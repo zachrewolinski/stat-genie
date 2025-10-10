@@ -6,7 +6,8 @@ from blade_bench.eval.datamodel import EntireAnalysis
 from blade_bench.eval.llm.examples.fertility import FERTILITY_ANALYSIS, FERTILITY_DINFO
 from blade_bench.llms import LLMBase
 from blade_bench.data.dataset import DatasetInfo
-
+from blade_bench.llms.base import TextGenerator
+from blade_bench.llms.datamodel import LLMHistory
 
 SYSTEM_PROMPT = """You are an AI Data Analysis Assistant who is an expert at \
 writing an end-to-end scientific analysis given a research question and a dataset. \
@@ -78,11 +79,29 @@ Result: """
 
 
 class GenAnalysisLM(LLMBase):
-    prompt_templates = {
-        "system": SYSTEM_PROMPT,
-        "instruction": INSTRUCTION_PROMPT + POST_FIX,
-        "instruction_example": INSTRUCTION_PROMPT + EXAMPLE + POST_FIX,
-    }
+
+    def __init__(self, text_gen: TextGenerator, history: LLMHistory = None,
+                 system_prompt: str = None, instruction_prompt: str = None,
+                 post_fix: str = None, example: str = None):
+        super().__init__(text_gen, history)
+        if system_prompt is None:
+            system_prompt = SYSTEM_PROMPT
+        if instruction_prompt is None:
+            instruction_prompt = INSTRUCTION_PROMPT
+        if post_fix is None:
+            post_fix = POST_FIX
+        if example is None:
+            example = EXAMPLE
+        self.system_prompt = system_prompt
+        self.instruction_prompt = instruction_prompt
+        self.post_fix = post_fix
+        self.example = example
+        self.prompt_templates = {
+            "system": self.system_prompt,
+            "instruction": self.instruction_prompt + self.post_fix,
+            "instruction_example": self.instruction_prompt + self.example + \
+                self.post_fix,
+        }
 
     def gen_analysis_example(
         self,

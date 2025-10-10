@@ -32,18 +32,26 @@ from blade_bench.utils import (
     get_dataset_csv_path,
 )
 
+from stat_genie.lm_runner.pipeline.prompt import PromptGenerator
+
 
 class SingleRunExperiment:
     GEN_ANALYSIS_FNAME = "llm_analysis.json"
 
-    def __init__(self, config: SingleRunConfig):
+    def __init__(self, config: SingleRunConfig, prompt: PromptGenerator):
         self.config = config
         self.dinfo = load_dataset_info(config.run_dataset)
         self.llm_history = LLMHistory()
         self.format_lm = LLMBase(config.llm_eval.texgt_gen)
         self.eval_text_gen = config.llm_eval.texgt_gen
+        self.prompt = prompt.get_prompts()
         self.gen_analysis_lm = GenAnalysisLM(
-            config.llm.texgt_gen, history=self.llm_history
+            config.llm.texgt_gen,
+            history=self.llm_history,
+            system_prompt=self.prompt["system"],
+            instruction_prompt=self.prompt["instruction"],
+            post_fix=self.prompt["post_fix"],
+            example=self.prompt["example"]
         )
         if config.use_agent:
             self.agent = ReActAgent(

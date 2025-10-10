@@ -1,0 +1,26 @@
+from typing import Dict, FrozenSet, List, Literal, Optional, Set, Tuple, Any
+import numpy as np
+import pandas as pd
+import sklearn
+import scipy
+import statsmodels.api as sm
+import statsmodels.formula.api as smf
+import matplotlib.pyplot as plt
+import pickle
+  
+df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/.venv/lib/python3.10/site-packages/blade_bench/datasets/hurricane/data.csv')
+
+# ======== TRANSFORM CODE ========
+# No missing values in the dataset
+
+# Convert binary gender indicator to categorical variable
+df['gender_mf'] = df['gender_mf'].replace({0: 'Male', 1: 'Female'})
+
+
+
+# ======== MODEL CODE ========
+model = smf.ols('alldeaths ~ gender_mf * masfem', data=df).fit()
+# Display the regression results
+print(model.summary())
+
+

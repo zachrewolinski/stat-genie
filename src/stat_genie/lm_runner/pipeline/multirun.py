@@ -11,6 +11,7 @@ from blade_bench.eval.datamodel.run import RunResultModes
 from blade_bench.eval.datamodel.multirun import MultiRunResults
 from blade_bench.eval.exceptions import LMGenerationError
 from blade_bench.utils import get_dataset_csv_path
+from stat_genie.lm_runner.pipeline.prompt import PromptGenerator
 
 from blade_bench.eval.utils import (
     SAVE_CODE_TEMPLATE,
@@ -19,9 +20,10 @@ from blade_bench.logger import logger
 
 
 class RunLLMMultiRun(SingleRunExperiment):
-    def __init__(self, config: MultiRunConfig):
-        super().__init__(config)
+    def __init__(self, config: MultiRunConfig, prompt: PromptGenerator):
+        super().__init__(config, prompt)
         self.config = config
+        self.prompt = prompt
 
     def __save_results(self, results: MultiRunResults):
         os.makedirs(self.config.output_dir, exist_ok=True)
@@ -72,7 +74,7 @@ class RunLLMMultiRun(SingleRunExperiment):
         return result
 
 
-def multirun_llm(config: MultiRunConfig):
-    runner = RunLLMMultiRun(config)
+def multirun_llm(config: MultiRunConfig, prompt: PromptGenerator):
+    runner = RunLLMMultiRun(config, prompt)
     results = asyncio.run(runner.run(config.save_results))
     logger.success("Completed, everything is logged at: " + config.output_dir)
