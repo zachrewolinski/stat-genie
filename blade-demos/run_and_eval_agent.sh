@@ -9,14 +9,14 @@
 #        (E.G., `export OPENAI_API_KEY="sk-..."`)
 
 run_analysis_cmd="blade/run_gen_analyses.py --run_dataset hurricane \
---llm_config_path blade-demos/openai_config.yml --llm_provider \
-openai --llm_eval_config_path blade-demos/openai_config.yml \
+--llm_config_path blade-demos/example_config.yml --llm_provider \
+openai --llm_eval_config_path blade-demos/example_config.yml \
 --output_dir blade-demos/analysis_output"
 
 run_eval_cmd="blade/run_get_eval.py --multirun_load_path \
 blade-demos/analysis_output/multirun_analyses.json --output_dir \
 blade-demos/eval_output --llm_eval_config_path \
-blade-demos/openai_config.yml"
+blade-demos/example_config.yml"
 
 poetry run python $run_analysis_cmd
 poetry run python $run_eval_cmd
