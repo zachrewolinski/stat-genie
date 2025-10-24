@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 from pydantic import BaseModel, ConfigDict
 from stat_genie.blade_pipeline.data.annotation import get_annotation_data_from_df
-from blade_bench.utils import (
+from stat_genie.blade_pipeline.utils import (
     get_dataset_info_path,
     get_datasets_dir,
     get_dataset_csv_path,

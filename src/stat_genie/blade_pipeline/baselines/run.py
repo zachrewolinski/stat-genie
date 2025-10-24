@@ -27,8 +27,8 @@ from blade_bench.eval.datamodel import (
 from blade_bench.baselines.agent import ReActAgent
 from stat_genie.blade_pipeline.baselines.lm.gen_analysis import GenAnalysisLM
 
-from blade_bench.data.dataset import load_dataset_info
-from blade_bench.utils import (
+from stat_genie.blade_pipeline.data.dataset import load_dataset_info
+from stat_genie.blade_pipeline.utils import (
     get_dataset_csv_path,
 )
 
