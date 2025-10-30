@@ -1,0 +1,573 @@
+[2025-10-30 04:04:02.34][1466812239.py:19 - __main__:<module>][INFO] Running command: 
+python ../../stat_genie/blade_pipeline/run_files/run_get_eval.py \
+	--multirun_load_path /accounts/grad/zachrewolinski/research/stat-genie/examples/analysis_and_eval/analysis_output/multirun_analyses.json \
+	--llm_eval_config_path /accounts/grad/zachrewolinski/research/stat-genie/config/llm_eval_config.yml \
+	--output_dir /accounts/grad/zachrewolinski/research/stat-genie/examples/analysis_and_eval/eval_output \
+	--ks '[]' \
+	--diversity_n_samples 1000
+[2025-10-30 04:04:02.35][1466812239.py:24 - __main__:<module>][INFO] Running evaluation for dataset hurricane with nruns=2
+[2025-10-30 04:04:07.30][895901646.py:11 - __main__:<module>][INFO] Running evaluation with config: {
+  "glob_str": null,
+  "multirun_load_path": "analysis_output/multirun_analyses.json",
+  "dataset_submission_path": null,
+  "llm_eval": {
+    "provider": "openai",
+    "model": "gpt-5-mini",
+    "textgen_config": null,
+    "log_file": null,
+    "use_cache": true
+  },
+  "output_dir": "eval_output",
+  "run_dataset": null,
+  "use_code_cache": true,
+  "diversity_ks": [],
+  "diversity_n_samples": 1000
+}
+[2025-10-30 04:04:07.38][config_load.py:34 - blade_bench.llms.config_load:load_config][INFO] Loaded config from '/accounts/grad/zachrewolinski/research/stat-genie/config/llm_config.yml'.
+[2025-10-30 04:04:08.72][evaluator.py:185 - stat_genie.blade_pipeline.eval.evaluator:run_eval_on_analyses][INFO] Running evaluation for analysis 1
+[2025-10-30 04:04:08.72][evaluator.py:155 - stat_genie.blade_pipeline.eval.evaluator:run_eval][DEBUG] Starting processing of analysis
+[2025-10-30 04:04:08.74][convert.py:187 - blade_bench.eval.convert:run_code_with_cache][CODE_ENV_QUERY] Running code with code_executor
+===================[[CODE ENV QUERY]]===================
+df = df.copy()
+required_cols = ['masfem', 'gender_mf', 'alldeaths', 'ndam15', 'wind',
+    'category', 'min', 'year', 'elapsedyrs']
+df = df.dropna(subset=required_cols)
+df['masfem_std'] = (df['masfem'] - df['masfem'].mean()) / (df['masfem'].std
+    (ddof=0) if df['masfem'].std(ddof=0) != 0 else 1.0)
+df['gender_mf'] = pd.to_numeric(df['gender_mf'], errors='coerce')
+df['log_ndam15'] = np.log1p(df['ndam15'].astype(float))
+df['wind'] = pd.to_numeric(df['wind'], errors='coerce')
+df['category'] = pd.to_numeric(df['category'], errors='coerce')
+df['min'] = pd.to_numeric(df['min'], errors='coerce')
+df['year'] = pd.to_numeric(df['year'], errors='coerce')
+df['elapsedyrs'] = pd.to_numeric(df['elapsedyrs'], errors='coerce')
+df = df.dropna(subset=['masfem_std', 'gender_mf', 'alldeaths', 'wind',
+    'category', 'min', 'year', 'elapsedyrs'])
+df = df.reset_index(drop=True)
+
+[2025-10-30 04:04:08.76][convert.py:200 - blade_bench.eval.convert:run_code_with_cache][CODE_ENV_RESP] Finished running code with code_executor
+===================[[CODE RESPONSE (cache time=0.013712644577026367)]]===================
+[Success]
+
+[2025-10-30 04:04:08.76][llm.py:109 - blade_bench.llms.llm:generate][PROMPT] Sending prompt from <class 'blade_bench.eval.llm.code_to_transforms.CodeToTransformsLLM'>
+===================[[system]]===================
+You are an AI Python Data Science assistant who is an expert at understanding data transformation code.
+===================[[user]]===================
+<Instruction> Given a description of the transformation API, and Python code, convert the code to the sequence of unit transformations that are applied to the dataframe.
+Each unit function will take in and return a TransformDataReturn objet defined below:
+```python
+class TransformDataReturn(BaseModel):
+    df: pd.DataFrame
+    column_mapping: Dict[FrozenSet[str], str] # we can specify multiple input and output column mappings
+    groupby_cols: Set[str] # only for groupby verb
+    transform_verb: Literal['derive', 'filter', 'groupby', 'deduplicate', 'impute', 'rollup', 'orderby']
+```
+These transform functions will be called by the main "transform" function that will apply the transformations in sequence. 
+IMPORTANT: The transform functions (i.e., transform_funcs) cannot call each other or reference any variables outside of the function.
+```python
+def transform(df: pd.DataFrame,
+              transform_funcs: List[Callable[[pd.DataFrame], TransformDataReturn]]):
+    td_objs: List[TransformDataReturn] = []
+    for func in transform_funcs:
+        td_obj = func(df)
+        df = td_obj.df
+        td_objs.append(td_obj)
+    return df
+```
+Your answer should be a list of transform functions of type Callable[[pd.DataFrame], TransformDataReturn] stored in the variable "transform_funcs".     
+DO NOT ADD ANY NEW CODE THAT WAS NOT SPECIFIED IN THE ORIGINAL CODE.
+For example, if the original code is empty then return empty.
+If there is any statistical modeling code, do not include it in the transformation functions. 
+We are only interested in the code that transforms the dataframe.
+</Instruction>
+
+
+<TransformationAPI> 
+Each transformation verb transforms the function in some way. In addition to the verb, depending on the code and transformation, there can be an input columns to output column mapping that specifies which input columns are used in the transformation and how it affects each output column specified or the whole datframe. Here is the description of each transformation verb, example code, and any input and output columns specification for each transformation:
+
+**Derive**: Derive new column values based on the provided expressions. Input is a dataframe or groupby object.
+    ```python
+    import pandas as pd
+    import numpy as np
+
+    # create a dataframe
+    df = pd.DataFrame({{
+        'x': [1, 2, 3, 4, 5],
+        'y': [5, 4, 3, 2, 1]
+    }})
+    # derive a new column 'sumXY' by adding 'x' and 'y'
+    df['sumXY'] = df['x'] + df['y']
+    ```
+    column_mapping: {{frozenset(['x', 'y']): 'sumXY'}}
+**Filter**: Filter a table to a subset of rows based on the input criteria. 
+    ```python
+    # filter the dataframe to include only rows where 'x' is greater than 2
+    df = df[df['x'] > 2]
+    ```
+    column_mapping: {{frozenset(['x']): 'ALL'}}
+**Groupby**: Group table rows based on a set of column values. Returns a groupby object
+    ```python
+    # group the dataframe by 'x'
+    grouped = df.groupby('x')
+    ```
+    groupby_cols: set(['x'])
+**De-duplicate**: De-duplicate table rows by removing repeated row values.
+    ```python
+    # remove duplicate rows in the dataframe
+    df = df.drop_duplicates()
+    ```
+    column_mapping: {{}}
+**Impute**: Impute missing values or rows.
+    ```python
+    # replace NaN values in column 'x' with the mean of 'x'
+    df['x'] = df['x'].fillna(df['x'].mean())
+    ```
+    column_mapping: {{frozenset(['x']): 'x'}}
+**Rollup**: Rollup a table to produce an aggregate summary. Input is a grouby object. This is used in conjunction with groupby when we aggregate a group.
+    ```python
+    grouped_df = df_grped.agg({'y': 'mean'})
+    ```
+    column_mapping: {{frozenset(['y']): 'y'}}
+**Orderby**: Order table rows based on a set of column values. Returns a dataframe.**
+    ```python
+    # order the dataframe by 'x'
+    df = df.sort_values(by='x')
+    ```
+    column_mapping: {{frozenset(['x']): 'ALL'}}
+    
+IMPORTANT:
+Only "Filter" and "Orderby" transformations can have column_mapping with 'ALL' as the output column value. For other transformers you need be specific about the exact column mapping. 
+IMPORTANT:
+We do not consider any operation that selects a subset of columns as a transformation. The code for this should be included with another transformation. 
+
+</TransformationAPI>
+
+<Example 1> 
+original code: ```python
+
+# a6_group_on_title_and_id
+df = df.groupby(['Title', 'Id']).agg(
+    comments_now=('Id', 'count'),
+    prev_contributions_mean=('PreviousContributions', 'mean'),
+    prev_threads_mean=('PreviousThreads', 'mean'),
+    cont_this_year=('ContributionsThisYear', 'mean'),
+    threads_this_year=('ThreadsThisYear', 'mean')
+).reset_index()
+
+# a6_get_totalpreviousthreads
+df["total_previous_threads"] = df["prev_threads_mean"]  + df["threads_this_year"]
+# a6_get_totalpreviouscontributions
+df["total_previous_contributions"] = df["prev_contributions_mean"]  + df["cont_this_year"]
+# a6_get_contperthread
+df["cont_per_thread"] = df["total_previous_contributions"] / df["total_previous_threads"]
+
+```
+result: ```python
+
+def t1(df: pd.DataFrame):
+    df = df.groupby(['Title', 'Id']).agg(
+        comments_now=('Id', 'count'),
+        prev_contributions_mean=('PreviousContributions', 'mean'),
+        prev_threads_mean=('PreviousThreads', 'mean'),
+        cont_this_year=('ContributionsThisYear', 'mean'),
+        threads_this_year=('ThreadsThisYear', 'mean')
+    ).reset_index()
+    return TransformDataReturn(
+            df=df, 
+            groupby_cols=frozenset(['Title', 'Id']),
+            column_mapping={
+                    frozenset(['PreviousContributions']: 'prev_contributions_mean',
+                    frozenset(['PreviousThreads']): 'prev_threads_mean',
+                    frozenset(['ContributionsThisYear']): 'cont_this_year',
+                    frozenset(['ThreadsThisYear']): 'threads_this_year'},
+                    },
+            transform_verb='derive'
+        )
+def t2(df: pd.DataFrame):
+    df["total_previous_threads"] = df["prev_threads_mean"]  + df["threads_this_year"]
+    return TransformDataReturn(
+            df=df, 
+            column_mapping={frozenset(['prev_threads_mean', 'threads_this_year']): 'total_previous_threads'},
+            transform_verb='derive'
+        )
+def t3(df: pd.DataFrame):
+    df["total_previous_contributions"] = df["prev_contributions_mean"]  + df["cont_this_year"]
+    return TransformDataReturn(
+            df=df, 
+            column_mapping={frozenset(['prev_contributions_mean', 'cont_this_year']): 'total_previous_contributions'},
+            transform_verb='derive'
+        )
+def t4(df: pd.DataFrame):
+    df["cont_per_thread"] = df["total_previous_contributions"] / df["total_previous_threads"]
+    return TransformDataReturn(
+            df=df, 
+            column_mapping={frozenset(['total_previous_contributions', 'total_previous_threads']): 'cont_per_thread'},
+            transform_verb='derive'
+        )
+        
+transform_funcs = [t1, t2, t3, t4]
+
+```
+</Example 1>
+<Example 2>
+original code: ```python
+
+df = df[(df['Type'] == 2) & (df['DebateSize'] > 1)].sort_values(by=['ThreadId', 'Order'])
+df['live_and_not_live'] = df.groupby('ThreadId')['Live'].transform(lambda x: len(x) > 1)
+df = df.astype({'live_and_not_live': int})
+
+```
+result: ```python
+
+def t1(df: pd.DataFrame):
+    df = df[(df['Type'] == 2) & (df['DebateSize'] > 1)]
+    return TransformDataReturn(
+            df=df, 
+            column_mapping={frozenset(['Type', 'DebateSize']): 'ALL'},
+            transform_verb='filter'
+        )
+def t2(df: pd.DataFrame):
+    df = df.sort_values(by=['ThreadId', 'Order'])
+    return TransformDataReturn(
+            df=df, 
+            column_mapping={frozenset(['ThreadId', 'Order']): 'ALL'},
+            transform_verb='orderby'
+        )
+
+def t3(df: pd.DataFrame):
+    df['live_and_not_live'] = df.groupby('ThreadId')['Live'].transform(lambda x: len(x) > 1)
+    return TransformDataReturn(
+            df=df, 
+            groupby_cols=frozenset(['ThreadId']),
+            column_mapping={frozenset(['Live']): 'live_and_not_live'},
+            transform_verb='groupby'
+        )
+
+def t4(df: pd.DataFrame):
+    df = df.astype({'live_and_not_live': int})
+    return TransformDataReturn(
+            df=df, 
+            column_mapping={frozenset(['live_and_not_live']): 'live_and_not_live'},
+            transform_verb='derive'
+        )
+        
+transform_funcs = [t1, t2, t3, t4]
+
+```
+</Example 2>
+<Example 3>
+original code: ```python
+
+df = df.dropna(subset=['redCards', 'rater1', 'rater2', 'meanIAT', 'meanExp'])
+
+# create skin tone variable
+# average skin rating from two raters
+ratings = (df.rater1 + df.rater2) / 2
+df['skin_tone'] = pd.cut(ratings, bins=[0, 0.2, 0.4, 0.6, 0.8, 1], labels=['Very Light', 'Light', 'Neutral', 'Dark', 'Very Dark'])
+
+```
+result: ```python
+
+def t1(df: pd.DataFrame):
+    df = df.dropna(subset=['redCards', 'rater1', 'rater2', 'meanIAT', 'meanExp'])
+    return TransformDataReturn(
+            df=df, 
+            column_mapping={frozenset(['redCards', 'rater1', 'rater2', 'meanIAT', 'meanExp']): 'ALL'},
+            transform_verb='filter'
+        )
+def t2(df: pd.DataFrame):
+    # we include ratings in the dataframe as we want to capture this unit calculation/function 
+    df['ratings'] = (df.rater1 + df.rater2) / 2
+    return TransformDataReturn(
+            df=df, 
+            column_mapping={frozenset(['rater1', 'rater2']): 'ratings'},
+            transform_verb='derive'
+        )
+def t3(df: pd.DataFrame):
+    df['skin_tone'] = pd.cut(df['ratings'], bins=[0, 0.2, 0.4, 0.6, 0.8, 1], labels=['Very Light', 'Light', 'Neutral', 'Dark', 'Very Dark'])
+    return TransformDataReturn(
+            df=df, 
+            column_mapping={frozenset(['ratings']): 'skin_tone'},
+            transform_verb='derive'
+        )
+transform_funcs = [t1, t2, t3]
+
+```
+</Example 3>
+<Example 4>
+original code: ```python
+
+df['skin_tone'] = (df.rater1 + df.rater2) / 2
+    
+df['skin_tone'] = df['skin_tone'].replace({
+    0.0: 'Very Light Skin',
+    0.25: 'Light Skin',
+    0.5: 'Neutral Skin',
+    0.75: 'Dark Skin',
+    1.0: 'Very Dark Skin'
+})
+
+model_df = df[['skin_tone', 'redCards', 'meanIAT', 'meanExp']]
+model_df = model_df.dropna()
+
+```
+result: ```python
+
+def t1(df: pd.DataFrame):
+    df['skin_tone'] = (df.rater1 + df.rater2) / 2
+    return TransformDataReturn(
+            df=df, 
+            column_mapping={frozenset(['rater1', 'rater2']): 'skin_tone'},
+            transform_verb='derive'
+        )
+
+def t2(df: pd.DataFrame):
+    df['skin_tone'] = df['skin_tone'].replace({
+        0.0: 'Very Light Skin',
+        0.25: 'Light Skin',
+        0.5: 'Neutral Skin',
+        0.75: 'Dark Skin',
+        1.0: 'Very Dark Skin'
+    })
+    return TransformDataReturn(
+            df=df, 
+            column_mapping={frozenset(['skin_tone']): 'skin_tone'},
+            transform_verb='derive'
+        )
+
+def t3(df: pd.DataFrame):
+    model_df = df[['skin_tone', 'redCards', 'meanIAT', 'meanExp']] # this is not really a unique transform, just selecting columns
+    model_df = model_df.dropna()
+    return TransformDataReturn(
+            df=model_df, 
+            column_mapping={frozenset(['skin_tone', 'redCards', 'meanIAT', 'meanExp']): 'ALL'},
+            transform_verb='filter'
+        )
+transform_funcs = [t1, t2, t3]
+
+```
+</Example 4>
+<Example 5>
+original code: ```python
+
+df = pd.get_dummies(df, columns=['rater1_cat', 'rater2_cat', 'refCountry_cat'])
+
+# drop unused columns
+df = df.drop(['rater1', 'rater2', 'refCountry'], axis=1)
+
+```
+result: ```python
+
+def t1(df: pd.DataFrame):
+    df = pd.get_dummies(df, columns=['rater1_cat'])
+    new_cols = [col for col in df.columns if 'rater1_cat' in col]
+    column_mapping = {for col in new_cols: frozenset(['rater1_cat']): col}
+    return TransformDataReturn(
+            df=df, 
+            column_mapping=column_mapping,
+            transform_verb='derive'
+        )
+        
+def t2(df: pd.DataFrame):
+    df = pd.get_dummies(df, columns=['rater2_cat'])
+    new_cols = [col for col in df.columns if 'rater2_cat' in col]
+    column_mapping = {for col in new_cols: frozenset(['rater2_cat']): col}
+    return TransformDataReturn(
+            df=df, 
+            column_mapping=column_mapping,
+            transform_verb='derive'
+        )
+        
+def t3(df: pd.DataFrame):
+    df = pd.get_dummies(df, columns=['refCountry_cat'])
+    new_cols = [col for col in df.columns if 'refCountry_cat' in col]
+    column_mapping = {for col in new_cols: frozenset(['refCountry_cat']): col}
+    # this code selects a subset of columns but does not impact any columns that we are outputting so we do not need to put it in it's own function
+    df = df.drop(['rater1', 'rater2', 'refCountry'], axis=1) 
+    return TransformDataReturn(
+            df=df, 
+            column_mapping=column_mapping,
+            transform_verb='derive'
+        )
+
+```
+</Example 5>
+<Example 6>
+original code: ```python
+
+# Total amount spent by each customer
+total_spent = (
+    transactions_df.groupby("customerID")["transactionAmount"].sum().reset_index()
+)
+total_spent.columns = ["customerID", "total_spent"]
+
+# Merging with the transactions dataframe to include additional customer details
+customer_summary = pd.merge(
+    total_spent,
+    transactions_df[
+        ["customerID", "customerCategory", "averageOrderValue", "loyaltyPoints"]
+    ],
+    on="customerID",
+    how="inner",
+)
+
+# Display the result
+print(customer_summary)
+
+```
+result: ```python
+
+def t1(df: pd.DataFrame):
+    # this is the same as creating a calculating total_spent and merging with the transactions dataframe
+    df["transactionAmount"] = df.groupby("customerID")[ "transactionAmount"].transform("sum")
+    customer_summary = df.sort_values("customerID") 
+    return TransformDataReturn(
+            df=customer_summary, 
+            groupby_cols=frozenset(['customerID']),
+            column_mapping={frozenset(['transactionAmount']): 'transactionAmount'},
+            transform_verb='groupby'
+        )
+
+```
+</Example 6>
+<Example 7>
+original code: ```python
+
+# Filtering and preprocessing data
+relevant_cols = ['studentID', 'testScores', 'meanGPA', 'rating1', 'rating2']
+df = df[relevant_cols].copy()
+# Remove rows with missing values in 'rating1' and 'rating2'
+df = df.dropna(subset=['rating1', 'rating2'])
+
+```
+result: ```python
+
+def t1(df: pd.DataFrame):
+    # This step selects a subset of columns but does not impact any columns that we are outputting, so we do not need to put it in its own function.
+    # We combine it with the next filtering step.
+    relevant_cols = ['studentID', 'testScores', 'meanGPA', 'rating1', 'rating2']
+    df = df[relevant_cols].copy()
+    df = df.dropna(subset=['rating1', 'rating2'])
+    return TransformDataReturn(
+            df=df, 
+            column_mapping={frozenset(['rating1', 'rating2']): 'ALL'},
+            transform_verb='filter'
+        )
+
+```
+</Example 7>
+ 
+original code: ```python
+df = df.copy()
+required_cols = ['masfem', 'gender_mf', 'alldeaths', 'ndam15', 'wind',
+    'category', 'min', 'year', 'elapsedyrs']
+df = df.dropna(subset=required_cols)
+df['masfem_std'] = (df['masfem'] - df['masfem'].mean()) / (df['masfem'].std
+    (ddof=0) if df['masfem'].std(ddof=0) != 0 else 1.0)
+df['gender_mf'] = pd.to_numeric(df['gender_mf'], errors='coerce')
+df['log_ndam15'] = np.log1p(df['ndam15'].astype(float))
+df['wind'] = pd.to_numeric(df['wind'], errors='coerce')
+df['category'] = pd.to_numeric(df['category'], errors='coerce')
+df['min'] = pd.to_numeric(df['min'], errors='coerce')
+df['year'] = pd.to_numeric(df['year'], errors='coerce')
+df['elapsedyrs'] = pd.to_numeric(df['elapsedyrs'], errors='coerce')
+df = df.dropna(subset=['masfem_std', 'gender_mf', 'alldeaths', 'wind',
+    'category', 'min', 'year', 'elapsedyrs'])
+df = df.reset_index(drop=True)
+
+```
+result:
+
+[2025-10-30 04:04:08.78][base.py:60 - stat_genie.blade_pipeline.llms.base:generate][INFO] Sending openai API Request (gpt-5-mini)
+[2025-10-30 04:04:39.57][base.py:67 - stat_genie.blade_pipeline.llms.base:generate][DEBUG] openai response took  30.80 seconds
+[2025-10-30 04:04:39.58][base.py:71 - stat_genie.blade_pipeline.llms.base:generate][API] Called openai API (gpt-5-mini)
+[2025-10-30 04:04:39.61][llm.py:131 - blade_bench.llms.llm:generate][LLM] Received response from <class 'blade_bench.eval.llm.code_to_transforms.CodeToTransformsLLM'>
+===================[[Response (API time=30.795s  completion tokens=1755  total_tokens=5968)]]===================
+def t1(df: pd.DataFrame):
+    required_cols = ['masfem', 'gender_mf', 'alldeaths', 'ndam15', 'wind',
+        'category', 'min', 'year', 'elapsedyrs']
+    df = df.dropna(subset=required_cols)
+    return TransformDataReturn(
+        df=df,
+        column_mapping={frozenset(required_cols): 'ALL'},
+        transform_verb='filter',
+        groupby_cols=set()
+    )
+
+def t2(df: pd.DataFrame):
+    # standardize masfem using population std (ddof=0), avoid division by zero
+    df['masfem_std'] = (df['masfem'] - df['masfem'].mean()) / (df['masfem'].std(ddof=0) if df['masfem'].std(ddof=0) != 0 else 1.0)
+    return TransformDataReturn(
+        df=df,
+        column_mapping={frozenset(['masfem']): 'masfem_std'},
+        transform_verb='derive',
+        groupby_cols=set()
+    )
+
+def t3(df: pd.DataFrame):
+    df['gender_mf'] = pd.to_numeric(df['gender_mf'], errors='coerce')
+    return TransformDataReturn(
+        df=df,
+        column_mapping={frozenset(['gender_mf']): 'gender_mf'},
+        transform_verb='derive',
+        groupby_cols=set()
+    )
+
+def t4(df: pd.DataFrame):
+    df['log_ndam15'] = np.log1p(df['ndam15'].astype(float))
+    return TransformDataReturn(
+        df=df,
+        column_mapping={frozenset(['ndam15']): 'log_ndam15'},
+        transform_verb='derive',
+        groupby_cols=set()
+    )
+
+def t5(df: pd.DataFrame):
+    df['wind'] = pd.to_numeric(df['wind'], errors='coerce')
+    df['category'] = pd.to_numeric(df['category'], errors='coerce')
+    df['min'] = pd.to_numeric(df['min'], errors='coerce')
+    df['year'] = pd.to_numeric(df['year'], errors='coerce')
+    df['elapsedyrs'] = pd.to_numeric(df['elapsedyrs'], errors='coerce')
+    return TransformDataReturn(
+        df=df,
+        column_mapping={
+            frozenset(['wind']): 'wind',
+            frozenset(['category']): 'category',
+            frozenset(['min']): 'min',
+            frozenset(['year']): 'year',
+            frozenset(['elapsedyrs']): 'elapsedyrs'
+        },
+        transform_verb='derive',
+        groupby_cols=set()
+    )
+
+def t6(df: pd.DataFrame):
+    df = df.dropna(subset=['masfem_std', 'gender_mf', 'alldeaths', 'wind',
+        'category', 'min', 'year', 'elapsedyrs'])
+    df = df.reset_index(drop=True)
+    return TransformDataReturn(
+        df=df,
+        column_mapping={frozenset(['masfem_std', 'gender_mf', 'alldeaths', 'wind', 'category', 'min', 'year', 'elapsedyrs']): 'ALL'},
+        transform_verb='filter',
+        groupby_cols=set()
+    )
+
+transform_funcs = [t1, t2, t3, t4, t5, t6]
+[2025-10-30 04:04:39.63][evaluator.py:76 - stat_genie.blade_pipeline.eval.evaluator:get_run_results][ERROR] Failed to convert submission: Traceback (most recent call last):
+  File "/accounts/grad/zachrewolinski/research/stat-genie/src/stat_genie/blade_pipeline/eval/evaluator.py", line 107, in process_analysis
+    await self.convert.convert_entire_analysis(analysis)
+  File "/accounts/grad/zachrewolinski/research/stat-genie/.venv/lib/python3.10/site-packages/blade_bench/eval/convert.py", line 106, in convert_entire_analysis
+    await self.get_state_data_from_code(
+  File "/accounts/grad/zachrewolinski/research/stat-genie/.venv/lib/python3.10/site-packages/blade_bench/eval/convert.py", line 246, in get_state_data_from_code
+    converted_code = self.code_to_transform_llm.convert_code(code)
+  File "/accounts/grad/zachrewolinski/research/stat-genie/.venv/lib/python3.10/site-packages/blade_bench/eval/llm/code_to_transforms.py", line 217, in convert_code
+    raw_response = self.generate(
+  File "/accounts/grad/zachrewolinski/research/stat-genie/.venv/lib/python3.10/site-packages/blade_bench/llms/llm.py", line 138, in generate
+    prompt_entry = PromptHistoryEntry(
+  File "/accounts/grad/zachrewolinski/research/stat-genie/.venv/lib/python3.10/site-packages/pydantic/main.py", line 193, in __init__
+    self.__pydantic_validator__.validate_python(data, self_instance=self)
+pydantic_core._pydantic_core.ValidationError: 1 validation error for PromptHistoryEntry
+response
+  Input should be a valid dictionary or instance of TextGenResponse [type=model_type, input_value=TextGenResponse(text=[Mes...755, total_tokens=5968)), input_type=TextGenResponse]
+    For further information visit https://errors.pydantic.dev/2.8/v/model_type
+
