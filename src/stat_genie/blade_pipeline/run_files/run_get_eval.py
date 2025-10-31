@@ -8,8 +8,9 @@ import click
 import yaml
 from blade_bench.eval.datamodel.submission import DatasetSubmission
 from blade_bench.logger import logger, formatter
-from blade_bench.baselines.config import EvalConfig
+from stat_genie.blade_pipeline.baselines.config import EvalConfig
 from blade_bench.eval.datamodel.multirun import MultiRunResults
+# from stat_genie.blade_pipeline.eval.evaluator import run_eval_on_analyses
 from blade_bench.eval.evaluator import run_eval_on_analyses
 from blade_bench.data.datamodel.transforms import (
     TransformDataReturn,
