@@ -8,7 +8,7 @@ from stat_genie.blade_pipeline.baselines.config import EvalConfig
 from blade_bench.data.annotation import AnnotationDBData
 from blade_bench.data.datamodel.transforms import TransformDatasetState
 from blade_bench.data.load_annotation import load_ground_truth
-from blade_bench.eval.convert import Convert
+from stat_genie.blade_pipeline.eval.convert import Convert
 from blade_bench.eval.datamodel.lm_analysis import (
     EntireAnalysis,
     EntireAnalysisProcessed,
@@ -20,9 +20,9 @@ from blade_bench.eval.exceptions import (
     MatchAnnotationsError,
     GetMetricsError,
 )
-from blade_bench.eval.datamodel.match import MatchedAnnotations
+from stat_genie.blade_pipeline.eval.datamodel.match import MatchedAnnotations
 from blade_bench.eval.datamodel.result import EvalResult, EvalResults
-from blade_bench.eval.match.match_submission import SubmissionMatch
+from stat_genie.blade_pipeline.eval.match.match_submission import SubmissionMatch
 from blade_bench.eval.metrics.all_metrics import get_metrics_from_match_obj
 from blade_bench.eval.metrics.calc_metrics import CalcSubmissionMetrics
 from blade_bench.eval.results_loader.load_lm_analyses import load_lm_analyses_glob
