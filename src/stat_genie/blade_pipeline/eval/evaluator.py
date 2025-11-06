@@ -4,6 +4,7 @@ import os
 import traceback
 import os.path as osp
 from typing import List, Union
+from pydantic import BaseModel
 from stat_genie.blade_pipeline.baselines.config import EvalConfig
 from blade_bench.data.annotation import AnnotationDBData
 from blade_bench.data.datamodel.transforms import TransformDatasetState
@@ -95,7 +96,8 @@ class Evaluator:
                 if self.transform_run_result is not None
                 else None
             ),
-            eval_lm_history=self.llm_history,
+            # eval_lm_history=self.llm_history,
+            eval_lm_history=self.llm_history.model_dump() if self.llm_history is not None and isinstance(self.llm_history, BaseModel) else self.llm_history,
             eval_metrics=eval_res,
         )
 
@@ -169,15 +171,24 @@ class Evaluator:
             run_results = await self.get_run_results(
                 e.res_type, e.message, is_error=True
             )
-        return EvalResult(
-            dataset_name=self.submission.dataset_name,
-            analysis=analysis,
-            analysis_processed=analysis_processed,
-            matched_annotations=matched_annotations,
-            metrics=match_metrics,
-            eval_run_result=run_results,
-            eval_lm_history=self.llm_history,
-        )
+        # return EvalResult(
+        #     dataset_name=self.submission.dataset_name,
+        #     analysis=analysis,
+        #     analysis_processed=analysis_processed,
+        #     matched_annotations=matched_annotations,
+        #     metrics=match_metrics,
+        #     eval_run_result=run_results,
+        #     eval_lm_history=self.llm_history,
+        # )
+        return EvalResult.model_validate({
+            "dataset_name": self.submission.dataset_name,
+            "analysis": analysis,
+            "analysis_processed": analysis_processed,
+            "matched_annotations": matched_annotations.model_dump(exclude_none=True) if matched_annotations is not None else None,
+            "metrics": match_metrics,
+            "eval_run_result": run_results.model_dump(exclude_none=True) if run_results is not None else None,
+            "eval_lm_history": self.llm_history.model_dump(exclude_none=True) if self.llm_history is not None else None,
+        })
 
     async def run_eval_on_analyses(self) -> EvalResults:
         res_l = []

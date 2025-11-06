@@ -2,7 +2,7 @@ import json
 import re
 from typing import Dict, List, Tuple
 from blade_bench.data.datamodel import ModelSpec
-from blade_bench.eval.datamodel import MatchModel
+from stat_genie.blade_pipeline.eval.datamodel.match import MatchModel
 from stat_genie.blade_pipeline.llms.llm import LLMBase
 from blade_bench.eval.llm.examples import (
     FERTILITY_MODELS_A,

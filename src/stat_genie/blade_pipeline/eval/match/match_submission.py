@@ -15,6 +15,7 @@ from stat_genie.blade_pipeline.eval.datamodel.lm_analysis import EntireAnalysisP
 from stat_genie.blade_pipeline.eval.match.conceptual_variable import CVarMatcher
 from stat_genie.blade_pipeline.eval.match.model import StatsModelMatcher
 from blade_bench.eval.match.transform import TransformMatcher
+from pydantic import BaseModel
 
 from blade_bench.llms import (
     OpenAIGenConfig,
@@ -114,11 +115,20 @@ class SubmissionMatch:
             transform_match = await self.match_transforms()
         cvar_match = self.match_cvars()
         smodel_match = self.match_statsmodel()
-        return MatchedAnnotations(
-            matched_models=smodel_match,
-            matched_transforms=transform_match,
-            matched_cvars=cvar_match,
-        )
+
+        # return MatchedAnnotations(
+        #     matched_models=smodel_match,
+        #     matched_transforms=transform_match,
+        #     matched_cvars=cvar_match,
+        # )
+        
+        # use model_validate to reconstruct from dicts and exclude None values
+        # since the None values will cause the model to fail validation
+        return MatchedAnnotations.model_validate({
+            "matched_models": smodel_match.model_dump(exclude_none=True),
+            "matched_transforms": transform_match.model_dump(exclude_none=True),
+            "matched_cvars": {k: v.model_dump(exclude_none=True) for k, v in cvar_match.items()},
+        })
 
 
 if __name__ == "__main__":
