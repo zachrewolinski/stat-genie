@@ -10,6 +10,10 @@ from blade_bench.data.annotation import AnnotationDBData
 from blade_bench.data.datamodel.transforms import TransformDatasetState
 from blade_bench.data.load_annotation import load_ground_truth
 from stat_genie.blade_pipeline.eval.convert import Convert
+# from stat_genie.blade_pipeline.eval.datamodel.lm_analysis import (
+#     EntireAnalysis,
+#     EntireAnalysisProcessed,
+# )
 from blade_bench.eval.datamodel.lm_analysis import (
     EntireAnalysis,
     EntireAnalysisProcessed,
@@ -108,6 +112,7 @@ class Evaluator:
             analysis_processed, eval_result = (
                 await self.convert.convert_entire_analysis(analysis)
             )
+            logger.info("Completed conversion of submission analysis.")
             if eval_result is not None:
                 logger.error(eval_result.info)
                 logger.info("Continuing with the next step, skipping transformations.")
@@ -155,12 +160,23 @@ class Evaluator:
         match_metrics = None
         try:
             logger.debug("Starting processing of analysis")
+            logger.info("Starting processing of analysis")
             analysis_processed = await self.process_analysis(analysis)
+            logger.info("Completed processing of analysis, loading ground truth")
             gnd_truth = await self.load_ground_truth()
+            logger.success(f"Loaded ground truth")
+            # print("processed analysis:", analysis_processed)
+            print("processed analysis type:", type(analysis_processed))
+            print("model associated cvars:", analysis_processed.get_model_associated_cvars())
+            print("col associated orig cols:", analysis_processed.get_col_asssociated_orig_cols())
+            print("processed analysis json:", analysis_processed.model_dump_json())
+            print("ground truth:", gnd_truth)
+            logger.info("Starting matching of annotations")
             matched_annotations = await self.match_annotations(
                 gnd_truth, analysis_processed
             )
             logger.success(f"Got matched annotations")
+            print("matched annotations:", matched_annotations)
             match_metrics = await self.get_metrics(matched_annotations)
             run_results = await self.get_run_results(
                 RunResultModes.FINISHED_SUCCESSFULLY,
@@ -194,6 +210,7 @@ class Evaluator:
         res_l = []
         for i, analysis in enumerate(self.submission.analyses):
             logger.info(f"Running evaluation for analysis {i+1}")
+            print(f"Analysis {i+1}:", analysis)
             self.transform_run_result: EvalRunResults = None
             res = await self.run_eval(analysis)
             logger.debug("got past the run_eval step")
@@ -228,7 +245,9 @@ def run_eval_on_analyses(eval_config: EvalConfig):
         use_code_cache=eval_config.use_code_cache,
         output_dir=eval_config.output_dir,
     )
+    logger.info("Starting evaluation on analyses...")
     res: EvalResults = asyncio.run(evaluator.run_eval_on_analyses())
+    logger.info("Completed evaluation on analyses. Calculating metrics...")
     calc_metrics = CalcSubmissionMetrics(
         res,
         ks=eval_config.diversity_ks,
@@ -236,6 +255,7 @@ def run_eval_on_analyses(eval_config: EvalConfig):
     )
 
     metrics_across_runs = calc_metrics.calculate_metrics()
+    logger.info("Calculated metrics across runs.")
     if multirun_results is not None:
         metrics_across_runs.status.extend(
             [
@@ -244,7 +264,7 @@ def run_eval_on_analyses(eval_config: EvalConfig):
                 if not isinstance(a, EntireAnalysis)
             ]
         )
-
+    logger.info("Saving evaluation results...")
     with open(osp.join(eval_config.output_dir, "eval_results.json"), "w") as f:
         f.write(res.model_dump_json(indent=2))
 
