@@ -8,20 +8,17 @@ import statsmodels.formula.api as smf
 import matplotlib.pyplot as plt
 import pickle
   
-df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/blade/blade_bench/datasets/hurricane/data.csv')
+df = pd.read_csv('/accounts/projects/binyu/hao_huang/stat-genie/blade/blade_bench/datasets/hurricane/data.csv')
 
 # ======== TRANSFORM CODE ========
-# Convert categorical gender indicator to interpretable text
-# Female if gender_mf = 1, Male if gender_mf = 0
-df['Gender'] = df['gender_mf'].apply(lambda x: 'Female' if x == 1 else 'Male')
+# No missing values in the dataset
 
-# Drop any rows with missing values in relevant columns
-df = df.dropna(subset=['masfem', 'alldeaths', 'gender_mf'])
+df['AvgPerceivedThreat'] = df['alldeaths']
 
 
 
 # ======== MODEL CODE ========
-model = smf.ols('alldeaths ~ masfem * gender_mf', data=df).fit()
+model = smf.ols('AvgPerceivedThreat ~ gender_mf * masfem', data=df).fit()
 # Display the regression results
 print(model.summary())
 

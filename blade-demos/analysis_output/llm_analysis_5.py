@@ -8,17 +8,16 @@ import statsmodels.formula.api as smf
 import matplotlib.pyplot as plt
 import pickle
   
-df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/blade/blade_bench/datasets/hurricane/data.csv')
+df = pd.read_csv('/accounts/projects/binyu/hao_huang/stat-genie/blade/blade_bench/datasets/hurricane/data.csv')
 
 # ======== TRANSFORM CODE ========
-# No missing data handling needed for this analysis
+# No missing values handling necessary for this analysis
 
-df['PrecautionaryMeasures'] = df['alldeaths'] + df['ndam']
-df['FeminineName'] = df['gender_mf']
+# No new columns are derived for this analysis
 
 
 # ======== MODEL CODE ========
-model = smf.ols('PrecautionaryMeasures ~ FeminineName * masfem', data=df).fit()
+model = smf.ols('alldeaths ~ masfem * C(gender_mf)', data=df).fit()
 # Display the regression results
 print(model.summary())
 
