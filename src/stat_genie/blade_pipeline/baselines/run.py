@@ -32,7 +32,7 @@ from stat_genie.blade_pipeline.utils import (
     get_dataset_csv_path,
 )
 
-from stat_genie.blade_pipeline.additions.prompt import PromptGenerator
+from stat_genie.blade_pipeline.additions.prompt.prompt import PromptGenerator
 
 
 class SingleRunExperiment:

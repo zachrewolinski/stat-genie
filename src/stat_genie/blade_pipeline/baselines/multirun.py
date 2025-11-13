@@ -11,7 +11,7 @@ from blade_bench.eval.datamodel.run import RunResultModes
 from blade_bench.eval.datamodel.multirun import MultiRunResults
 from blade_bench.eval.exceptions import LMGenerationError
 from blade_bench.utils import get_dataset_csv_path
-from stat_genie.blade_pipeline.additions.prompt import PromptGenerator
+from stat_genie.blade_pipeline.additions.prompt.prompt import PromptGenerator
 
 from blade_bench.eval.utils import (
     SAVE_CODE_TEMPLATE,
