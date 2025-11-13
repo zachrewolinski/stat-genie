@@ -15,99 +15,103 @@ def transform(df: pd.DataFrame) -> pd.DataFrame:
     # Work on a copy
     df = df.copy()
 
-    # Ensure numeric columns are numeric (coerce errors to NaN)
-    num_cols = ['masfem', 'masfem_mturk', 'gender_mf', 'alldeaths', 'ndam15', 'wind', 'category', 'min', 'year', 'elapsedyrs']
-    for c in num_cols:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors='coerce')
+    # Keep relevant columns and drop rows with missing critical values
+    required = ['alldeaths', 'masfem', 'gender_mf', 'wind', 'min', 'ndam15', 'elapsedyrs', 'category']
+    df = df.dropna(subset=required)
 
-    # Create log-transformed dependent variables (log(1 + x)) to handle zeros and skew
-    if 'alldeaths' in df.columns:
-        df['log_alldeaths'] = np.log1p(df['alldeaths'])
-    else:
-        df['log_alldeaths'] = np.nan
+    # Create binary female-name indicator
+    # In dataset gender_mf: 1 = female, 0 = male
+    df['female_name'] = df['gender_mf'].astype(int)
 
-    if 'ndam15' in df.columns:
-        df['log_ndam15'] = np.log1p(df['ndam15'])
-    else:
-        df['log_ndam15'] = np.nan
+    # Log-transform monetary damage to reduce skew
+    df['log_ndam15'] = np.log1p(df['ndam15'])
 
-    # Standardize the continuous femininity measures (z-scores). Use sample mean/std ignoring NaNs.
-    if 'masfem' in df.columns:
-        mean_m = df['masfem'].mean()
-        std_m = df['masfem'].std(ddof=0)
-        df['masfem_z'] = (df['masfem'] - mean_m) / (std_m if std_m != 0 else 1.0)
-    else:
-        df['masfem_z'] = np.nan
+    # Log-transform deaths for OLS modeling
+    df['log_alldeaths'] = np.log1p(df['alldeaths'])
 
-    if 'masfem_mturk' in df.columns:
-        mean_mt = df['masfem_mturk'].mean()
-        std_mt = df['masfem_mturk'].std(ddof=0)
-        df['masfem_mturk_z'] = (df['masfem_mturk'] - mean_mt) / (std_mt if std_mt != 0 else 1.0)
-    else:
-        df['masfem_mturk_z'] = np.nan
+    # Standardize continuous predictors (z-score). Use sample std (ddof=0) via pandas .std() default ddof=1; to get population-like z, use ddof=0 via numpy
+    # We'll compute z = (x - mean)/std with ddof=0 to be explicit
+    def zscore(series):
+        arr = series.astype(float).to_numpy()
+        mu = np.nanmean(arr)
+        sigma = np.nanstd(arr)
+        if sigma == 0:
+            return series * 0.0
+        return (series - mu) / sigma
 
-    # Binary female name indicator (ensure numeric 0/1). Keep NaN if missing.
-    if 'gender_mf' in df.columns:
-        df['female_name'] = pd.to_numeric(df['gender_mf'], errors='coerce').astype(float)
-    else:
-        df['female_name'] = np.nan
+    df['masfem_z'] = zscore(df['masfem'])
+    df['wind_z'] = zscore(df['wind'])
+    df['min_z'] = zscore(df['min'])
+    df['log_ndam15_z'] = zscore(df['log_ndam15'])
+    df['elapsedyrs_z'] = zscore(df['elapsedyrs'])
 
-    # Year centered to improve interpretability and numerical stability
-    if 'year' in df.columns:
-        df['year_c'] = df['year'] - df['year'].median()
-    else:
-        df['year_c'] = np.nan
+    # Convert category to integer and create dummy variables for categories 2-5 (reference: category 1)
+    df['category'] = df['category'].astype(int)
+    cats = pd.get_dummies(df['category'], prefix='category')
+    # Ensure consistent dummy columns for categories 2-5 (use 1 as reference). If some categories are missing in this dataset, add columns with zeros so downstream model code can rely on their presence.
+    for c in [2,3,4,5]:
+        col = f'category_{c}'
+        if col not in cats.columns:
+            cats[col] = 0
+    # Keep only category_2..category_5 (drop category_1 to be the reference)
+    cats = cats[[f'category_{c}' for c in [2,3,4,5]]]
+    df = pd.concat([df, cats], axis=1)
 
-    # Keep source as-is (categorical string) to be handled by the modeling function via C(source)
-
-    # Drop rows that are missing the core independent variables or core controls (these rows cannot be used in the primary regression)
-    required_for_model = ['masfem_z', 'wind', 'category', 'min', 'year_c', 'elapsedyrs', 'source']
-    present_required = [c for c in required_for_model if c in df.columns]
-    if len(present_required) > 0:
-        df = df.dropna(subset=present_required)
-
-    # Return transformed dataframe with all columns that will be used by the model
+    # Final columns we will use in modeling (keep original alldeaths too)
+    # Return the transformed dataframe (with all original columns plus newly created ones)
     return df
 
 
 # ======== MODEL CODE ========
-def model(df: pd.DataFrame):
-    # We'll run: (1) primary OLS predicting log fatalities from name femininity (masfem_z)
-    # with controls for physical storm severity and data source. We use robust (HC3) SEs.
-    # (2) Robustness: replace masfem_z with binary female_name
-    # (3) Secondary outcome: property damage (log_ndam15) with the same covariates.
+def model(df: pd.DataFrame) -> dict:
+    """Runs the primary negative-binomial count model (alldeaths) and a robustness OLS on log(1+alldeaths).
 
-    import statsmodels.formula.api as smf
+    Returns a dict with statsmodels results objects: {'nb_model': ..., 'ols_model': ...}
+    """
+    # Work on a copy
+    df = df.copy()
 
-    results = {}
+    # Define predictors used in both models; ensure the expected dummy columns exist
+    predictor_cols = [
+        'masfem_z',
+        'female_name',
+        'wind_z',
+        'min_z',
+        'log_ndam15_z',
+        'elapsedyrs_z',
+        'category_2',
+        'category_3',
+        'category_4',
+        'category_5'
+    ]
 
-    # Primary model: fatalities
-    formula_primary = 'log_alldeaths ~ masfem_z + wind + category + min + year_c + elapsedyrs + C(source)'
+    # Check presence
+    missing = [c for c in predictor_cols if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing predictor columns in transformed dataframe: {missing}")
+
+    X = df[predictor_cols].astype(float)
+    X = sm.add_constant(X)
+
+    # Outcome for count model
+    y_count = df['alldeaths'].astype(float)
+
+    # Fit Negative Binomial GLM for counts (robust to overdispersion relative to Poisson)
     try:
-        res_primary = smf.ols(formula_primary, data=df).fit(cov_type='HC3')
-        results['alldeaths_masfem'] = res_primary
-    except Exception as e:
-        results['alldeaths_masfem'] = e
+        nb_model = sm.GLM(y_count, X, family=sm.families.NegativeBinomial()).fit()
+    except Exception:
+        # If GLM NB fails, fall back to Poisson with robust covariance
+        poisson = sm.GLM(y_count, X, family=sm.families.Poisson()).fit(cov_type='HC0')
+        nb_model = poisson
 
-    # Robustness: binary female name instead of continuous masfem
-    formula_gender = 'log_alldeaths ~ female_name + wind + category + min + year_c + elapsedyrs + C(source)'
-    try:
-        res_gender = smf.ols(formula_gender, data=df).fit(cov_type='HC3')
-        results['alldeaths_femaleName'] = res_gender
-    except Exception as e:
-        results['alldeaths_femaleName'] = e
+    # Robustness: OLS on log(1 + deaths)
+    y_log = df['log_alldeaths'].astype(float)
+    ols_model = sm.OLS(y_log, X).fit()
 
-    # Secondary outcome: property damage (log_ndam15) as a robustness check / alternative proxy
-    formula_damage = 'log_ndam15 ~ masfem_z + wind + category + min + year_c + elapsedyrs + C(source)'
-    try:
-        res_damage = smf.ols(formula_damage, data=df).fit(cov_type='HC3')
-        results['ndam15_masfem'] = res_damage
-    except Exception as e:
-        results['ndam15_masfem'] = e
-
-    # Return a dict of fitted models (or exceptions if any model could not be fit).
-    # The caller can inspect .summary() on each statsmodels RegressionResults object.
-    return results
+    # Return fitted model results
+    return {
+        'nb_model': nb_model,
+        'ols_model': ols_model
+    }
 
 

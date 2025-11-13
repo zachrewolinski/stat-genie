@@ -1,5 +1,6 @@
 # imports
 from stat_genie.blade_pipeline.llms.base import TextGenerator
+from stat_genie.blade_pipeline.llms.config import llm
 
 def get_feature_transforms(llm_assistant: TextGenerator, transform_code: str,
                            feature_columns: list[str],
@@ -77,3 +78,88 @@ def get_model_information(llm_assistant: TextGenerator, model_code: str):
                                         "content": find_model_prompt}])
     
     return response.text[0].content
+
+def format_features(multirun_analyses: dict, num_runs: int,
+                    llm_assistant: TextGenerator):
+    
+    # create dict to store features
+    features = {}
+    
+    # loop through analyses
+    for i in range(num_runs):
+        
+        # create internal dict for analysis features
+        features[i] = {}
+        
+        # get the features from each analysis
+        # this should include the independent and control variables
+        ind_vars = multirun_analyses['analyses'][str(i)]['cvars']['ivs']
+        control_vars = multirun_analyses['analyses'][str(i)]['cvars']['controls']
+
+        # get any lines from the transform code that represent transformations
+        # of the independent or control variables
+        transform_code = multirun_analyses['analyses'][str(i)]['transform_code']
+        # for each variable in ind_vars, check if it is transformed
+        # in the transform_code by using an LLM assistant
+        for dict_idx, var in enumerate(ind_vars):
+            transform_responses = get_feature_transforms(llm_assistant,
+                                                         transform_code,
+                                                         var['columns'],
+                                                         var['description'])
+            ind_vars[dict_idx]['transform_code'] = \
+                [response.text[0].content for response in transform_responses]
+            
+        # save updated independent variables in features dict
+        features[i]['independent_variables'] = ind_vars
+        
+        # tkae same approach for control variables
+        for dict_idx, var in enumerate(control_vars):
+            transform_responses = get_feature_transforms(llm_assistant,
+                                                         transform_code,
+                                                         var['columns'],
+                                                         var['description'])
+            control_vars[dict_idx]['transform_code'] = \
+                [response.text[0].content for response in transform_responses]
+        
+        # save updated control variables in features dict
+        features[i]['control_variables'] = control_vars
+
+        # get the dependent variables
+        response_vars = multirun_analyses['analyses'][str(i)]['cvars']['dv']
+
+        # for each variable in response_vars, check if it is transformed
+        # in the transform_code by using an LLM assistant
+        transform_responses = get_feature_transforms(llm_assistant,
+                                                     transform_code,
+                                                     response_vars['columns'],
+                                                     response_vars['description'])
+        response_vars['transform_code'] = [response.text[0].content \
+            for response in transform_responses]
+
+        # save updated response variables in features dict
+        features[i]['response_variables'] = response_vars
+        
+    # return the features dict
+    return features
+
+def format_model_info(multirun_analyses: dict, num_runs: int,
+                      llm_assistant: TextGenerator):
+    
+    # create dict to store model information
+    model_info = {}
+    
+    # loop through analyses
+    for i in range(num_runs):
+        
+        # get the model code
+        model_code = multirun_analyses['analyses'][str(i)]['m_code']
+        
+        # get the model information using an LLM assistant
+        model_information = get_model_information(llm_assistant, model_code)
+        
+        # save the model information in the dict
+        model_info[i] = model_information
+        
+    # return the model information dict
+    return model_info
+    

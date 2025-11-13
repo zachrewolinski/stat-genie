@@ -163,3 +163,4 @@ def make_conclusion(llm_assistant: TextGenerator, task: list[str],
                                         "content": find_answer_prompt}])
     
     return response.text[0].content
+
