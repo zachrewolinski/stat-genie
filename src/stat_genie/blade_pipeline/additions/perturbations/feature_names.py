@@ -1,138 +1,186 @@
 # imports
-import json
 import random
 from copy import deepcopy
+from stat_genie.blade_pipeline.additions.perturbations.utils import read_json
 
-def read_json(json_path):
+class FeaturePerturbation:
     """
-    Reads a JSON file from the given file path and returns the parsed metadata.
+    Centralized object for perturbing feature names in JSON metadata. There
+    are currently three supported actions:
+    1. Anonymize variable names - replaces variable names with generic
+       names like "feature1", "feature2", etc.
+    2. Shuffle feature order - randomly shuffles the order of features
+       in the metadata.
+    3. Shuffle feature names - randomly shuffles the feature names among the
+       features.
+    If multiple types of feature perturbations are desired, their order will
+    follow the order listed above.
+    """
     
-    Args:
-        json_path: Path to the JSON file to read
+    def __init__(self, json_path: str, anonymize: bool = False,
+                 shuffle_order: bool = False, shuffle_names: bool = False,
+                 shuffle_order_seed: int = 42, shuffle_names_seed: int = 42):
         
-    Returns:
-        Dictionary or list containing the parsed JSON metadata
-    """
-    with open(json_path, "r") as f:
-        metadata = json.load(f)
-    return metadata
+        self.json_metadata = deepcopy(read_json(json_path))
+        self.anonymize = anonymize
+        self.shuffle_order = shuffle_order
+        self.shuffle_names = shuffle_names
+        self.shuffle_order_seed = shuffle_order_seed
+        self.shuffle_names_seed = shuffle_names_seed
 
-def anonymize_variable_names(json_metadata):
-    """
-    Takes a JSON (in dictionary format) and replaces variable names 
-    with non-descriptive names like "feature1", "feature2", etc.
-    
-    Args:
-        json_metadata: Dictionary containing the JSON metadata
+    def anonymize_variable_names(self) -> None:
+        """
+        Takes a JSON (in dictionary format) and replaces variable names 
+        with non-descriptive names like "feature1", "feature2", etc.
         
-    Returns:
-        Dictionary with anonymized variable names
-    """
-    
-    # create a copy of the metadata to work with
-    json_metadata = deepcopy(json_metadata)
-    
-    # get all unique variable names from fields
-    if "data_desc" in json_metadata and "fields" in json_metadata["data_desc"]:
-        variable_names = [field["column"] for field in json_metadata["data_desc"]["fields"]]
-    else:
-        # fallback: try to get from field_names if fields structure is different
-        variable_names = json_metadata.get("data_desc", {}).get("field_names", [])
-    
-    # create mapping from old names to new names (feature1, feature2, etc.)
-    name_mapping = {old_name: f"feature{i+1}" for i, old_name in enumerate(variable_names)}
-    
-    # replace column names in fields
-    if "data_desc" in json_metadata and "fields" in json_metadata["data_desc"]:
-        for field in json_metadata["data_desc"]["fields"]:
-            if "column" in field and field["column"] in name_mapping:
-                field["column"] = name_mapping[field["column"]]
-    
-    # replace names in field_names array
-    if "data_desc" in json_metadata and "field_names" in json_metadata["data_desc"]:
-        json_metadata["data_desc"]["field_names"] = [
-            name_mapping.get(old_name, old_name) 
-            for old_name in json_metadata["data_desc"]["field_names"]
-        ]
-    
-    return json_metadata
+        Args:
+            json_metadata: Dictionary containing the JSON metadata
+            
+        Returns:
+            Nothing, modifies self.json_metadata in place
+        """
+        
+        # create a copy of the metadata to work with
+        json_metadata = deepcopy(self.json_metadata)
+        
+        # get all unique variable names from fields
+        if "data_desc" in json_metadata and "fields" in json_metadata["data_desc"]:
+            variable_names = [field["column"] for field in json_metadata["data_desc"]["fields"]]
+        else:
+            # fallback: try to get from field_names if fields structure is different
+            variable_names = json_metadata.get("data_desc", {}).get("field_names", [])
+        
+        # create mapping from old names to new names (feature1, feature2, etc.)
+        name_mapping = {old_name: f"feature{i+1}" for i, old_name in enumerate(variable_names)}
+        
+        # replace column names in fields
+        if "data_desc" in json_metadata and "fields" in json_metadata["data_desc"]:
+            for field in json_metadata["data_desc"]["fields"]:
+                if "column" in field and field["column"] in name_mapping:
+                    field["column"] = name_mapping[field["column"]]
+        
+        # replace names in field_names array
+        if "data_desc" in json_metadata and "field_names" in json_metadata["data_desc"]:
+            json_metadata["data_desc"]["field_names"] = [
+                name_mapping.get(old_name, old_name) 
+                for old_name in json_metadata["data_desc"]["field_names"]
+            ]
+            
+        self.json_metadata = json_metadata
+        
+        return
 
-def shuffle_feature_order(json_metadata, seed=42):
-    """
-    Shuffles the order of features in the JSON metadata.
-    
-    Args:
-        json_metadata: Dictionary containing the JSON metadata
-        seed: Random seed for reproducibility
-    
-    Returns:
-        Dictionary with shuffled feature order
-    """
-    
-    # create a copy of the metadata to work with
-    json_metadata = deepcopy(json_metadata)
-    
-    # set random seed for reproducibility
-    random.seed(seed)
-    
-    # shuffle the fields array if it exists
-    if "data_desc" in json_metadata and "fields" in json_metadata["data_desc"]:
-        fields = json_metadata["data_desc"]["fields"]
-        random.shuffle(fields)
-        json_metadata["data_desc"]["fields"] = fields
-    
-    # shuffle the field_names array if it exists
-    if "data_desc" in json_metadata and "field_names" in json_metadata["data_desc"]:
-        field_names = json_metadata["data_desc"]["field_names"]
-        random.shuffle(field_names)
-        json_metadata["data_desc"]["field_names"] = field_names
-    
-    return json_metadata
+    def shuffle_feature_order(self) -> None:
+        """
+        Shuffles the order of features in the JSON metadata.
+        
+        Args:
+            json_metadata: Dictionary containing the JSON metadata
+            seed: Random seed for reproducibility
+        
+        Returns:
+            Nothing, modifies self.json_metadata in place
+        """
+        
+        # create a copy of the metadata to work with
+        json_metadata = deepcopy(self.json_metadata)
+        
+        # set random seed for reproducibility
+        random.seed(self.shuffle_order_seed)
+        
+        # shuffle the fields array if it exists
+        if "data_desc" in json_metadata and "fields" in json_metadata["data_desc"]:
+            fields = json_metadata["data_desc"]["fields"]
+            random.shuffle(fields)
+            json_metadata["data_desc"]["fields"] = fields
+        
+        # shuffle the field_names array if it exists
+        if "data_desc" in json_metadata and "field_names" in json_metadata["data_desc"]:
+            field_names = json_metadata["data_desc"]["field_names"]
+            random.shuffle(field_names)
+            json_metadata["data_desc"]["field_names"] = field_names
+            
+        self.json_metadata = json_metadata
+        
+        return
 
-def shuffle_feature_names(json_metadata, seed=42):
-    """
-    Randomly shuffles the feature names in the JSON metadata.
+    def shuffle_feature_names(self) -> None:
+        """
+        Randomly shuffles the feature names in the JSON metadata.
+        
+        Args:
+            json_metadata: Dictionary containing the JSON metadata
+            seed: Random seed for reproducibility
+        
+        Returns:
+            Nothing, modifies self.json_metadata in place
+        """
+        
+        # create a copy of the metadata to work with
+        json_metadata = deepcopy(self.json_metadata)
+        
+        # set random seed for reproducibility
+        random.seed(self.shuffle_names_seed)
+        
+        # get all variable names from fields
+        if "data_desc" in json_metadata and "fields" in json_metadata["data_desc"]:
+            variable_names = [field["column"] for field in json_metadata["data_desc"]["fields"]]
+        else:
+            # fallback: try to get from field_names if fields structure is different
+            variable_names = json_metadata.get("data_desc", {}).get("field_names", [])
+        
+        # create a shuffled copy of the names
+        shuffled_names = variable_names.copy()
+        random.shuffle(shuffled_names)
+        
+        # create mapping from original names to shuffled names
+        name_mapping = {old_name: new_name for old_name, new_name in zip(variable_names, shuffled_names)}
+        
+        # replace column names in fields
+        if "data_desc" in json_metadata and "fields" in json_metadata["data_desc"]:
+            for field in json_metadata["data_desc"]["fields"]:
+                if "column" in field and field["column"] in name_mapping:
+                    field["column"] = name_mapping[field["column"]]
+        
+        # replace names in field_names array
+        if "data_desc" in json_metadata and "field_names" in json_metadata["data_desc"]:
+            json_metadata["data_desc"]["field_names"] = [
+                name_mapping.get(old_name, old_name) 
+                for old_name in json_metadata["data_desc"]["field_names"]
+            ]
+        
+        self.json_metadata = json_metadata
+        
+        return
     
-    Args:
-        json_metadata: Dictionary containing the JSON metadata
-        seed: Random seed for reproducibility
+    def perturb(self) -> dict:
+        """
+        Applies the selected perturbations to the JSON metadata in the
+        following order:
+        1. Anonymize variable names
+        2. Shuffle feature order
+        3. Shuffle feature names
+        
+        Returns:
+            The perturbed JSON metadata as a dictionary
+        """
+        
+        if self.anonymize:
+            self.anonymize_variable_names()
+        
+        if self.shuffle_order:
+            self.shuffle_feature_order()
+        
+        if self.shuffle_names:
+            self.shuffle_feature_names()
+        
+        return self.json_metadata
     
-    Returns:
-        Dictionary with shuffled feature names
-    """
-    
-    # create a copy of the metadata to work with
-    json_metadata = deepcopy(json_metadata)
-    
-    # set random seed for reproducibility
-    random.seed(seed)
-    
-    # get all variable names from fields
-    if "data_desc" in json_metadata and "fields" in json_metadata["data_desc"]:
-        variable_names = [field["column"] for field in json_metadata["data_desc"]["fields"]]
-    else:
-        # fallback: try to get from field_names if fields structure is different
-        variable_names = json_metadata.get("data_desc", {}).get("field_names", [])
-    
-    # create a shuffled copy of the names
-    shuffled_names = variable_names.copy()
-    random.shuffle(shuffled_names)
-    
-    # create mapping from original names to shuffled names
-    name_mapping = {old_name: new_name for old_name, new_name in zip(variable_names, shuffled_names)}
-    
-    # replace column names in fields
-    if "data_desc" in json_metadata and "fields" in json_metadata["data_desc"]:
-        for field in json_metadata["data_desc"]["fields"]:
-            if "column" in field and field["column"] in name_mapping:
-                field["column"] = name_mapping[field["column"]]
-    
-    # replace names in field_names array
-    if "data_desc" in json_metadata and "field_names" in json_metadata["data_desc"]:
-        json_metadata["data_desc"]["field_names"] = [
-            name_mapping.get(old_name, old_name) 
-            for old_name in json_metadata["data_desc"]["field_names"]
-        ]
-    
-    return json_metadata
-    
+    def get_metadata(self) -> dict:
+        """
+        Returns the current state of the JSON metadata.
+        
+        Returns:
+            The JSON metadata as a dictionary
+        """
+        return self.json_metadata
