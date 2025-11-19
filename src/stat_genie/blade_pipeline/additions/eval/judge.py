@@ -7,13 +7,13 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-JUDGE_MODEL = "gpt-4.1-mini"
+JUDGE_MODEL = "gpt-5-mini"
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 dataset_name = ""  #set this
-dataset_path = join("..", "..", "src", "stat_genie", "blade_pipeline", "datasets", dataset_name, "data.csv")
+dataset_path = join("..", "..", "datasets", dataset_name, "data.csv")
 data = pd.read_csv(dataset_path)
 data_head = data.head(10)
 data_head_preview = data_head.to_markdown(index=False)
