@@ -1,0 +1,222 @@
+{
+  "dataset_name": "hurricane",
+  "n": 3,
+  "analyses": {
+    "0": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Name femininity: continuous coder rating of how feminine the hurricane name is (higher = more feminine). Used as the focal independent variable; hypothesized that higher femininity -> fewer precautions -> more fatalities.",
+            "columns": [
+              "masfem_z"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Total number of deaths caused by the hurricane (count). This serves as a proxy outcome for the consequence of reduced precautionary behavior by the public.",
+          "columns": [
+            "alldeaths"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Maximum wind speed at landfall (knots or mph depending on source). Controls for objective storm intensity.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "wind_z"
+            ]
+          },
+          {
+            "description": "Minimum atmospheric pressure at landfall (lower -> stronger storm). Controls for objective storm intensity.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "min_z"
+            ]
+          },
+          {
+            "description": "Adjusted property damage in 2015 dollars (log-transformed). Controls for exposure / economic impact and correlates of population affected.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "log_ndam15_z"
+            ]
+          },
+          {
+            "description": "Year of the storm, mean-centered to capture secular trends in reporting, warning systems, and infrastructure.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "year_c"
+            ]
+          },
+          {
+            "description": "Saffir-Simpson category (ordinal 1-5). Controls for storm intensity in an ordinal form.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "category"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transformations performed:\n    - Drop rows missing the key outcome, IV, or core controls.\n    - Ensure alldeaths is integer and non-negative.\n    - Create log_ndam15 = log(ndam15 + 1) to compress heavy-tailed damage values.\n    - Mean-center year to year_c (controls secular trends).\n    - Z-score continuous predictors (masfem, wind, min, log_ndam15) to aid interpretation and numerical stability.\n    - Return a dataframe containing exactly the columns used in the model.\n    \"\"\"\n    df = df.copy()\n\n    # Required raw columns\n    required = ['alldeaths', 'masfem', 'wind', 'min', 'ndam15', 'year', 'category']\n    # Drop rows missing required variables\n    df = df.dropna(subset=required)\n\n    # Ensure numeric types\n    df['alldeaths'] = pd.to_numeric(df['alldeaths'], errors='coerce')\n    df['masfem'] = pd.to_numeric(df['masfem'], errors='coerce')\n    df['wind'] = pd.to_numeric(df['wind'], errors='coerce')\n    df['min'] = pd.to_numeric(df['min'], errors='coerce')\n    df['ndam15'] = pd.to_numeric(df['ndam15'], errors='coerce')\n    df['year'] = pd.to_numeric(df['year'], errors='coerce')\n    df['category'] = pd.to_numeric(df['category'], errors='coerce')\n\n    # Drop any rows that became NA after coercion\n    df = df.dropna(subset=required)\n\n    # Ensure alldeaths are non-negative integers\n    df = df[df['alldeaths'] >= 0]\n    # In case floats exist, convert to integers (counts)\n    df['alldeaths'] = df['alldeaths'].astype(int)\n\n    # Create log-transformed damage variable (ndam15 may be heavy tailed)\n    df['log_ndam15'] = np.log(df['ndam15'].clip(lower=0) + 1)\n\n    # Mean-center year\n    df['year_c'] = df['year'] - df['year'].mean()\n\n    # Z-score the continuous predictors used in the model for interpretability\n    for col in ['masfem', 'wind', 'min', 'log_ndam15']:\n        zcol = f\"{col}_z\"\n        # population std (ddof=0) to be deterministic\n        std = df[col].std(ddof=0)\n        if std == 0 or np.isnan(std):\n            # if constant, create zeros\n            df[zcol] = 0.0\n        else:\n            df[zcol] = (df[col] - df[col].mean()) / std\n\n    # Keep only columns necessary for modeling\n    keep_cols = ['alldeaths', 'masfem_z', 'wind_z', 'min_z', 'log_ndam15_z', 'year_c', 'category']\n    # If some of these columns are missing for any reason, raise an informative error\n    missing = [c for c in keep_cols if c not in df.columns]\n    if len(missing) > 0:\n        raise ValueError(f\"Missing required transformed columns: {missing}\")\n\n    return df[keep_cols].reset_index(drop=True)\n",
+      "m_code": "def model(df: pd.DataFrame):\n    \"\"\"\n    Fit a count regression (Negative Binomial) predicting alldeaths from name femininity\n    controlling for objective storm intensity and damage. Negative Binomial is chosen\n    because alldeaths is a non-negative integer outcome with substantial overdispersion.\n\n    Model specification (in matrix form):\n      alldeaths ~ 1 + masfem_z + wind_z + min_z + log_ndam15_z + year_c + category\n\n    Returns the fitted statsmodels results object.\n    \"\"\"\n    df = df.copy()\n\n    # Define predictors and outcome\n    y = df['alldeaths']\n    X = df[['masfem_z', 'wind_z', 'min_z', 'log_ndam15_z', 'year_c', 'category']]\n\n    # Add intercept\n    X = sm.add_constant(X)\n\n    # Fit Negative Binomial using GLM\n    model_glm = sm.GLM(y, X, family=sm.families.NegativeBinomial())\n    results = model_glm.fit()\n\n    # Print summary for quick inspection (can be removed if silent return is preferred)\n    print(results.summary())\n\n    return results\n"
+    },
+    "1": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Name femininity score (continuous). Primary independent variable: higher values indicate names rated as more feminine. Standardized (z-scored) for interpretability.",
+            "columns": [
+              "masfem_z"
+            ]
+          },
+          {
+            "description": "Binary indicator for hurricane name gender (1 = female name, 0 = male name). Included as a robustness/alternative IV to the continuous masculinity-femininity rating.",
+            "columns": [
+              "gender_female"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Fatalities caused by the hurricane (count). Used as a proxy for the extent to which the public took precautionary measures (fewer fatalities interpreted as potentially more precaution). Primary model uses the count; a logged version is used for OLS robustness.",
+          "columns": [
+            "alldeaths"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Maximum sustained wind speed at landfall (controls for storm strength). Standardized (z-scored).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "wind_z"
+            ]
+          },
+          {
+            "description": "Minimum central pressure at landfall (controls for storm strength). Standardized (z-scored).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "min_z"
+            ]
+          },
+          {
+            "description": "Economic damage (2015-normalized) logged. Controls for economic impact / exposure which may correlate with fatalities and name assignment.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "ndam15_log"
+            ]
+          },
+          {
+            "description": "Storm category on the Saffir-Simpson scale (1-5). Included as a categorical control to adjust for nonlinearity in intensity.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "category"
+            ]
+          },
+          {
+            "description": "Year centered around the sample mean. Controls for time trends (changes in preparedness, warning systems, etc.).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "year_centered"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    # Work on a copy\n    df = df.copy()\n\n    # Ensure required columns exist and convert to numeric where appropriate\n    numeric_cols = ['alldeaths', 'masfem', 'gender_mf', 'wind', 'min', 'ndam15', 'year', 'category']\n    for c in numeric_cols:\n        if c in df.columns:\n            df[c] = pd.to_numeric(df[c], errors='coerce')\n\n    # Drop rows missing the key variables needed for the analysis\n    df = df.dropna(subset=['alldeaths', 'masfem', 'wind', 'min', 'ndam15', 'year', 'category'])\n\n    # Dependent variable: keep count and also create logged variant for robustness\n    df['alldeaths'] = df['alldeaths'].astype(int)\n    df['alldeaths_log'] = np.log(df['alldeaths'] + 1)\n\n    # Independent variables\n    # Standardize continuous femininity rating\n    df['masfem_z'] = (df['masfem'] - df['masfem'].mean()) / (df['masfem'].std(ddof=0) if df['masfem'].std(ddof=0) != 0 else 1)\n    # Binary gender indicator: rename into analytic column\n    df['gender_female'] = df['gender_mf'].astype(int)\n\n    # Controls: standardize continuous storm-strength indicators\n    df['wind_z'] = (df['wind'] - df['wind'].mean()) / (df['wind'].std(ddof=0) if df['wind'].std(ddof=0) != 0 else 1)\n    df['min_z'] = (df['min'] - df['min'].mean()) / (df['min'].std(ddof=0) if df['min'].std(ddof=0) != 0 else 1)\n\n    # Logged damage (ndam15) to reduce skew\n    df['ndam15_log'] = np.log(df['ndam15'] + 1)\n\n    # Time trend\n    df['year_centered'] = df['year'] - df['year'].mean()\n\n    # Ensure category is integer (we will treat it as categorical in the model)\n    df['category'] = df['category'].astype(int)\n\n    # Keep only columns necessary for modeling + useful identifiers\n    keep_cols = ['ind', 'year', 'name', 'masfem', 'masfem_z', 'gender_female', 'alldeaths', 'alldeaths_log',\n                 'wind', 'wind_z', 'min', 'min_z', 'ndam15', 'ndam15_log', 'year_centered', 'category', 'source']\n    # Return only existing columns from keep_cols (defensive in case some identifiers missing)\n    present_cols = [c for c in keep_cols if c in df.columns]\n    return df[present_cols]\n",
+      "m_code": "def model(df: pd.DataFrame) -> dict:\n    import statsmodels.api as sm\n    import statsmodels.formula.api as smf\n\n    # Work on a copy\n    data = df.copy()\n\n    # Primary specification: negative binomial regression on death counts\n    # Formula includes the standardized femininity rating and the gender binary control,\n    # and adjusts for storm strength and time trends. Category is treated as categorical.\n    formula_nb = 'alldeaths ~ masfem_z + gender_female + wind_z + min_z + ndam15_log + year_centered + C(category)'\n\n    nb_model = smf.glm(formula=formula_nb, data=data, family=sm.families.NegativeBinomial())\n    nb_results = nb_model.fit()\n\n    # Robustness: OLS on log(deaths + 1) with heteroskedasticity-robust SEs\n    formula_ols = 'alldeaths_log ~ masfem_z + gender_female + wind_z + min_z + ndam15_log + year_centered + C(category)'\n    ols_model = smf.ols(formula=formula_ols, data=data).fit(cov_type='HC3')\n\n    # Return fitted results objects for downstream inspection; callers can call .summary() or examine params\n    return {\n        'nb_results': nb_results,\n        'ols_results': ols_model\n    }\n"
+    },
+    "2": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Continuously-coded femininity of the hurricane name (standardized). Higher values indicate names rated as more feminine by independent coders. This is the primary independent variable testing whether more-feminine names predict differences in consequences (fewer precautions -> different fatalities).",
+            "columns": [
+              "masfem_z"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Count of total deaths caused by the hurricane (raw count). This operationalizes the downstream outcome that might reflect whether fewer precautionary measures were taken (higher deaths could indicate fewer precautions, holding storm severity constant).",
+          "columns": [
+            "alldeaths"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Binary indicator encoding whether the hurricane name was classified female (1) vs male (0). Included as a covariate to separate effects of binary gender labeling from the continuous femininity rating.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "gender_mf"
+            ]
+          },
+          {
+            "description": "Maximum reported wind speed at landfall (mph). Controls for physical storm intensity that directly affects fatalities.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "wind"
+            ]
+          },
+          {
+            "description": "Saffir-Simpson category of hurricane at landfall (1-5). Controls for coarse storm intensity.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "category"
+            ]
+          },
+          {
+            "description": "Minimum central pressure at landfall (mb). Lower pressures indicate stronger storms; included as an additional intensity control.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "min"
+            ]
+          },
+          {
+            "description": "Years elapsed since the hurricane (age of record); included to account for reporting/recording differences as well as long-term trends in preparedness and infrastructure.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "elapsedyrs"
+            ]
+          },
+          {
+            "description": "Year (centered). Controls for secular trends in preparedness, reporting, and infrastructure improvements over time.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "year_c"
+            ]
+          },
+          {
+            "description": "Source of the historical data (categorical). Included as a factor to account for differences in measurement/reporting between sources.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "source"
+            ]
+          },
+          {
+            "description": "Alternate femininity ratings collected on MTurk (standardized). Included as a control / robustness check to partial out measurement noise in the original masfem variable.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "masfem_mturk_z"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw hurricane dataset into the analysis-ready dataframe.\n    Produces standardized femininity variables, centers year, ensures categorical source,\n    and constructs a log outcome for OLS robustness.\n    Required output columns (used by models):\n      - alldeaths, masfem_z, gender_mf, wind, category, min, elapsedyrs, year_c, source, masfem_mturk_z, log_alldeaths\n    \"\"\"\n    df = df.copy()\n\n    # Ensure numeric columns are numeric\n    numeric_cols = ['alldeaths', 'masfem', 'masfem_mturk', 'gender_mf', 'wind', 'category', 'min', 'elapsedyrs', 'year']\n    for c in numeric_cols:\n        if c in df.columns:\n            df[c] = pd.to_numeric(df[c], errors='coerce')\n\n    # Ensure source is categorical and fill missing source with 'unknown'\n    if 'source' in df.columns:\n        df['source'] = df['source'].fillna('unknown').astype('category')\n    else:\n        df['source'] = pd.Categorical(['unknown'] * len(df))\n\n    # Drop rows missing the key dependent or independent variables\n    df = df.dropna(subset=['alldeaths', 'masfem'])\n\n    # Standardize masfem (primary IV) and masfem_mturk (alternative rating) for interpretability\n    df['masfem_z'] = (df['masfem'] - df['masfem'].mean()) / (df['masfem'].std(ddof=0) if df['masfem'].std(ddof=0) != 0 else 1)\n    if 'masfem_mturk' in df.columns:\n        df['masfem_mturk_z'] = (df['masfem_mturk'] - df['masfem_mturk'].mean()) / (df['masfem_mturk'].std(ddof=0) if df['masfem_mturk'].std(ddof=0) != 0 else 1)\n    else:\n        df['masfem_mturk_z'] = np.nan\n\n    # Ensure binary gender_mf is 0/1\n    if 'gender_mf' in df.columns:\n        df['gender_mf'] = df['gender_mf'].astype(float).fillna(0).astype(int)\n    else:\n        df['gender_mf'] = 0\n\n    # Center year to aid model stability (year_c = year - mean(year))\n    if 'year' in df.columns:\n        df['year_c'] = df['year'] - df['year'].mean()\n    else:\n        df['year_c'] = 0\n\n    # Create a logged outcome for OLS robustness (log1p to handle zeros)\n    df['log_alldeaths'] = np.log1p(df['alldeaths'].fillna(0))\n\n    # Keep only rows with necessary control variables available; for GLM we allow some missing in masfem_mturk_z\n    required_for_model = ['alldeaths', 'masfem_z', 'gender_mf', 'wind', 'category', 'min', 'elapsedyrs', 'year_c', 'source']\n    missing_req = [c for c in required_for_model if c not in df.columns]\n    if missing_req:\n        raise ValueError(f\"Required columns missing from input df: {missing_req}\")\n\n    df = df.dropna(subset=['wind', 'category', 'min', 'elapsedyrs'])\n\n    # Final check / reorder to make outputs clear\n    keep_cols = ['alldeaths', 'log_alldeaths', 'masfem', 'masfem_z', 'masfem_mturk_z', 'gender_mf', 'wind', 'category', 'min', 'elapsedyrs', 'year', 'year_c', 'source', 'name', 'ind']\n    cols_present = [c for c in keep_cols if c in df.columns]\n    df = df[cols_present]\n\n    return df\n",
+      "m_code": "def model(df: pd.DataFrame) -> dict:\n    \"\"\"\n    Fit a set of models to test whether more-feminine hurricane names predict differences in fatalities\n    after controlling for storm intensity and other covariates.\n\n    Models fit:\n      1) Poisson GLM (for count outcome)\n      2) Negative Binomial GLM (accounts for overdispersion)\n      3) OLS on log1p(alldeaths) as a robustness check\n\n    Returns a dictionary of fitted model result objects.\n    \"\"\"\n    import statsmodels.api as sm\n    import statsmodels.formula.api as smf\n\n    # Ensure we're using the transformed data columns defined above\n    required = ['alldeaths', 'masfem_z', 'gender_mf', 'wind', 'category', 'min', 'elapsedyrs', 'year_c', 'source', 'masfem_mturk_z', 'log_alldeaths']\n    for c in ['alldeaths', 'masfem_z', 'gender_mf', 'wind', 'category', 'min', 'elapsedyrs', 'year_c', 'source']:\n        if c not in df.columns:\n            raise ValueError(f\"Required column for modeling missing: {c}\")\n\n    # Base formula: primary IV masfem_z, include binary gender label and intensity controls, plus source fixed effects and masfem_mturk_z as measurement control\n    formula = 'alldeaths ~ masfem_z + gender_mf + wind + category + min + elapsedyrs + year_c + masfem_mturk_z + C(source)'\n\n    # Poisson GLM\n    poisson_model = smf.glm(formula=formula, data=df, family=sm.families.Poisson()).fit()\n\n    # Compute dispersion for Poisson (pearson chi2 / df_resid). If >>1 suggests overdispersion.\n    try:\n        poisson_dispersion = poisson_model.pearson_chi2 / poisson_model.df_resid\n    except Exception:\n        poisson_dispersion = None\n\n    # Negative binomial GLM to account for overdispersion\n    negbin_model = smf.glm(formula=formula, data=df, family=sm.families.NegativeBinomial()).fit()\n\n    # OLS on log1p(alldeaths) as a robustness check (continuous approximation)\n    ols_formula = 'log_alldeaths ~ masfem_z + gender_mf + wind + category + min + elapsedyrs + year_c + masfem_mturk_z + C(source)'\n    ols_model = smf.ols(formula=ols_formula, data=df).fit()\n\n    # Pack useful outputs: models themselves and diagnostic numbers\n    results = {\n        'poisson_model': poisson_model,\n        'poisson_dispersion': poisson_dispersion,\n        'negbin_model': negbin_model,\n        'ols_log_model': ols_model\n    }\n\n    return results\n"
+    }
+  }
+}

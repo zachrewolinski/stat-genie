@@ -12,115 +12,68 @@ df = pd.read_csv('/accounts/projects/binyu/hao_huang/stat-genie/.venv/lib/python
 
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Transform the raw hurricane dataframe to the analysis-ready dataframe.
-
-    Creates standardized (z-scored) versions of the key continuous predictors,
-    a log-transformed damage outcome, and a cleaned categorical source column
-    for use in formula-based models. Drops rows missing required variables for
-    the core analyses.
-    """
+    # Make a copy to avoid modifying the original
     df = df.copy()
 
-    # Ensure key columns exist
-    required_cols = ['alldeaths', 'masfem', 'wind', 'min', 'category', 'ndam15', 'gender_mf', 'elapsedyrs', 'source']
-    missing = [c for c in required_cols if c not in df.columns]
-    if missing:
-        raise ValueError(f"Missing required columns for transform: {missing}")
+    # ----------------------
+    # Required columns and basic cleaning
+    # ----------------------
+    # Keep rows with non-missing dependent variable and main IVs
+    required_cols = ['alldeaths', 'masfem', 'gender_mf', 'wind', 'category', 'min', 'year', 'elapsedyrs', 'source']
+    df = df.dropna(subset=required_cols)
 
-    # Drop rows missing core variables (primary analyses need these)
-    df = df.dropna(subset=['alldeaths', 'masfem', 'wind', 'min', 'category', 'ndam15', 'gender_mf', 'elapsedyrs', 'source'])
+    # Rename 'min' to avoid collision with Python built-in; keep original values
+    df['min_pressure'] = df['min']
 
-    # Create log-transformed damage (secondary DV). Add 1 to avoid log(0).
-    df['log_ndam15'] = np.log(df['ndam15'].astype(float) + 1.0)
-
-    # Standardize (z-score) continuous predictors for interpretability
-    # Use population std (ddof=0) to match most standardization practices in regressions
-    def zscore(s: pd.Series) -> pd.Series:
-        s = s.astype(float)
-        return (s - s.mean()) / (s.std(ddof=0) if s.std(ddof=0) != 0 else 1.0)
-
-    df['masfem_z'] = zscore(df['masfem'])
-
-    # masfem_mturk is an alternative measure; create standardized version if present
-    if 'masfem_mturk' in df.columns:
-        df['masfem_mturk_z'] = zscore(df['masfem_mturk'])
-    else:
-        # create column with NaNs so downstream code can reference it safely
-        df['masfem_mturk_z'] = np.nan
-
-    df['wind_z'] = zscore(df['wind'])
-    df['min_z'] = zscore(df['min'])
-
-    # Ensure numeric types where expected
-    df['alldeaths'] = pd.to_numeric(df['alldeaths'], errors='coerce').fillna(0).astype(int)
+    # Ensure numeric types where appropriate
+    df['alldeaths'] = pd.to_numeric(df['alldeaths'], errors='coerce')
+    df['masfem'] = pd.to_numeric(df['masfem'], errors='coerce')
+    df['gender_mf'] = pd.to_numeric(df['gender_mf'], errors='coerce').astype(int)
+    df['wind'] = pd.to_numeric(df['wind'], errors='coerce')
     df['category'] = pd.to_numeric(df['category'], errors='coerce')
+    df['min_pressure'] = pd.to_numeric(df['min_pressure'], errors='coerce')
+    df['year'] = pd.to_numeric(df['year'], errors='coerce')
     df['elapsedyrs'] = pd.to_numeric(df['elapsedyrs'], errors='coerce')
-    df['gender_mf'] = pd.to_numeric(df['gender_mf'], errors='coerce').fillna(0).astype(int)
 
-    # Create a cleaned source categorical column (safe names) for use with C(source_cat) in formulas
-    df['source_cat'] = df['source'].astype(str).str.replace(r'[^0-9A-Za-z]+', '_', regex=True).str.strip('_')
+    # Drop rows that became NA after coercion
+    df = df.dropna(subset=['alldeaths', 'masfem', 'gender_mf', 'wind', 'category', 'min_pressure', 'year', 'elapsedyrs', 'source'])
 
-    # Final safety: drop any rows that still have NA in model columns
-    model_cols = ['alldeaths', 'masfem_z', 'wind_z', 'min_z', 'category', 'elapsedyrs', 'gender_mf', 'log_ndam15', 'source_cat']
-    df = df.dropna(subset=model_cols)
+    # ----------------------
+    # Derived / transformed columns
+    # ----------------------
+    # Standardize masfem so coefficients are interpretable (z-score)
+    df['masfem_z'] = (df['masfem'] - df['masfem'].mean()) / (df['masfem'].std(ddof=0) if df['masfem'].std(ddof=0) != 0 else 1.0)
 
-    # Reset index for cleanliness
-    df = df.reset_index(drop=True)
+    # Keep alldeaths as count for count modeling; also create log version for diagnostics/robustness
+    df['alldeaths_log1p'] = np.log1p(df['alldeaths'])
+
+    # Make sure 'source' is a categorical variable for modeling with C(source)
+    df['source'] = df['source'].astype('category')
+
+    # Optional: create an indicator for extremely high-fatality outliers for sensitivity checks
+    df['alldeaths_outlier'] = (df['alldeaths'] > df['alldeaths'].quantile(0.99)).astype(int)
+
+    # Finalize: keep only columns that will be used in the model and useful diagnostics
+    keep_cols = ['alldeaths', 'alldeaths_log1p', 'masfem', 'masfem_z', 'gender_mf', 'wind', 'category', 'min_pressure', 'year', 'elapsedyrs', 'source', 'alldeaths_outlier']
+    df = df[keep_cols]
 
     return df
 
 
 # ======== MODEL CODE ========
-def model(df: pd.DataFrame) -> dict:
-    """
-    Fit statistical models to test whether more feminine hurricane names are
-    associated with differences in downstream consequences (used as proxies for
-    fewer precautionary measures).
-
-    Models fitted:
-    1) Negative Binomial regression predicting alldeaths with masfem_z (primary IV),
-       controlling for objective severity (wind_z, min_z, category), elapsedyrs,
-       gender_mf, and source (categorical).
-    2) Alternative Negative Binomial using masfem_mturk_z (MTurk rating) instead of masfem_z.
-    3) OLS regression predicting log_ndam15 (log damage) with the same predictors.
-
-    Returns a dict with fitted model result objects.
-    """
+def model(df: pd.DataFrame) -> Any:
     import statsmodels.formula.api as smf
     import statsmodels.api as sm
 
-    results = {}
+    # Build formula: negative binomial GLM with categorical source control
+    formula = 'alldeaths ~ masfem_z + gender_mf + wind + category + min_pressure + year + elapsedyrs + C(source)'
 
-    # Primary NB model using masfem_z
-    formula_nb = 'alldeaths ~ masfem_z + gender_mf + wind_z + min_z + category + elapsedyrs + C(source_cat)'
-    try:
-        nb_model = smf.glm(formula=formula_nb, data=df, family=sm.families.NegativeBinomial()).fit()
-        results['nb_masfem'] = nb_model
-    except Exception as e:
-        results['nb_masfem_error'] = str(e)
+    # Fit Negative Binomial GLM to account for over-dispersed count data
+    # Using statsmodels' GLM with NegativeBinomial family
+    nb_model = smf.glm(formula=formula, data=df, family=sm.families.NegativeBinomial())
+    results = nb_model.fit()
 
-    # Alternative NB model using masfem_mturk_z (drop rows missing that variable)
-    if df['masfem_mturk_z'].notna().any():
-        df_mturk = df.dropna(subset=['masfem_mturk_z'])
-        formula_nb_mturk = 'alldeaths ~ masfem_mturk_z + gender_mf + wind_z + min_z + category + elapsedyrs + C(source_cat)'
-        try:
-            nb_model_mturk = smf.glm(formula=formula_nb_mturk, data=df_mturk, family=sm.families.NegativeBinomial()).fit()
-            results['nb_masfem_mturk'] = nb_model_mturk
-        except Exception as e:
-            results['nb_masfem_mturk_error'] = str(e)
-    else:
-        results['nb_masfem_mturk'] = None
-
-    # OLS on log damage (secondary outcome)
-    formula_ols = 'log_ndam15 ~ masfem_z + gender_mf + wind_z + min_z + category + elapsedyrs + C(source_cat)'
-    try:
-        ols_model = smf.ols(formula=formula_ols, data=df).fit()
-        results['ols_log_ndam15'] = ols_model
-    except Exception as e:
-        results['ols_log_ndam15_error'] = str(e)
-
-    # Return results (caller can print .summary() for each fitted model)
+    # Return the fitted results object. The caller can call .summary() or inspect params, conf_int, etc.
     return results
 
 
