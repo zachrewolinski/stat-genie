@@ -5,8 +5,10 @@ import importlib.util
 import traceback
 from stat_genie.blade_pipeline.llms.config import llm
 
-def is_code_correct(analysis_code_name: str, analysis_code_path: str,
-                    dataset_path: str, verbose: bool=False) -> str:
+def is_transform_model_code_correct(analysis_code_name: str,
+                                    analysis_code_path: str,
+                                    dataset_path: str,
+                                    verbose: bool=False) -> str:
     """
     Given a path to an LLM-generated Python file, this function checks if the
     module can be imported without errors. This includes checking that the
@@ -79,8 +81,8 @@ def is_code_correct(analysis_code_name: str, analysis_code_path: str,
     
     return None
 
-def llm_correction(analysis_code_path: str, error_message: str,
-                   llm_provider: str, llm_model: str) -> str:
+def transform_model_llm_correction(analysis_code_path: str, error_message: str,
+                                   llm_provider: str, llm_model: str) -> str:
     """
     Given the path of an LLM-generated Python file and an error
     message, this function requests corrections from the LLM. It reads the 
@@ -162,10 +164,12 @@ def llm_correction(analysis_code_path: str, error_message: str,
     
     return
 
-def check_and_fix_code(analysis_code_name: str, analysis_code_path: str,
-                       dataset_path: str,
-                       llm_provider: str, llm_model: str,
-                       verbose: bool = False) -> int:
+def check_and_fix_transform_model_code(analysis_code_name: str,
+                                       analysis_code_path: str,
+                                       dataset_path: str,
+                                       llm_provider: str,
+                                       llm_model: str,
+                                       verbose: bool = False) -> int:
     """
     Given a Python file written by an LLM, this function checks if the code is
     correct. If the code is not correct, it requests corrections from the LLM
@@ -195,7 +199,7 @@ def check_and_fix_code(analysis_code_name: str, analysis_code_path: str,
         analysis_code_name_iter = f"{analysis_code_name}_{iterations}"
         
         # call helper function above
-        error_message = is_code_correct(analysis_code_name_iter,
+        error_message = is_transform_model_code_correct(analysis_code_name_iter,
                                         analysis_code_path,
                                         dataset_path,
                                         verbose=verbose)
@@ -207,8 +211,202 @@ def check_and_fix_code(analysis_code_name: str, analysis_code_path: str,
         if iterations >= 10:
             return -1
         # helper function which edits the file in place
-        llm_correction(analysis_code_path, error_message,
+        transform_model_llm_correction(analysis_code_path, error_message,
                        llm_provider, llm_model)
+        iterations += 1
+    
+    return iterations
+
+def is_final_answer_code_correct(analysis_code_name: str,
+                                 analysis_code_path: str,
+                                 model_output,
+                                 verbose: bool=False) -> str:
+    """
+    Given a path to an LLM-generated Python file, this function checks if the
+    module can be imported without errors. This includes checking that the
+    file includes a function called `transform` and a function called `model`.
+    If there are no issues with the file, it returns `True`. If there are any
+    issues, it returns `False`.
+    
+    Args:
+        analysis_code_name (str): The name of the analysis code.
+        analysis_code_path (str): The file path to the analysis code.
+        model_output: The output of the model function.
+        verbose (bool): Whether to print detailed error messages.
+    
+    Returns:
+        str: None if the code is correct, otherwise the error message to pass
+             back to the LLM.
+    """
+    
+    ### check for syntax errors and required functions ###
+    try:
+        # rename module to start with _ to avoid reloading errors
+        analysis_code_name = f"_{analysis_code_name}"
+        
+        # check that code file has no syntax errors
+        spec = importlib.util.spec_from_file_location(analysis_code_name,
+                                                      analysis_code_path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[analysis_code_name] = module
+        spec.loader.exec_module(module)
+        
+        # check that required functions are present
+        if not hasattr(module, 'extract_final_answer'):
+            msg = "Error: 'extract_final_answer' function not found."
+            if verbose:
+                print(msg)
+            return msg
+    except Exception as e:
+        error_trace = traceback.format_exc()
+        msg = f"Error prior to runtime:\n{error_trace}"
+        if verbose:
+            print(msg)
+        return msg
+    
+    ### check for runtime errors ###
+    try:
+        # get the functions
+        final_answer_func = module.extract_final_answer
+        
+        # run the extract_final_answer function
+        final_answer = final_answer_func(model_output)
+        
+    except Exception as e:
+        error_trace = traceback.format_exc()
+        msg = f"Error during runtime:\n{error_trace}"
+        if verbose:
+            print(msg)
+        return msg
+    
+    return None
+
+
+def final_answer_llm_correction(final_answer_code_path: str, error_message: str,
+                                llm_provider: str, llm_model: str) -> None:
+    """
+    Given the path of an LLM-generated Python file and an error
+    message, this function requests corrections from the LLM. It reads the 
+    content of the file and constructs a prompt including the error message.
+    The corrected code generated by the LLM will then be written to the same
+    file path.
+    
+    Args:
+        final_answer_code_path (str): The file path to the code.
+        error_message (str): The message indicating what is wrong with the code.
+        llm_provider (str): The LLM provider to use for corrections.
+        llm_model (str): The LLM model to use for corrections.    
+    """
+    
+    # instantiate llm to fix problem
+    llm_code_fixer = llm(provider=llm_provider, model=llm_model)
+    
+    # read in the code content
+    with open(final_answer_code_path, 'r') as file:
+        code_content = file.read()
+    
+    # construct the system prompt
+    code_fix_system_prompt = """
+                             You are an expert Python programmer. Your task is
+                             to fix issues in the provided code based on the
+                             error message given. Ensure that the corrected code
+                             adheres to best practices, is free of syntax
+                             errors, and is consistent with the original intent
+                             of the code as evidenced by the code's
+                             documentation and contents as well as the user
+                             prompt context provided.
+                             """
+    
+    # construct the user prompt
+    code_fix_user_prompt = f"""
+                            The following Python code should define one function, `extract_final_answer`:
+                           
+                            The function should:
+                            - Take the model_output as input
+                            - Extract the necessary statistics from the model output object
+                            - Return a dictionary with:
+                                - "object": The actual value you would like to return (e.g. a coefficient, p-value, etc.)
+                                - "description": A brief explanation of the extracted statistics/return object and what it means in the context of the task
+                            
+                            Here is the code template for the extract_final_answer function:
+                            ```python
+                            def extract_final_answer(model_output):
+                                # Your code here to extract and interpret statistics from model_output
+                                # Return a dictionary with keys: "object", "description"
+                                pass
+                            ```
+
+                            This function should be able to run without errors. \
+                            However, the current code has the following issue:
+                            {error_message}
+                            
+                            Please provide a corrected version of the full code that resolves this issue. \
+                            Your response should only include the corrected code file contents without any additional explanations, \
+                            and should be able to be instantly converted into a .py file.
+                            """
+    
+    # get the corrected code from the llm
+    response = llm_code_fixer.generate([{"role": "system",
+                                         "content": code_fix_system_prompt},
+                                        {"role": "user",
+                                         "content": code_fix_user_prompt}])
+    corrected_code = response.text[0].content
+    
+    # replace the code file with the corrected code
+    with open(final_answer_code_path, 'w') as file:
+        file.write(corrected_code)
+    
+    return
+
+def check_and_fix_final_answer_code(final_answer_code_name: str,
+                                    final_answer_code_path: str,
+                                    model_output,
+                                    llm_provider: str,
+                                    llm_model: str,
+                                    verbose: bool = False) -> int:
+    """
+    Given a Python file written by an LLM, this function checks if the code is
+    correct. If the code is not correct, it requests corrections from the LLM
+    and updates the file with the corrected code. If it takes more than ten
+    iterations with an LLM to fix the code, the function stops and returns.
+    
+    Args:
+        final_answer_code_name (str): The name of the analysis code.
+        final_answer_code_path (str): The file path to the analysis code.
+        model_output: The output from the model to be checked.
+        llm_provider (str): The LLM provider to use for corrections.
+        llm_model (str): The LLM model to use for corrections.
+        verbose (bool): Whether to print detailed error messages.
+    
+    Returns:
+        int: The number of iterations needed to fix the code. If the code was
+             correct on the first check, returns 0. If it takes more than 10
+             iterations, the function stops and returns -1.
+    """
+    
+    # starts at zero iterations
+    iterations = 0
+    
+    # initiate loop that only breaks when iter max has hit or code is correct
+    while True:
+        # append iteration count to the end of the final_answer_code_name to avoid import issues
+        final_answer_code_name_iter = f"{final_answer_code_name}_{iterations}"
+        
+        # call helper function above
+        error_message = is_final_answer_code_correct(final_answer_code_name_iter,
+                                        final_answer_code_path,
+                                        model_output,
+                                        verbose=verbose)
+        # None corresponds to correct code
+        if error_message is None:
+            break
+        # iteration max, 10 is arbitrary but seems reasonable
+        # needs to be here so if the 10th iteration fixes the code it counts
+        if iterations >= 10:
+            return -1
+        # helper function which edits the file in place
+        final_answer_llm_correction(final_answer_code_path, error_message,
+                                    llm_provider, llm_model)
         iterations += 1
     
     return iterations

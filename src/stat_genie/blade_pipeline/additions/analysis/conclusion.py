@@ -2,7 +2,8 @@ from stat_genie.blade_pipeline.llms.base import TextGenerator
 
 def write_final_answer_code(llm_assistant: TextGenerator, task: list[str],
                             independent_variable: dict, dependent_variable: dict,
-                            model_code: str, model_output):
+                            model_code: str, output_subdir: str,
+                            analysis_num: int, model_output):
     """
     In its attempt to answer the underlying question, GenAI analyst writes
     two functions: one which preprocesses the data and another that performs
@@ -25,6 +26,8 @@ def write_final_answer_code(llm_assistant: TextGenerator, task: list[str],
         independent_variable (dict): The independent variable to be used in the analysis.
         dependent_variable (dict): The dependent variable to be used in the analysis.
         model_code (str): The code that defines the model.
+        output_subdir (str): The directory where output files should be saved.
+        analysis_num (int): The analysis number (used for file naming purposes).
         model_output: The output of the model.
         
     Returns:
@@ -90,7 +93,11 @@ def write_final_answer_code(llm_assistant: TextGenerator, task: list[str],
                                        {"role": "user",
                                         "content": find_answer_prompt}])
     
-    return response.text[0].content
+    # create a file llm_answer_{analysis_num}.py in the output subdir
+    with open(f"{output_subdir}/llm_answer_{analysis_num}.py", "w") as f:
+        f.write(response.text[0].content)
+    
+    return
     
 def make_conclusion(llm_assistant: TextGenerator, task: list[str],
                     independent_variable: dict, dependent_variable: dict,
