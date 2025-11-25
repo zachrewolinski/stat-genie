@@ -33,17 +33,20 @@ from stat_genie.blade_pipeline.utils import (
 )
 
 from stat_genie.blade_pipeline.additions.prompt.prompt import PromptGenerator
+from stat_genie.blade_pipeline.additions.perturbations.feature_names import FeaturePerturbation
 
 
 class SingleRunExperiment:
     GEN_ANALYSIS_FNAME = "llm_analysis.json"
 
-    def __init__(self, config: SingleRunConfig, prompt: PromptGenerator):
+    def __init__(self, config: SingleRunConfig, prompt: PromptGenerator, feature_perturbation: FeaturePerturbation):
         self.config = config
-        self.dinfo = load_dataset_info(config.run_dataset)
+        # NOTE: THIS IS WHERE WE APPLY FEATURE PERTURBATION
+        self.dinfo = load_dataset_info(config.run_dataset, feature_perturbation)
         self.llm_history = LLMHistory()
         self.format_lm = LLMBase(config.llm_eval.texgt_gen)
         self.eval_text_gen = config.llm_eval.texgt_gen
+        # NOTE: THIS IS WHERE WE APPLY PROMPT CHANGES
         self.prompt = prompt.get_prompts()
         self.gen_analysis_lm = GenAnalysisLM(
             config.llm.texgt_gen,

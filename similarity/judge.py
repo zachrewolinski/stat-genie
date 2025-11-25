@@ -85,7 +85,7 @@ def judge_all(q, features_vars, features_models):
     try:
         scores = json.loads(text)
     except json.JSONDecodeError:
-        print("⚠️ Could not parse response as JSON. Raw output:")
+        print("Could not parse response as JSON. Raw output:")
         print(text)
         return None
 

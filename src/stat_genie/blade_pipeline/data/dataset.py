@@ -11,6 +11,7 @@ from stat_genie.blade_pipeline.utils import (
     get_dataset_csv_path,
     get_dataset_annotations_path,
 )
+from stat_genie.blade_pipeline.additions.perturbations.feature_names import FeaturePerturbation
 
 
 class DatasetInfo(BaseModel):
@@ -71,11 +72,14 @@ def list_datasets_mcq():
     ]
 
 
-def load_dataset_info(dataset: str, load_df=False):
+def load_dataset_info(dataset: str, feature_perturbation: FeaturePerturbation,
+                      load_df=False):
     data_info_path = get_dataset_info_path(dataset)
     if not osp.exists(data_info_path):
         raise FileNotFoundError(f"Dataset info file not found: {data_info_path}")
-    dinfo = DatasetInfo(**json.load(open(data_info_path)))
+    # NOTE: THIS IS WHERE WE APPLY THE FEATURE PERTURBATION.
+    dataset_info = feature_perturbation.perturb(data_info_path)
+    dinfo = DatasetInfo(**dataset_info)
     if load_df:
         df_path = get_dataset_csv_path(dataset)
         df = pd.read_csv(df_path)

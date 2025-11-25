@@ -17,18 +17,17 @@ class FeaturePerturbation:
     follow the order listed above.
     """
     
-    def __init__(self, json_path: str, anonymize: bool = False,
+    def __init__(self, anonymize: bool = False,
                  shuffle_order: bool = False, shuffle_names: bool = False,
                  shuffle_order_seed: int = 42, shuffle_names_seed: int = 42):
         
-        self.json_metadata = deepcopy(read_json(json_path))
         self.anonymize = anonymize
         self.shuffle_order = shuffle_order
         self.shuffle_names = shuffle_names
         self.shuffle_order_seed = shuffle_order_seed
         self.shuffle_names_seed = shuffle_names_seed
 
-    def anonymize_variable_names(self) -> None:
+    def anonymize_variable_names(self, json_metadata: dict) -> None:
         """
         Takes a JSON (in dictionary format) and replaces variable names 
         with non-descriptive names like "feature1", "feature2", etc.
@@ -41,7 +40,7 @@ class FeaturePerturbation:
         """
         
         # create a copy of the metadata to work with
-        json_metadata = deepcopy(self.json_metadata)
+        json_metadata = deepcopy(json_metadata)
         
         # get all unique variable names from fields
         if "data_desc" in json_metadata and "fields" in json_metadata["data_desc"]:
@@ -66,11 +65,9 @@ class FeaturePerturbation:
                 for old_name in json_metadata["data_desc"]["field_names"]
             ]
             
-        self.json_metadata = json_metadata
-        
-        return
+        return json_metadata
 
-    def shuffle_feature_order(self) -> None:
+    def shuffle_feature_order(self, json_metadata: dict) -> None:
         """
         Shuffles the order of features in the JSON metadata.
         
@@ -83,7 +80,7 @@ class FeaturePerturbation:
         """
         
         # create a copy of the metadata to work with
-        json_metadata = deepcopy(self.json_metadata)
+        json_metadata = deepcopy(json_metadata)
         
         # set random seed for reproducibility
         random.seed(self.shuffle_order_seed)
@@ -100,11 +97,9 @@ class FeaturePerturbation:
             random.shuffle(field_names)
             json_metadata["data_desc"]["field_names"] = field_names
             
-        self.json_metadata = json_metadata
-        
-        return
+        return json_metadata
 
-    def shuffle_feature_names(self) -> None:
+    def shuffle_feature_names(self, json_metadata: dict) -> None:
         """
         Randomly shuffles the feature names in the JSON metadata.
         
@@ -117,7 +112,7 @@ class FeaturePerturbation:
         """
         
         # create a copy of the metadata to work with
-        json_metadata = deepcopy(self.json_metadata)
+        json_metadata = deepcopy(json_metadata)
         
         # set random seed for reproducibility
         random.seed(self.shuffle_names_seed)
@@ -149,11 +144,9 @@ class FeaturePerturbation:
                 for old_name in json_metadata["data_desc"]["field_names"]
             ]
         
-        self.json_metadata = json_metadata
-        
-        return
+        return json_metadata
     
-    def perturb(self) -> dict:
+    def perturb(self, json_path: str) -> dict:
         """
         Applies the selected perturbations to the JSON metadata in the
         following order:
@@ -165,22 +158,16 @@ class FeaturePerturbation:
             The perturbed JSON metadata as a dictionary
         """
         
+        # read in json metadata
+        json_metadata = read_json(json_path)
+        
         if self.anonymize:
-            self.anonymize_variable_names()
+            json_metadata = self.anonymize_variable_names(json_metadata)
         
         if self.shuffle_order:
-            self.shuffle_feature_order()
+            json_metadata = self.shuffle_feature_order(json_metadata)
         
         if self.shuffle_names:
-            self.shuffle_feature_names()
+            json_metadata = self.shuffle_feature_names(json_metadata)
         
-        return self.json_metadata
-    
-    def get_metadata(self) -> dict:
-        """
-        Returns the current state of the JSON metadata.
-        
-        Returns:
-            The JSON metadata as a dictionary
-        """
-        return self.json_metadata
+        return json_metadata

@@ -8,158 +8,137 @@ import statsmodels.formula.api as smf
 import matplotlib.pyplot as plt
 import pickle
   
-df = pd.read_csv('/accounts/projects/binyu/hao_huang/stat-genie/.venv/lib/python3.11/site-packages/blade_bench/datasets/hurricane/data.csv')
+df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/.venv/lib/python3.10/site-packages/blade_bench/datasets/hurricane/data.csv')
 
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Transform the raw hurricane dataframe into analytic dataframe with derived columns used in modeling.
+    Transform the raw hurricane dataframe into the analysis-ready dataframe.
 
-    Outputs (added columns):
-    - log_deaths: np.log1p(alldeaths)
-    - log_ndam15: np.log1p(ndam15) (kept for possible robustness but not primary DV)
-    - masfem_z: standardized masfem score (z)
-    - masfem_mturk_z: standardized masfem_mturk score (z)
-    - gender_female: binary indicator copied from gender_mf (0/1)
-    - year_c: year centered at sample mean
-    - wind_z, category_z, min_z: z-scores of storm physical covariates
-    - severity_index: composite severity index (higher = more severe)
+    Produces:
+    - log_alldeaths: np.log1p(alldeaths)
+    - log_ndam15: np.log1p(ndam15)
+    - masfem_z: standardized masfem (mean 0, sd 1)
+    - masfem_mturk_z: standardized masfem_mturk (if present)
+    - year_centered: year minus mean(year)
 
-    Rows with missing values in the main variables used in the principal analyses are dropped.
+    Drops rows missing the key variables required for the primary models.
     """
-
     df = df.copy()
 
-    # Ensure numeric conversion where appropriate
-    # (if input df has these columns as strings, pandas will coerce or raise)
-    for col in ['alldeaths', 'ndam15', 'masfem', 'masfem_mturk', 'gender_mf', 'year', 'wind', 'category', 'min']:
+    # Ensure expected numeric columns exist and coerce types where reasonable
+    for col in ['masfem', 'alldeaths', 'ndam15', 'wind', 'min', 'category', 'year', 'elapsedyrs', 'gender_mf']:
         if col in df.columns:
-            # coerce to numeric (errors -> NaN)
             df[col] = pd.to_numeric(df[col], errors='coerce')
 
-    # Primary dependent variable: log(1 + alldeaths)
-    if 'alldeaths' in df.columns:
-        df['log_deaths'] = np.log1p(df['alldeaths'])
-    else:
-        df['log_deaths'] = np.nan
+    # Convert source to string/category if present
+    if 'source' in df.columns:
+        df['source'] = df['source'].astype('category')
 
-    # Also create log damage (robustness)
+    # Drop rows missing the primary IV or DV or core intensity controls
+    required = ['masfem', 'alldeaths', 'wind', 'min', 'category', 'year', 'elapsedyrs']
+    present_required = [c for c in required if c in df.columns]
+    df = df.dropna(subset=present_required)
+
+    # Create log-transformed outcome variables (use log1p to handle zeros)
+    df['log_alldeaths'] = np.log1p(df['alldeaths'].fillna(0))
     if 'ndam15' in df.columns:
-        df['log_ndam15'] = np.log1p(df['ndam15'])
-    else:
-        df['log_ndam15'] = np.nan
+        df['log_ndam15'] = np.log1p(df['ndam15'].fillna(0))
 
-    # Standardize masfem and masfem_mturk (z-scores). Use population std (ddof=0) to be explicit.
-    if 'masfem' in df.columns:
-        masfem_mean = df['masfem'].mean()
-        masfem_std = df['masfem'].std(ddof=0)
-        # guard against zero std
-        if pd.isna(masfem_std) or masfem_std == 0:
-            df['masfem_z'] = df['masfem'] - masfem_mean
-        else:
-            df['masfem_z'] = (df['masfem'] - masfem_mean) / masfem_std
-    else:
-        df['masfem_z'] = np.nan
+    # Standardize masfem (primary IV); create masfem_z
+    df['masfem_z'] = (df['masfem'] - df['masfem'].mean()) / (df['masfem'].std(ddof=0) if df['masfem'].std(ddof=0) != 0 else 1)
 
+    # If MTurk masculinity/femininity rating is available, standardize for robustness checks
     if 'masfem_mturk' in df.columns:
-        mm_mean = df['masfem_mturk'].mean()
-        mm_std = df['masfem_mturk'].std(ddof=0)
-        if pd.isna(mm_std) or mm_std == 0:
-            df['masfem_mturk_z'] = df['masfem_mturk'] - mm_mean
-        else:
-            df['masfem_mturk_z'] = (df['masfem_mturk'] - mm_mean) / mm_std
-    else:
-        df['masfem_mturk_z'] = np.nan
+        df['masfem_mturk_z'] = (df['masfem_mturk'] - df['masfem_mturk'].mean()) / (df['masfem_mturk'].std(ddof=0) if df['masfem_mturk'].std(ddof=0) != 0 else 1)
 
-    # Binary female name indicator (copy and ensure integer 0/1)
+    # Center year to improve interpretability and reduce collinearity
+    df['year_centered'] = df['year'] - df['year'].mean()
+
+    # Ensure gender_mf is integer/binary if present
     if 'gender_mf' in df.columns:
-        # original encoding: 0 male, 1 female (per schema)
-        df['gender_female'] = df['gender_mf'].astype('float').round().fillna(0).astype(int)
-    else:
-        df['gender_female'] = 0
+        df['gender_mf'] = df['gender_mf'].astype(pd.Int64Dtype()).astype('float')
 
-    # Year centered
-    if 'year' in df.columns:
-        df['year_c'] = df['year'] - df['year'].mean()
-    else:
-        df['year_c'] = np.nan
+    # Keep only columns needed for modeling plus a few originals for reference
+    keep_cols = [
+        'masfem', 'masfem_z',
+        'alldeaths', 'log_alldeaths',
+        'ndam15' if 'ndam15' in df.columns else None,
+        'log_ndam15' if 'log_ndam15' in df.columns else None,
+        'wind', 'min', 'category', 'year', 'year_centered', 'elapsedyrs',
+        'gender_mf' if 'gender_mf' in df.columns else None,
+        'source' if 'source' in df.columns else None,
+        'masfem_mturk_z' if 'masfem_mturk_z' in df.columns else None,
+        'name' if 'name' in df.columns else None,
+        'ind' if 'ind' in df.columns else None
+    ]
+    # Remove Nones and duplicates while preserving order
+    keep_cols = [c for i, c in enumerate(keep_cols) if c is not None and c not in keep_cols[:i]]
 
-    # Standardize physical storm covariates and build severity index
-    # For min (pressure), lower values => stronger storm, so we invert its z-score when composing severity
-    for c in ['wind', 'category', 'min']:
-        if c in df.columns:
-            df[c + '_z'] = (df[c] - df[c].mean()) / (df[c].std(ddof=0) if df[c].std(ddof=0) != 0 else 1)
-        else:
-            df[c + '_z'] = np.nan
+    df = df.loc[:, keep_cols]
 
-    # severity_index: average of wind_z and category_z and inverted min_z (so higher => more severe)
-    df['severity_index'] = df[['wind_z', 'category_z', 'min_z']].apply(lambda row: np.nanmean([row['wind_z'], row['category_z'], -row['min_z']]), axis=1)
-
-    # Drop rows missing the main variables for the primary analysis
-    required_for_primary = ['log_deaths', 'masfem_z', 'severity_index', 'year_c']
-    # Only drop if columns exist; build list of existing required cols
-    required_existing = [c for c in required_for_primary if c in df.columns]
-    df = df.dropna(subset=required_existing)
-
-    # Return transformed dataframe containing the new columns and original columns
     return df
 
 
 # ======== MODEL CODE ========
 def model(df: pd.DataFrame) -> dict:
     """
-    Fit primary OLS model and robustness checks.
+    Fit primary and robustness models to test whether more feminine hurricane names are associated
+    with downstream adverse outcomes (used here as a proxy for fewer precautions).
 
-    Primary model:
-      log_deaths ~ masfem_z + severity_index + year_c
-    Robustness models:
-      - Replace masfem_z with binary gender_female
-      - Replace masfem_z with masfem_mturk_z
+    Models run:
+    1) OLS on log_alldeaths with HC3 robust standard errors.
+    2) OLS on log_ndam15 (log damage) as a secondary outcome with HC3 SEs (if ndam15 present).
+    3) Negative Binomial GLM on raw alldeaths as a robustness check for count outcome.
 
-    Uses heteroskedasticity-robust (HC1) standard errors for inference.
-
-    Returns a dictionary of fitted results objects (statsmodels RegressionResults).
+    Returns a dictionary of fitted results objects.
     """
-
+    results = {}
     df = df.copy()
 
-    # Ensure necessary columns are present
-    required_cols = ['log_deaths', 'masfem_z', 'severity_index', 'year_c']
-    for c in required_cols:
-        if c not in df.columns:
-            raise ValueError(f"Required column for modeling missing: {c}")
+    # Build base covariates list (these must match transformed df columns)
+    covariates = ['masfem_z', 'wind', 'min', 'category', 'year_centered', 'elapsedyrs']
+    if 'gender_mf' in df.columns:
+        covariates.append('gender_mf')
 
-    # Build design matrices
-    X_main = df[['masfem_z', 'severity_index', 'year_c']]
-    X_main = sm.add_constant(X_main)
-    y = df['log_deaths']
-
-    # Fit main model with robust (HC1) standard errors
-    model_main = sm.OLS(y, X_main).fit(cov_type='HC1')
-
-    # Robustness 1: binary female name
-    if 'gender_female' in df.columns:
-        X_bin = df[['gender_female', 'severity_index', 'year_c']]
-        X_bin = sm.add_constant(X_bin)
-        model_gender_bin = sm.OLS(y, X_bin).fit(cov_type='HC1')
+    # Create source dummies if source available (drop first to avoid multicollinearity)
+    if 'source' in df.columns:
+        src_dummies = pd.get_dummies(df['source'], prefix='source', drop_first=True)
+        X = pd.concat([df[covariates], src_dummies], axis=1)
     else:
-        model_gender_bin = None
+        X = df[covariates]
 
-    # Robustness 2: MTurk-based femininity z-score
-    if 'masfem_mturk_z' in df.columns:
-        X_mturk = df[['masfem_mturk_z', 'severity_index', 'year_c']]
-        X_mturk = sm.add_constant(X_mturk)
-        model_mturk = sm.OLS(y, X_mturk).fit(cov_type='HC1')
-    else:
-        model_mturk = None
+    # Add constant
+    X_const = sm.add_constant(X, has_constant='add')
 
-    # Return results in a dictionary for downstream inspection
-    results = {
-        'main_masfem_z': model_main,
-        'gender_binary': model_gender_bin,
-        'masfem_mturk_z': model_mturk
-    }
+    # Primary OLS: log_alldeaths ~ masfem_z + controls
+    if 'log_alldeaths' in df.columns:
+        y = df['log_alldeaths']
+        ols_model = sm.OLS(y, X_const, missing='drop')
+        ols_res = ols_model.fit(cov_type='HC3')
+        results['ols_deaths'] = ols_res
 
+    # Secondary OLS: log_ndam15 if available
+    if 'log_ndam15' in df.columns:
+        y2 = df['log_ndam15']
+        ols_model2 = sm.OLS(y2, X_const, missing='drop')
+        ols_res2 = ols_model2.fit(cov_type='HC3')
+        results['ols_damage'] = ols_res2
+
+    # Robustness: Negative Binomial on raw alldeaths (counts)
+    # Use GLM NegativeBinomial if alldeaths exists
+    if 'alldeaths' in df.columns:
+        # ensure non-negative and finite
+        y_nb = df['alldeaths'].fillna(0)
+        try:
+            nb_model = sm.GLM(y_nb, X_const, family=sm.families.NegativeBinomial())
+            nb_res = nb_model.fit()
+            results['nb_deaths'] = nb_res
+        except Exception as e:
+            # If NB fails, return the exception string for diagnostics
+            results['nb_deaths_error'] = str(e)
+
+    # Return dictionary of models (fitted result objects). Callers can inspect .summary() on each fit.
     return results
 
 

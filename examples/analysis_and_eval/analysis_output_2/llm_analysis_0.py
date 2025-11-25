@@ -8,98 +8,109 @@ import statsmodels.formula.api as smf
 import matplotlib.pyplot as plt
 import pickle
   
-df = pd.read_csv('/accounts/projects/binyu/hao_huang/stat-genie/.venv/lib/python3.11/site-packages/blade_bench/datasets/hurricane/data.csv')
+df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/.venv/lib/python3.10/site-packages/blade_bench/datasets/hurricane/data.csv')
 
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Transformations performed:
-    - Drop rows missing the key outcome, IV, or core controls.
-    - Ensure alldeaths is integer and non-negative.
-    - Create log_ndam15 = log(ndam15 + 1) to compress heavy-tailed damage values.
-    - Mean-center year to year_c (controls secular trends).
-    - Z-score continuous predictors (masfem, wind, min, log_ndam15) to aid interpretation and numerical stability.
-    - Return a dataframe containing exactly the columns used in the model.
+    Transform the raw hurricane dataframe into the final dataframe used for modeling.
+
+    Produces the following new columns (exact names used in the model):
+      - log_alldeaths : np.log1p(alldeaths)
+      - log_ndam15   : np.log1p(ndam15)
+      - masfem_std   : standardized masfem (z-score)
+      - source_code  : integer code for the categorical 'source' column
+
+    Also drops rows missing the key variables required for the analysis.
     """
     df = df.copy()
 
     # Required raw columns
-    required = ['alldeaths', 'masfem', 'wind', 'min', 'ndam15', 'year', 'category']
-    # Drop rows missing required variables
-    df = df.dropna(subset=required)
+    required_cols = [
+        'alldeaths', 'masfem', 'gender_mf', 'wind', 'min', 'category',
+        'ndam15', 'year', 'elapsedyrs', 'source'
+    ]
 
-    # Ensure numeric types
-    df['alldeaths'] = pd.to_numeric(df['alldeaths'], errors='coerce')
-    df['masfem'] = pd.to_numeric(df['masfem'], errors='coerce')
-    df['wind'] = pd.to_numeric(df['wind'], errors='coerce')
-    df['min'] = pd.to_numeric(df['min'], errors='coerce')
-    df['ndam15'] = pd.to_numeric(df['ndam15'], errors='coerce')
-    df['year'] = pd.to_numeric(df['year'], errors='coerce')
-    df['category'] = pd.to_numeric(df['category'], errors='coerce')
+    # Drop rows missing any required column
+    df = df.dropna(subset=required_cols)
 
-    # Drop any rows that became NA after coercion
-    df = df.dropna(subset=required)
+    # Ensure numeric columns are numeric
+    numeric_cols = ['alldeaths', 'masfem', 'gender_mf', 'wind', 'min', 'category', 'ndam15', 'year', 'elapsedyrs']
+    for c in numeric_cols:
+        # coerce to numeric; invalid parsing to NaN will be dropped
+        df[c] = pd.to_numeric(df[c], errors='coerce')
+    df = df.dropna(subset=numeric_cols)
 
-    # Ensure alldeaths are non-negative integers
-    df = df[df['alldeaths'] >= 0]
-    # In case floats exist, convert to integers (counts)
-    df['alldeaths'] = df['alldeaths'].astype(int)
+    # Dependent variable: log-transform fatalities to reduce skew
+    df['log_alldeaths'] = np.log1p(df['alldeaths'].astype(float))
 
-    # Create log-transformed damage variable (ndam15 may be heavy tailed)
-    df['log_ndam15'] = np.log(df['ndam15'].clip(lower=0) + 1)
+    # Control: log-transformed damage (2015-normalized) as a proxy for exposure/economic impact
+    df['log_ndam15'] = np.log1p(df['ndam15'].astype(float))
 
-    # Mean-center year
-    df['year_c'] = df['year'] - df['year'].mean()
+    # Independent variable: standardize masfem (z-score) to aid interpretation
+    df['masfem_std'] = (df['masfem'].astype(float) - df['masfem'].astype(float).mean()) / (df['masfem'].astype(float).std(ddof=0) if df['masfem'].astype(float).std(ddof=0) != 0 else 1.0)
 
-    # Z-score the continuous predictors used in the model for interpretability
-    for col in ['masfem', 'wind', 'min', 'log_ndam15']:
-        zcol = f"{col}_z"
-        # population std (ddof=0) to be deterministic
-        std = df[col].std(ddof=0)
-        if std == 0 or np.isnan(std):
-            # if constant, create zeros
-            df[zcol] = 0.0
-        else:
-            df[zcol] = (df[col] - df[col].mean()) / std
+    # Ensure gender_mf is numeric 0/1
+    df['gender_mf'] = df['gender_mf'].astype(int)
 
-    # Keep only columns necessary for modeling
-    keep_cols = ['alldeaths', 'masfem_z', 'wind_z', 'min_z', 'log_ndam15_z', 'year_c', 'category']
-    # If some of these columns are missing for any reason, raise an informative error
-    missing = [c for c in keep_cols if c not in df.columns]
-    if len(missing) > 0:
-        raise ValueError(f"Missing required transformed columns: {missing}")
+    # Encode source as an integer code to control for reporting/source differences
+    # Factorize returns (codes, uniques); codes are 0..k-1
+    df['source_code'] = pd.factorize(df['source'])[0]
 
-    return df[keep_cols].reset_index(drop=True)
+    # Keep only columns relevant to the model plus original identifiers (if present)
+    # Final dataframe must include all columns listed in the conceptual variables
+    keep_cols = list(df.columns)  # keep everything for flexibility
+
+    return df
 
 
 # ======== MODEL CODE ========
-def model(df: pd.DataFrame):
+def model(df: pd.DataFrame) -> dict:
     """
-    Fit a count regression (Negative Binomial) predicting alldeaths from name femininity
-    controlling for objective storm intensity and damage. Negative Binomial is chosen
-    because alldeaths is a non-negative integer outcome with substantial overdispersion.
+    Fit OLS models predicting log fatalities from name femininity while controlling for physical severity
+    and temporal/source variables. Returns a dict of fitted statsmodels results objects.
 
-    Model specification (in matrix form):
-      alldeaths ~ 1 + masfem_z + wind_z + min_z + log_ndam15_z + year_c + category
+    Three models are estimated:
+      1) model_masfem_cont: masfem_std (continuous) + controls
+      2) model_gender_bin: gender_mf (binary female indicator) + controls
+      3) model_both: both masfem_std and gender_mf + controls
 
-    Returns the fitted statsmodels results object.
+    Robust (HC3) standard errors are used to mitigate heteroskedasticity.
     """
     df = df.copy()
 
-    # Define predictors and outcome
-    y = df['alldeaths']
-    X = df[['masfem_z', 'wind_z', 'min_z', 'log_ndam15_z', 'year_c', 'category']]
+    # Check that required transformed columns are present
+    required = ['log_alldeaths', 'masfem_std', 'gender_mf', 'wind', 'min', 'category', 'year', 'elapsedyrs', 'log_ndam15', 'source_code']
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"The following required columns are missing from the dataframe: {missing}")
 
-    # Add intercept
-    X = sm.add_constant(X)
+    # Define control columns
+    control_cols = ['wind', 'min', 'category', 'year', 'elapsedyrs', 'log_ndam15', 'source_code']
 
-    # Fit Negative Binomial using GLM
-    model_glm = sm.GLM(y, X, family=sm.families.NegativeBinomial())
-    results = model_glm.fit()
+    # Prepare design matrices
+    y = df['log_alldeaths'].astype(float)
 
-    # Print summary for quick inspection (can be removed if silent return is preferred)
-    print(results.summary())
+    # Model 1: continuous masfem
+    X1 = df[['masfem_std'] + control_cols].astype(float)
+    X1 = sm.add_constant(X1)
+    model_masfem_cont = sm.OLS(y, X1).fit(cov_type='HC3')
 
-    return results
+    # Model 2: binary gender indicator
+    X2 = df[['gender_mf'] + control_cols].astype(float)
+    X2 = sm.add_constant(X2)
+    model_gender_bin = sm.OLS(y, X2).fit(cov_type='HC3')
+
+    # Model 3: both measures included
+    X3 = df[['masfem_std', 'gender_mf'] + control_cols].astype(float)
+    X3 = sm.add_constant(X3)
+    model_both = sm.OLS(y, X3).fit(cov_type='HC3')
+
+    # Return the fitted results for further inspection (e.g., .summary())
+    return {
+        'model_masfem_cont': model_masfem_cont,
+        'model_gender_bin': model_gender_bin,
+        'model_both': model_both
+    }
 
 

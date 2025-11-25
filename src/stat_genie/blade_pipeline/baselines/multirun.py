@@ -12,6 +12,7 @@ from blade_bench.eval.datamodel.multirun import MultiRunResults
 from blade_bench.eval.exceptions import LMGenerationError
 from blade_bench.utils import get_dataset_csv_path
 from stat_genie.blade_pipeline.additions.prompt.prompt import PromptGenerator
+from stat_genie.blade_pipeline.additions.perturbations.feature_names import FeaturePerturbation
 
 from blade_bench.eval.utils import (
     SAVE_CODE_TEMPLATE,
@@ -20,11 +21,13 @@ from blade_bench.logger import logger
 
 
 class RunLLMMultiRun(SingleRunExperiment):
-    def __init__(self, config: MultiRunConfig, prompt: PromptGenerator):
-        super().__init__(config, prompt)
+    def __init__(self, config: MultiRunConfig, prompt: PromptGenerator,
+                 feature_perturbation: FeaturePerturbation):
+        super().__init__(config, prompt, feature_perturbation)
         self.config = config
         self.prompt = prompt
-
+        self.feature_perturbation = feature_perturbation
+        
     def __save_results(self, results: MultiRunResults):
         os.makedirs(self.config.output_dir, exist_ok=True)
         for i, analysis in results.analyses.items():
@@ -74,7 +77,14 @@ class RunLLMMultiRun(SingleRunExperiment):
         return result
 
 
-def multirun_llm(config: MultiRunConfig, prompt: PromptGenerator):
-    runner = RunLLMMultiRun(config, prompt)
+def multirun_llm(config: MultiRunConfig, prompt: PromptGenerator = None,
+                 feature_perturbation: FeaturePerturbation = None):
+    # if no prompt is provided, create a default one
+    if prompt is None:
+        prompt = PromptGenerator() # no args gives default (BLADE-style prompts)
+    # if no feature perturbation is provided, create a default one
+    if feature_perturbation is None:
+        feature_perturbation = FeaturePerturbation() # no args gives default (no perturbation)
+    runner = RunLLMMultiRun(config, prompt, feature_perturbation)
     results = asyncio.run(runner.run(config.save_results))
     logger.success("Completed, everything is logged at: " + config.output_dir)
