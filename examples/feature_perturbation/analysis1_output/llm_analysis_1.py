@@ -1,112 +1,198 @@
-from typing import Dict, FrozenSet, List, Literal, Optional, Set, Tuple, Any
-import numpy as np
 import pandas as pd
-import sklearn
-import scipy
+import numpy as np
+from typing import Any
+import warnings
 import statsmodels.api as sm
-import statsmodels.formula.api as smf
-import matplotlib.pyplot as plt
-import pickle
-  
-df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/.venv/lib/python3.10/site-packages/blade_bench/datasets/hurricane/data.csv')
+from pandas.api import types as pdt
 
-# ======== TRANSFORM CODE ========
+
 def transform(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Produce a dataframe containing all columns necessary for modeling the relationship between
-    hurricane name femininity and mortality/damage outcomes. The function:
-      - ensures numeric types for key columns
-      - drops rows missing essential variables for the main analysis
-      - creates log-transformed outcome variables
-      - standardizes femininity ratings (masfem and masfem_mturk)
+    Transform the input dataframe into a form suitable for statistical modeling.
 
-    Resulting dataframe contains at minimum the columns:
-      ['alldeaths','ndam15','masfem','masfem_mturk','gender_mf','wind','category','min','elapsedyrs','year','source',
-       'log_alldeaths','log_ndam15','masfem_std','masfem_mturk_std']
+    Transformations performed:
+    - Work on a copy of the dataframe (original is not modified).
+    - Convert boolean columns to integers (0/1).
+    - Convert datetime-like columns to numeric timestamps (seconds since epoch).
+    - Convert object or categorical columns to dummy/indicator columns (one-hot encoding).
+      Columns that look like datetimes (when parsed) will be treated as datetimes instead.
+    - Numeric columns are left as-is, and missing numeric values are imputed with the column mean.
+    - Missing values in categorical/dummy columns are filled with 0 (after one-hot encoding).
+    - Add indicator columns for missingness for original columns (prefix "missing_").
+    - The returned dataframe contains only numeric columns (suitable for most statistical models).
+
+    Args:
+        df: Input pandas DataFrame.
+
+    Returns:
+        Transformed pandas DataFrame with numeric columns only.
     """
-    df = df.copy()
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError("Input must be a pandas DataFrame")
 
-    # Ensure numeric types where appropriate
-    numeric_cols = ['alldeaths', 'ndam15', 'masfem', 'masfem_mturk', 'gender_mf', 'wind', 'category', 'min', 'elapsedyrs', 'year']
-    for c in numeric_cols:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors='coerce')
+    df = df.copy(deep=True)
+    # Keep track of missingness indicators to add later
+    missing_indicators = {}
 
-    # Ensure source exists as string/categorical
-    if 'source' in df.columns:
-        df['source'] = df['source'].astype('category')
+    for col in df.columns:
+        missing_indicators[f"missing_{col}"] = df[col].isna().astype(int)
 
-    # Drop rows missing the primary dependent and independent variables and core controls
-    required_for_main = ['alldeaths', 'masfem', 'wind', 'category', 'min', 'elapsedyrs', 'source']
-    missing_required = [c for c in required_for_main if c not in df.columns]
-    if missing_required:
-        raise ValueError(f"Input dataframe is missing required columns for the main analysis: {missing_required}")
+    # We'll build a new dataframe of processed columns
+    processed = {}
 
-    df = df.dropna(subset=required_for_main)
+    for col in df.columns:
+        series = df[col]
+        dtype = series.dtype
 
-    # Create log-transformed outcomes (add-one to handle zeros)
-    df['log_alldeaths'] = np.log1p(df['alldeaths'])
-    if 'ndam15' in df.columns:
-        df['log_ndam15'] = np.log1p(df['ndam15'])
-    else:
-        df['log_ndam15'] = np.nan
+        # Numeric types: keep, but coerce to numeric if object-like numeric strings
+        if pdt.is_numeric_dtype(dtype):
+            # Coerce to numeric to handle numeric strings; errors -> NaN
+            coerced = pd.to_numeric(series, errors="coerce")
+            processed[col] = coerced
+            continue
 
-    # Standardize masfem (and masfem_mturk if present)
-    df['masfem_std'] = (df['masfem'] - df['masfem'].mean()) / (df['masfem'].std(ddof=0) if df['masfem'].std(ddof=0) != 0 else 1.0)
-    if 'masfem_mturk' in df.columns:
-        df['masfem_mturk_std'] = (df['masfem_mturk'] - df['masfem_mturk'].mean()) / (df['masfem_mturk'].std(ddof=0) if df['masfem_mturk'].std(ddof=0) != 0 else 1.0)
-    else:
-        df['masfem_mturk_std'] = np.nan
+        # Boolean -> convert to integer (0/1)
+        if pdt.is_bool_dtype(dtype):
+            processed[col] = series.astype(int)
+            continue
 
-    # Ensure binary gender variable is integer (0/1)
-    if 'gender_mf' in df.columns:
-        df['gender_mf'] = df['gender_mf'].astype('Int64')
+        # If object or categorical, check whether it is datetime-like
+        if pdt.is_object_dtype(dtype) or pdt.is_categorical_dtype(dtype):
+            # Try parsing as datetime
+            parsed = pd.to_datetime(series, errors="coerce")
+            non_na_fraction = parsed.notna().sum() / max(1, len(parsed))
+            # If a reasonable fraction parsed as datetime, treat as datetime
+            if non_na_fraction > 0.5:
+                # Convert to unix timestamp in seconds (float)
+                ts = parsed.view("int64") // 10**9
+                processed[col] = ts.astype("float64")
+            else:
+                # Treat as categorical: one-hot encode
+                # First convert to string to ensure consistent dummies for mixed types
+                cat_series = series.astype("category")
+                dummies = pd.get_dummies(cat_series, prefix=col, dummy_na=False, drop_first=True)
+                # Add each dummy column to processed
+                for dummy_col in dummies.columns:
+                    processed[dummy_col] = dummies[dummy_col].astype(float)
+            continue
 
-    # Keep columns necessary for modeling to avoid accidental use of other columns
-    keep_cols = ['alldeaths', 'log_alldeaths', 'ndam15', 'log_ndam15', 'masfem', 'masfem_std', 'masfem_mturk', 'masfem_mturk_std', 'gender_mf', 'wind', 'category', 'min', 'elapsedyrs', 'year', 'source']
-    existing_keep = [c for c in keep_cols if c in df.columns]
-    df = df[existing_keep]
+        # Datetime dtypes
+        if pdt.is_datetime64_any_dtype(dtype):
+            ts = series.view("int64") // 10**9
+            processed[col] = ts.astype("float64")
+            continue
 
-    return df
+        # Fallback: try to coerce to numeric
+        try:
+            coerced = pd.to_numeric(series, errors="coerce")
+            processed[col] = coerced
+        except Exception:
+            # As a last resort, convert to string and one-hot encode (may be many columns)
+            cat_series = series.astype("category")
+            dummies = pd.get_dummies(cat_series, prefix=col, dummy_na=False, drop_first=True)
+            for dummy_col in dummies.columns:
+                processed[dummy_col] = dummies[dummy_col].astype(float)
+
+    # Build dataframe
+    processed_df = pd.DataFrame(processed, index=df.index)
+
+    # Add missing indicators
+    for ind_col, ind_series in missing_indicators.items():
+        processed_df[ind_col] = ind_series.astype(int)
+
+    # Impute numeric missing values with column mean
+    for col in processed_df.columns:
+        if pdt.is_numeric_dtype(processed_df[col].dtype):
+            if processed_df[col].isna().any():
+                mean_val = processed_df[col].mean()
+                # If mean is nan (all values missing), fill with 0
+                if pd.isna(mean_val):
+                    mean_val = 0.0
+                processed_df[col] = processed_df[col].fillna(mean_val)
+
+    # Ensure all columns are numeric and of float64 type (common for modeling)
+    for col in processed_df.columns:
+        if not pdt.is_numeric_dtype(processed_df[col].dtype):
+            processed_df[col] = pd.to_numeric(processed_df[col], errors="coerce").fillna(0.0)
+        processed_df[col] = processed_df[col].astype("float64")
+
+    return processed_df
 
 
-# ======== MODEL CODE ========
-def model(df: pd.DataFrame) -> dict:
+def model(df: pd.DataFrame) -> Any:
     """
-    Fit regression models to test whether more feminine hurricane names are associated with
-    higher fatalities (as a proxy for lower precautionary responses). We estimate:
-      1) OLS on log(alldeaths + 1) with masfem (standardized) and controls; robust SEs
-      2) OLS on log(alldeaths + 1) with gender_mf (binary) and same controls (robust SEs)
-      3) Robustness: OLS on log(ndam15 + 1) with masfem_std and controls
+    Fit a simple linear regression model (OLS) using statsmodels if a target column is present.
 
-    Returns a dictionary of fitted results objects.
+    The function will look for a target column with a common name among:
+    ['target', 'y', 'label', 'outcome'] (case-insensitive). If multiple are present, the first
+    match in that list is used. If no target column is found, returns a dictionary summarizing
+    the numeric columns (no exception is raised).
+
+    Args:
+        df: Transformed dataframe produced by transform(), should be numeric.
+
+    Returns:
+        If a target column is found: the fitted statsmodels regression results object.
+        Otherwise: a dict with a summary of numeric columns.
     """
-    import statsmodels.formula.api as smf
-    results = {}
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError("Input must be a pandas DataFrame")
 
-    # Basic checks
-    for col in ['log_alldeaths', 'masfem_std', 'wind', 'category', 'min', 'elapsedyrs', 'source']:
-        if col not in df.columns:
-            raise ValueError(f"Column required for modeling not found in dataframe: {col}")
+    if df.shape[0] == 0:
+        raise ValueError("DataFrame is empty")
 
-    # Model 1: continuous femininity measure
-    formula1 = 'log_alldeaths ~ masfem_std + wind + category + min + elapsedyrs + C(source)'
-    ols_masfem = smf.ols(formula1, data=df).fit(cov_type='HC3')
-    results['ols_masfem'] = ols_masfem
+    # Identify target column
+    target_candidates = ["target", "y", "label", "outcome"]
+    lower_cols = {c.lower(): c for c in df.columns}
+    target_col = None
+    for cand in target_candidates:
+        if cand in lower_cols:
+            target_col = lower_cols[cand]
+            break
 
-    # Model 2: binary gender indicator
-    if 'gender_mf' in df.columns and df['gender_mf'].notnull().any():
-        formula2 = 'log_alldeaths ~ gender_mf + wind + category + min + elapsedyrs + C(source)'
-        ols_gender = smf.ols(formula2, data=df).fit(cov_type='HC3')
-        results['ols_gender_binary'] = ols_gender
+    # If target not found, try to find any column named exactly 'response' or 'dep_var'
+    if target_col is None:
+        for cand in ["response", "dep_var"]:
+            if cand in lower_cols:
+                target_col = lower_cols[cand]
+                break
 
-    # Model 3: robustness using inflation-adjusted damage
-    if 'log_ndam15' in df.columns and df['log_ndam15'].notnull().any():
-        formula3 = 'log_ndam15 ~ masfem_std + wind + category + min + elapsedyrs + C(source)'
-        ols_damage = smf.ols(formula3, data=df).fit(cov_type='HC3')
-        results['ols_damage_masfem'] = ols_damage
+    # If still not found, return a summary rather than raising
+    if target_col is None:
+        warnings.warn(
+            "No target column found among common names. Returning dataframe numeric summary instead of fitting a model."
+        )
+        numeric_cols = [c for c in df.columns if pdt.is_numeric_dtype(df[c].dtype)]
+        summary = {
+            "n_rows": df.shape[0],
+            "n_columns": df.shape[1],
+            "numeric_columns": numeric_cols,
+            "dtypes": df.dtypes.apply(lambda x: str(x)).to_dict(),
+        }
+        return summary
 
-    # Return the fitted results objects; the caller can inspect .summary() for each
-    return results
+    # Prepare X and y
+    y = df[target_col].astype(float)
+    X = df.drop(columns=[target_col])
 
+    # Ensure X contains at least one column
+    if X.shape[1] == 0:
+        raise ValueError(f"No predictor columns available after removing target '{target_col}'")
 
+    # Use only numeric predictors
+    numeric_predictors = [c for c in X.columns if pdt.is_numeric_dtype(X[c].dtype)]
+    if len(numeric_predictors) == 0:
+        raise ValueError("No numeric predictor columns available for modeling")
+
+    X = X[numeric_predictors].astype(float)
+
+    # Add constant for intercept
+    X_with_const = sm.add_constant(X, has_constant="add")
+
+    # Fit OLS regression
+    try:
+        model_res = sm.OLS(y, X_with_const, missing="drop").fit()
+        return model_res
+    except Exception as e:
+        # In case statsmodels fails for some reason, provide informative error
+        raise RuntimeError(f"Failed to fit OLS model: {e}") from e

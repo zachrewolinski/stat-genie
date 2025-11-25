@@ -1,85 +1,141 @@
-from typing import Dict, FrozenSet, List, Literal, Optional, Set, Tuple, Any
-import numpy as np
 import pandas as pd
-import sklearn
-import scipy
-import statsmodels.api as sm
-import statsmodels.formula.api as smf
-import matplotlib.pyplot as plt
-import pickle
-  
-df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/.venv/lib/python3.10/site-packages/blade_bench/datasets/hurricane/data.csv')
-
-# ======== TRANSFORM CODE ========
-# Copy dataframe to avoid modifying in place
-_df = df.copy()
-
-# Rename columns to meaningful names used below
-_df = _df.rename(columns={
-    'feature6': 'Name',
-    'feature12': 'FeminineName',          # binary (0 male, 1 female)
-    'feature9': 'NameFemininity',        # continuous rater index (higher = more feminine)
-    'feature13': 'Deaths',               # fatalities (count)
-    'feature7': 'MaxWind',               # maximum wind speed at landfall
-    'feature4': 'Category',              # Saffir-Simpson category
-    'feature14': 'MinPressure',          # minimum central pressure
-    'feature5': 'Year',                  # year of storm
-    'feature8': 'Damage2015',            # damage normalized to 2015
-    'feature10': 'Source',               # data source (text)
-    'feature2': 'StormID',
-    'feature11': 'MTurkRating',
-    'feature1': 'Damage2013',
-    'feature3': 'YearsSince'
-})
-
-# Ensure numeric columns are numeric; coerce to NaN on errors
-num_cols = ['FeminineName', 'NameFemininity', 'Deaths', 'MaxWind', 'Category', 'MinPressure', 'Year', 'Damage2015']
-for c in num_cols:
-    _df[c] = pd.to_numeric(_df[c], errors='coerce')
-
-# Source as categorical/string
-_df['Source'] = _df['Source'].astype(str)
-
-# Drop rows missing critical variables for this analysis
-_df = _df.dropna(subset=['Deaths', 'NameFemininity', 'FeminineName', 'MaxWind', 'Category', 'MinPressure', 'Year', 'Damage2015'])
-
-# Create log-transformed damage to reduce skew (add 1 to avoid log(0))
-_df['LogDamage'] = np.log(_df['Damage2015'] + 1)
-
-# Standardize continuous controls and IV (z-score) to aid interpretation and model convergence
-_df['NameFemininity_z'] = (_df['NameFemininity'] - _df['NameFemininity'].mean()) / (_df['NameFemininity'].std(ddof=0) if _df['NameFemininity'].std(ddof=0) != 0 else 1)
-_df['MaxWind_z'] = (_df['MaxWind'] - _df['MaxWind'].mean()) / (_df['MaxWind'].std(ddof=0) if _df['MaxWind'].std(ddof=0) != 0 else 1)
-_df['Category_z'] = (_df['Category'] - _df['Category'].mean()) / (_df['Category'].std(ddof=0) if _df['Category'].std(ddof=0) != 0 else 1)
-_df['MinPressure_z'] = (_df['MinPressure'] - _df['MinPressure'].mean()) / (_df['MinPressure'].std(ddof=0) if _df['MinPressure'].std(ddof=0) != 0 else 1)
-
-# Center year (linear trend control)
-_df['Year_c'] = _df['Year'] - _df['Year'].mean()
-
-# Keep only the columns required for modeling (plus identifiers)
-final_cols = [
-    'StormID', 'Name', 'FeminineName', 'NameFemininity', 'NameFemininity_z', 'Deaths',
-    'MaxWind', 'MaxWind_z', 'Category', 'Category_z', 'MinPressure', 'MinPressure_z',
-    'Year', 'Year_c', 'Damage2015', 'LogDamage', 'Source', 'MTurkRating'
-]
-_df = _df.loc[:, [c for c in final_cols if c in _df.columns]]
-
-# Return transformed dataframe
-df = _df
-return df
-
-# ======== MODEL CODE ========
-import statsmodels.formula.api as smf
+import numpy as np
+from typing import Any, List, Optional
 import statsmodels.api as sm
 
-# Fit a negative binomial regression predicting deaths from name femininity (binary and continuous)
-# while controlling for measures of storm severity and exposure. We include Source as a categorical control.
-# Using a count model (negative binomial) is appropriate for overdispersed count outcomes like fatalities.
-formula = 'Deaths ~ FeminineName + NameFemininity_z + MaxWind_z + Category_z + MinPressure_z + Year_c + LogDamage + C(Source)'
 
-model = smf.glm(formula=formula, data=df, family=sm.families.NegativeBinomial())
-results = model.fit()
+def transform(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Transform the input dataframe to prepare features for statistical modeling.
 
-# Provide summary for inspection and return fitted results object
-print(results.summary())
-return results
+    Transformations performed:
+    - Works on a copy of the input dataframe; original dataframe is not modified.
+    - Adds 'num_missing' column: count of missing values per row.
+    - For each numeric column with missing values, creates a new column
+      '<col>_imputed' where missing values are filled with the column median.
+    - For each non-numeric (object/category) column, creates a new column
+      '<col>_filled' where missing values are replaced with the string 'missing',
+      and then creates one-hot encoded indicator columns (prefix '<col>') for that
+      filled column, dropping the first level to avoid perfect multicollinearity.
+    - Leaves original columns intact (as requested: changes/additions are new columns).
 
+    The returned dataframe includes the original columns plus the newly derived
+    columns needed for modeling.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Original input dataframe.
+
+    Returns
+    -------
+    pd.DataFrame
+        Transformed dataframe containing original and newly derived columns.
+    """
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError("Input must be a pandas DataFrame")
+
+    df_out = df.copy(deep=True)
+
+    # Add count of missing values per row
+    df_out["num_missing"] = df_out.isna().sum(axis=1)
+
+    # Process numeric columns: impute missing values into new columns
+    numeric_cols = df_out.select_dtypes(include=[np.number]).columns.tolist()
+    for col in numeric_cols:
+        if df_out[col].isna().any():
+            imputed_col = f"{col}_imputed"
+            median_val = df_out[col].median(skipna=True)
+            # If median is NaN (all values missing), fill with 0 to ensure numeric column
+            if np.isnan(median_val):
+                median_val = 0.0
+            df_out[imputed_col] = df_out[col].fillna(median_val)
+
+    # Process non-numeric columns: fill missing and create dummies
+    non_numeric_cols = df_out.select_dtypes(exclude=[np.number]).columns.tolist()
+    for col in non_numeric_cols:
+        filled_col = f"{col}_filled"
+        # Fill missing with explicit token
+        df_out[filled_col] = df_out[col].fillna("missing").astype("category")
+        # Create dummies for modeling, drop first to reduce multicollinearity
+        dummies = pd.get_dummies(df_out[filled_col], prefix=col, drop_first=True, dtype=int)
+        if not dummies.empty:
+            # Only add dummies if there is at least one level besides the dropped one
+            df_out = pd.concat([df_out, dummies], axis=1)
+
+    # Ensure column names are safe (no duplicates introduced by transformations)
+    df_out = df_out.loc[:, ~df_out.columns.duplicated()]
+
+    return df_out
+
+
+def model(df: pd.DataFrame) -> Any:
+    """
+    Fit a simple linear regression model (OLS) using numeric predictors from the
+    transformed dataframe and return the fitted results object.
+
+    Behavior:
+    - Attempts to locate an outcome column in this order: 'y', 'target', 'outcome'.
+      If none are present, the first numeric column (left-to-right) will be used
+      as the outcome.
+    - Predictors are all numeric columns except the chosen outcome column.
+      Missing predictor values are filled with 0.
+    - Adds an intercept term automatically.
+    - Returns the fitted statsmodels regression results object.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Transformed dataframe produced by transform().
+
+    Returns
+    -------
+    Any
+        The fitted statsmodels results object (e.g., RegressionResultsWrapper).
+
+    Raises
+    ------
+    ValueError
+        If no suitable outcome or predictor columns can be found.
+    """
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError("Input must be a pandas DataFrame")
+
+    df_in = df.copy(deep=True)
+
+    # Determine outcome column
+    possible_outcomes = ["y", "target", "outcome"]
+    outcome_col: Optional[str] = None
+    for name in possible_outcomes:
+        if name in df_in.columns:
+            outcome_col = name
+            break
+
+    if outcome_col is None:
+        # pick first numeric column as outcome
+        numeric_cols = df_in.select_dtypes(include=[np.number]).columns.tolist()
+        if not numeric_cols:
+            raise ValueError("No numeric columns available to select as outcome.")
+        outcome_col = numeric_cols[0]
+
+    # Drop rows with missing outcome
+    df_in = df_in.dropna(subset=[outcome_col])
+    y = df_in[outcome_col].astype(float)
+
+    # Select numeric predictors excluding the outcome column
+    predictor_cols = df_in.select_dtypes(include=[np.number]).columns.tolist()
+    predictor_cols = [c for c in predictor_cols if c != outcome_col]
+
+    if not predictor_cols:
+        raise ValueError("No numeric predictor columns available for modeling.")
+
+    X = df_in[predictor_cols].fillna(0.0).astype(float)
+
+    # Add intercept
+    X_with_const = sm.add_constant(X, has_constant="add")
+
+    # Fit OLS model
+    model_fit = sm.OLS(y, X_with_const)
+    results = model_fit.fit()
+
+    return results
