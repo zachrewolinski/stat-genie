@@ -1,141 +1,141 @@
 import pandas as pd
 import numpy as np
-from typing import Any, List, Optional
-import statsmodels.api as sm
+from typing import Any, List
 
 
 def transform(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Transform the input dataframe to prepare features for statistical modeling.
+    Prepare the dataframe for modeling.
 
-    Transformations performed:
-    - Works on a copy of the input dataframe; original dataframe is not modified.
-    - Adds 'num_missing' column: count of missing values per row.
-    - For each numeric column with missing values, creates a new column
-      '<col>_imputed' where missing values are filled with the column median.
-    - For each non-numeric (object/category) column, creates a new column
-      '<col>_filled' where missing values are replaced with the string 'missing',
-      and then creates one-hot encoded indicator columns (prefix '<col>') for that
-      filled column, dropping the first level to avoid perfect multicollinearity.
-    - Leaves original columns intact (as requested: changes/additions are new columns).
-
-    The returned dataframe includes the original columns plus the newly derived
-    columns needed for modeling.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Original input dataframe.
-
-    Returns
-    -------
-    pd.DataFrame
-        Transformed dataframe containing original and newly derived columns.
+    Behavior:
+    - Ensures an 'outcome' column exists. If one of the common outcome column names
+      ('outcome', 'y', 'target', 'label', 'response', 'dependent') exists, a copy
+      of the first found is placed in df['outcome'] (unless 'outcome' already exists).
+    - If no obvious outcome column exists, picks the first numeric column as outcome.
+    - If there are no numeric columns, factorizes the first column and uses that as outcome.
+    - Returns a new dataframe (does not modify the input in-place).
     """
-    if not isinstance(df, pd.DataFrame):
-        raise TypeError("Input must be a pandas DataFrame")
+    df = df.copy()
 
-    df_out = df.copy(deep=True)
+    # Candidate names to search for (in order)
+    outcome_candidates: List[str] = ["outcome", "y", "target", "label", "response", "dependent"]
 
-    # Add count of missing values per row
-    df_out["num_missing"] = df_out.isna().sum(axis=1)
+    # Find any existing candidate column (case-insensitive)
+    col_map = {c.lower(): c for c in df.columns}
+    found_name = None
+    for cand in outcome_candidates:
+        if cand.lower() in col_map:
+            found_name = col_map[cand.lower()]
+            break
 
-    # Process numeric columns: impute missing values into new columns
-    numeric_cols = df_out.select_dtypes(include=[np.number]).columns.tolist()
-    for col in numeric_cols:
-        if df_out[col].isna().any():
-            imputed_col = f"{col}_imputed"
-            median_val = df_out[col].median(skipna=True)
-            # If median is NaN (all values missing), fill with 0 to ensure numeric column
-            if np.isnan(median_val):
-                median_val = 0.0
-            df_out[imputed_col] = df_out[col].fillna(median_val)
+    if found_name:
+        # If 'outcome' does not exist, create it as a copy of the found column.
+        if "outcome" not in df.columns:
+            df["outcome"] = df[found_name].copy()
+        else:
+            # If 'outcome' exists, leave it as-is (do not overwrite).
+            # But ensure there's at least one numeric outcome: if outcome is non-numeric, try to coerce.
+            if not pd.api.types.is_numeric_dtype(df["outcome"]):
+                coerced = pd.to_numeric(df["outcome"], errors="coerce")
+                if coerced.isna().all():
+                    # fallback: factorize original found column
+                    df["outcome"] = pd.factorize(df[found_name])[0]
+                else:
+                    # use coerced numeric values (NaNs remain if any)
+                    df["outcome"] = coerced
+    else:
+        # No candidate name found. Try numeric columns.
+        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+        if numeric_cols:
+            # Use the first numeric column as outcome (create 'outcome' copy).
+            df["outcome"] = df[numeric_cols[0]].copy()
+        else:
+            # No numeric columns at all. Use the first column and factorize it.
+            if len(df.columns) >= 1:
+                first_col = df.columns[0]
+                df["outcome"] = pd.factorize(df[first_col])[0]
+            else:
+                # Empty dataframe: create an empty numeric outcome column
+                df["outcome"] = pd.Series(dtype=float)
 
-    # Process non-numeric columns: fill missing and create dummies
-    non_numeric_cols = df_out.select_dtypes(exclude=[np.number]).columns.tolist()
-    for col in non_numeric_cols:
-        filled_col = f"{col}_filled"
-        # Fill missing with explicit token
-        df_out[filled_col] = df_out[col].fillna("missing").astype("category")
-        # Create dummies for modeling, drop first to reduce multicollinearity
-        dummies = pd.get_dummies(df_out[filled_col], prefix=col, drop_first=True, dtype=int)
-        if not dummies.empty:
-            # Only add dummies if there is at least one level besides the dropped one
-            df_out = pd.concat([df_out, dummies], axis=1)
+    # Final safety: ensure 'outcome' is numeric. If not, factorize it.
+    if not pd.api.types.is_numeric_dtype(df["outcome"]):
+        df["outcome"] = pd.factorize(df["outcome"])[0]
 
-    # Ensure column names are safe (no duplicates introduced by transformations)
-    df_out = df_out.loc[:, ~df_out.columns.duplicated()]
-
-    return df_out
+    return df
 
 
 def model(df: pd.DataFrame) -> Any:
     """
-    Fit a simple linear regression model (OLS) using numeric predictors from the
-    transformed dataframe and return the fitted results object.
+    Fit a simple statistical model to the transformed dataframe.
+
+    Requirements:
+    - df must contain an 'outcome' column (numeric). If not present, raises ValueError.
 
     Behavior:
-    - Attempts to locate an outcome column in this order: 'y', 'target', 'outcome'.
-      If none are present, the first numeric column (left-to-right) will be used
-      as the outcome.
-    - Predictors are all numeric columns except the chosen outcome column.
-      Missing predictor values are filled with 0.
-    - Adds an intercept term automatically.
-    - Returns the fitted statsmodels regression results object.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Transformed dataframe produced by transform().
-
-    Returns
-    -------
-    Any
-        The fitted statsmodels results object (e.g., RegressionResultsWrapper).
-
-    Raises
-    ------
-    ValueError
-        If no suitable outcome or predictor columns can be found.
+    - Uses all other columns as predictors. Categorical predictors are turned into dummy variables.
+    - If there are no predictors, fits an intercept-only model.
+    - Attempts to use statsmodels. If statsmodels is unavailable, falls back to scikit-learn
+      LinearRegression. If sklearn is also unavailable, falls back to numpy least squares.
+    - Returns the fitted model object (statsmodels results if available, otherwise a fallback structure).
     """
-    if not isinstance(df, pd.DataFrame):
-        raise TypeError("Input must be a pandas DataFrame")
+    if "outcome" not in df.columns:
+        outcome_candidates = ["outcome", "y", "target"]
+        raise ValueError("No outcome column found. Expected one of: " + ", ".join(outcome_candidates))
 
-    df_in = df.copy(deep=True)
+    y = df["outcome"]
 
-    # Determine outcome column
-    possible_outcomes = ["y", "target", "outcome"]
-    outcome_col: Optional[str] = None
-    for name in possible_outcomes:
-        if name in df_in.columns:
-            outcome_col = name
-            break
+    # Prepare predictors: drop the outcome column
+    X = df.drop(columns=["outcome"])
 
-    if outcome_col is None:
-        # pick first numeric column as outcome
-        numeric_cols = df_in.select_dtypes(include=[np.number]).columns.tolist()
-        if not numeric_cols:
-            raise ValueError("No numeric columns available to select as outcome.")
-        outcome_col = numeric_cols[0]
+    # If there are no predictors, create a constant-only predictor
+    if X.shape[1] == 0:
+        X_proc = pd.DataFrame({"const": np.ones(len(df))})
+    else:
+        # Convert categorical variables to dummies, keep numeric as-is
+        X_proc = pd.get_dummies(X, drop_first=True)
+        # If get_dummies produces zero columns (e.g., all columns were empty), add constant
+        if X_proc.shape[1] == 0:
+            X_proc = pd.DataFrame({"const": np.ones(len(df))})
 
-    # Drop rows with missing outcome
-    df_in = df_in.dropna(subset=[outcome_col])
-    y = df_in[outcome_col].astype(float)
+    # Ensure index alignment and no NA in predictors; if NA present, try to fill with column means
+    if X_proc.isna().any().any():
+        # For numeric columns: fill with mean
+        numeric_cols = X_proc.select_dtypes(include=[np.number]).columns
+        for col in numeric_cols:
+            if X_proc[col].isna().any():
+                X_proc[col] = X_proc[col].fillna(X_proc[col].mean())
+        # For any remaining non-numeric (unlikely after get_dummies), fill with 0
+        X_proc = X_proc.fillna(0)
 
-    # Select numeric predictors excluding the outcome column
-    predictor_cols = df_in.select_dtypes(include=[np.number]).columns.tolist()
-    predictor_cols = [c for c in predictor_cols if c != outcome_col]
+    # Ensure y is numeric
+    if not pd.api.types.is_numeric_dtype(y):
+        y = pd.factorize(y)[0]
 
-    if not predictor_cols:
-        raise ValueError("No numeric predictor columns available for modeling.")
+    # Try statsmodels first
+    try:
+        import statsmodels.api as sm
 
-    X = df_in[predictor_cols].fillna(0.0).astype(float)
+        Xc = sm.add_constant(X_proc, has_constant="add")
+        model_sm = sm.OLS(y, Xc).fit()
+        return model_sm
+    except Exception:
+        # Fallback to scikit-learn
+        try:
+            from sklearn.linear_model import LinearRegression
 
-    # Add intercept
-    X_with_const = sm.add_constant(X, has_constant="add")
-
-    # Fit OLS model
-    model_fit = sm.OLS(y, X_with_const)
-    results = model_fit.fit()
-
-    return results
+            lr = LinearRegression()
+            lr.fit(X_proc.values, np.asarray(y))
+            return {"sklearn_model": lr, "X_columns": X_proc.columns.tolist()}
+        except Exception:
+            # Final fallback: use numpy lstsq to compute coefficients (including intercept)
+            X_mat = np.asarray(X_proc, dtype=float)
+            y_vec = np.asarray(y, dtype=float)
+            # Add intercept column
+            X_with_intercept = np.hstack([np.ones((X_mat.shape[0], 1)), X_mat])
+            try:
+                coef, *_ = np.linalg.lstsq(X_with_intercept, y_vec, rcond=None)
+                return {"numpy_lstsq_coef": coef, "X_columns": ["const"] + X_proc.columns.tolist()}
+            except Exception as e:
+                # If everything fails, raise an informative error
+                raise RuntimeError("Failed to fit model with available backends.") from e

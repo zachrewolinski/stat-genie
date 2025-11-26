@@ -1,105 +1,126 @@
 def extract_final_answer(model_output):
     """
-    Extracts coefficients, standard errors, p-values, 95% CIs, and incidence-rate ratios (IRRs)
-    for the name-femininity predictors from a fitted statsmodels GLM (NegativeBinomial) results object.
+    Extract statistics for the masculinity-femininity predictor from the provided model output.
+    Returns a dictionary with keys:
+      - "object": dict with extracted numeric results for the continuous (masfem_z) and
+                  binary (female_name) specifications plus a brief conclusion.
+      - "description": short plain-language interpretation of those results in the context
+                       of the hypothesis.
 
-    Returns a dictionary:
-      {
-        "object": { variable_name: {coef, se, pvalue, ci_lower, ci_upper, irr, irr_ci_lower, irr_ci_upper, perc_change, perc_change_ci}, ... },
-        "description": "Textual interpretation of the results in context"
-      }
+    The function accepts either:
+      - a dict-like object containing keys 'model_masfem_continuous' and 'model_gender_binary'
+        mapping to statsmodels RegressionResultsWrapper objects, OR
+      - a single RegressionResultsWrapper (in which case it will try to extract masfem_z).
     """
     import numpy as np
+    from types import SimpleNamespace
 
-    # Variables of interest
-    vars_of_interest = ["FeminineName", "NameFemininity_z"]
-
-    res = {}
-    try:
-        params = model_output.params          # pandas Series
-        bse = model_output.bse
-        pvals = model_output.pvalues
-        ci = model_output.conf_int()          # DataFrame: columns [0,1] or named
-    except Exception as e:
+    def _extract_from_result(res, var):
+        """Safely extract coef, se, pvalue, 95% CI for var from a statsmodels result object.
+           Returns None if var not in the model."""
+        try:
+            params = res.params
+        except Exception:
+            return None
+        if var not in params.index:
+            return None
+        coef = float(params[var])
+        se = float(res.bse[var])
+        p = float(res.pvalues[var])
+        try:
+            ci = res.conf_int(alpha=0.05).loc[var].tolist()
+            ci_lower, ci_upper = float(ci[0]), float(ci[1])
+        except Exception:
+            # fallback: approximate CI using coef +/- 1.96*se
+            ci_lower = coef - 1.96 * se
+            ci_upper = coef + 1.96 * se
+        # For interpretation on the log scale, compute percent change approx: 100*(exp(coef)-1)
+        pct_change = (np.exp(coef) - 1.0) * 100.0
+        pct_change_ci_lower = (np.exp(ci_lower) - 1.0) * 100.0
+        pct_change_ci_upper = (np.exp(ci_upper) - 1.0) * 100.0
         return {
-            "object": None,
-            "description": f"Error extracting results from model_output: {e}"
+            'coef': coef,
+            'se': se,
+            'pvalue': p,
+            'ci_lower': ci_lower,
+            'ci_upper': ci_upper,
+            'approx_percent_change_in_deaths': pct_change,
+            'pct_change_ci_lower': pct_change_ci_lower,
+            'pct_change_ci_upper': pct_change_ci_upper
         }
 
-    for v in vars_of_interest:
-        if v not in params.index:
-            # Variable not in model (e.g., dropped or not included)
-            res[v] = None
-            continue
-
-        coef = float(params.loc[v])
-        se = float(bse.loc[v]) if v in bse.index else None
-        pval = float(pvals.loc[v]) if v in pvals.index else None
-
-        # Confidence interval
-        try:
-            ci_row = ci.loc[v]
-            # conf_int returns a 2-column array/dataframe; ensure ordering
-            ci_lower = float(ci_row[0])
-            ci_upper = float(ci_row[1])
-        except Exception:
-            ci_lower = None
-            ci_upper = None
-
-        # For count models (log link), exponentiate coefficient to get IRR (incidence rate ratio)
-        try:
-            irr = float(np.exp(coef))
-            irr_ci_lower = float(np.exp(ci_lower)) if ci_lower is not None else None
-            irr_ci_upper = float(np.exp(ci_upper)) if ci_upper is not None else None
-        except Exception:
-            irr = None
-            irr_ci_lower = None
-            irr_ci_upper = None
-
-        # Percentage change in expected deaths associated with one-unit increase (or binary change)
-        perc_change = (irr - 1) * 100 if irr is not None else None
-        perc_change_ci_lower = (irr_ci_lower - 1) * 100 if irr_ci_lower is not None else None
-        perc_change_ci_upper = (irr_ci_upper - 1) * 100 if irr_ci_upper is not None else None
-
-        # Significance at conventional levels
-        sig_05 = (pval is not None) and (pval < 0.05)
-
-        res[v] = {
-            "coef": round(coef, 4),
-            "se": round(se, 4) if se is not None else None,
-            "pvalue": round(pval, 4) if pval is not None else None,
-            "ci_lower": round(ci_lower, 4) if ci_lower is not None else None,
-            "ci_upper": round(ci_upper, 4) if ci_upper is not None else None,
-            "irr": round(irr, 4) if irr is not None else None,
-            "irr_ci_lower": round(irr_ci_lower, 4) if irr_ci_lower is not None else None,
-            "irr_ci_upper": round(irr_ci_upper, 4) if irr_ci_upper is not None else None,
-            "perc_change": round(perc_change, 2) if perc_change is not None else None,
-            "perc_change_ci": (round(perc_change_ci_lower, 2), round(perc_change_ci_upper, 2)) if (perc_change_ci_lower is not None and perc_change_ci_upper is not None) else None,
-            "significant_p_lt_0.05": bool(sig_05)
-        }
-
-    # Create a short interpretation for the primary test (binary FeminineName)
-    if res.get("FeminineName") is None:
-        interpretation = "The model does not contain the variable 'FeminineName' (it may have been dropped)."
+    # Normalize input to a dict-like container with expected names
+    models = {}
+    if isinstance(model_output, dict):
+        models = model_output
     else:
-        vres = res["FeminineName"]
-        if vres is None:
-            interpretation = "The variable 'FeminineName' is not available in the fitted model results."
-        else:
-            if vres["irr"] is None:
-                interpretation = "Could not compute IRR for 'FeminineName'."
-            else:
-                # Direction and significance
-                direction = "lower" if vres["irr"] < 1 else "higher"
-                sig_text = "statistically significant (p < 0.05)" if vres["significant_p_lt_0.05"] else "not statistically significant (p >= 0.05)"
-                interpretation = (
-                    f"Binary FeminineName -> coef = {vres['coef']}, p = {vres['pvalue']}. "
-                    f"IRR = {vres['irr']} (95% CI: {vres['irr_ci_lower']} to {vres['irr_ci_upper']}). "
-                    f"This implies that hurricanes given feminine names are associated with {abs(vres['perc_change']):.1f}% {direction} expected deaths "
-                    f"relative to masculine-named hurricanes, and this effect is {sig_text}."
-                )
+        # single result: wrap it
+        models = {'single_model': model_output}
 
-    return {
-        "object": res,
-        "description": interpretation
+    # Try to get the two expected models (continuous and binary). Accept some name variants.
+    model_a = models.get('model_masfem_continuous') or models.get('model_masfem') or models.get('single_model')
+    model_b = models.get('model_gender_binary') or models.get('model_female_binary') or None
+
+    res_a = None
+    res_b = None
+    if model_a is not None:
+        res_a = _extract_from_result(model_a, 'masfem_z')
+    if model_b is None and isinstance(models, dict):
+        # maybe the single model contains female_name instead; try extracting from model_a if present
+        if model_a is not None:
+            res_b = _extract_from_result(model_a, 'female_name')
+    else:
+        if model_b is not None:
+            res_b = _extract_from_result(model_b, 'female_name')
+
+    conclusion_lines = []
+    # Evaluate evidence for hypothesis: "more feminine names -> fewer precautions -> more deaths"
+    # That predicts a positive coefficient on masfem (masfem_z or female_name).
+    def interpret(res_entry, var_label):
+        if res_entry is None:
+            return f"No estimate for {var_label} was found in the provided models."
+        coef = res_entry['coef']
+        p = res_entry['pvalue']
+        direction = "positive" if coef > 0 else ("negative" if coef < 0 else "zero")
+        sig = p < 0.05
+        if sig and coef > 0:
+            return (f"{var_label}: estimated coefficient = {coef:.4f} (95% CI [{res_entry['ci_lower']:.4f}, {res_entry['ci_upper']:.4f}]), "
+                    f"p = {p:.3f}. Significant positive effect — consistent with the hypothesis: "
+                    f"~{res_entry['approx_percent_change_in_deaths']:.1f}% change in deaths per 1-unit increase (log scale).")
+        elif sig and coef <= 0:
+            return (f"{var_label}: estimated coefficient = {coef:.4f} (95% CI [{res_entry['ci_lower']:.4f}, {res_entry['ci_upper']:.4f}]), "
+                    f"p = {p:.3f}. Significant effect but in the opposite direction to the hypothesis.")
+        else:
+            return (f"{var_label}: estimated coefficient = {coef:.4f} (95% CI [{res_entry['ci_lower']:.4f}, {res_entry['ci_upper']:.4f}]), "
+                    f"p = {p:.3f}. Not statistically significant at alpha=0.05 — insufficient evidence to support the hypothesis.")
+
+    conclusion_lines.append(interpret(res_a, 'masfem_z (continuous)') if res_a is not None else "masfem_z (continuous): not available.")
+    conclusion_lines.append(interpret(res_b, 'female_name (binary)') if res_b is not None else "female_name (binary): not available.")
+
+    # Final synthesis: if either specification shows a significant positive effect, we say the model provides evidence.
+    evidence = False
+    evidence_reasons = []
+    for r, name in ((res_a, 'masfem_z'), (res_b, 'female_name')):
+        if r is None:
+            continue
+        if (r['pvalue'] < 0.05) and (r['coef'] > 0):
+            evidence = True
+            evidence_reasons.append(name)
+    if evidence:
+        final_statement = ("There is evidence consistent with the hypothesis in the model(s): " +
+                           ", ".join(evidence_reasons) + ".")
+    else:
+        final_statement = "No robust evidence supporting the hypothesis was found in the provided model(s)."
+
+    result_object = {
+        'masfem_z': res_a,
+        'female_name': res_b,
+        'final_conclusion': final_statement
     }
+
+    description = ("Extracted coefficients, standard errors, p-values, and 95% CIs for the name-gender predictors. "
+                   "Positive and statistically significant coefficients support the hypothesis that more-feminine names "
+                   "are associated with more fatalities (interpreted as fewer precautions). The 'final_conclusion' field "
+                   "summarizes whether any model specification provided such evidence at alpha=0.05.")
+
+    return {'object': result_object, 'description': "\n".join(conclusion_lines) + "\n\n" + description}

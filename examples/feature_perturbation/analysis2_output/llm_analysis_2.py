@@ -1,168 +1,124 @@
-import pandas as pd
 import numpy as np
-from typing import Any, Dict
+import pandas as pd
+import statsmodels.api as sm
+from typing import Any
 
 
 def transform(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Transform the input dataframe to ensure it contains the columns needed for downstream modeling.
+    Transform the input dataframe to ensure required modeling columns exist.
 
-    Transformations performed:
-    - Work on a copy of the input dataframe to avoid side-effects.
-    - Locate a column that corresponds to deaths (case-insensitive, tolerant to small variations).
-      The canonical column produced is 'Deaths'.
-    - Coerce the 'Deaths' column to numeric (non-convertible values -> NaN).
-    - Add an indicator 'Deaths_is_missing' that flags rows where 'Deaths' is missing.
-    - Add a derived column 'log_Deaths' = log1p(Deaths_filled_with_0) for use in models that prefer
-      a transformed response.
-    - Leave all other columns intact.
+    - Ensures a numeric 'Deaths' column exists (by looking for common name variants).
+    - Creates a 'LogDeaths' column = log(Deaths + 1) (uses 0 for missing deaths).
+    - Returns a copy of the dataframe with the new/normalized columns added.
 
-    This function will not raise if a deaths-like column cannot be found; instead it will create
-    a 'Deaths' column filled with NaN and appropriate derived columns so downstream code can handle it.
+    This function is defensive: it will not raise if a deaths-like column is missing;
+    instead it will create a 'Deaths' column filled with NaN and a 'LogDeaths' with
+    log(0 + 1) = 0 where appropriate.
     """
     if not isinstance(df, pd.DataFrame):
-        raise TypeError("Input must be a pandas DataFrame.")
+        raise TypeError("df must be a pandas DataFrame")
 
-    df_out = df.copy()
+    df = df.copy()
 
-    # Try to find a column corresponding to deaths in a tolerant manner
+    # Try to find a column that represents deaths (several common variants)
     deaths_col = None
-    for col in df_out.columns:
-        col_stripped = str(col).strip()
-        lower = col_stripped.lower()
-        # Accept exact 'deaths' or variations that include the word 'death'
-        if lower == "deaths" or lower == "death" or "death" in lower:
-            deaths_col = col
+    # exact match first
+    for c in df.columns:
+        if c.lower() == "deaths":
+            deaths_col = c
             break
+    # broader match if exact not found
+    if deaths_col is None:
+        for c in df.columns:
+            if "death" in c.lower():
+                deaths_col = c
+                break
 
+    # Create a normalized 'Deaths' column (numeric)
     if deaths_col is not None:
-        # Create canonical 'Deaths' column, coercing to numeric
-        df_out["Deaths"] = pd.to_numeric(df_out[deaths_col], errors="coerce")
+        df["Deaths"] = pd.to_numeric(df[deaths_col], errors="coerce")
     else:
-        # If no suitable column found, create 'Deaths' as NaN so downstream can handle it
-        df_out["Deaths"] = np.nan
+        # If no deaths column exists, create it as NaN (so downstream logic can handle it)
+        df["Deaths"] = np.nan
 
-    # Indicator for missing Deaths
-    df_out["Deaths_is_missing"] = df_out["Deaths"].isna()
+    # Create a log-transformed deaths column that is safe for zeros/missing values
+    # Use fillna(0) so that missing values are treated as 0 for the log transform,
+    # producing log(1) = 0. If you'd rather keep NaN, change fillna behavior.
+    df["LogDeaths"] = np.log(df["Deaths"].fillna(0).astype(float) + 1)
 
-    # Derived transformation: log(Deaths + 1) with NaN -> treat as 0 for the transform to avoid -inf
-    # We intentionally do not overwrite the original 'Deaths'; we add 'log_Deaths'.
-    # Use fillna(0) so rows with missing deaths get log_Deaths = 0 (this is a modeling choice;
-    # downstream modeling code can use Deaths_is_missing if needed).
-    df_out["log_Deaths"] = np.log1p(df_out["Deaths"].fillna(0))
-
-    return df_out
+    return df
 
 
-def model(df: pd.DataFrame) -> Dict[str, Any]:
+def model(df: pd.DataFrame) -> Any:
     """
-    Fit a simple linear model using numeric predictors in `df` to predict 'Deaths'.
+    Fit a simple linear model predicting LogDeaths.
 
-    Behavior:
-    - Response variable: attempts to use 'Deaths' if present; otherwise uses 'log_Deaths' if present;
-      if neither exist, uses a zero-vector (no-information) response.
-    - Predictors: all numeric columns except 'Deaths' and 'log_Deaths' are used as features.
-      An intercept is always included.
-    - Rows with NaN in the response or predictors are dropped for the fit.
-    - The model is fitted via numpy.linalg.lstsq (ordinary least squares).
-    - Returns a dictionary containing coefficients (including intercept), R-squared, predictions,
-      residuals, and n_obs used in the fit.
+    - Ensures 'LogDeaths' exists (calls transform if necessary).
+    - Searches for reasonable numeric predictor columns (population/case-like columns).
+    - Always includes an intercept.
+    - Returns the fitted statsmodels results object when fitting is possible.
+    - If there is not enough data to fit a model, returns an informative dict.
 
-    The function is written to avoid raising under normal input circumstances; if no usable rows
-    exist for fitting, it returns coefficients for an intercept-only model predicting the mean (or 0).
+    Notes:
+    - This function is defensive and will not raise on typical missing-column issues.
+    - The returned object is either a statsmodels.regression.linear_model.RegressionResultsWrapper
+      or a dict describing why a model could not be fit.
     """
     if not isinstance(df, pd.DataFrame):
-        raise TypeError("Input must be a pandas DataFrame.")
+        raise TypeError("df must be a pandas DataFrame")
 
-    # Determine response vector y
-    if "Deaths" in df.columns:
-        y = df["Deaths"].copy()
-    elif "log_Deaths" in df.columns:
-        y = df["log_Deaths"].copy()
+    # Ensure transformation has been applied
+    if "LogDeaths" not in df.columns:
+        df = transform(df)
     else:
-        # As a last resort, create a zero response to keep the function non-failing
-        y = pd.Series(np.zeros(len(df)), index=df.index, name="Deaths")
+        # make a shallow copy to avoid modifying caller's df
+        df = df.copy()
 
-    # Identify numeric predictors, excluding any response-like columns
-    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-    predictors = [c for c in numeric_cols if c not in {"Deaths", "log_Deaths"}]
+    # Identify candidate predictor columns (exclude target columns)
+    excluded = {"logdeaths", "deaths"}
+    predictor_candidates = []
+    for c in df.columns:
+        if c.lower() in excluded:
+            continue
+        # pick columns that look like useful numeric predictors:
+        lower = c.lower()
+        if any(key in lower for key in ("population", "pop", "case", "confirmed", "new", "age", "median")):
+            predictor_candidates.append(c)
 
-    # Build design matrix X (include intercept)
-    if len(predictors) == 0:
-        # Intercept-only model
-        X = pd.DataFrame({"intercept": np.ones(len(df))}, index=df.index)
+    # Coerce predictors to numeric where possible
+    if predictor_candidates:
+        exog = df[predictor_candidates].apply(pd.to_numeric, errors="coerce")
     else:
-        X = df[predictors].copy()
-        # Add intercept column
-        X.insert(0, "intercept", 1.0)
+        # If no sensible predictors found, create an empty DataFrame to which we'll add intercept
+        exog = pd.DataFrame(index=df.index)
 
-    # Align y and X and drop rows with NaNs in either
-    combined = pd.concat([y.rename("y"), X], axis=1)
-    combined_clean = combined.dropna(axis=0, how="any")
+    # Always include an intercept column
+    exog = exog.copy()
+    exog["Intercept"] = 1.0
 
-    if combined_clean.shape[0] == 0:
-        # No rows to fit: return sensible defaults
-        # Intercept is mean of y if available, otherwise 0
-        if y.dropna().shape[0] > 0:
-            intercept_val = float(y.dropna().mean())
-        else:
-            intercept_val = 0.0
+    # Endogenous variable
+    endog = pd.to_numeric(df["LogDeaths"], errors="coerce")
 
-        coeffs = {"intercept": intercept_val}
-        for col in predictors:
-            coeffs[col] = 0.0
+    # Combine and drop rows with NA in either endog or exog
+    model_df = pd.concat([endog.rename("LogDeaths"), exog], axis=1)
+    model_df = model_df.dropna()
 
-        n_obs = 0
-        predictions = pd.Series(np.full(len(df), intercept_val), index=df.index, name="predicted")
-        residuals = pd.Series(np.full(len(df), np.nan), index=df.index, name="residuals")
-
-        results = {
-            "coefficients": coeffs,
-            "r_squared": float("nan"),
-            "predictions": predictions,
-            "residuals": residuals,
-            "n_obs": n_obs,
+    if model_df.shape[0] < 2:
+        # Not enough observations to fit a regression
+        return {
+            "message": "Not enough complete observations to fit model",
+            "n_observations_total": len(df),
+            "n_observations_complete_cases": int(model_df.shape[0]),
         }
-        return results
 
-    # Proceed with ordinary least squares using numpy
-    y_clean = combined_clean["y"].values
-    X_clean = combined_clean.drop(columns="y").values
-    # Solve least squares
+    y = model_df["LogDeaths"]
+    X = model_df.drop(columns=["LogDeaths"])
+
     try:
-        betas, residuals_sum, rank, s = np.linalg.lstsq(X_clean, y_clean, rcond=None)
-    except np.linalg.LinAlgError:
-        # In case of numerical issues, fall back to zeros
-        betas = np.zeros(X_clean.shape[1])
+        results = sm.OLS(y, X).fit()
+    except Exception as e:
+        # In case something unexpected goes wrong, return a descriptive dict
+        return {"message": "Model fitting failed", "error": str(e)}
 
-    # Map coefficients back to names
-    coef_names = combined_clean.drop(columns="y").columns.tolist()
-    coefficients = {name: float(b) for name, b in zip(coef_names, betas)}
-
-    # Predictions for all rows: use available columns in X (for rows with NaN predictors, result will be NaN)
-    # Build full X matrix matching coef_names
-    X_full = X[coef_names].values
-    preds_full = X_full.dot(betas)
-    predictions = pd.Series(preds_full, index=df.index, name="predicted")
-
-    # Residuals: defined where both y and prediction are finite; otherwise NaN
-    residuals = pd.Series(np.nan, index=df.index, name="residuals")
-    common_index = combined_clean.index
-    residuals.loc[common_index] = combined_clean["y"].values - (X_clean.dot(betas))
-
-    # Compute R-squared on the cleaned data used for fitting
-    ss_res = np.sum((combined_clean["y"].values - X_clean.dot(betas)) ** 2)
-    ss_tot = np.sum((combined_clean["y"].values - combined_clean["y"].values.mean()) ** 2)
-    if ss_tot > 0:
-        r_squared = 1.0 - ss_res / ss_tot
-    else:
-        r_squared = float("nan")  # undefined when y is constant
-
-    results = {
-        "coefficients": coefficients,
-        "r_squared": float(r_squared),
-        "predictions": predictions,
-        "residuals": residuals,
-        "n_obs": int(combined_clean.shape[0]),
-    }
     return results
