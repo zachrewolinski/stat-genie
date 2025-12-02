@@ -5,21 +5,27 @@ import importlib.util
 import traceback
 from stat_genie.blade_pipeline.llms.config import llm
 
-def is_transform_model_code_correct(analysis_code_name: str,
-                                    analysis_code_path: str,
-                                    dataset_path: str,
-                                    verbose: bool=False) -> str:
+def is_code_correct(code_name: str,
+                    code_path: str,
+                    code_purpose: str,
+                    dataset_path: str = None,
+                    model_output = None,
+                    verbose: bool=False) -> str:
     """
-    Given a path to an LLM-generated Python file, this function checks if the
-    module can be imported without errors. This includes checking that the
-    file includes a function called `transform` and a function called `model`.
-    If there are no issues with the file, it returns `True`. If there are any
-    issues, it returns `False`.
+    Given a path to an LLM-generated Python file, check if the module can be
+    imported without errors. This includes checking that the file includes the
+    necessary functions for its purpose. If there are no issues with the file,
+    it returns `True`. If there are any issues, it returns `False`.
     
     Args:
-        analysis_code_name (str): The name of the analysis code.
-        analysis_code_path (str): The file path to the analysis code.
-        dataset_path (str): The file path to the dataset.
+        code_name (str): The name of the code file.
+        code_path (str): The path to the code file.
+        code_purpose (str): The purpose of the code. Must be either
+                            'transform_model' or 'final_answer'.
+        dataset_path (str): The path to the dataset. Only required if the
+                            'code_purpose' is 'transform_model'.
+        model_output: The output of the model function. Only required if the
+                      'code_purpose' is 'final_answer'.
         verbose (bool): Whether to print detailed error messages.
     
     Returns:
@@ -27,62 +33,89 @@ def is_transform_model_code_correct(analysis_code_name: str,
              back to the LLM.
     """
     
+    # handle code purposes
+    if code_purpose == 'transform_model':
+        assert dataset_path is not None, \
+            "Parameter `dataset_path` must be provided when \
+            `code_purpose` is 'transform_model'"
+        functions = ['transform', 'model']
+    elif code_purpose == 'final_answer':
+        assert model_output is not None, \
+            "Parameter `model_output` must be provided when \
+            `code_purpose` is 'final_answer'"
+        functions = ['extract_final_answer']
+    else:
+        raise ValueError("Parameter `code_purpose` must be either \
+            'transform_model' or 'final_answer'")
+    
     ### check for syntax errors and required functions ###
     try:
         # rename module to start with _ to avoid reloading errors
-        analysis_code_name = f"_{analysis_code_name}"
+        code_name = f"_{code_name}"
         
         # check that code file has no syntax errors
-        spec = importlib.util.spec_from_file_location(analysis_code_name,
-                                                      analysis_code_path)
+        spec = importlib.util.spec_from_file_location(code_name,
+                                                      code_path)
         module = importlib.util.module_from_spec(spec)
-        sys.modules[analysis_code_name] = module
+        sys.modules[code_name] = module
         spec.loader.exec_module(module)
         
         # check that required functions are present
-        if not hasattr(module, 'transform'):
-            msg = "Error: 'transform' function not found."
-            if verbose:
-                print(msg)
-            return msg
-        if not hasattr(module, 'model'):
-            msg = "Error: 'model' function not found."
-            if verbose:
-                print(msg)
-            return msg
+        for function in functions:
+            if not hasattr(module, function):
+                msg = f"Error: '{function}' function not found."
+                if verbose:
+                    print(msg)
+                return msg
     except Exception as e:
         error_trace = traceback.format_exc()
         msg = f"Error prior to runtime:\n{error_trace}"
         if verbose:
             print(msg)
         return msg
-    
+
     ### check for runtime errors ###
     try:
         # get the functions
-        transform_func = module.transform
-        model_func = module.model
+        if code_purpose == 'transform_model':
+            
+            # get the functions
+            transform_func = module.transform
+            model_func = module.model
+            
+            # read in the dataset
+            df = pd.read_csv(dataset_path)
+            
+            # run the transform function
+            transformed_df = transform_func(df)
+            
+            # run the model function
+            model_results = model_func(transformed_df)
         
-        # read in the dataset
-        df = pd.read_csv(dataset_path)
+        elif code_purpose == 'final_answer':
+            
+            # get the functions
+            final_answer_func = module.extract_final_answer
+            
+            # run the extract_final_answer function
+            final_answer = final_answer_func(model_output)
         
-        # run the transform function
-        transformed_df = transform_func(df)
-        
-        # run the model function
-        model_results = model_func(transformed_df)
-        
+        else:
+            raise ValueError("Parameter `code_purpose` must be either \
+                'transform_model' or 'final_answer'")
     except Exception as e:
-        error_trace = traceback.format_exc()
-        msg = f"Error during runtime:\n{error_trace}"
+        # error_trace = traceback.format_exc() # issues with patsy compatibility
+        trace_str = ''.join(traceback.format_tb(e.__traceback__))
+        err_and_trace = trace_str + f"{type(e).__name__}: {e}"
+        msg = f"Error during runtime:\n{err_and_trace}"
         if verbose:
             print(msg)
         return msg
     
     return None
 
-def transform_model_llm_correction(analysis_code_path: str, error_message: str,
-                                   llm_provider: str, llm_model: str) -> str:
+def llm_correction(code_path: str, error_message: str, code_purpose: str,
+                   llm_provider: str, llm_model: str) -> str:
     """
     Given the path of an LLM-generated Python file and an error
     message, this function requests corrections from the LLM. It reads the 
@@ -91,17 +124,15 @@ def transform_model_llm_correction(analysis_code_path: str, error_message: str,
     file path.
     
     Args:
-        analysis_code_path (str): The file path to the analysis code.
+        code_path (str): The file path to the analysis code.
         error_message (str): The message indicating what is wrong with the code.
-    
-    Returns:
+        code_purpose (str): The purpose of the code. Must be either
+                            'transform_model' or 'final_answer'.
+        llm_provider (str): LLM provider to use for corrections (e.g. OpenAI).
+        llm_model (str): The LLM model to use for corrections (e.g. GPT-5).
     """
-    
-    # instantiate llm to fix problem
-    llm_code_fixer = llm(provider=llm_provider, model=llm_model)
-    
     # read in the code content
-    with open(analysis_code_path, 'r') as file:
+    with open(code_path, 'r') as file:
         code_content = file.read()
     
     # construct the system prompt
@@ -115,10 +146,15 @@ def transform_model_llm_correction(analysis_code_path: str, error_message: str,
                              documentation and contents as well as the user
                              prompt context provided.
                              """
-    
+                             
     # construct the user prompt
-    code_fix_user_prompt = f"""
-                            The following Python code should define two functions:
+    if code_purpose == 'transform_model':
+        code_fix_user_prompt = f"""
+                            <code>
+                            {code_content}
+                            </code>
+                            
+                            The above Python code should define two functions:
                            
                             The transform function which follows the which will take the original dataframe \
                             and return the dataframe after all transformations. \
@@ -141,8 +177,8 @@ def transform_model_llm_correction(analysis_code_path: str, error_message: str,
                                 # Your code here
                                 return results
                             ```
-                            
-                            These two functions should be able to run without errors. \
+
+                            These functions should be able to run without errors. \
                             However, the current code has the following issue:
                             {error_message}
                             
@@ -150,176 +186,13 @@ def transform_model_llm_correction(analysis_code_path: str, error_message: str,
                             Your response should only include the corrected code file contents without any additional explanations, \
                             and should be able to be instantly converted into a .py file.
                             """
-    
-    # get the corrected code from the llm
-    response = llm_code_fixer.generate([{"role": "system",
-                                         "content": code_fix_system_prompt},
-                                        {"role": "user",
-                                         "content": code_fix_user_prompt}])
-    corrected_code = response.text[0].content
-    
-    # replace the code file with the corrected code
-    with open(analysis_code_path, 'w') as file:
-        file.write(corrected_code)
-    
-    return
-
-def check_and_fix_transform_model_code(analysis_code_name: str,
-                                       analysis_code_path: str,
-                                       dataset_path: str,
-                                       llm_provider: str,
-                                       llm_model: str,
-                                       verbose: bool = False) -> int:
-    """
-    Given a Python file written by an LLM, this function checks if the code is
-    correct. If the code is not correct, it requests corrections from the LLM
-    and updates the file with the corrected code. If it takes more than ten
-    iterations with an LLM to fix the code, the function stops and returns.
-    
-    Args:
-        analysis_code_name (str): The name of the analysis code.
-        analysis_code_path (str): The file path to the analysis code.
-        dataset_path (str): The file path to the dataset.
-        llm_provider (str): The LLM provider to use for corrections.
-        llm_model (str): The LLM model to use for corrections.
-        verbose (bool): Whether to print detailed error messages.
-    
-    Returns:
-        int: The number of iterations needed to fix the code. If the code was
-             correct on the first check, returns 0. If it takes more than 10
-             iterations, the function stops and returns -1.
-    """
-    
-    # starts at zero iterations
-    iterations = 0
-    
-    # initiate loop that only breaks when iter max has hit or code is correct
-    while True:
-        # append iteration count to the end of the analysis_code_name to avoid import issues
-        analysis_code_name_iter = f"{analysis_code_name}_{iterations}"
-        
-        # call helper function above
-        error_message = is_transform_model_code_correct(analysis_code_name_iter,
-                                        analysis_code_path,
-                                        dataset_path,
-                                        verbose=verbose)
-        # None corresponds to correct code
-        if error_message is None:
-            break
-        # iteration max, 10 is arbitrary but seems reasonable
-        # needs to be here so if the 10th iteration fixes the code it counts
-        if iterations >= 10:
-            return -1
-        # helper function which edits the file in place
-        transform_model_llm_correction(analysis_code_path, error_message,
-                       llm_provider, llm_model)
-        iterations += 1
-    
-    return iterations
-
-def is_final_answer_code_correct(analysis_code_name: str,
-                                 analysis_code_path: str,
-                                 model_output,
-                                 verbose: bool=False) -> str:
-    """
-    Given a path to an LLM-generated Python file, this function checks if the
-    module can be imported without errors. This includes checking that the
-    file includes a function called `transform` and a function called `model`.
-    If there are no issues with the file, it returns `True`. If there are any
-    issues, it returns `False`.
-    
-    Args:
-        analysis_code_name (str): The name of the analysis code.
-        analysis_code_path (str): The file path to the analysis code.
-        model_output: The output of the model function.
-        verbose (bool): Whether to print detailed error messages.
-    
-    Returns:
-        str: None if the code is correct, otherwise the error message to pass
-             back to the LLM.
-    """
-    
-    ### check for syntax errors and required functions ###
-    try:
-        # rename module to start with _ to avoid reloading errors
-        analysis_code_name = f"_{analysis_code_name}"
-        
-        # check that code file has no syntax errors
-        spec = importlib.util.spec_from_file_location(analysis_code_name,
-                                                      analysis_code_path)
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[analysis_code_name] = module
-        spec.loader.exec_module(module)
-        
-        # check that required functions are present
-        if not hasattr(module, 'extract_final_answer'):
-            msg = "Error: 'extract_final_answer' function not found."
-            if verbose:
-                print(msg)
-            return msg
-    except Exception as e:
-        error_trace = traceback.format_exc()
-        msg = f"Error prior to runtime:\n{error_trace}"
-        if verbose:
-            print(msg)
-        return msg
-    
-    ### check for runtime errors ###
-    try:
-        # get the functions
-        final_answer_func = module.extract_final_answer
-        
-        # run the extract_final_answer function
-        final_answer = final_answer_func(model_output)
-        
-    except Exception as e:
-        error_trace = traceback.format_exc()
-        msg = f"Error during runtime:\n{error_trace}"
-        if verbose:
-            print(msg)
-        return msg
-    
-    return None
-
-
-def final_answer_llm_correction(final_answer_code_path: str, error_message: str,
-                                llm_provider: str, llm_model: str) -> None:
-    """
-    Given the path of an LLM-generated Python file and an error
-    message, this function requests corrections from the LLM. It reads the 
-    content of the file and constructs a prompt including the error message.
-    The corrected code generated by the LLM will then be written to the same
-    file path.
-    
-    Args:
-        final_answer_code_path (str): The file path to the code.
-        error_message (str): The message indicating what is wrong with the code.
-        llm_provider (str): The LLM provider to use for corrections.
-        llm_model (str): The LLM model to use for corrections.    
-    """
-    
-    # instantiate llm to fix problem
-    llm_code_fixer = llm(provider=llm_provider, model=llm_model)
-    
-    # read in the code content
-    with open(final_answer_code_path, 'r') as file:
-        code_content = file.read()
-    
-    # construct the system prompt
-    code_fix_system_prompt = """
-                             You are an expert Python programmer. Your task is
-                             to fix issues in the provided code based on the
-                             error message given. Ensure that the corrected code
-                             adheres to best practices, is free of syntax
-                             errors, and is consistent with the original intent
-                             of the code as evidenced by the code's
-                             documentation and contents as well as the user
-                             prompt context provided.
-                             """
-    
-    # construct the user prompt
-    code_fix_user_prompt = f"""
-                            The following Python code should define one function, `extract_final_answer`:
+    elif code_purpose == 'final_answer':
+        code_fix_user_prompt = f"""
+                            <code>
+                            {code_content}
+                            </code>
+                            
+                            The above Python code should define one function, `extract_final_answer`:
                            
                             The function should:
                             - Take the model_output as input
@@ -344,6 +217,12 @@ def final_answer_llm_correction(final_answer_code_path: str, error_message: str,
                             Your response should only include the corrected code file contents without any additional explanations, \
                             and should be able to be instantly converted into a .py file.
                             """
+    else:
+        raise ValueError("Parameter `code_purpose` must be either \
+            'transform_model' or 'final_answer'")
+    
+    # instantiate llm to fix problem
+    llm_code_fixer = llm(provider=llm_provider, model=llm_model)
     
     # get the corrected code from the llm
     response = llm_code_fixer.generate([{"role": "system",
@@ -353,17 +232,19 @@ def final_answer_llm_correction(final_answer_code_path: str, error_message: str,
     corrected_code = response.text[0].content
     
     # replace the code file with the corrected code
-    with open(final_answer_code_path, 'w') as file:
+    with open(code_path, 'w') as file:
         file.write(corrected_code)
     
     return
 
-def check_and_fix_final_answer_code(final_answer_code_name: str,
-                                    final_answer_code_path: str,
-                                    model_output,
-                                    llm_provider: str,
-                                    llm_model: str,
-                                    verbose: bool = False) -> int:
+def check_and_fix_code(code_name: str,
+                       code_path: str,
+                       code_purpose: str,
+                       llm_provider: str,
+                       llm_model: str,
+                       dataset_path: str = None,
+                       model_output = None,
+                       verbose: bool = False) -> int:
     """
     Given a Python file written by an LLM, this function checks if the code is
     correct. If the code is not correct, it requests corrections from the LLM
@@ -371,11 +252,16 @@ def check_and_fix_final_answer_code(final_answer_code_name: str,
     iterations with an LLM to fix the code, the function stops and returns.
     
     Args:
-        final_answer_code_name (str): The name of the analysis code.
-        final_answer_code_path (str): The file path to the analysis code.
-        model_output: The output from the model to be checked.
+        code_name (str): The name of the code file.
+        code_path (str): The path to the code file.
+        code_purpose (str): The purpose of the code. Must be either
+                            'transform_model' or 'final_answer'.
         llm_provider (str): The LLM provider to use for corrections.
         llm_model (str): The LLM model to use for corrections.
+        dataset_path (str): The path to the dataset. Only required if the
+                            'code_purpose' is 'transform_model'.
+        model_output: The output of the model function. Only required if the
+                      'code_purpose' is 'final_answer'.
         verbose (bool): Whether to print detailed error messages.
     
     Returns:
@@ -389,13 +275,15 @@ def check_and_fix_final_answer_code(final_answer_code_name: str,
     
     # initiate loop that only breaks when iter max has hit or code is correct
     while True:
-        # append iteration count to the end of the final_answer_code_name to avoid import issues
-        final_answer_code_name_iter = f"{final_answer_code_name}_{iterations}"
+        # append iteration count to the end of the analysis_code_name to avoid import issues
+        code_name_iter = f"{code_name}_{iterations}"
         
         # call helper function above
-        error_message = is_final_answer_code_correct(final_answer_code_name_iter,
-                                        final_answer_code_path,
-                                        model_output,
+        error_message = is_code_correct(code_name_iter,
+                                        code_path,
+                                        code_purpose,
+                                        dataset_path=dataset_path,
+                                        model_output=model_output,
                                         verbose=verbose)
         # None corresponds to correct code
         if error_message is None:
@@ -405,8 +293,8 @@ def check_and_fix_final_answer_code(final_answer_code_name: str,
         if iterations >= 10:
             return -1
         # helper function which edits the file in place
-        final_answer_llm_correction(final_answer_code_path, error_message,
-                                    llm_provider, llm_model)
+        llm_correction(code_path, error_message, code_purpose, llm_provider,
+                       llm_model)
         iterations += 1
     
     return iterations
