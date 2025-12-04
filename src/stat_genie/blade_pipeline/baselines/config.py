@@ -76,6 +76,7 @@ class EvalConfig(BaseModel):
 class MultiRunConfig(SingleRunConfig):
     num_runs: int = 10
     save_results: bool = True
+    fix_code: bool = Field(default=False, description="Whether to fix code after generation (preserves cvars column names)")
 
 
 class BenchmarkMCQConfig(BaseModel):

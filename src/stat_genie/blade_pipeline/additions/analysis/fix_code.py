@@ -298,3 +298,222 @@ def check_and_fix_code(code_name: str,
         iterations += 1
     
     return iterations
+
+
+def llm_correction_with_cvars(
+    code_path: str,
+    error_message: str,
+    cvars_text: str,
+    llm_provider: str,
+    llm_model: str
+) -> None:
+    """
+    Request code corrections from LLM with cvars constraints in the prompt.
+    
+    This is a cvars-aware version of llm_correction that includes
+    the conceptual variables and their required column names in the prompt.
+    
+    Args:
+        code_path: Path to the code file to fix
+        error_message: Error message describing what's wrong
+        cvars_text: Formatted text describing cvars and their columns
+        llm_provider: LLM provider to use
+        llm_model: LLM model to use
+    """
+    # Read the code content
+    with open(code_path, 'r') as file:
+        code_content = file.read()
+    
+    # System prompt
+    code_fix_system_prompt = """
+                             You are an expert Python programmer. Your task is
+                             to fix issues in the provided code based on the
+                             error message given. Ensure that the corrected code
+                             adheres to best practices, is free of syntax
+                             errors, and is consistent with the original intent
+                             of the code as evidenced by the code's
+                             documentation and contents as well as the user
+                             prompt context provided.
+                             """
+    
+    # User prompt with cvars constraints
+    code_fix_user_prompt = f"""
+                            <code>
+                            {code_content}
+                            </code>
+                            
+                            You are fixing Python code that defines TWO functions:
+
+                            1. A transform function:
+
+                                def transform(df: pd.DataFrame) -> pd.DataFrame:
+                                    ...
+
+                               This function reads a raw dataframe and returns a FINAL dataframe with all columns
+                               needed for the statistical model.
+
+                            2. A model function:
+
+                                def model(df: pd.DataFrame) -> Any:
+                                    ...
+
+                               This function takes the FINAL dataframe (output of transform) and fits a statistical model.
+
+                            ============================================================
+                            CONCEPTUAL VARIABLES AND REQUIRED FINAL DATAFRAME COLUMNS
+                            ============================================================
+
+                            The conceptual variables and their REQUIRED FINAL dataframe columns are:
+
+                            {cvars_text}
+
+                            Each item above specifies:
+                            - A conceptual variable (independent / dependent / control)
+                            - The EXACT column name(s) in the FINAL dataframe that implement that variable.
+
+                            These conceptual variables and their column names are ALREADY fixed and are used
+                            elsewhere (e.g., in JSON outputs and evaluation). They MUST NOT change.
+
+                            Your job is to fix the code so that it runs correctly WHILE STRICTLY PRESERVING
+                            this contract.
+
+                            ------------------------------------------------------------
+                            HARD CONSTRAINTS YOU MUST FOLLOW
+                            ------------------------------------------------------------
+
+                            1. DO NOT change any of the column names listed in the block above.
+                               - You MUST NOT rename, delete, or alter the spelling/casing of these columns
+                                 anywhere in either the transform or model code.
+                               - If the current code uses different names, you MUST change the CODE so that it
+                                 uses the EXACT names listed above instead.
+
+                            2. DO NOT change which columns the model uses as inputs for these conceptual variables.
+                               - The identity and roles of IVs, DV, and controls are fixed by the conceptual
+                                 variables and their associated column names above.
+                               - You MUST NOT introduce new model input columns that are not in this list.
+                               - You MUST NOT swap, drop, or reinterpret which column corresponds to which
+                                 conceptual variable.
+
+                            3. You MAY add internal helper columns inside the transform function, BUT:
+                               - These helper columns are for intermediate computation only.
+                               - They MUST NOT be treated as new conceptual variables.
+                               - They MUST NOT be required inputs to the model beyond what is already
+                                 specified by the conceptual variables block.
+                               - The model's effective inputs (its formula, design matrix, etc.) must still
+                                 ultimately be the same conceptual variables/columns listed above.
+
+                            4. You MUST preserve the function signatures and return types:
+                               - transform(df: pd.DataFrame) -> pd.DataFrame
+                               - model(df: pd.DataFrame) -> Any
+
+                            5. You MUST NOT change the high-level semantics of the analysis:
+                               - The research question, conceptual meaning of variables, and their mapping
+                                 to final dataframe columns must remain exactly the same.
+                               - Assume that the JSON representation of the analysis (including cvars and
+                                 their columns) is authoritative and must remain valid.
+
+                            ------------------------------------------------------------
+                            WHAT IS WRONG WITH THE CURRENT CODE
+                            ------------------------------------------------------------
+
+                            The current code has the following issue:
+
+                            {error_message}
+
+                            ------------------------------------------------------------
+                            YOUR TASK
+                            ------------------------------------------------------------
+
+                            Please provide a corrected version of the FULL code file that:
+
+                            - Fixes the issue described above so that the code runs without errors
+                              when transform is applied to the dataset and model is called on the
+                              transformed dataframe.
+                            - STRICTLY respects all constraints about column names and conceptual
+                              variables described above.
+                            - May introduce internal helper columns ONLY as allowed above.
+
+                            Your response MUST:
+
+                            - Contain ONLY the corrected Python code file contents (no explanations).
+                            - Be valid Python that can be saved directly as a .py file and imported.
+                            """
+    
+    # Instantiate LLM to fix problem
+    llm_code_fixer = llm(provider=llm_provider, model=llm_model)
+    
+    # Get the corrected code from the LLM
+    response = llm_code_fixer.generate([{"role": "system",
+                                         "content": code_fix_system_prompt},
+                                        {"role": "user",
+                                         "content": code_fix_user_prompt}])
+    corrected_code = response.text[0].content
+    
+    # Replace the code file with the corrected code
+    with open(code_path, 'w') as file:
+        file.write(corrected_code)
+    
+    return
+
+
+def check_and_fix_code_with_cvars(
+    code_name: str,
+    code_path: str,
+    cvars_text: str,
+    llm_provider: str,
+    llm_model: str,
+    dataset_path: str,
+    verbose: bool = False
+) -> int:
+    """
+    Check and fix code with cvars preservation constraints.
+    
+    This is a cvars-aware version of check_and_fix_code that ensures
+    column names in cvars are preserved during fixing.
+    
+    Args:
+        code_name: Name of the code file
+        code_path: Path to the code file
+        cvars_text: Formatted text describing cvars and their columns
+        llm_provider: LLM provider to use for corrections
+        llm_model: LLM model to use for corrections
+        dataset_path: Path to the dataset
+        verbose: Whether to print detailed error messages
+        
+    Returns:
+        Number of iterations needed to fix the code (0 if already correct, -1 if max iterations reached)
+    """
+    iterations = 0
+    max_iterations = 10
+    
+    while True:
+        code_name_iter = f"{code_name}_{iterations}"
+        
+        # Check if code is correct
+        error_message = is_code_correct(
+            code_name_iter,
+            code_path,
+            'transform_model',
+            dataset_path=dataset_path,
+            verbose=verbose
+        )
+        
+        # None means code is correct
+        if error_message is None:
+            break
+        
+        # Check iteration limit
+        if iterations >= max_iterations:
+            return -1
+        
+        # Fix the code with cvars constraints
+        llm_correction_with_cvars(
+            code_path,
+            error_message,
+            cvars_text,
+            llm_provider,
+            llm_model
+        )
+        iterations += 1
+    
+    return iterations
