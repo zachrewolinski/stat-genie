@@ -18,6 +18,99 @@ from blade_bench.eval.utils import (
     SAVE_CODE_TEMPLATE,
 )
 from blade_bench.logger import logger
+from stat_genie.blade_pipeline.additions.analysis.fix_code import (
+    is_code_correct,
+    check_and_fix_code_with_cvars,
+)
+
+
+def _extract_code_from_file(file_path: str) -> Tuple[str, str]:
+    """
+    Extract transform_code and model_code from a .py file.
+    
+    The file should contain markers:
+    - '# ======== TRANSFORM CODE ========'
+    - '# ======== MODEL CODE ========'
+    
+    Args:
+        file_path: Path to the .py file
+        
+    Returns:
+        Tuple of (transform_code, model_code)
+    """
+    with open(file_path, 'r') as f:
+        content = f.read()
+    
+    # Split on the markers
+    transform_marker = '# ======== TRANSFORM CODE ========'
+    model_marker = '# ======== MODEL CODE ========'
+    
+    if transform_marker not in content:
+        raise ValueError(f"Transform code marker not found in {file_path}")
+    if model_marker not in content:
+        raise ValueError(f"Model code marker not found in {file_path}")
+    
+    # Extract transform code (between transform marker and model marker)
+    transform_start = content.find(transform_marker) + len(transform_marker)
+    transform_end = content.find(model_marker)
+    transform_code = content[transform_start:transform_end].strip()
+    
+    # Extract model code (after model marker to end of file)
+    model_start = content.find(model_marker) + len(model_marker)
+    model_code = content[model_start:].strip()
+    
+    return transform_code, model_code
+
+
+def _format_cvars_for_prompt(cvars) -> str:
+    """
+    Format cvars into a human-readable string for the LLM prompt.
+    
+    Args:
+        cvars: AgentCVarsWithCol object
+        
+    Returns:
+        Formatted string describing the conceptual variables and their columns
+    """
+    lines = []
+    lines.append("Independent variables:")
+    for iv in cvars.ivs:
+        lines.append(f"  - {iv.description} : columns = {iv.columns}")
+    
+    lines.append("\nDependent variable:")
+    lines.append(f"  - {cvars.dv.description} : columns = {cvars.dv.columns}")
+    
+    lines.append("\nControl variables:")
+    for control in cvars.controls:
+        lines.append(f"  - {control.description} : columns = {control.columns}")
+        if control.is_moderator:
+            lines.append(f"    (Moderator on: {control.moderator_on})")
+    
+    return "\n".join(lines)
+
+
+def _update_analysis_with_fixed_code(
+    analysis: EntireAnalysis,
+    fixed_transform_code: str,
+    fixed_model_code: str
+) -> EntireAnalysis:
+    """
+    Update an EntireAnalysis object with fixed code while preserving cvars.
+    
+    Args:
+        analysis: Original EntireAnalysis object
+        fixed_transform_code: Fixed transform code
+        fixed_model_code: Fixed model code
+        
+    Returns:
+        New EntireAnalysis object with fixed code but original cvars
+    """
+    # Create a new EntireAnalysis with fixed code but same cvars
+    return EntireAnalysis(
+        cvars=analysis.cvars,  # Preserve cvars exactly
+        transform_code=fixed_transform_code,
+        m_code=fixed_model_code
+    )
 
 
 class RunLLMMultiRun(SingleRunExperiment):
@@ -30,6 +123,8 @@ class RunLLMMultiRun(SingleRunExperiment):
         
     def __save_results(self, results: MultiRunResults):
         os.makedirs(self.config.output_dir, exist_ok=True)
+        
+        # Step 1: Write .py files
         for i, analysis in results.analyses.items():
             if isinstance(analysis, EntireAnalysis):
                 save_path = osp.join(self.config.output_dir, f"llm_analysis_{i}.py")
@@ -40,6 +135,50 @@ class RunLLMMultiRun(SingleRunExperiment):
                         model_code=analysis.m_code,
                     )
                     f.write(code)
+        
+        # Step 2: Fix .py files (if enabled) and update analyses with fixed code
+        if self.config.fix_code:
+            dataset_path = get_dataset_csv_path(self.config.run_dataset)
+            llm_provider = self.config.llm.provider
+            llm_model = self.config.llm.model
+            
+            for i, analysis in results.analyses.items():
+                if isinstance(analysis, EntireAnalysis):
+                    save_path = osp.join(self.config.output_dir, f"llm_analysis_{i}.py")
+                    
+                    # Format cvars for the prompt
+                    cvars_text = _format_cvars_for_prompt(analysis.cvars)
+                    
+                    # Fix the code (with cvars preservation)
+                    try:
+                        iterations = check_and_fix_code_with_cvars(
+                            code_name=f"llm_analysis_{i}",
+                            code_path=save_path,
+                            cvars_text=cvars_text,
+                            llm_provider=llm_provider,
+                            llm_model=llm_model,
+                            dataset_path=dataset_path,
+                            verbose=False
+                        )
+                        
+                        if iterations >= 0:
+                            # Step 3: Extract fixed code from .py file
+                            fixed_transform_code, fixed_model_code = _extract_code_from_file(save_path)
+                            
+                            # Step 4: Update EntireAnalysis with fixed code
+                            results.analyses[i] = _update_analysis_with_fixed_code(
+                                analysis,
+                                fixed_transform_code,
+                                fixed_model_code
+                            )
+                            
+                            logger.info(f"Fixed code for analysis {i} in {iterations} iteration(s)")
+                        else:
+                            logger.warning(f"Code fixing for analysis {i} hit max iterations, using original code")
+                    except Exception as e:
+                        logger.warning(f"Code fixing failed for analysis {i}: {e}. Using original code.")
+        
+        # Step 5: Write JSON (now contains fixed code if fixing was enabled)
         with open(osp.join(self.config.output_dir, "multirun_analyses.json"), "w") as f:
             f.write(results.model_dump_json(indent=2))
         with open(osp.join(self.config.output_dir, "config.json"), "w") as f:
