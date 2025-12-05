@@ -1,25 +1,46 @@
-from openai import OpenAI
-import os
-import pandas as pd
-from os.path import join
 import json
-from dotenv import load_dotenv
+from stat_genie.blade_pipeline.llms.config import llm
 
-load_dotenv()
+def make_judge_prompt(task, data_head, featA, featB, modelA, modelB, conclA, conclB):
+    return (
+        f"Research Question / Context:\n{task}\n\n"
+        "Here is a sample of the dataset to understand the structure and variables:\n"
+        f"{data_head}\n\n"
+        "Compare the two trials methodologically and interpretively based on the provided variables, model specifications, and conclusions.\n\n"
+        "==================== TRIAL A ====================\n\n"
+        "Independent Variables:\n"
+        f"{featA['independent_variables']}\n\n"
+        "Control Variables:\n"
+        f"{featA.get('control_variables')}\n\n"
+        "Response Variables:\n"
+        f"{featA['response_variables']}\n\n"
+        "Model Specification:\n"
+        f"{modelA}\n\n"
+        "Conclusion:\n"
+        f"{conclA}\n\n"
+        "==================== TRIAL B ====================\n\n"
+        "Independent Variables:\n"
+        f"{featB['independent_variables']}\n\n"
+        "Control Variables:\n"
+        f"{featB.get('control_variables')}\n\n"
+        "Response Variables:\n"
+        f"{featB['response_variables']}\n\n"
+        "Model Specification:\n"
+        f"{modelB}\n\n"
+        "Conclusion:\n"
+        f"{conclB}\n\n"
+        "Now, following your reasoning plan, provide similarity ratings as JSON only."
+    )
 
-JUDGE_MODEL = "gpt-5-mini"
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-
-client = OpenAI(api_key=OPENAI_API_KEY)
-
-dataset_name = ""  #set this
-dataset_path = join("..", "..", "datasets", dataset_name, "data.csv")
-data = pd.read_csv(dataset_path)
-data_head = data.head(10)
-data_head_preview = data_head.to_markdown(index=False)
-
-def judge_all(q, features_vars, features_models, features_conclusions):
-    system_prompt = (
+def run_judge_evaluation_pairwise(
+    task, data_head,
+    features_1, features_2,
+    model_info_1, model_info_2,
+    conclusions_1, conclusions_2,
+    llm_provider="openai", llm_model="gpt-5-mini",
+    output_path=None
+):
+    judge_system_prompt = (
         "You are a meticulous research design evaluator. "
         "Your role is to compare two experimental trials methodologically **and interpretively**.\n\n"
         "You will go through the following reasoning plan step-by-step (internally):\n"
@@ -52,61 +73,54 @@ def judge_all(q, features_vars, features_models, features_conclusions):
         "}"
     )
 
+    llm_judge = llm(provider=llm_provider, model=llm_model)
 
-    user_prompt = (
-        f"Research Question / Context:\n{q}\n\n"
-        "Here is a sample of the dataset to understand the structure and variables:\n"
-        f"{data_head_preview}\n\n"
-        "Compare the two trials methodologically and interpretively based on the provided variables, model specifications, and conclusions.\n\n"
-        "==================== TRIAL 0 ====================\n\n"
-        "Independent Variables:\n"
-        f"{json.dumps(features_vars[0]['independent_variables'], indent=2)}\n\n"
-        "Control Variables:\n"
-        f"{json.dumps(features_vars[0]['control_variables'], indent=2)}\n\n"
-        "Response Variables:\n"
-        f"{json.dumps(features_vars[0]['response_variables'], indent=2)}\n\n"
-        "Model Specification:\n"
-        f"{json.dumps(json.loads(features_models[0]), indent=2)}\n\n"
-        "Conclusion:\n"
-        f"{json.dumps(json.loads(features_conclusions[0]), indent=2)}\n\n"
-        "==================== TRIAL 1 ====================\n\n"
-        "Independent Variables:\n"
-        f"{json.dumps(features_vars[1]['independent_variables'], indent=2)}\n\n"
-        "Control Variables:\n"
-        f"{json.dumps(features_vars[1]['control_variables'], indent=2)}\n\n"
-        "Response Variables:\n"
-        f"{json.dumps(features_vars[1]['response_variables'], indent=2)}\n\n"
-        "Model Specification:\n"
-        f"{json.dumps(json.loads(features_models[1]), indent=2)}\n\n"
-        "Conclusion:\n"
-        f"{json.dumps(json.loads(features_conclusions[1]), indent=2)}\n\n"
-        "Now, following your reasoning plan, provide similarity ratings as JSON only."
-    )
+    pairwise_results = {}
+    nA = len(features_1)
+    nB = len(features_2)
 
-    resp = client.responses.create(
-        model=JUDGE_MODEL,
-        input=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=0,
-    )
+    for i in range(nA):
+        for j in range(nB):
 
-    text = resp.output_text.strip()
-    try:
-        scores = json.loads(text)
-    except json.JSONDecodeError:
-        print("⚠️ Could not parse response as JSON. Raw output:")
-        print(text)
-        return None
+            user_prompt = make_judge_prompt(
+                task, data_head,
+                features_1[i], features_2[j],
+                model_info_1[i], model_info_2[j],
+                conclusions_1[i], conclusions_2[j]
+            )
 
-    print("Similarity Scores by Category:")
-    for key, val in scores.items():
-        print(f"  {key}: {val}")
+            result = llm_judge.generate([
+                {"role": "system", "content": judge_system_prompt},
+                {"role": "user", "content": user_prompt}
+            ])
+            if hasattr(result, "text"):
+                text = result.text
+            elif hasattr(result, "content"):
+                text = result.content
+            else:
+                text = str(result)
 
-    return scores
+            text = str(text).strip()
+
+            clean = (
+                text.replace("```json", "")
+                    .replace("```", "")
+                    .strip()
+            )
+
+            pairwise_results[(i, j)] = clean
+
+    if output_path:
+        serializable = {}
+        for k, v in pairwise_results.items():
+            try:
+                serializable[str(k)] = json.loads(v)
+            except:
+                serializable[str(k)] = v 
+
+        with open(output_path, "w") as f:
+            json.dump(serializable, f, indent=2)
+
+    return pairwise_results
 
 
-
-if __name__ == "__main__":
-    print("Testing judge function...")
