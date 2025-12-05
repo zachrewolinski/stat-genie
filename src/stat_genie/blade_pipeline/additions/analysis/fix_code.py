@@ -114,8 +114,13 @@ def is_code_correct(code_name: str,
     
     return None
 
-def llm_correction(code_path: str, error_message: str, code_purpose: str,
-                   llm_provider: str, llm_model: str) -> str:
+def llm_correction(code_path: str,
+                   error_message: str,
+                   code_purpose: str,
+                   llm_provider: str,
+                   llm_model: str,
+                   cvars_text: str = None
+) -> str:
     """
     Given the path of an LLM-generated Python file and an error
     message, this function requests corrections from the LLM. It reads the 
@@ -130,6 +135,8 @@ def llm_correction(code_path: str, error_message: str, code_purpose: str,
                             'transform_model' or 'final_answer'.
         llm_provider (str): LLM provider to use for corrections (e.g. OpenAI).
         llm_model (str): The LLM model to use for corrections (e.g. GPT-5).
+        cvars_text (str): Formatted text describing cvars and their columns.
+                          Only used when code_purpose is 'transform_model'.
     """
     # read in the code content
     with open(code_path, 'r') as file:
@@ -149,195 +156,10 @@ def llm_correction(code_path: str, error_message: str, code_purpose: str,
                              
     # construct the user prompt
     if code_purpose == 'transform_model':
+        assert cvars_text is not None, \
+            "Parameter `cvars_text` must be provided when \
+            `code_purpose` is 'transform_model'"
         code_fix_user_prompt = f"""
-                            <code>
-                            {code_content}
-                            </code>
-                            
-                            The above Python code should define two functions:
-                           
-                            The transform function which follows the which will take the original dataframe \
-                            and return the dataframe after all transformations. \
-                            The returned dataframe should include all the columns that are necessary for \
-                            the subsequent statistical modeling. \
-                            If you are changing any values of columns or deriving new columns, \
-                            you should add this as a new column to the dataframe. \
-                            Here is the code template for the transform function:
-                            ```python
-                            def transform(df: pd.DataFrame) -> pd.DataFrame:
-                                # Your code here
-                                return df
-                            ```
-                                
-                            The model function which will take the transformed dataframe \
-                            and run a statistical model on it. The model function should return the results of the model.
-                            Here is the code template for the model function:
-                            ```python
-                            def model(df: pd.DataFrame) -> Any:
-                                # Your code here
-                                return results
-                            ```
-
-                            These functions should be able to run without errors. \
-                            However, the current code has the following issue:
-                            {error_message}
-                            
-                            Please provide a corrected version of the full code that resolves this issue. \
-                            Your response should only include the corrected code file contents without any additional explanations, \
-                            and should be able to be instantly converted into a .py file.
-                            """
-    elif code_purpose == 'final_answer':
-        code_fix_user_prompt = f"""
-                            <code>
-                            {code_content}
-                            </code>
-                            
-                            The above Python code should define one function, `extract_final_answer`:
-                           
-                            The function should:
-                            - Take the model_output as input
-                            - Extract the necessary statistics from the model output object
-                            - Return a dictionary with:
-                                - "object": The actual value you would like to return (e.g. a coefficient, p-value, etc.)
-                                - "description": A brief explanation of the extracted statistics/return object and what it means in the context of the task
-                            
-                            Here is the code template for the extract_final_answer function:
-                            ```python
-                            def extract_final_answer(model_output):
-                                # Your code here to extract and interpret statistics from model_output
-                                # Return a dictionary with keys: "object", "description"
-                                pass
-                            ```
-
-                            This function should be able to run without errors. \
-                            However, the current code has the following issue:
-                            {error_message}
-                            
-                            Please provide a corrected version of the full code that resolves this issue. \
-                            Your response should only include the corrected code file contents without any additional explanations, \
-                            and should be able to be instantly converted into a .py file.
-                            """
-    else:
-        raise ValueError("Parameter `code_purpose` must be either \
-            'transform_model' or 'final_answer'")
-    
-    # instantiate llm to fix problem
-    llm_code_fixer = llm(provider=llm_provider, model=llm_model)
-    
-    # get the corrected code from the llm
-    response = llm_code_fixer.generate([{"role": "system",
-                                         "content": code_fix_system_prompt},
-                                        {"role": "user",
-                                         "content": code_fix_user_prompt}])
-    corrected_code = response.text[0].content
-    
-    # replace the code file with the corrected code
-    with open(code_path, 'w') as file:
-        file.write(corrected_code)
-    
-    return
-
-def check_and_fix_code(code_name: str,
-                       code_path: str,
-                       code_purpose: str,
-                       llm_provider: str,
-                       llm_model: str,
-                       dataset_path: str = None,
-                       model_output = None,
-                       verbose: bool = False) -> int:
-    """
-    Given a Python file written by an LLM, this function checks if the code is
-    correct. If the code is not correct, it requests corrections from the LLM
-    and updates the file with the corrected code. If it takes more than ten
-    iterations with an LLM to fix the code, the function stops and returns.
-    
-    Args:
-        code_name (str): The name of the code file.
-        code_path (str): The path to the code file.
-        code_purpose (str): The purpose of the code. Must be either
-                            'transform_model' or 'final_answer'.
-        llm_provider (str): The LLM provider to use for corrections.
-        llm_model (str): The LLM model to use for corrections.
-        dataset_path (str): The path to the dataset. Only required if the
-                            'code_purpose' is 'transform_model'.
-        model_output: The output of the model function. Only required if the
-                      'code_purpose' is 'final_answer'.
-        verbose (bool): Whether to print detailed error messages.
-    
-    Returns:
-        int: The number of iterations needed to fix the code. If the code was
-             correct on the first check, returns 0. If it takes more than 10
-             iterations, the function stops and returns -1.
-    """
-    
-    # starts at zero iterations
-    iterations = 0
-    
-    # initiate loop that only breaks when iter max has hit or code is correct
-    while True:
-        # append iteration count to the end of the analysis_code_name to avoid import issues
-        code_name_iter = f"{code_name}_{iterations}"
-        
-        # call helper function above
-        error_message = is_code_correct(code_name_iter,
-                                        code_path,
-                                        code_purpose,
-                                        dataset_path=dataset_path,
-                                        model_output=model_output,
-                                        verbose=verbose)
-        # None corresponds to correct code
-        if error_message is None:
-            break
-        # iteration max, 10 is arbitrary but seems reasonable
-        # needs to be here so if the 10th iteration fixes the code it counts
-        if iterations >= 10:
-            return -1
-        # helper function which edits the file in place
-        llm_correction(code_path, error_message, code_purpose, llm_provider,
-                       llm_model)
-        iterations += 1
-    
-    return iterations
-
-
-def llm_correction_with_cvars(
-    code_path: str,
-    error_message: str,
-    cvars_text: str,
-    llm_provider: str,
-    llm_model: str
-) -> None:
-    """
-    Request code corrections from LLM with cvars constraints in the prompt.
-    
-    This is a cvars-aware version of llm_correction that includes
-    the conceptual variables and their required column names in the prompt.
-    
-    Args:
-        code_path: Path to the code file to fix
-        error_message: Error message describing what's wrong
-        cvars_text: Formatted text describing cvars and their columns
-        llm_provider: LLM provider to use
-        llm_model: LLM model to use
-    """
-    # Read the code content
-    with open(code_path, 'r') as file:
-        code_content = file.read()
-    
-    # System prompt
-    code_fix_system_prompt = """
-                             You are an expert Python programmer. Your task is
-                             to fix issues in the provided code based on the
-                             error message given. Ensure that the corrected code
-                             adheres to best practices, is free of syntax
-                             errors, and is consistent with the original intent
-                             of the code as evidenced by the code's
-                             documentation and contents as well as the user
-                             prompt context provided.
-                             """
-    
-    # User prompt with cvars constraints
-    code_fix_user_prompt = f"""
                             <code>
                             {code_content}
                             </code>
@@ -438,82 +260,118 @@ def llm_correction_with_cvars(
                             - Contain ONLY the corrected Python code file contents (no explanations).
                             - Be valid Python that can be saved directly as a .py file and imported.
                             """
+    elif code_purpose == 'final_answer':
+        code_fix_user_prompt = f"""
+                            <code>
+                            {code_content}
+                            </code>
+                            
+                            The above Python code should define one function, `extract_final_answer`:
+                           
+                            The function should:
+                            - Take the model_output as input
+                            - Extract the necessary statistics from the model output object
+                            - Return a dictionary with:
+                                - "object": The actual value you would like to return (e.g. a coefficient, p-value, etc.)
+                                - "description": A brief explanation of the extracted statistics/return object and what it means in the context of the task
+                            
+                            Here is the code template for the extract_final_answer function:
+                            ```python
+                            def extract_final_answer(model_output):
+                                # Your code here to extract and interpret statistics from model_output
+                                # Return a dictionary with keys: "object", "description"
+                                pass
+                            ```
+
+                            This function should be able to run without errors. \
+                            However, the current code has the following issue:
+                            {error_message}
+                            
+                            Please provide a corrected version of the full code that resolves this issue. \
+                            Your response should only include the corrected code file contents without any additional explanations, \
+                            and should be able to be instantly converted into a .py file.
+                            """
+    else:
+        raise ValueError("Parameter `code_purpose` must be either \
+            'transform_model' or 'final_answer'")
     
-    # Instantiate LLM to fix problem
+    # instantiate llm to fix problem
     llm_code_fixer = llm(provider=llm_provider, model=llm_model)
     
-    # Get the corrected code from the LLM
+    # get the corrected code from the llm
     response = llm_code_fixer.generate([{"role": "system",
                                          "content": code_fix_system_prompt},
                                         {"role": "user",
                                          "content": code_fix_user_prompt}])
     corrected_code = response.text[0].content
     
-    # Replace the code file with the corrected code
+    # replace the code file with the corrected code
     with open(code_path, 'w') as file:
         file.write(corrected_code)
     
     return
 
-
-def check_and_fix_code_with_cvars(
-    code_name: str,
-    code_path: str,
-    cvars_text: str,
-    llm_provider: str,
-    llm_model: str,
-    dataset_path: str,
-    verbose: bool = False
-) -> int:
+def check_and_fix_code(code_name: str,
+                       code_path: str,
+                       code_purpose: str,
+                       llm_provider: str,
+                       llm_model: str,
+                       cvars_text: str = None,
+                       dataset_path: str = None,
+                       model_output = None,
+                       verbose: bool = False) -> int:
     """
-    Check and fix code with cvars preservation constraints.
-    
-    This is a cvars-aware version of check_and_fix_code that ensures
-    column names in cvars are preserved during fixing.
+    Given a Python file written by an LLM, this function checks if the code is
+    correct. If the code is not correct, it requests corrections from the LLM
+    and updates the file with the corrected code. If it takes more than ten
+    iterations with an LLM to fix the code, the function stops and returns.
     
     Args:
-        code_name: Name of the code file
-        code_path: Path to the code file
-        cvars_text: Formatted text describing cvars and their columns
-        llm_provider: LLM provider to use for corrections
-        llm_model: LLM model to use for corrections
-        dataset_path: Path to the dataset
-        verbose: Whether to print detailed error messages
-        
-    Returns:
-        Number of iterations needed to fix the code (0 if already correct, -1 if max iterations reached)
-    """
-    iterations = 0
-    max_iterations = 10
+        code_name (str): The name of the code file.
+        code_path (str): The path to the code file.
+        code_purpose (str): The purpose of the code. Must be either
+                            'transform_model' or 'final_answer'.
+        llm_provider (str): The LLM provider to use for corrections.
+        llm_model (str): The LLM model to use for corrections.
+        cvars_text (str): Formatted text describing cvars and their columns.
+                          Only used when code_purpose is 'transform_model'.
+        dataset_path (str): The path to the dataset. Only required if the
+                            'code_purpose' is 'transform_model'.
+        model_output: The output of the model function. Only required if the
+                      'code_purpose' is 'final_answer'.
+        verbose (bool): Whether to print detailed error messages.
     
+    Returns:
+        int: The number of iterations needed to fix the code. If the code was
+             correct on the first check, returns 0. If it takes more than 10
+             iterations, the function stops and returns -1.
+    """
+    
+    # starts at zero iterations
+    iterations = 0
+    
+    # initiate loop that only breaks when iter max has hit or code is correct
     while True:
+        # append iteration count to the end of the analysis_code_name to avoid import issues
         code_name_iter = f"{code_name}_{iterations}"
         
-        # Check if code is correct
-        error_message = is_code_correct(
-            code_name_iter,
-            code_path,
-            'transform_model',
-            dataset_path=dataset_path,
-            verbose=verbose
-        )
-        
-        # None means code is correct
+        # call helper function above
+        error_message = is_code_correct(code_name_iter,
+                                        code_path,
+                                        code_purpose,
+                                        dataset_path=dataset_path,
+                                        model_output=model_output,
+                                        verbose=verbose)
+        # None corresponds to correct code
         if error_message is None:
             break
-        
-        # Check iteration limit
-        if iterations >= max_iterations:
+        # iteration max, 10 is arbitrary but seems reasonable
+        # needs to be here so if the 10th iteration fixes the code it counts
+        if iterations >= 10:
             return -1
-        
-        # Fix the code with cvars constraints
-        llm_correction_with_cvars(
-            code_path,
-            error_message,
-            cvars_text,
-            llm_provider,
-            llm_model
-        )
+        # helper function which edits the file in place
+        llm_correction(code_path, error_message, code_purpose, llm_provider,
+                       llm_model, cvars_text)
         iterations += 1
     
     return iterations
