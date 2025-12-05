@@ -1,0 +1,151 @@
+{
+  "dataset_name": "boxes",
+  "n": 3,
+  "analyses": {
+    "0": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Child's age, centered (used to model developmental change). Centering improves interpretability of the intercept and interaction terms.",
+            "columns": [
+              "Age_c"
+            ]
+          },
+          {
+            "description": "Cultural context / study site (categorical). Captures between-site differences in baseline majority reliance and allows interactions with age to test whether developmental slopes differ by culture.",
+            "columns": [
+              "Site"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Binary indicator whether the child chose the majority-demonstrated option (1 = chose majority; 0 = chose minority or undemonstrated option).",
+          "columns": [
+            "MajorityChoice"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Child's sex (1 = female, 0 = male). Controls for possible sex differences in social learning strategy.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "Female"
+            ]
+          },
+          {
+            "description": "Whether the majority option was demonstrated first (1 = majority shown first, 0 = not). Controls for order effects in demonstration sequence.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "MajorityFirst"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw dataset into the dataframe used for modeling.\n    Expected original columns: feature1 (choice), feature2 (gender), feature3 (age),\n    feature4 (majority-first flag), feature5 (site id).\n\n    Produces columns used in the model: MajorityChoice, Age, Age_c, Female, MajorityFirst, Site.\n    \"\"\"\n    df = df.copy()\n\n    # Rename raw columns to descriptive names\n    df = df.rename(columns={\n        'feature1': 'Choice',        # 1 = unchosen option, 2 = majority option, 3 = minority option\n        'feature2': 'Gender',        # 1 = girl, 2 = boy\n        'feature3': 'Age',           # age in years\n        'feature4': 'MajorityFirst', # whether majority was demonstrated first (0/1)\n        'feature5': 'Site'           # site id (integer)\n    })\n\n    # Drop rows with missing essential values\n    df = df.dropna(subset=['Choice', 'Gender', 'Age', 'MajorityFirst', 'Site'])\n\n    # Dependent variable: did child choose the majority-demonstrated option?\n    df['MajorityChoice'] = (df['Choice'] == 2).astype(int)\n\n    # Control: Female indicator (1 if girl, 0 if boy)\n    df['Female'] = (df['Gender'] == 1).astype(int)\n\n    # Ensure MajorityFirst is binary integer\n    df['MajorityFirst'] = df['MajorityFirst'].astype(int)\n\n    # Site as categorical variable (keep original ids but convert dtype)\n    df['Site'] = df['Site'].astype('category')\n\n    # Center age for interpretability (used in interactions)\n    df['Age_c'] = df['Age'] - df['Age'].mean()\n\n    # Keep columns necessary for modeling (plus some originals for traceability)\n    df = df[['MajorityChoice', 'Age', 'Age_c', 'Female', 'MajorityFirst', 'Site', 'Choice', 'Gender']]\n\n    return df\n",
+      "m_code": "def model(df: pd.DataFrame) -> any:\n    \"\"\"\n    Fit a logistic (binomial) regression to model the probability of choosing the majority option.\n\n    Model specification:\n      MajorityChoice ~ Age_c * C(Site) + Female + MajorityFirst\n\n    This specification includes:\n      - main effect of age (centered)\n      - main effects of Site (categorical fixed effects)\n      - interactions Age_c:C(Site) to allow developmental slopes to vary by site\n      - controls for child's sex and demonstration order\n\n    We fit a binomial GLM and return results with cluster-robust standard errors clustered by Site.\n    \"\"\"\n    import statsmodels.api as sm\n    import statsmodels.formula.api as smf\n\n    # Ensure Site is categorical for the formula interface\n    df = df.copy()\n    df['Site'] = df['Site'].astype('category')\n\n    formula = 'MajorityChoice ~ Age_c * C(Site) + Female + MajorityFirst'\n\n    # Fit binomial GLM\n    glm_mod = smf.glm(formula=formula, data=df, family=sm.families.Binomial())\n    glm_res = glm_mod.fit()\n\n    # Obtain cluster-robust standard errors clustered by site id\n    # If clustering fails for any reason, fall back to the original fit\n    try:\n        results = glm_res.get_robustcov_results(cov_type='cluster', groups=df['Site'])\n    except Exception:\n        # fallback (no clustered SE)\n        results = glm_res\n\n    # Print summary for quick inspection (caller can use returned object programmatically)\n    print(results.summary())\n\n    return results\n"
+    },
+    "1": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Child age (developmental predictor). We model both a linear and nonlinear (quadratic) effect of age to capture potential non-linear developmental trajectories. Age will be mean-centered in the analysis to aid interpretation and reduce collinearity with the quadratic term.",
+            "columns": [
+              "Age",
+              "Age_c",
+              "Age_sq"
+            ]
+          },
+          {
+            "description": "Cultural context / testing site. Categorical variable indicating which society/site the child was tested in (e.g. Brazil, Canada, China, Japan, Namibia, Germany, Argentina). Modeled as a factor (dummy-coded) and included both as a main effect and in interaction with age to test whether developmental trajectories differ across cultures.",
+            "columns": [
+              "Site"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Whether the child chose the majority option in the trial (1 = chose majority; 0 = chose minority or unchosen option). This encodes children's reliance on the majority preference.",
+          "columns": [
+            "MajorityChoice"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Child gender coded as a binary variable (IsBoy = 1 if boy, 0 if girl). Included as a control because gender can be associated with social learning strategies in some contexts.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "IsBoy"
+            ]
+          },
+          {
+            "description": "Order of demonstration: whether the majority option was demonstrated first (1) or not (0). Included as a control because presentation order can bias choice.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "DemoFirst"
+            ]
+          },
+          {
+            "description": "Quadratic age term to capture nonlinear developmental change (Age squared, computed on mean-centered age). Treated as a control/nonlinear term accompanying the linear Age predictor.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "Age_sq"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw dataset into a dataframe ready for modeling.\n\n    Produces these columns used by the model:\n      - MajorityChoice: binary (1 = chose majority, 0 = otherwise)\n      - Age: numeric (years)\n      - Age_c: mean-centered age\n      - Age_sq: squared centered age (Age_c ** 2)\n      - Site: categorical site label (e.g. 'Site_1', 'Site_2', ...)\n      - IsBoy: gender dummy (1 = boy, 0 = girl)\n      - DemoFirst: whether majority was demonstrated first (0/1)\n    \"\"\"\n\n    # Work on a copy\n    df = df.copy()\n\n    # Rename columns from the provided schema to meaningful names\n    rename_map = {\n        'feature1': 'Outcome',   # 1 = unchosen option, 2 = majority option, 3 = minority option\n        'feature2': 'Gender',    # 1 = girl, 2 = boy\n        'feature3': 'Age',       # age in years\n        'feature4': 'DemoFirst', # whether majority option was demonstrated first (0/1)\n        'feature5': 'Site'       # site ID (1..8)\n    }\n    df = df.rename(columns=rename_map)\n\n    # Drop rows with missing critical fields\n    df = df.dropna(subset=['Outcome', 'Gender', 'Age', 'DemoFirst', 'Site'])\n\n    # Create dependent variable: MajorityChoice (1 if chose majority option, else 0)\n    df['MajorityChoice'] = (df['Outcome'] == 2).astype(int)\n\n    # Create gender indicator: IsBoy (1 = boy, 0 = girl). If there are unexpected codes, treat others as NA\n    df['IsBoy'] = df['Gender'].apply(lambda x: 1 if x == 2 else (0 if x == 1 else np.nan))\n\n    # Ensure DemoFirst is 0/1 integer\n    df['DemoFirst'] = df['DemoFirst'].astype(int)\n\n    # Normalize / cast Age\n    df['Age'] = pd.to_numeric(df['Age'], errors='coerce')\n\n    # Convert Site to a categorical label (string) to make factor handling explicit\n    # Ensure integer site values before conversion\n    df['Site'] = pd.to_numeric(df['Site'], errors='coerce').astype(int).astype(str)\n    df['Site'] = 'Site_' + df['Site']\n    df['Site'] = df['Site'].astype('category')\n\n    # Drop rows with any newly introduced NA values\n    df = df.dropna(subset=['IsBoy', 'Age', 'Site'])\n\n    # Mean-center Age and add quadratic term\n    df['Age_c'] = df['Age'] - df['Age'].mean()\n    df['Age_sq'] = df['Age_c'] ** 2\n\n    # Keep only the columns needed for modeling plus original useful fields\n    cols_to_keep = ['Outcome', 'MajorityChoice', 'Age', 'Age_c', 'Age_sq', 'Site', 'IsBoy', 'DemoFirst']\n    # If some columns are missing for any reason, filter to those that exist\n    cols_to_keep = [c for c in cols_to_keep if c in df.columns]\n    df = df[cols_to_keep].reset_index(drop=True)\n\n    return df\n",
+      "m_code": "def model(df: pd.DataFrame):\n    \"\"\"\n    Fit a logistic regression predicting the probability the child chose the majority option.\n\n    Model specification:\n      MajorityChoice ~ Age_c + Age_sq + C(Site) + Age_c:C(Site) + IsBoy + DemoFirst\n\n    - Age_c:C(Site) tests whether the developmental (age) trajectory differs across cultural contexts.\n    - C(Site) treats site as a categorical factor.\n\n    Returns:\n      A statsmodels results object with cluster-robust standard errors by Site (if available).\n    \"\"\"\n\n    import statsmodels.formula.api as smf\n\n    # Ensure Site is treated as a categorical factor in the formula using C(Site)\n    formula = 'MajorityChoice ~ Age_c + Age_sq + C(Site) + Age_c:C(Site) + IsBoy + DemoFirst'\n\n    # Fit a logistic regression (binomial logit)\n    logit_model = smf.logit(formula=formula, data=df)\n    results = logit_model.fit(disp=False)\n\n    # Attempt to compute cluster-robust SEs clustered by Site to account for within-site correlation\n    try:\n        results_clustered = results.get_robustcov_results(cov_type='cluster', groups=df['Site'])\n    except Exception:\n        # If clustering fails (e.g., if only one observation per cluster), return the original results\n        results_clustered = results\n\n    return results_clustered\n"
+    },
+    "2": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Child's age in years (continuous). We include both the raw Age and a mean-centered version Age_c for numerical stability and interpretation of interactions.",
+            "columns": [
+              "Age",
+              "Age_c"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Binary indicator of whether the child chose the majority option in the trial (1 = chose majority option, 0 = chose minority or unchosen option).",
+          "columns": [
+            "MajorityChoice"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Cultural context / data collection site (categorical). This variable will be treated as a moderator of Age (we test Age × Site interactions to see whether age-related changes differ across sites).",
+            "is_moderator": true,
+            "moderator_on": "Age",
+            "columns": [
+              "Site"
+            ]
+          },
+          {
+            "description": "Child's gender coded as a binary control (1 = boy, 0 = girl).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "IsBoy"
+            ]
+          },
+          {
+            "description": "Whether the majority demonstration was shown first in the video (0/1). Included as a procedural control because demonstration order can influence choice.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "MajorityFirst"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw dataset into a modeling-ready dataframe. The final dataframe contains the columns:\n      - Choice (original outcome)\n      - Age (raw age in years)\n      - Age_c (mean-centered age)\n      - Site (categorical site identifier)\n      - MajorityChoice (DV: 1 if child chose majority option, 0 otherwise)\n      - IsBoy (control: 1 if boy, 0 if girl)\n      - MajorityFirst (control: 0/1 whether majority was demonstrated first)\n\n    Original column mapping:\n      feature1 -> Choice (1=unchosen, 2=majority, 3=minority)\n      feature2 -> Gender (1=girl, 2=boy)\n      feature3 -> Age (years)\n      feature4 -> MajorityFirst (0/1)\n      feature5 -> Site (1..8)\n    \"\"\"\n    # Work on a copy to avoid side-effects\n    df = df.copy()\n\n    # Rename raw features to clear names\n    rename_map = {\n        'feature1': 'Choice',\n        'feature2': 'Gender',\n        'feature3': 'Age',\n        'feature4': 'MajorityFirst',\n        'feature5': 'Site'\n    }\n    df = df.rename(columns=rename_map)\n\n    # Drop rows with missing values in essential columns\n    df = df.dropna(subset=['Choice', 'Gender', 'Age', 'MajorityFirst', 'Site'])\n\n    # Ensure proper dtypes\n    df['Choice'] = df['Choice'].astype(int)\n    # Age may be integer already but ensure numeric\n    df['Age'] = pd.to_numeric(df['Age'], errors='coerce')\n    df = df.dropna(subset=['Age'])\n    df['Age'] = df['Age'].astype(float)\n\n    df['Gender'] = df['Gender'].astype(int)\n    df['MajorityFirst'] = df['MajorityFirst'].astype(int)\n    # Site might be encoded 1..8; keep as category for modeling\n    df['Site'] = df['Site'].astype(int).astype('category')\n\n    # Create binary dependent variable: MajorityChoice (1 if majority option chosen)\n    df['MajorityChoice'] = (df['Choice'] == 2).astype(int)\n\n    # Create gender binary: IsBoy (1 = boy, 0 = girl)\n    df['IsBoy'] = df['Gender'].apply(lambda x: 1 if x == 2 else 0)\n\n    # Mean-center age for better interpretability and numerical stability\n    df['Age_c'] = df['Age'] - df['Age'].mean()\n\n    # Optional: If needed later, create a quadratic age term to capture nonlinearity\n    # df['Age_c2'] = df['Age_c'] ** 2\n\n    # Keep only columns needed for modeling (but return full df with these available)\n    # Return df with all original plus the new columns so downstream code can inspect anything needed\n    return df\n",
+      "m_code": "def model(df: pd.DataFrame) -> any:\n    \"\"\"\n    Fit a logistic regression (binomial GLM) predicting the probability of choosing the majority option.\n    The model tests the main effect of Age and whether the Age effect differs across Sites (Age × Site interaction).\n    Controls: IsBoy and MajorityFirst.\n\n    Formula used:\n      MajorityChoice ~ Age_c * C(Site) + IsBoy + MajorityFirst\n\n    Returns the fitted GLM results object (statsmodels) so users can examine coefficients, standard errors,\n    and compute predicted probabilities or marginal effects.\n    \"\"\"\n    import statsmodels.api as sm\n    import statsmodels.formula.api as smf\n\n    # Ensure required columns exist\n    required_cols = ['MajorityChoice', 'Age_c', 'Site', 'IsBoy', 'MajorityFirst']\n    missing = [c for c in required_cols if c not in df.columns]\n    if missing:\n        raise ValueError(f\"Missing required columns for modeling: {missing}\")\n\n    # Define formula: Age main effect and Age x Site interaction, site treated as categorical\n    formula = 'MajorityChoice ~ Age_c * C(Site) + IsBoy + MajorityFirst'\n\n    # Fit binomial GLM (logistic regression)\n    results = smf.glm(formula=formula, data=df, family=sm.families.Binomial()).fit()\n\n    # For convenience, also compute and attach simple marginal effects of Age at the reference site\n    try:\n        marg_eff = results.get_margeff(at='overall', method='dydx', dummy=True)\n        results._marginal_effects = marg_eff\n    except Exception:\n        # If marginal effects computation fails for any reason, continue without attaching\n        results._marginal_effects = None\n\n    return results\n"
+    }
+  }
+}
