@@ -1,0 +1,176 @@
+{
+  "dataset_name": "caschools",
+  "n": 3,
+  "analyses": {
+    "0": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "District student-teacher ratio (number of students enrolled per full-time-equivalent teacher). Lower values indicate fewer students per teacher.",
+            "columns": [
+              "StudentTeacherRatio"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "District average academic performance measured as the mean of the two available standardized test score columns ('grades' and 'rownames'). These columns contain the district-level standardized test scores (e.g., Stanford-9 scaled scores).",
+          "columns": [
+            "AvgTestScore"
+          ]
+        },
+        "controls": [
+          {
+            "description": "District expenditure per student (continuous). Controls for district-level funding differences that can affect test scores.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "expenditure"
+            ]
+          },
+          {
+            "description": "Percent of students qualifying for reduced-price lunch (socioeconomic status proxy).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "math"
+            ]
+          },
+          {
+            "description": "Percent of English learners in the district (language background of students).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "district"
+            ]
+          },
+          {
+            "description": "Number of computers (or similar technology resource) in the district (continuous).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "english"
+            ]
+          },
+          {
+            "description": "District grade span indicator (categorical: e.g., KK-06 vs KK-08). Included as categorical fixed-effect control.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "school"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw district-level dataframe into a modeling-ready dataframe.\n\n    Steps:\n    - Coerce relevant columns to numeric where appropriate.\n    - Drop rows with missing or invalid enrollment / teacher / score data.\n    - Compute StudentTeacherRatio = total enrollment ('calworks') / number of teachers ('teachers').\n    - Compute AvgTestScore as the mean of the two available test-score columns ('grades' and 'rownames').\n    - Drop rows missing any variables used in the model.\n    - Return the dataframe with newly created columns used in modeling: 'StudentTeacherRatio' and 'AvgTestScore'.\n    \"\"\"\n    # Work on a copy\n    df = df.copy()\n\n    # Coerce columns to numeric where possible (these names come from provided schema)\n    numeric_cols = ['calworks', 'teachers', 'grades', 'rownames', 'expenditure', 'math', 'district', 'english']\n    for col in numeric_cols:\n        if col in df.columns:\n            df[col] = pd.to_numeric(df[col], errors='coerce')\n\n    # Ensure 'school' exists (categorical control)\n    if 'school' in df.columns:\n        # keep as-is; convert to string category\n        df['school'] = df['school'].astype('category')\n    else:\n        # create a placeholder single-category if missing to avoid later errors\n        df['school'] = 'unknown'\n        df['school'] = df['school'].astype('category')\n\n    # Drop rows missing enrollment, teachers, or test scores used to compute outcome or IV\n    required_for_ratio_and_score = ['calworks', 'teachers', 'grades', 'rownames']\n    required_existing = [c for c in required_for_ratio_and_score if c in df.columns]\n    df = df.dropna(subset=required_existing)\n\n    # Remove implausible / invalid teacher counts (zero or negative)\n    if 'teachers' in df.columns:\n        df = df[df['teachers'] > 0]\n\n    # Compute student-teacher ratio\n    df['StudentTeacherRatio'] = df['calworks'] / df['teachers']\n\n    # Compute the average test score using the two provided score columns\n    df['AvgTestScore'] = df[['grades', 'rownames']].mean(axis=1)\n\n    # Keep rows that have all model columns (IV, DV, and controls)\n    model_columns = ['StudentTeacherRatio', 'AvgTestScore', 'expenditure', 'math', 'district', 'english', 'school']\n    # Only require those model columns that actually exist in the dataframe (robustness)\n    model_columns_present = [c for c in model_columns if c in df.columns]\n    df = df.dropna(subset=model_columns_present)\n\n    # Optional: reset index for a clean output\n    df = df.reset_index(drop=True)\n\n    return df\n",
+      "m_code": "def model(df: pd.DataFrame) -> any:\n    \"\"\"\n    Fit an OLS regression predicting AvgTestScore from StudentTeacherRatio and controls.\n\n    Model specification:\n    AvgTestScore ~ StudentTeacherRatio + expenditure + math + district + english + categorical school fixed effects\n\n    Returns the fitted statsmodels regression results object.\n    \"\"\"\n    # Work on a copy\n    df = df.copy()\n\n    # Ensure required columns present\n    required = ['StudentTeacherRatio', 'AvgTestScore']\n    for c in required:\n        if c not in df.columns:\n            raise ValueError(f\"Required column '{c}' not found in dataframe\")\n\n    # Predictor matrix X\n    predictors = ['StudentTeacherRatio']\n    controls = [c for c in ['expenditure', 'math', 'district', 'english'] if c in df.columns]\n    predictors += controls\n\n    X = df[predictors].copy()\n\n    # Add school dummies (categorical fixed effects) if school column exists\n    if 'school' in df.columns:\n        school_dummies = pd.get_dummies(df['school'], prefix='school', drop_first=True, dtype=float)\n        if not school_dummies.empty:\n            X = pd.concat([X, school_dummies], axis=1)\n\n    # Add constant\n    X = sm.add_constant(X, has_constant='add')\n\n    # Outcome\n    y = df['AvgTestScore']\n\n    # Fit OLS\n    results = sm.OLS(y, X).fit()\n\n    return results\n"
+    },
+    "1": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Student-teacher ratio computed as total district enrollment divided by number of full-time-equivalent teachers (higher values = more students per teacher). This is the main independent variable testing whether lower ratio (fewer students per teacher) is associated with higher academic performance.",
+            "columns": [
+              "StudentTeacherRatio"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "District-level average standardized test score (Stanford-9 style scaled score). Higher values indicate better academic performance.",
+          "columns": [
+            "AvgTestScore"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Expenditure per student; a numeric control for district resources.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "Expenditure"
+            ]
+          },
+          {
+            "description": "District average income proxy / percent (as provided in the dataset). Included to control for socioeconomic status.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "Income"
+            ]
+          },
+          {
+            "description": "Percent of students who are English learners (controls for language-related differences in test scores).",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "PctEnglishLearners"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw dataset into the analysis dataframe.\n\n    Produces the following columns that are used in the model:\n      - TotalEnrollment: numeric, from original 'calworks' column (interpreted as enrollment)\n      - Teachers: numeric, from original 'teachers' column (FTE teachers)\n      - AvgTestScore: numeric, from original 'grades' column (district average test score)\n      - Expenditure: numeric, from original 'expenditure' column (expenditure per student)\n      - Income: numeric, from original 'income' column (income / poverty proxy)\n      - PctEnglishLearners: numeric, from original 'district' column (percent English learners)\n      - StudentTeacherRatio: computed TotalEnrollment / Teachers\n      - LogSTR: natural log of StudentTeacherRatio (for diagnostics / potential sensitivity analyses)\n\n    The function coerces relevant columns to numeric, drops rows with missing or invalid values for the core variables\n    and avoids division by zero for teacher counts.\n    \"\"\"\n    df = df.copy()\n\n    # Coerce relevant raw columns to numeric, mapping likely-misaligned names in schema to usable fields\n    df['TotalEnrollment'] = pd.to_numeric(df.get('calworks', pd.Series(dtype='float')), errors='coerce')\n    df['Teachers'] = pd.to_numeric(df.get('teachers', pd.Series(dtype='float')), errors='coerce')\n    df['AvgTestScore'] = pd.to_numeric(df.get('grades', pd.Series(dtype='float')), errors='coerce')\n    df['Expenditure'] = pd.to_numeric(df.get('expenditure', pd.Series(dtype='float')), errors='coerce')\n    df['Income'] = pd.to_numeric(df.get('income', pd.Series(dtype='float')), errors='coerce')\n    df['PctEnglishLearners'] = pd.to_numeric(df.get('district', pd.Series(dtype='float')), errors='coerce')\n\n    # Remove rows missing the essential variables\n    df = df.dropna(subset=['TotalEnrollment', 'Teachers', 'AvgTestScore'])\n\n    # Remove or flag invalid teacher counts (avoid division by zero)\n    df = df[df['Teachers'] > 0]\n\n    # Compute student-teacher ratio\n    df['StudentTeacherRatio'] = df['TotalEnrollment'] / df['Teachers']\n\n    # Clip extreme ratios to avoid numerical issues in logs (retain information but avoid -inf)\n    df['StudentTeacherRatio'] = df['StudentTeacherRatio'].clip(lower=0.1)\n\n    # Log transform for diagnostics and possible nonlinearity checks\n    df['LogSTR'] = np.log(df['StudentTeacherRatio'])\n\n    # Keep only columns needed for modeling plus original identifiers (do not drop extras here)\n    # Final dataframe contains the columns referenced in the statistical model\n    return df\n",
+      "m_code": "def model(df: pd.DataFrame) -> Any:\n    \"\"\"\n    Fit an OLS regression of AvgTestScore on StudentTeacherRatio with controls.\n\n    Model specification:\n      AvgTestScore_i = beta0 + beta1 * StudentTeacherRatio_i + beta2 * Expenditure_i\n                        + beta3 * Income_i + beta4 * PctEnglishLearners_i + eps_i\n\n    The function returns the fitted statsmodels results object using robust (HC3) standard errors.\n    \"\"\"\n    # Ensure we operate on a copy\n    df = df.copy()\n\n    # Drop rows with missing controls used in the model\n    model_vars = ['AvgTestScore', 'StudentTeacherRatio', 'Expenditure', 'Income', 'PctEnglishLearners']\n    # If any control columns are entirely missing in the dataset, drop them from the model formulation\n    present_vars = [v for v in model_vars if v in df.columns]\n    df = df.dropna(subset=present_vars)\n\n    # Prepare X and y\n    y = df['AvgTestScore']\n\n    # If some controls are absent, include only available ones (this is defensive).\n    X_vars = ['StudentTeacherRatio']\n    if 'Expenditure' in df.columns:\n        X_vars.append('Expenditure')\n    if 'Income' in df.columns:\n        X_vars.append('Income')\n    if 'PctEnglishLearners' in df.columns:\n        X_vars.append('PctEnglishLearners')\n\n    X = df[X_vars]\n    X = sm.add_constant(X)\n\n    # Fit OLS with robust standard errors (HC3)\n    model = sm.OLS(y, X)\n    results = model.fit(cov_type='HC3')\n\n    # Return the full results object for examination (summary, params, conf_int, etc.)\n    return results\n"
+    },
+    "2": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Student-teacher ratio computed as total enrolled students divided by number of full-time-equivalent teachers. Lower values indicate fewer students per teacher.",
+            "columns": [
+              "StudentTeacherRatio_z"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Average academic performance at the district level, computed as the mean of the available standardized reading and math scores (columns 'grades' and 'rownames'). Higher values indicate better performance.",
+          "columns": [
+            "AvgTestScore"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Expenditure per student (district-level). Continuous control to account for funding differences.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "expenditure_z"
+            ]
+          },
+          {
+            "description": "Percent (or proxy) of low-income / CalWorks eligibility or related socioeconomic indicator. Continuous control for socioeconomic status.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "income_z"
+            ]
+          },
+          {
+            "description": "Percent English learners (district-level) or analogous share of students for whom English is a second language. Continuous control.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "district_z"
+            ]
+          },
+          {
+            "description": "Number of computers (district-level). Control for technology resources.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "computer_z"
+            ]
+          },
+          {
+            "description": "Grade-span category of the district (dummy). Categorical control capturing structural differences in district grade span (KK-06 vs KK-08). Implemented as a dummy column; the specific dummy kept after drop_first is 'school_KK_08' if present in the data.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "school_KK_08"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw district-level dataframe to the modeling dataframe.\n\n    Produces the following new/derived columns used in modeling:\n      - StudentTeacherRatio: calworks / teachers (enrollment per teacher)\n      - AvgTestScore: mean of 'grades' and 'rownames' (reading & math average), allowing one missing score\n      - *_z: z-score standardized versions of continuous predictors used in the model\n      - school_KK_08: dummy for the 'school' category 'KK_08' (created if present); otherwise 0\n\n    The final dataframe will contain the exact columns required by the analysis contract:\n      - StudentTeacherRatio_z\n      - AvgTestScore\n      - expenditure_z\n      - income_z\n      - district_z\n      - computer_z\n      - school_KK_08\n    \"\"\"\n    # Work on a copy\n    df = df.copy()\n\n    # Ensure numeric columns are numeric where expected\n    numeric_cols = ['calworks', 'teachers', 'grades', 'rownames', 'expenditure', 'income', 'district', 'computer']\n    for col in numeric_cols:\n        if col in df.columns:\n            df[col] = pd.to_numeric(df[col], errors='coerce')\n\n    # We require calworks and teachers to compute the StudentTeacherRatio.\n    # For the outcome AvgTestScore, we allow having at least one of 'grades' or 'rownames'.\n    score_cols = [c for c in ['grades', 'rownames'] if c in df.columns]\n\n    # Drop rows missing the key variables needed to compute the IV (calworks and teachers)\n    required_iv = [c for c in ['calworks', 'teachers'] if c in df.columns]\n    if required_iv:\n        df = df.dropna(subset=required_iv)\n\n    # Also drop rows where both score columns are missing (we need at least one score)\n    if score_cols:\n        df = df.dropna(subset=score_cols, how='all')\n\n    # Remove implausible teacher counts (<=0) to avoid division by zero\n    if 'teachers' in df.columns:\n        df = df[df['teachers'] > 0]\n\n    # Compute student-teacher ratio (only for rows that survived the above)\n    if 'calworks' in df.columns and 'teachers' in df.columns:\n        df['StudentTeacherRatio'] = df['calworks'] / df['teachers']\n    else:\n        # If either is absent, create the column but fill with NaN so downstream logic can handle it\n        df['StudentTeacherRatio'] = np.nan\n\n    # Compute average test score as mean of reading and math, allowing one to be missing\n    if score_cols:\n        df['AvgTestScore'] = df[score_cols].mean(axis=1, skipna=True)\n    else:\n        df['AvgTestScore'] = np.nan\n\n    # Standardize continuous predictors (z-scores). Use ddof=0 for population-like standardization.\n    def zscore(s: pd.Series) -> pd.Series:\n        s = s.astype(float)\n        mean = s.mean()\n        std = s.std(ddof=0)\n        if pd.isna(std) or std == 0:\n            # If no variation (or all missing), return zeros for non-missing and 0 for missing as well.\n            res = s.copy()\n            # center to zero and set non-missing to 0\n            res = res - mean\n            res.loc[~res.isna()] = 0.0\n            res = res.fillna(0.0)\n            return res\n        return (s - mean) / std\n\n    # Create z-scores for IV\n    df['StudentTeacherRatio_z'] = zscore(df['StudentTeacherRatio'])\n\n    # Controls: expenditure, income, district, computer\n    # If a control is present, compute z-score. If absent, create a column filled with 0.0 so the final dataframe\n    # contains the required column but does not cause all rows to be dropped.\n    for c in ['expenditure', 'income', 'district', 'computer']:\n        zcol = c + '_z'\n        if c in df.columns:\n            df[zcol] = zscore(df[c])\n        else:\n            df[zcol] = 0.0\n\n    # Clean up school category strings to produce safe dummy column names and ensure the specific dummy exists\n    # The analysis requires the final column 'school_KK_08' to be present.\n    if 'school' in df.columns:\n        # Fill NA first, then convert to string and sanitize\n        df['school'] = df['school'].fillna('NA').astype(str).str.replace('[^0-9A-Za-z_]+', '_', regex=True)\n        school_dummies = pd.get_dummies(df['school'], prefix='school', drop_first=True)\n        # Ensure the specific required dummy exists; if not, create it with zeros\n        if 'school_KK_08' not in school_dummies.columns:\n            school_dummies['school_KK_08'] = 0\n        df = pd.concat([df, school_dummies], axis=1)\n    else:\n        # If school not present, create the required dummy column filled with zeros\n        df['school'] = 'NA'\n        df['school_KK_08'] = 0\n\n    # Final: keep only rows with non-missing values in the core model columns (IV and DV).\n    # We require StudentTeacherRatio_z and AvgTestScore to be non-missing; controls exist (possibly filled with 0).\n    df = df.dropna(subset=['StudentTeacherRatio_z', 'AvgTestScore'])\n\n    # Ensure the final dataframe contains exactly the required conceptual variable columns (names must match).\n    required_final_cols = [\n        'StudentTeacherRatio_z',\n        'AvgTestScore',\n        'expenditure_z',\n        'income_z',\n        'district_z',\n        'computer_z',\n        'school_KK_08'\n    ]\n    for col in required_final_cols:\n        if col not in df.columns:\n            df[col] = 0.0\n\n    return df",
+      "m_code": "def model(df: pd.DataFrame) -> Any:\n    \"\"\"\n    Fit an OLS model predicting AvgTestScore from StudentTeacherRatio (z-scored) controlling for expenditure, income,\n    percent English learners (district), computer resources, and the school grade-span dummy 'school_KK_08'.\n\n    Returns a fitted statsmodels regression results object (with robust HC3 standard errors).\n    \"\"\"\n    # Copy to avoid side-effects\n    df = df.copy()\n\n    # Define the exact predictors required by the conceptual variables contract\n    predictor_cols = [\n        'StudentTeacherRatio_z',\n        'expenditure_z',\n        'income_z',\n        'district_z',\n        'computer_z',\n        'school_KK_08'\n    ]\n\n    # Ensure all predictors exist in df\n    missing = [c for c in predictor_cols if c not in df.columns]\n    if missing:\n        raise ValueError(f\"Missing predictors in dataframe required for model: {missing}\")\n\n    # Outcome and design matrix\n    y = df['AvgTestScore']\n    X = df[predictor_cols]\n\n    # Drop rows with any missing values among y or X\n    combined = pd.concat([y, X], axis=1).dropna()\n    if combined.shape[0] == 0:\n        raise ValueError(\"No observations available after dropping missing values for modeling.\")\n\n    y = combined['AvgTestScore']\n    X = combined[predictor_cols]\n\n    # Add constant\n    X = sm.add_constant(X, has_constant='add')\n\n    # Fit OLS\n    results = sm.OLS(y, X).fit()\n\n    # Return results adjusted for robust HC3 standard errors\n    try:\n        robust_results = results.get_robustcov_results(cov_type='HC3')\n    except Exception:\n        # If for some reason robust cov can't be computed, return the plain results\n        robust_results = results\n\n    return robust_results"
+    }
+  }
+}
