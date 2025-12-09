@@ -6,169 +6,99 @@
       "cvars": {
         "ivs": [
           {
-            "description": "Hurricane name femininity score (higher values = rated as more feminine). This is the primary independent variable: the hypothesis is that storms with higher femininity scores are perceived as less threatening, which leads to fewer precautionary measures and therefore higher fatalities/damage.",
+            "description": "Continuous masculinity-femininity rating of the hurricane name (higher = more feminine). Primary independent variable capturing perceived femininity/masculinity of the name as rated by coders.",
             "columns": [
-              "name_z"
+              "name_c"
             ]
           }
         ],
         "dv": {
-          "description": "Log-transformed count of deaths attributed to the hurricane (log(ndam15 + 1)). Used as a proxy for the extent to which precautionary measures were taken (more deaths interpreted as fewer effective precautions). Log transform reduces skew and makes OLS more appropriate.",
+          "description": "Log-transformed count of total deaths caused by the hurricane (log(ndam15 + 1)). Used as a proxy for the extent of harm potentially driven by public under-preparation/precautions.",
           "columns": [
-            "ln_ndam15"
+            "log_deaths"
           ]
         },
         "controls": [
           {
-            "description": "Maximum wind speed at landfall (standardized). Controls for storm intensity, which directly affects fatalities.",
+            "description": "Binary indicator of whether the hurricane name was coded as female (1) vs male (0). Alternative operationalization of name gender; included as a control for robustness.",
             "is_moderator": false,
-            "moderator_on": "",
+            "moderator_on": null,
             "columns": [
-              "wind_z"
+              "elapsedyrs"
             ]
           },
           {
-            "description": "Minimum central pressure at landfall (standardized). Another measure of storm intensity; lower pressure typically indicates a stronger storm.",
+            "description": "Maximum sustained wind speed at landfall (higher values → stronger storms). Controls for physical storm severity.",
             "is_moderator": false,
-            "moderator_on": "",
+            "moderator_on": null,
             "columns": [
-              "gender_mf_z"
+              "wind"
             ]
           },
           {
-            "description": "Logged and standardized property damage (ind column, adjusted) used to control for economic impact and storm destructiveness that could correlate with fatalities.",
+            "description": "Minimum central pressure at landfall (lower pressure → stronger storm). Controls for storm intensity.",
             "is_moderator": false,
-            "moderator_on": "",
+            "moderator_on": null,
             "columns": [
-              "ln_ind_z"
+              "min"
             ]
           },
           {
-            "description": "Saffir-Simpson category of the hurricane (treated as categorical). Controls for categorical intensity/severity classification.",
+            "description": "Storm category / Saffir-Simpson category (as provided in masfem column in the raw data). Controls for categorical storm intensity.",
             "is_moderator": false,
-            "moderator_on": "",
+            "moderator_on": null,
             "columns": [
               "masfem"
             ]
           },
           {
-            "description": "Year of the hurricane (standardized). Controls for temporal trends in reporting, preparedness, and infrastructure.",
+            "description": "Year of the storm (alldeaths column stores the year in this dataset schema). Controls for temporal trends in preparedness / reporting.",
             "is_moderator": false,
-            "moderator_on": "",
+            "moderator_on": null,
             "columns": [
-              "year_z"
-            ]
-          },
-          {
-            "description": "Binary indicator originally in the data that marks female versus male name (0 = male name, 1 = female name). Included as an additional control/robustness check.",
-            "is_moderator": false,
-            "moderator_on": "",
-            "columns": [
-              "elapsedyrs"
+              "alldeaths"
             ]
           }
         ]
       },
-      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw hurricane dataset into an analysis-ready dataframe.\n\n    Steps:\n    - Make a defensive copy.\n    - Coerce relevant columns to numeric where appropriate.\n    - Drop rows missing the essential variables.\n    - Create the log-transformed dependent variable ln_ndam15 = log(ndam15 + 1).\n    - Create a log-transformed damage control ln_ind = log(ind + 1).\n    - Standardize continuous predictors (z-scores) used in the model for interpretability.\n    - Return dataframe containing all columns used in the model.\n    \"\"\"\n    df = df.copy()\n\n    # Ensure numeric columns are numeric (coerce errors to NaN)\n    numeric_cols = ['ndam15', 'name', 'wind', 'gender_mf', 'masfem', 'ind', 'year', 'elapsedyrs']\n    for col in numeric_cols:\n        if col in df.columns:\n            df[col] = pd.to_numeric(df[col], errors='coerce')\n\n    # Drop rows missing the key variables needed for the analysis\n    required = ['ndam15', 'name', 'wind', 'gender_mf', 'masfem', 'ind', 'year', 'elapsedyrs']\n    df = df.dropna(subset=[c for c in required if c in df.columns])\n\n    # Dependent variable: log-transform deaths (add 1 to handle zeros)\n    df['ln_ndam15'] = np.log(df['ndam15'].astype(float) + 1.0)\n\n    # Control for economic damage (log-transform). Ensure non-negative.\n    # If 'ind' contains zeros or negatives for some reason, shift minimally to make positive before log.\n    df['ind'] = df['ind'].astype(float)\n    min_ind = df['ind'].min()\n    if min_ind <= 0:\n        shift = abs(min_ind) + 1.0\n        df['ln_ind'] = np.log(df['ind'] + shift)\n    else:\n        df['ln_ind'] = np.log(df['ind'] + 1.0)\n\n    # Standardize continuous predictors for easier interpretation\n    def zscore(series):\n        return (series - series.mean()) / series.std(ddof=0)\n\n    df['name_z'] = zscore(df['name'].astype(float))\n    df['wind_z'] = zscore(df['wind'].astype(float))\n    # Note: 'gender_mf' in this dataset is used as minimum pressure at landfall in the schema; higher pressure = weaker storm.\n    df['gender_mf_z'] = zscore(df['gender_mf'].astype(float))\n    df['ln_ind_z'] = zscore(df['ln_ind'].astype(float))\n    df['year_z'] = zscore(df['year'].astype(float))\n\n    # Keep masfem and elapsedyrs as-is (masfem may be categorical/severity; elapsedyrs is binary gender indicator)\n    # Ensure masfem is integer/category if possible\n    try:\n        df['masfem'] = df['masfem'].astype(int)\n    except Exception:\n        # If conversion fails, leave as is and let statsmodels treat via C(masfem)\n        pass\n\n    # Final column list used in modeling\n    keep_cols = ['ln_ndam15', 'name_z', 'wind_z', 'gender_mf_z', 'ln_ind_z', 'year_z', 'masfem', 'elapsedyrs']\n    # Some datasets may lack certain columns; keep whichever are present\n    existing_keep = [c for c in keep_cols if c in df.columns]\n\n    return df[existing_keep]\n",
-      "m_code": "def model(df: pd.DataFrame) -> Any:\n    \"\"\"\n    Fit an OLS regression predicting log deaths (ln_ndam15) from the standardized femininity score\n    and controls. Use heteroskedasticity-robust standard errors (HC3).\n\n    Returns the fitted statsmodels results object.\n    \"\"\"\n    import statsmodels.formula.api as smf\n\n    # Make sure required columns exist\n    required = ['ln_ndam15', 'name_z', 'wind_z', 'gender_mf_z', 'ln_ind_z', 'year_z', 'masfem', 'elapsedyrs']\n    missing = [c for c in required if c not in df.columns]\n    if missing:\n        raise ValueError(f\"Missing required columns for modeling: {missing}\")\n\n    # Formula: ln_ndam15 on femininity (name_z) plus controls. Treat masfem as categorical severity.\n    formula = 'ln_ndam15 ~ name_z + wind_z + gender_mf_z + ln_ind_z + year_z + C(masfem) + elapsedyrs'\n\n    model = smf.ols(formula=formula, data=df).fit(cov_type='HC3')\n\n    # Print a concise summary and return the fitted model object for further inspection\n    print(model.summary())\n    return model\n"
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    # Work on a copy\n    df = df.copy()\n\n    # Ensure expected raw columns exist in the DataFrame (create if missing)\n    # Note: 'name' is kept as-is (may be numeric rating or string); we'll handle numeric conversion for name separately.\n    expected_cols = ['ndam15', 'name', 'elapsedyrs', 'wind', 'min', 'masfem', 'alldeaths']\n    for col in expected_cols:\n        if col not in df.columns:\n            df[col] = np.nan\n\n    # Convert relevant columns to numeric where appropriate (coerce errors to NaN)\n    # Exclude 'name' here to avoid accidentally turning string hurricane names into NaN;\n    # we'll explicitly convert 'name' to numeric for name_c creation below.\n    numeric_cols = ['ndam15', 'elapsedyrs', 'wind', 'min', 'masfem', 'alldeaths']\n    for c in numeric_cols:\n        df[c] = pd.to_numeric(df[c], errors='coerce')\n\n    # Drop rows missing the dependent variable:\n    # - ndam15 is required for log_deaths (DV)\n    df = df.dropna(subset=['ndam15'])\n\n    # If after dropping there are no rows, return an empty DataFrame with the required final columns\n    final_cols = ['ndam15', 'log_deaths', 'name', 'name_c', 'elapsedyrs', 'wind', 'min', 'masfem', 'alldeaths']\n    if df.shape[0] == 0:\n        # Create an empty DataFrame with the required columns and appropriate dtypes\n        empty_df = pd.DataFrame({c: pd.Series(dtype=float) for c in final_cols})\n        # elapsedyrs should be integer dtype when possible\n        empty_df['elapsedyrs'] = empty_df['elapsedyrs'].astype('Int64')\n        return empty_df\n\n    # Create dependent variable: log-transformed deaths to reduce skew\n    # Add 1 to allow zero-death storms\n    df['log_deaths'] = np.log(df['ndam15'] + 1)\n\n    # Create numeric version of 'name' for constructing name_c (the continuous femininity rating).\n    # If 'name' is already numeric, this will keep values; if not, will be NaN.\n    name_num = pd.to_numeric(df['name'], errors='coerce')\n\n    # If there are no numeric name ratings at all, create a default (zeros).\n    # Otherwise, impute missing numeric name ratings with the median rating.\n    if name_num.notna().sum() == 0:\n        name_num = pd.Series(0.0, index=df.index)\n    else:\n        median_name = name_num.median(skipna=True)\n        name_num = name_num.fillna(median_name)\n\n    # Center the continuous name femininity score for interpretability\n    df['name_c'] = name_num - name_num.mean()\n\n    # Ensure binary elapsedyrs is 0/1; coerce non-missing values to integers.\n    # Fill missing elapsedyrs with 0 (assumes missing means not female-coded).\n    df['elapsedyrs'] = df['elapsedyrs'].fillna(0)\n    # Some values may be non-binary; coerce to 0/1 by rounding after converting to numeric\n    df['elapsedyrs'] = pd.to_numeric(df['elapsedyrs'], errors='coerce').fillna(0).round().astype(int)\n\n    # For control variables, impute missing values with the column median (numeric) where appropriate.\n    # This prevents excessive row loss while preserving the variables in the final DataFrame.\n    for c in ['wind', 'min', 'masfem', 'alldeaths']:\n        if c in df.columns:\n            # If entire column is NaN, fill with 0 to ensure presence\n            if df[c].notna().sum() == 0:\n                df[c] = 0.0\n            else:\n                median_val = df[c].median(skipna=True)\n                df[c] = df[c].fillna(median_val)\n\n    # Ensure 'name' column exists in final (keep original values; if entirely missing fill with empty string)\n    if 'name' not in df.columns:\n        df['name'] = ''\n    else:\n        # If name column is entirely NaN, fill with empty string to avoid NaN in final dataframe\n        if df['name'].isna().all():\n            df['name'] = ''\n\n    # Final dataframe will include: ndam15, log_deaths, name, name_c, elapsedyrs, wind, min, masfem, alldeaths\n    # Ensure all required final columns exist (create if necessary)\n    for c in final_cols:\n        if c not in df.columns:\n            # For safety create missing columns filled with zeros (or appropriate type)\n            if c == 'elapsedyrs':\n                df[c] = 0\n            elif c == 'name':\n                df[c] = ''\n            else:\n                df[c] = 0.0\n\n    # Select and return only the final columns in the required order\n    df_final = df[final_cols].copy()\n\n    # Make sure there are no remaining NaNs in numeric final columns by filling with sensible defaults\n    numeric_final_cols = ['ndam15', 'log_deaths', 'name_c', 'elapsedyrs', 'wind', 'min', 'masfem', 'alldeaths']\n    for c in numeric_final_cols:\n        if df_final[c].isna().any():\n            if c == 'elapsedyrs':\n                df_final[c] = pd.to_numeric(df_final[c], errors='coerce').fillna(0).astype(int)\n            else:\n                df_final[c] = pd.to_numeric(df_final[c], errors='coerce').fillna(0.0)\n\n    # Ensure elapsedyrs dtype is integer\n    df_final['elapsedyrs'] = df_final['elapsedyrs'].astype(int)\n\n    return df_final",
+      "m_code": "def model(df: pd.DataFrame) -> Any:\n    # Fit OLS models predicting log_deaths from name femininity and controls.\n    # Returns a dict with two fitted models for comparison:\n    #  - model_name: continuous name femininity (name_c) as primary IV\n    #  - model_binary: binary female-name indicator (elapsedyrs) as primary IV\n\n    results = {}\n\n    # Verify required columns exist\n    required_final_cols = ['ndam15', 'log_deaths', 'name_c', 'elapsedyrs', 'wind', 'min', 'masfem', 'alldeaths']\n    missing = [c for c in required_final_cols if c not in df.columns]\n    if missing:\n        raise ValueError(f\"Input DataFrame is missing required columns for modeling: {missing}\")\n\n    # Ensure numeric types for modeling columns\n    model_numeric_cols = ['log_deaths', 'name_c', 'elapsedyrs', 'wind', 'min', 'masfem', 'alldeaths']\n    for c in model_numeric_cols:\n        df[c] = pd.to_numeric(df[c], errors='coerce')\n\n    # Drop any rows with missing outcome or with missing exogenous variables for each model separately\n    y = df['log_deaths']\n\n    # Model 1: continuous name score as primary IV\n    X_cols_name = ['name_c', 'elapsedyrs', 'wind', 'min', 'masfem', 'alldeaths']\n    X1 = df[X_cols_name].copy()\n    # Drop rows with missing values in y or X1\n    model1_df = pd.concat([y, X1], axis=1).dropna()\n    if model1_df.shape[0] == 0:\n        raise ValueError(\"No observations available after dropping missing values for model_name.\")\n    y1 = model1_df['log_deaths'].astype(float)\n    X1_clean = model1_df[X_cols_name].astype(float)\n    X1_clean = sm.add_constant(X1_clean, has_constant='add')\n    model_name = sm.OLS(y1, X1_clean).fit()\n    results['model_name'] = model_name\n\n    # Model 2: binary elapsedyrs as primary IV\n    X_cols_bin = ['elapsedyrs', 'wind', 'min', 'masfem', 'alldeaths']\n    X2 = df[X_cols_bin].copy()\n    model2_df = pd.concat([y, X2], axis=1).dropna()\n    if model2_df.shape[0] == 0:\n        raise ValueError(\"No observations available after dropping missing values for model_binary.\")\n    y2 = model2_df['log_deaths'].astype(float)\n    X2_clean = model2_df[X_cols_bin].astype(float)\n    X2_clean = sm.add_constant(X2_clean, has_constant='add')\n    model_binary = sm.OLS(y2, X2_clean).fit()\n    results['model_binary'] = model_binary\n\n    return results"
     },
     "1": {
       "cvars": {
         "ivs": [
           {
-            "description": "Continuous femininity rating of the hurricane name (higher = more feminine). This is the average masculinity/femininity index assigned by coders.",
+            "description": "Hurricane name femininity as rated by independent coders (higher = more feminine). Primary independent variable: hypothesized that more feminine names are perceived as less threatening and therefore lead to fewer precautionary measures (proxied by higher fatalities).",
             "columns": [
-              "Femininity"
-            ]
-          },
-          {
-            "description": "Binary indicator for whether the hurricane name is categorized as female (1) vs male (0). Alternative operationalization of name gender.",
-            "columns": [
-              "FemaleName"
+              "Femininity_Coder_c"
             ]
           }
         ],
         "dv": {
-          "description": "Log-transformed total reported deaths caused by the hurricane (log(ndam15 + 1)). Used as a proxy for the downstream effect of lower precautionary behavior (fewer precautions -> more deaths).",
+          "description": "Fatalities caused by the hurricane, log-transformed (log(1 + deaths)). This is used as a proxy for the downstream consequences of fewer precautionary measures (higher fatalities suggesting fewer precautions / preparedness).",
           "columns": [
             "LogDeaths"
           ]
         },
         "controls": [
           {
-            "description": "Maximum wind speed at landfall (proxy for storm intensity).",
+            "description": "Binary indicator for whether the hurricane name was classified as female (0=male name, 1=female name). Included as a control for any categorical/label effects not captured by continuous femininity rating.",
             "is_moderator": false,
             "moderator_on": null,
             "columns": [
-              "Wind_z"
+              "BinaryFemaleName"
             ]
           },
           {
-            "description": "Minimum pressure at landfall (proxy for storm intensity).",
+            "description": "Maximum sustained wind speed at landfall (knots or dataset units). Controls for storm intensity which directly affects fatalities and precaution needs.",
             "is_moderator": false,
             "moderator_on": null,
             "columns": [
-              "MinPressure_z"
+              "MaxWind"
             ]
           },
           {
-            "description": "Saffir-Simpson category or similar categorical intensity score (numeric Saffir-like scale).",
-            "is_moderator": false,
-            "moderator_on": null,
-            "columns": [
-              "CategoryScale_z"
-            ]
-          },
-          {
-            "description": "Log-transformed economic damage (normalized damage) as a control for harm potential and exposure.",
-            "is_moderator": false,
-            "moderator_on": null,
-            "columns": [
-              "LogDamage_z"
-            ]
-          },
-          {
-            "description": "Year of the storm (controls for secular trends in warning systems, preparedness, and reporting).",
-            "is_moderator": false,
-            "moderator_on": null,
-            "columns": [
-              "Year"
-            ]
-          }
-        ]
-      },
-      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Clean and derive variables needed for modeling the relationship between hurricane name femininity\n    and casualties (proxy for precautionary behavior). The function returns a dataframe containing all\n    columns listed in the conceptual variables.\n    Created columns (used later in the model):\n      - Femininity: continuous femininity score (from original 'name' column)\n      - FemaleName: binary indicator (from 'elapsedyrs') 1=female name, 0=male name\n      - Deaths: raw deaths count from 'ndam15'\n      - LogDeaths: np.log(Deaths + 1)\n      - Wind: maximum wind speed at landfall from 'wind'\n      - MinPressure: minimum pressure at landfall from 'min'\n      - CategoryScale: category / Saffir-like numeric from 'masfem'\n      - Damage: economic damage from 'ind'\n      - LogDamage: np.log(Damage + 1)\n      - Year: year of storm from 'alldeaths'\n      - standardized (_z) versions for continuous predictors used in the model\n    \"\"\"\n    df = df.copy()\n\n    # Ensure numeric types where expected; coerce non-numeric to NaN\n    df['Femininity'] = pd.to_numeric(df.get('name', None), errors='coerce')\n    # elapsedyrs in this dataset is coded as binary gender indicator (0 male, 1 female)\n    df['FemaleName'] = pd.to_numeric(df.get('elapsedyrs', None), errors='coerce')\n\n    df['Deaths'] = pd.to_numeric(df.get('ndam15', None), errors='coerce')\n    df['Wind'] = pd.to_numeric(df.get('wind', None), errors='coerce')\n    df['MinPressure'] = pd.to_numeric(df.get('min', None), errors='coerce')\n    df['CategoryScale'] = pd.to_numeric(df.get('masfem', None), errors='coerce')\n    df['Damage'] = pd.to_numeric(df.get('ind', None), errors='coerce')\n    df['Year'] = pd.to_numeric(df.get('alldeaths', None), errors='coerce')\n\n    # Build log-transformed outcomes / controls (add small constant to avoid log(0))\n    df['LogDeaths'] = np.log(df['Deaths'].fillna(0) + 1)\n    df['LogDamage'] = np.log(df['Damage'].fillna(0) + 1)\n\n    # Drop rows missing primary variables required for model: Femininity (IV) and Deaths (DV)\n    # Also drop rows missing core intensity controls as those are essential confounds\n    required_cols = ['Femininity', 'Deaths', 'Wind', 'CategoryScale']\n    df = df.dropna(subset=required_cols)\n\n    # Standardize continuous predictors (z-scores) used in the model for easier interpretation\n    def z(col: pd.Series) -> pd.Series:\n        return (col - col.mean()) / (col.std(ddof=0) if col.std(ddof=0) != 0 else 1.0)\n\n    df['Femininity_z'] = z(df['Femininity'])\n    df['Wind_z'] = z(df['Wind'])\n    # For MinPressure, higher pressure often means weaker storm; keep as-is but z-score it\n    df['MinPressure_z'] = z(df['MinPressure'].fillna(df['MinPressure'].mean()))\n    df['CategoryScale_z'] = z(df['CategoryScale'])\n    df['LogDamage_z'] = z(df['LogDamage'])\n\n    # Ensure FemaleName is binary 0/1 where possible\n    df['FemaleName'] = df['FemaleName'].apply(lambda x: 1 if x == 1 else (0 if x == 0 else np.nan))\n\n    # Final drop of rows with any remaining NaNs in variables we will use in the model\n    model_columns = [\n        'LogDeaths', 'Femininity_z', 'FemaleName',\n        'Wind_z', 'MinPressure_z', 'CategoryScale_z', 'LogDamage_z', 'Year'\n    ]\n    df = df.dropna(subset=model_columns)\n\n    # Keep only the columns relevant for subsequent modeling (plus an identifier if available)\n    keep_cols = model_columns + ['Deaths', 'Femininity', 'Wind', 'MinPressure', 'CategoryScale', 'Damage']\n    # If source column exists include as ID\n    if 'source' in df.columns:\n        keep_cols = ['source'] + keep_cols\n\n    return df[keep_cols]\n",
-      "m_code": "def model(df: pd.DataFrame) -> sm.regression.linear_model.RegressionResultsWrapper:\n    \"\"\"\n    Fit an OLS model predicting log deaths (LogDeaths) from name femininity and controls.\n    Primary specification: OLS on LogDeaths with robust (HC3) standard errors.\n\n    Primary independent variable: Femininity_z (continuous). Alternative indicator FemaleName is available\n    but the model below uses the continuous femininity index as the main test. If desired, run an\n    alternative specification replacing Femininity_z with FemaleName.\n\n    Returns the fitted statsmodels results object.\n    \"\"\"\n    # Required columns check\n    required = ['LogDeaths', 'Femininity_z', 'Wind_z', 'MinPressure_z', 'CategoryScale_z', 'LogDamage_z', 'Year']\n    missing = [c for c in required if c not in df.columns]\n    if missing:\n        raise ValueError(f\"Dataframe is missing required columns for modeling: {missing}\")\n\n    # Design matrix\n    X_cols = ['Femininity_z', 'Wind_z', 'MinPressure_z', 'CategoryScale_z', 'LogDamage_z', 'Year']\n    X = df[X_cols].astype(float)\n    X = sm.add_constant(X)\n    y = df['LogDeaths'].astype(float)\n\n    # Fit OLS with robust standard errors (HC3)\n    model = sm.OLS(y, X).fit(cov_type='HC3')\n\n    # Return the fitted results object (user can inspect .summary(), .params, .bse, etc.)\n    return model\n"
-    },
-    "2": {
-      "cvars": {
-        "ivs": [
-          {
-            "description": "Feminine character of the hurricane name as rated on a continuous masculinity-femininity scale (higher = more feminine) and a binary indicator for whether the name is female-coded (0=male-coded, 1=female-coded). These capture the hypothesized perceptual cue that more feminine names are seen as less threatening.",
-            "columns": [
-              "FemininityScore",
-              "FemaleName"
-            ]
-          }
-        ],
-        "dv": {
-          "description": "Public precaution/outcome proxied by the human toll of the storm: total deaths caused by the hurricane (and a logged version for robustness). Higher values indicate more severe outcome (which would reflect fewer effective precautions if all else equal).",
-          "columns": [
-            "Deaths",
-            "logDeaths"
-          ]
-        },
-        "controls": [
-          {
-            "description": "Maximum sustained wind speed at landfall (higher = more severe storm).",
-            "is_moderator": false,
-            "moderator_on": null,
-            "columns": [
-              "Wind"
-            ]
-          },
-          {
-            "description": "Minimum central pressure (lower pressure = stronger storm).",
+            "description": "Minimum central pressure (or the 'min' column from the dataset). Controls for storm intensity/severity.",
             "is_moderator": false,
             "moderator_on": null,
             "columns": [
@@ -176,34 +106,111 @@
             ]
           },
           {
-            "description": "Saffir-Simpson category or comparable severity rating (numeric).",
+            "description": "Saffir-Simpson category indicator (numeric category from dataset column 'masfem' which in this dataset encodes the category). Controls for categorical severity.",
             "is_moderator": false,
             "moderator_on": null,
             "columns": [
-              "SaffirCategory"
+              "SaffirSimpson"
             ]
           },
           {
-            "description": "Measured economic/property damage (proxy for exposure/impact). Used in logged form to reduce skew.",
-            "is_moderator": false,
-            "moderator_on": null,
-            "columns": [
-              "PropertyDamage",
-              "logPropertyDamage"
-            ]
-          },
-          {
-            "description": "Year of the storm to control for improvements in preparedness and reporting over time.",
+            "description": "Year of the hurricane (controls for temporal trends in preparedness, warning systems, and reporting).",
             "is_moderator": false,
             "moderator_on": null,
             "columns": [
               "Year"
             ]
+          },
+          {
+            "description": "Logged economic damage (log(1 + damage, from column 'ind')). Controls for exposure/damage magnitude which may correlate with fatalities.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "LogDamage"
+            ]
+          },
+          {
+            "description": "Alternative continuous femininity measure collected via MTurk raters (used for a robustness specification).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "Femininity_MTURK_c"
+            ]
           }
         ]
       },
-      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw hurricane dataset into a modeling-ready dataframe.\n    Produces the following key columns used in the model:\n      - FemininityScore: continuous name femininity score (from 'name')\n      - FemaleName: binary name-gender indicator (from 'elapsedyrs', 0=male,1=female)\n      - Deaths: total deaths caused by the hurricane (from 'ndam15')\n      - logDeaths: log(Deaths + 1)\n      - Wind: wind speed at landfall (from 'wind')\n      - MinPressure: minimum pressure at landfall (from 'min')\n      - SaffirCategory: numeric severity category (from 'masfem')\n      - PropertyDamage: normalized property damage (from 'ind')\n      - logPropertyDamage: log(PropertyDamage + 1)\n      - Year: year of the storm (from 'alldeaths')\n      - StormName: original hurricane name string (from 'ndam')\n    \"\"\"\n\n    # Work on a copy\n    df = df.copy()\n\n    # Standardize/rename columns we will use so downstream names are exact\n    # Note: use the columns as they exist in the provided schema\n    # 'name' is the continuous masculinity-femininity rating (higher = more feminine)\n    # 'elapsedyrs' is a binary gender indicator (0 male, 1 female)\n    # 'ndam15' is total deaths\n    # 'wind' wind speed\n    # 'min' minimum pressure\n    # 'masfem' category (Saffir-style numeric)\n    # 'ind' property damage (normalized)\n    # 'alldeaths' contains the year according to the provided schema\n\n    # Coerce numeric columns and handle non-numeric entries\n    numeric_cols = ['name', 'elapsedyrs', 'ndam15', 'wind', 'min', 'masfem', 'ind', 'alldeaths']\n    for col in numeric_cols:\n        if col in df.columns:\n            df[col] = pd.to_numeric(df[col], errors='coerce')\n\n    # Keep storm name string if present\n    if 'ndam' in df.columns:\n        df['StormName'] = df['ndam'].astype(str)\n    else:\n        df['StormName'] = pd.NA\n\n    # Rename to analysis-friendly exact column names (these are required by the model code)\n    # Femininity score (continuous)\n    if 'name' in df.columns:\n        df['FemininityScore'] = df['name']\n    else:\n        df['FemininityScore'] = pd.NA\n\n    # Binary female-coded name indicator\n    if 'elapsedyrs' in df.columns:\n        # Ensure binary 0/1\n        df['FemaleName'] = df['elapsedyrs'].apply(lambda x: 1 if x == 1 else (0 if x == 0 else pd.NA))\n    else:\n        df['FemaleName'] = pd.NA\n\n    # Dependent variable: death counts\n    if 'ndam15' in df.columns:\n        df['Deaths'] = df['ndam15'].astype(float)\n    else:\n        df['Deaths'] = pd.NA\n\n    # Controls\n    df['Wind'] = df['wind'] if 'wind' in df.columns else pd.NA\n    df['MinPressure'] = df['min'] if 'min' in df.columns else pd.NA\n    df['SaffirCategory'] = df['masfem'] if 'masfem' in df.columns else pd.NA\n    df['PropertyDamage'] = df['ind'] if 'ind' in df.columns else pd.NA\n    df['Year'] = df['alldeaths'] if 'alldeaths' in df.columns else pd.NA\n\n    # Derived transforms\n    # log transform deaths for OLS robustness\n    df['logDeaths'] = np.log1p(df['Deaths'])\n    # log transform property damage to reduce skew\n    df['logPropertyDamage'] = np.log1p(df['PropertyDamage'].clip(lower=0))\n\n    # Drop rows missing the core variables necessary for the primary analysis\n    required = ['FemininityScore', 'FemaleName', 'Deaths', 'Wind', 'MinPressure']\n    df = df.dropna(subset=required)\n\n    # Reset index\n    df = df.reset_index(drop=True)\n\n    return df\n",
-      "m_code": "def model(df: pd.DataFrame) -> Any:\n    \"\"\"\n    Fit the primary statistical models to test whether more feminine hurricane names predict\n    lower human tolls (fewer deaths), controlling for storm severity and year.\n\n    Primary specification: Negative Binomial (counts, accommodates overdispersion):\n      Deaths ~ FemininityScore + FemaleName + Wind + MinPressure + SaffirCategory + logPropertyDamage + Year\n\n    Robustness: OLS on logDeaths with the same covariates.\n\n    Returns a dict with the fitted results objects for inspection.\n    \"\"\"\n    import statsmodels.formula.api as smf\n    import statsmodels.api as sm\n\n    # Ensure we have the expected columns\n    model_df = df.copy()\n\n    # Formula for models\n    formula = (\n        'Deaths ~ FemininityScore + FemaleName + Wind + MinPressure + '\n        'SaffirCategory + logPropertyDamage + Year'\n    )\n\n    # Fit Negative Binomial via GLM (handles overdispersion relative to Poisson)\n    try:\n        nb_model = smf.glm(formula=formula, data=model_df,\n                           family=sm.families.NegativeBinomial()).fit()\n    except Exception as e:\n        # If NegativeBinomial family not available or fails, fall back to Poisson and report\n        nb_model = None\n        poisson_model = None\n        try:\n            poisson_model = smf.glm(formula=formula, data=model_df,\n                                    family=sm.families.Poisson()).fit()\n        except Exception:\n            poisson_model = None\n\n    # Robustness OLS on log-transformed deaths\n    ols_formula = ('logDeaths ~ FemininityScore + FemaleName + Wind + MinPressure + '\n                   'SaffirCategory + logPropertyDamage + Year')\n    ols_model = smf.ols(formula=ols_formula, data=model_df).fit()\n\n    results = {\n        'nb_model': nb_model,\n        'poisson_model_fallback': poisson_model if 'poisson_model' in locals() else None,\n        'ols_model': ols_model\n    }\n\n    return results\n"
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    # Make a copy to avoid mutating original\n    df = df.copy()\n\n    # Helper: try candidate columns and return a numeric Series (with original index) if any convertible values exist.\n    def find_numeric_series(df: pd.DataFrame, candidates: List[str]) -> pd.Series:\n        for c in candidates:\n            if c in df.columns:\n                # Try numeric conversion\n                s_num = pd.to_numeric(df[c], errors='coerce')\n                if s_num.notna().any():\n                    return s_num\n        return pd.Series(dtype=float, index=df.index)\n\n    # Helper: find a series that may be categorical (e.g., 'male'/'female') and convert to binary 0/1 where possible.\n    def find_binary_female_series(df: pd.DataFrame, candidates: List[str]) -> pd.Series:\n        for c in candidates:\n            if c in df.columns:\n                s = df[c]\n                # If numeric convertible and has non-null, use numeric\n                s_num = pd.to_numeric(s, errors='coerce')\n                if s_num.notna().any():\n                    # If values are not strictly 0/1 but numeric, keep numeric (assume already coded)\n                    return s_num\n                # Otherwise try mapping common string labels\n                s_str = s.astype(str).str.strip().str.lower()\n                mapping = {'female': 1, 'f': 1, 'woman': 1, 'female_name': 1,\n                           'male': 0, 'm': 0, 'man': 0}\n                mapped = s_str.map(mapping)\n                if mapped.notna().any():\n                    return mapped\n        return pd.Series(dtype=float, index=df.index)\n\n    # Candidate source columns for each conceptual final variable.\n    death_candidates = ['ndam15', 'deaths', 'fatalities', 'ndead', 'fatality']\n    femininity_coder_candidates = [\n        'Femininity_Coder', 'femininity_coder', 'masfem_coder', 'masfemcoder',\n        'coder_fem', 'coder_rating', 'name', 'masfem'  # include masfem as potential source if it encodes a rating\n    ]\n    femininity_mturk_candidates = ['masfem_mturk', 'masfem-mturk', 'mturk_fem', 'femininity_mturk']\n    binary_female_candidates = ['elapsedyrs', 'female', 'female_name', 'is_female', 'female_name_ind', 'sex', 'sex_f']\n    maxwind_candidates = ['wind', 'max_wind', 'maxwind', 'wind_speed']\n    minpressure_candidates = ['min', 'min_pressure', 'pressure_min', 'minpress']\n    saffir_candidates = ['masfem', 'saffir_simpson', 'category', 'ss_category', 'saffir']\n    year_candidates = ['alldeaths', 'year', 'yr']\n    damage_candidates = ['ind', 'damage', 'adjusted_damage', 'adj_damage', 'economic_damage']\n\n    # Create LogDeaths\n    deaths_series = find_numeric_series(df, death_candidates)\n    if not deaths_series.empty and deaths_series.notna().any():\n        df['LogDeaths'] = np.log1p(deaths_series.astype(float))\n    else:\n        # If no numeric deaths found, create empty column of floats (will be dropped later if required)\n        df['LogDeaths'] = pd.Series(dtype=float, index=df.index)\n\n    # Femininity coder: try to find numeric rating. If candidate yields non-numeric (e.g., hurricane names), skip.\n    fem_coder_series = find_numeric_series(df, femininity_coder_candidates)\n    # If we didn't find numeric coder ratings but MTURK ratings exist, use MTURK as a fallback to populate Femininity_Coder\n    fem_mturk_series = find_numeric_series(df, femininity_mturk_candidates)\n    if fem_coder_series.notna().any():\n        df['Femininity_Coder_c'] = fem_coder_series.astype(float) - fem_coder_series.astype(float).mean()\n    else:\n        # If no coder ratings but MTURK exists, use MTURK to fill coder variable as a fallback.\n        if fem_mturk_series.notna().any():\n            df['Femininity_Coder_c'] = fem_mturk_series.astype(float) - fem_mturk_series.astype(float).mean()\n        else:\n            # Create empty column\n            df['Femininity_Coder_c'] = pd.Series(dtype=float, index=df.index)\n\n    # MTURK femininity (optional)\n    if fem_mturk_series.notna().any():\n        df['Femininity_MTURK_c'] = fem_mturk_series.astype(float) - fem_mturk_series.astype(float).mean()\n    else:\n        # Do NOT create a column of all-NaNs if no MTURK ratings are present (follow original intent).\n        # We'll simply not add Femininity_MTURK_c in that case.\n        if 'Femininity_MTURK_c' in df.columns:\n            df = df.drop(columns=['Femininity_MTURK_c'])\n\n    # Binary female-name indicator\n    binary_series = find_binary_female_series(df, binary_female_candidates)\n    if not binary_series.empty and binary_series.notna().any():\n        df['BinaryFemaleName'] = binary_series.astype(float)\n    else:\n        # Create empty column if no source found (will be handled downstream)\n        df['BinaryFemaleName'] = pd.Series(dtype=float, index=df.index)\n\n    # Intensity controls\n    maxwind_series = find_numeric_series(df, maxwind_candidates)\n    if not maxwind_series.empty and maxwind_series.notna().any():\n        df['MaxWind'] = maxwind_series.astype(float)\n    else:\n        df['MaxWind'] = pd.Series(dtype=float, index=df.index)\n\n    minpress_series = find_numeric_series(df, minpressure_candidates)\n    if not minpress_series.empty and minpress_series.notna().any():\n        df['MinPressure'] = minpress_series.astype(float)\n    else:\n        df['MinPressure'] = pd.Series(dtype=float, index=df.index)\n\n    # Saffir-Simpson category proxy\n    saffir_series = find_numeric_series(df, saffir_candidates)\n    if not saffir_series.empty and saffir_series.notna().any():\n        df['SaffirSimpson'] = saffir_series.astype(float)\n    else:\n        df['SaffirSimpson'] = pd.Series(dtype=float, index=df.index)\n\n    # Year\n    year_series = find_numeric_series(df, year_candidates)\n    if not year_series.empty and year_series.notna().any():\n        df['Year'] = year_series.astype(float)\n    else:\n        df['Year'] = pd.Series(dtype=float, index=df.index)\n\n    # LogDamage\n    damage_series = find_numeric_series(df, damage_candidates)\n    if not damage_series.empty and damage_series.notna().any():\n        df['LogDamage'] = np.log1p(damage_series.astype(float))\n    else:\n        df['LogDamage'] = pd.Series(dtype=float, index=df.index)\n\n    # Now enforce that the FINAL required columns are present and non-missing.\n    final_required = [\n        'LogDeaths',\n        'Femininity_Coder_c',\n        'BinaryFemaleName',\n        'MaxWind',\n        'MinPressure',\n        'SaffirSimpson',\n        'Year',\n        'LogDamage'\n    ]\n    # If any of these columns are entirely missing from the df at the moment (shouldn't be), create empty cols\n    for col in final_required:\n        if col not in df.columns:\n            df[col] = pd.Series(dtype=float, index=df.index)\n\n    # Drop rows with missing values in required columns (must have complete cases for modeling)\n    df = df.dropna(subset=final_required)\n\n    return df",
+      "m_code": "def model(df: pd.DataFrame) -> Any:\n    # Ensure required final columns exist\n    required = [\n        'LogDeaths',\n        'Femininity_Coder_c',\n        'BinaryFemaleName',\n        'MaxWind',\n        'MinPressure',\n        'SaffirSimpson',\n        'Year',\n        'LogDamage'\n    ]\n    missing = [c for c in required if c not in df.columns]\n    if missing:\n        raise ValueError(f\"Required column(s) for modeling missing from dataframe: {missing}\")\n\n    # Ensure there are observations with non-missing values for the primary specification\n    cols_spec1 = required.copy()\n    df1 = df.dropna(subset=cols_spec1)\n    if df1.empty:\n        raise ValueError(\"No observations available for modeling after transform (all rows missing required values).\")\n\n    # Specification 1 (primary): test relationship between coder-rated femininity and log deaths,\n    # controlling for storm intensity, year, and economic damage. Use robust (HC3) SEs.\n    formula1 = 'LogDeaths ~ Femininity_Coder_c + BinaryFemaleName + MaxWind + MinPressure + SaffirSimpson + Year + LogDamage'\n    model1 = smf.ols(formula1, data=df1).fit(cov_type='HC3')\n\n    results = {'model_coder': model1}\n\n    # Specification 2 (robustness): replace coder-rated femininity with MTurk-rated femininity if available\n    if 'Femininity_MTURK_c' in df.columns and df['Femininity_MTURK_c'].notnull().any():\n        cols_spec2 = ['LogDeaths', 'Femininity_MTURK_c', 'BinaryFemaleName', 'MaxWind', 'MinPressure', 'SaffirSimpson', 'Year', 'LogDamage']\n        df2 = df.dropna(subset=cols_spec2)\n        if not df2.empty:\n            formula2 = 'LogDeaths ~ Femininity_MTURK_c + BinaryFemaleName + MaxWind + MinPressure + SaffirSimpson + Year + LogDamage'\n            model2 = smf.ols(formula2, data=df2).fit(cov_type='HC3')\n            results['model_mturk'] = model2\n        # If df2 is empty, skip adding model_mturk (no usable rows)\n\n    return results"
+    },
+    "2": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Masculinity–femininity index of the hurricane name rated by independent coders (higher values = more feminine name). This operationalizes perceived femininity of the storm name and is the key independent variable testing whether more feminine names are associated with different outcomes.",
+            "columns": [
+              "name"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Observed human fatalities attributed to the hurricane (total deaths). This is used as a proxy outcome for whether people took sufficient precautionary measures: if feminine names lead to fewer precautions, all else equal we expect more deaths.",
+          "columns": [
+            "ndam15"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Maximum sustained wind speed at landfall (control for storm intensity).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "wind"
+            ]
+          },
+          {
+            "description": "Minimum central pressure or other pressure-related measure at landfall (control for storm intensity; lower pressure indicates stronger storm).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "min"
+            ]
+          },
+          {
+            "description": "Normalized property damage (proxy for exposure / economic impact). Controls for difference in exposure and impacts across storms which could confound deaths.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "ind"
+            ]
+          },
+          {
+            "description": "Calendar year of the hurricane (controls for time trends in evacuation procedures, forecasting, and general preparedness).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "alldeaths"
+            ]
+          },
+          {
+            "description": "Coded storm category on the Saffir–Simpson scale (control for storm severity in a categorical/ordinal way).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "masfem"
+            ]
+          },
+          {
+            "description": "Alternative continuous femininity rating collected on MTurk (used as an additional control/robustness variable or alternative IV).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "masfem_mturk"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    # Make a copy to avoid modifying original\n    df = df.copy()\n\n    # Standardize column names that may be confused in metadata; keep exact final column names used in modeling\n    # Columns expected in raw data: 'name' (masc-fem index), 'ndam15' (total deaths), 'wind', 'min', 'ind', 'alldeaths', 'masfem', 'masfem_mturk'\n\n    # Ensure numeric types (coerce non-numeric to NaN)\n    numeric_cols = ['name', 'ndam15', 'wind', 'min', 'ind', 'alldeaths', 'masfem', 'masfem_mturk']\n    for col in numeric_cols:\n        if col in df.columns:\n            df[col] = pd.to_numeric(df[col], errors='coerce')\n\n    # Drop rows missing the core IV or DV (we cannot model without them)\n    df = df.dropna(subset=['name', 'ndam15'])\n\n    # For controls, we will allow some missingness but drop rows missing the primary set of controls\n    # (wind, min, ind, alldeaths). If you want to keep more rows, consider multiple imputation.\n    controls_needed = [c for c in ['wind', 'min', 'ind', 'alldeaths'] if c in df.columns]\n    if len(controls_needed) > 0:\n        df = df.dropna(subset=controls_needed)\n\n    # Create a log-transformed deaths variable for OLS sensitivity analysis\n    df['log_ndam15'] = np.log1p(df['ndam15'])\n\n    # Optionally standardize the IV for interpretable coefficients in sensitivity checks\n    df['name_z'] = (df['name'] - df['name'].mean()) / (df['name'].std(ddof=0) if df['name'].std(ddof=0) != 0 else 1)\n\n    # Trim or winsorize extremely large damage values to reduce influence of outliers (robustness)\n    if 'ind' in df.columns:\n        # Replace negative or zero with small positive to allow log transforms if needed later\n        df['ind'] = df['ind'].apply(lambda x: np.nan if pd.isna(x) else (x if x >= 0 else np.nan))\n        # create log damage variable\n        df['log_ind'] = np.log1p(df['ind'])\n\n    # Ensure final dataframe contains exactly the columns described in conceptual variables + auxiliaries\n    final_cols = [c for c in ['name', 'name_z', 'ndam15', 'log_ndam15', 'wind', 'min', 'ind', 'log_ind', 'alldeaths', 'masfem', 'masfem_mturk'] if c in df.columns]\n    df = df[final_cols]\n\n    return df",
+      "m_code": "def model(df: pd.DataFrame) -> dict:\n    \"\"\"\n    Runs primary negative-binomial GLM on death counts and an OLS on log(deaths+1) as sensitivity.\n\n    Returns a dict with both fitted results objects (statsmodels result instances).\n    \"\"\"\n    results = {}\n\n    # Prepare design matrix for controls used in primary specification\n    controls = [c for c in ['wind', 'min', 'ind', 'alldeaths', 'masfem'] if c in df.columns]\n\n    # Primary model: negative binomial regression for count of deaths (handles overdispersion)\n    try:\n        exog_vars = ['name'] + controls\n        X = df[exog_vars]\n        X = sm.add_constant(X, has_constant='add')\n        y = df['ndam15']\n\n        nb_model = sm.GLM(y, X, family=sm.families.NegativeBinomial()).fit()\n        results['nb_model'] = nb_model\n    except Exception as e:\n        results['nb_model_error'] = str(e)\n\n    # Sensitivity: linear regression on log( ndam15 + 1 )\n    try:\n        exog_vars = ['name'] + controls\n        X2 = df[exog_vars]\n        X2 = sm.add_constant(X2, has_constant='add')\n        y2 = df['log_ndam15']\n\n        ols_model = sm.OLS(y2, X2).fit()\n        results['ols_model'] = ols_model\n    except Exception as e:\n        results['ols_model_error'] = str(e)\n\n    # Additional robustness check: use standardized IV (name_z) in OLS if present\n    if 'name_z' in df.columns:\n        try:\n            exog_vars_z = ['name_z'] + controls\n            X3 = df[exog_vars_z]\n            X3 = sm.add_constant(X3, has_constant='add')\n            ols_z = sm.OLS(df['log_ndam15'], X3).fit()\n            results['ols_name_z'] = ols_z\n        except Exception as e:\n            results['ols_name_z_error'] = str(e)\n\n    return results"
     }
   }
 }

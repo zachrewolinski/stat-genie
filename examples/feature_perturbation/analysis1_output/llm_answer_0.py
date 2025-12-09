@@ -1,132 +1,179 @@
 def extract_final_answer(model_output):
     """
-    Extracts statistics about the effect of hurricane name femininity (NameFem)
-    and binary gender (GenderBinary) from a statsmodels fitted-model output dict.
+    Extracts statistics for the 'masfem_z' coefficient from the provided model_output dict,
+    which is expected to contain 'nb_result' (Negative Binomial GLM fit) and optionally
+    'ols_result' (OLS on log(alldeaths + 1)).
 
-    Input:
-        model_output: dict-like with keys 'main', 'robust_damage', 'gender_only'
-                      values are statsmodels RegressionResultsWrapper objects.
-
-    Output:
-        dict with keys:
-          - "object": dict with extracted numeric statistics for relevant coefficients
-          - "description": short interpretation linking the statistics to the task hypothesis
+    Returns:
+      {
+        "object": {
+          "nb": { "coef": ..., "pvalue": ..., "ci_lower": ..., "ci_upper": ..., "irr": ..., "irr_ci_lower": ..., "irr_ci_upper": ... }  # if nb_result present
+          "ols": { "coef": ..., "pvalue": ..., "ci_lower": ..., "ci_upper": ..., "pct_change": ..., "pct_change_ci_lower": ..., "pct_change_ci_upper": ... }  # if ols_result present
+          "conclusion": "supports / does not support / inconclusive"  # simple judgement based on sign and p-value (alpha=0.05)
+        },
+        "description": "Plain-language explanation"
+      }
     """
-    import math
     import numpy as np
 
-    def safe_get_result(res, varname):
-        """Return dict with coefficient, se, t, p, 95% CI, and percent change for log outcome."""
-        out = {"variable": varname, "present": False}
-        if res is None:
-            return out
+    result = {"object": {}, "description": ""}
+
+    if not isinstance(model_output, dict):
+        raise ValueError("model_output must be a dictionary containing model result objects.")
+
+    # Helper to safely extract param, pvalue, conf int
+    def _extract_from_result(res, name):
+        out = {}
+        # params and pvalues are usually pandas Series
         try:
-            params = res.params
+            coef = float(res.params[name])
         except Exception:
-            return out
-        if varname not in params.index:
-            return out
-        out["present"] = True
-        coef = float(params[varname])
-        # standard error, tvalue, pvalue
-        se = float(res.bse[varname]) if varname in res.bse.index else None
-        t = float(res.tvalues[varname]) if varname in res.tvalues.index else None
-        p = float(res.pvalues[varname]) if varname in res.pvalues.index else None
+            # try positional access
+            try:
+                idx = list(res.params.index).index(name)
+                coef = float(res.params.iloc[idx])
+            except Exception as e:
+                raise KeyError(f"Could not find parameter '{name}' in result.params: {e}")
+
+        # p-value
+        try:
+            pval = float(res.pvalues[name])
+        except Exception:
+            try:
+                idx = list(res.pvalues.index).index(name)
+                pval = float(res.pvalues.iloc[idx])
+            except Exception as e:
+                pval = np.nan
+
         # confidence interval
         try:
-            ci = res.conf_int().loc[varname].tolist()
-            ci_lower, ci_upper = float(ci[0]), float(ci[1])
+            ci = res.conf_int()  # may be ndarray or DataFrame
+            # If DataFrame-like and has index:
+            if hasattr(ci, "loc") and name in ci.index:
+                lower, upper = float(ci.loc[name, 0]), float(ci.loc[name, 1])
+            else:
+                # assume array with ordering same as params
+                idx = list(res.params.index).index(name)
+                lower, upper = float(ci[idx, 0]), float(ci[idx, 1])
         except Exception:
-            # fallback if conf_int doesn't have index
-            try:
-                ci_array = res.conf_int().values
-                # try to find row corresponding to varname via params index position
-                idx = list(res.params.index).index(varname)
-                ci_lower, ci_upper = float(ci_array[idx, 0]), float(ci_array[idx, 1])
-            except Exception:
-                ci_lower, ci_upper = None, None
-        # For log outcome, approximate percent change in (outcome) per 1-unit change in predictor:
-        # percent_change = (exp(coef) - 1) * 100
-        try:
-            pct_change = (math.exp(coef) - 1) * 100.0
-        except Exception:
-            pct_change = None
-        # assemble
-        out.update({
-            "coef": coef,
-            "se": se,
-            "t": t,
-            "p": p,
-            "ci_lower": ci_lower,
-            "ci_upper": ci_upper,
-            "percent_change_approx": pct_change
-        })
+            lower, upper = np.nan, np.nan
+
+        out["coef"] = coef
+        out["pvalue"] = pval
+        out["ci_lower"] = lower
+        out["ci_upper"] = upper
         return out
 
-    # Prepare results container
-    results = {}
+    # Primary: Negative Binomial
+    if "nb_result" in model_output and model_output["nb_result"] is not None:
+        nb = model_output["nb_result"]
+        try:
+            nb_stats = _extract_from_result(nb, "masfem_z")
+            # For count model, exponentiate coef to get incidence rate ratio (IRR)
+            irr = np.exp(nb_stats["coef"])
+            irr_ci_lower = np.exp(nb_stats["ci_lower"]) if not np.isnan(nb_stats["ci_lower"]) else np.nan
+            irr_ci_upper = np.exp(nb_stats["ci_upper"]) if not np.isnan(nb_stats["ci_upper"]) else np.nan
 
-    # Extract from main model: NameFem and GenderBinary (effect on LogDeaths)
-    res_main = model_output.get('main')
-    results['main_NameFem'] = safe_get_result(res_main, 'NameFem')
-    results['main_GenderBinary'] = safe_get_result(res_main, 'GenderBinary')
-
-    # Extract from robustness using damages outcome (LogNDAM15): same predictor NameFem
-    res_damage = model_output.get('robust_damage')
-    results['damage_NameFem'] = safe_get_result(res_damage, 'NameFem')
-
-    # Extract from gender-only model: GenderBinary effect on LogDeaths
-    res_genderonly = model_output.get('gender_only')
-    results['genderonly_GenderBinary'] = safe_get_result(res_genderonly, 'GenderBinary')
-
-    # Build human-readable interpretation for the main effect
-    interp_lines = []
-    main_nf = results.get('main_NameFem', {})
-    if main_nf.get("present"):
-        coef = main_nf["coef"]
-        p = main_nf["p"]
-        ci_l = main_nf["ci_lower"]
-        ci_u = main_nf["ci_upper"]
-        pct = main_nf["percent_change_approx"]
-        direction = "positive (higher femininity → higher log fatalities)" if coef > 0 else "negative (higher femininity → lower log fatalities)"
-        signif = "statistically significant (p < 0.05)" if (p is not None and p < 0.05) else "not statistically significant (p ≥ 0.05)"
-        interp_lines.append(
-            f"Main model — NameFem: coef={coef:.4g}, se={main_nf.get('se'):.4g} , p={p:.4g}; 95% CI [{ci_l:.4g}, {ci_u:.4g}]. "
-            f"Direction: {direction}. {signif}."
-        )
-        if pct is not None:
-            interp_lines.append(f"Approx. percent change in (alldeaths+1) per 1-unit increase in NameFem: {pct:.3g}%.")
+            nb_stats.update({
+                "irr": irr,
+                "irr_ci_lower": irr_ci_lower,
+                "irr_ci_upper": irr_ci_upper
+            })
+            result["object"]["nb"] = nb_stats
+        except KeyError as e:
+            result["object"]["nb_error"] = str(e)
     else:
-        interp_lines.append("Main model — NameFem: variable not present in the fitted model output.")
+        result["object"]["nb"] = None
 
-    # Add interpretation for gender-only model
-    go = results.get('genderonly_GenderBinary', {})
-    if go.get("present"):
-        coef = go["coef"]
-        p = go["p"]
-        ci_l = go["ci_lower"]
-        ci_u = go["ci_upper"]
-        direction = "female-named storms associated with higher log fatalities" if coef > 0 else "female-named storms associated with lower log fatalities"
-        signif = "statistically significant (p < 0.05)" if (p is not None and p < 0.05) else "not statistically significant (p ≥ 0.05)"
-        interp_lines.append(
-            f"Gender-only model — GenderBinary: coef={coef:.4g}, p={p:.4g}; 95% CI [{ci_l:.4g}, {ci_u:.4g}]. "
-            f"Interpretation: {direction}. {signif}."
+    # Robustness: OLS on log(alldeaths + 1)
+    if "ols_result" in model_output and model_output["ols_result"] is not None:
+        ols = model_output["ols_result"]
+        try:
+            ols_stats = _extract_from_result(ols, "masfem_z")
+            # For log outcome, approximate percent change = (exp(coef) - 1) * 100
+            pct_change = (np.exp(ols_stats["coef"]) - 1.0) * 100.0
+            pct_ci_lower = (np.exp(ols_stats["ci_lower"]) - 1.0) * 100.0 if not np.isnan(ols_stats["ci_lower"]) else np.nan
+            pct_ci_upper = (np.exp(ols_stats["ci_upper"]) - 1.0) * 100.0 if not np.isnan(ols_stats["ci_upper"]) else np.nan
+
+            ols_stats.update({
+                "pct_change": pct_change,
+                "pct_change_ci_lower": pct_ci_lower,
+                "pct_change_ci_upper": pct_ci_upper
+            })
+            result["object"]["ols"] = ols_stats
+        except KeyError as e:
+            result["object"]["ols_error"] = str(e)
+    else:
+        result["object"]["ols"] = None
+
+    # Simple conclusion logic based on primary NB model
+    conclusion = "inconclusive"
+    try:
+        nb_obj = result["object"].get("nb")
+        if isinstance(nb_obj, dict) and "coef" in nb_obj:
+            coef = nb_obj["coef"]
+            p = nb_obj["pvalue"]
+            # Direction: positive coef => more feminine names associated with more deaths (consistent with hypothesis)
+            if (not np.isnan(p)) and (p <= 0.05):
+                conclusion = "supports" if coef > 0 else "contradicts"
+            else:
+                # not statistically significant
+                conclusion = "inconclusive"
+        else:
+            conclusion = "inconclusive"
+    except Exception:
+        conclusion = "inconclusive"
+
+    # Build a readable description
+    descr_lines = []
+    descr_lines.append("Extracted estimates for the predictor 'masfem_z' (higher = more feminine name).")
+    if result["object"].get("nb"):
+        nb = result["object"]["nb"]
+        descr_lines.append(
+            f"Negative Binomial (primary): coef = {nb['coef']:.4f}, p = {nb['pvalue']:.4g}, "
+            f"95% CI = [{nb['ci_lower']:.4f}, {nb['ci_upper']:.4f}]."
+        )
+        descr_lines.append(
+            f"This implies an incidence rate ratio (IRR) = {nb['irr']:.4f} "
+            f"(95% CI = [{nb['irr_ci_lower']:.4f}, {nb['irr_ci_upper']:.4f}])."
         )
     else:
-        interp_lines.append("Gender-only model — GenderBinary: variable not present in the fitted model output.")
+        descr_lines.append("Negative Binomial result not available or 'masfem_z' not estimated.")
 
-    # Brief conclusion relative to the hypothesis
-    conclusion = ("Conclusion (data-driven): Inspect the sign and significance of NameFem in the main model. "
-                  "If NameFem coef is positive and statistically significant, this is consistent with the hypothesis "
-                  "that more feminine names are associated with higher fatalities (interpreted as less precaution). "
-                  "If negative and significant, it contradicts the hypothesis. If not significant, the analysis "
-                  "does not provide evidence for the hypothesized effect.")
-    interp_lines.append(conclusion)
+    if result["object"].get("ols"):
+        ols = result["object"]["ols"]
+        descr_lines.append(
+            f"OLS on log(alldeaths+1) (robust): coef = {ols['coef']:.4f}, p = {ols['pvalue']:.4g}, "
+            f"95% CI = [{ols['ci_lower']:.4f}, {ols['ci_upper']:.4f}]."
+        )
+        descr_lines.append(
+            f"Approximate percent change in (alldeaths+1) per 1 SD increase in masculinity->femininity = "
+            f"{ols['pct_change']:.2f}% (95% CI = [{ols['pct_change_ci_lower']:.2f}%, {ols['pct_change_ci_upper']:.2f}%])."
+        )
+    else:
+        descr_lines.append("OLS robustness result not available or 'masfem_z' not estimated.")
 
-    return {
-        "object": results,
-        "description": "Extracted coefficient estimates, standard errors, t-values, p-values, 95% CIs, and approximate percent-change for NameFem and GenderBinary from the provided models. "
-                       "Also provides a short interpretation stating whether the estimates support the hypothesis (direction and statistical significance). "
-                       "See 'object' for numeric results.",
-        "interpretation_lines": interp_lines
-    }
+    # Interpret direction relative to hypothesis
+    if conclusion == "supports":
+        descr_lines.append(
+            "Interpretation: The NB estimate is positive and statistically significant at alpha=0.05, "
+            "meaning storms with more feminine names are associated with higher fatality counts, "
+            "which is consistent with the hypothesis that feminine names lead to fewer precautions and thus more deaths."
+        )
+    elif conclusion == "contradicts":
+        descr_lines.append(
+            "Interpretation: The NB estimate is negative and statistically significant at alpha=0.05, "
+            "meaning storms with more feminine names are associated with fewer fatalities, "
+            "which contradicts the stated hypothesis."
+        )
+    else:
+        descr_lines.append(
+            "Interpretation: The NB estimate is not statistically significant (or not available), "
+            "so there is insufficient evidence to conclude that perceived femininity of hurricane names "
+            "affects fatality counts in the data at conventional significance levels."
+        )
+
+    result["object"]["conclusion"] = conclusion
+    result["description"] = " ".join(descr_lines)
+
+    return result

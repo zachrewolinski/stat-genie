@@ -1,133 +1,115 @@
-import pandas as pd
+from typing import Dict, FrozenSet, List, Literal, Optional, Set, Tuple, Any
 import numpy as np
-from typing import Any
+import pandas as pd
+import sklearn
+import scipy
 import statsmodels.api as sm
+import statsmodels.formula.api as smf
+import matplotlib.pyplot as plt
+import pickle
+  
+df = pd.read_csv('/accounts/campus/austin.zane/stat-genie/.venv/lib/python3.11/site-packages/blade_bench/datasets/hurricane/data.csv')
 
-
+# ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Prepare dataframe for modeling by converting pandas extension dtypes
-    (e.g. nullable integer "Int64", nullable boolean "boolean", etc.)
-    to numpy-backed dtypes that statsmodels/patsy can consume.
-
-    The function:
-    - Makes and returns a copy of the dataframe (does not modify in place).
-    - Converts pandas extension integer/float dtypes to numpy float64.
-      (float64 is used to preserve NA values).
-    - Converts pandas nullable boolean dtype to numpy bool (NA will be converted to False).
-    - Converts other extension types (including object/categorical) to types
-      that are compatible; categorical is left as-is because downstream
-      encoding uses get_dummies.
-    """
+    # Work on a copy to avoid side effects
     df = df.copy()
 
-    # pandas API helpers
-    from pandas.api import types as ptypes
+    # Keep only rows with the primary variables present
+    required_cols = ['alldeaths', 'masfem', 'wind', 'min', 'category', 'year', 'elapsedyrs', 'source', 'gender_mf']
+    df = df.dropna(subset=required_cols)
 
-    for col in df.columns:
-        dtype = df[col].dtype
+    # Dependent variable: fatalities as integer count
+    # Ensure non-negative integer counts; if fractional or negative, coerce sensibly
+    df['alldeaths_count'] = df['alldeaths'].astype(float).clip(lower=0)
+    # Round to nearest integer if necessary (fatalities should be integer counts)
+    df['alldeaths_count'] = df['alldeaths_count'].round().astype(int)
 
-        # Skip already numpy-backed numeric dtypes
-        if np.issubdtype(dtype, np.number):
-            continue
+    # Independent variable: masfem (higher = more feminine name)
+    # Create a standardized (z-scored) version for interpretability in regression
+    df['masfem'] = df['masfem'].astype(float)
+    df['masfem_z'] = (df['masfem'] - df['masfem'].mean()) / (df['masfem'].std(ddof=0) if df['masfem'].std(ddof=0) != 0 else 1.0)
 
-        # If it's a pandas extension array dtype (e.g., "Int64", "Float64", "boolean")
-        if ptypes.is_extension_array_dtype(dtype):
-            # Nullable integers or floats -> convert to numpy float64 (keeps NaN)
-            if ptypes.is_integer_dtype(dtype) or ptypes.is_float_dtype(dtype):
-                df[col] = df[col].astype("float64")
-            # Nullable booleans -> convert to numpy bool, fill NA with False
-            elif ptypes.is_bool_dtype(dtype):
-                # fillna(False) to ensure conversion to numpy bool works
-                df[col] = df[col].fillna(False).astype("bool")
-            # CategoricalDtype is fine to leave as category; objects remain as-is
-            else:
-                # fallback: convert to object for safety (string-like)
-                try:
-                    df[col] = df[col].astype("object")
-                except Exception:
-                    # as a last resort, convert via numpy array
-                    df[col] = df[col].to_numpy()
+    # Ensure gender_mf is binary numeric 0/1
+    df['gender_mf'] = df['gender_mf'].astype(int)
+
+    # Center year to improve interpretability and numerical stability
+    df['year_centered'] = df['year'].astype(float) - df['year'].astype(float).mean()
+
+    # Ensure category is an integer (1-5) used as categorical in modeling
+    df['category'] = df['category'].astype(int)
+
+    # elapsedyrs keep as numeric
+    df['elapsedyrs'] = df['elapsedyrs'].astype(float)
+
+    # Ensure wind and min are numeric
+    df['wind'] = df['wind'].astype(float)
+    df['min'] = df['min'].astype(float)
+
+    # Create an auxiliary logged DV for alternative linear modeling (not used in main NB model but useful)
+    df['log_alldeaths_plus1'] = np.log1p(df['alldeaths_count'])
+
+    # Keep only columns necessary for modeling and diagnostics
+    keep_cols = [
+        'alldeaths_count', 'log_alldeaths_plus1',
+        'masfem', 'masfem_z', 'gender_mf',
+        'wind', 'min', 'category', 'year_centered', 'elapsedyrs', 'source', 'name', 'year'
+    ]
+
+    # Some sources may have many categories; keep as-is (we will model as categorical)
+    df = df[keep_cols]
 
     return df
 
 
-def model(df: pd.DataFrame) -> Any:
-    """
-    Fit a Negative Binomial GLM to the dataframe without using Patsy/formula,
-    to avoid issues with pandas extension dtypes and Patsy dtype sniffing.
+# ======== MODEL CODE ========
+def model(df: pd.DataFrame) -> any:
+    import statsmodels.formula.api as smf
+    import statsmodels.api as sm
 
-    Strategy:
-    - Automatically pick a response (endogenous) variable: the first numeric column found.
-    - Use all other columns as predictors.
-    - For categorical/object/bool predictors, use one-hot encoding (pd.get_dummies).
-    - For numeric predictors, use them as-is.
-    - Add a constant (intercept) and fit statsmodels.GLM with NegativeBinomial family.
-
-    Returns the fitted results object (statsmodels RegressionResultsWrapper).
-    """
-    if not isinstance(df, pd.DataFrame):
-        raise ValueError("Input must be a pandas DataFrame")
-
-    # Work on a copy to avoid modifying original
+    # Work on a copy
     data = df.copy()
 
-    # Select numeric columns for candidate response
-    numeric_cols = data.select_dtypes(include=[np.number]).columns.tolist()
-    if len(numeric_cols) == 0:
-        raise ValueError("No numeric columns found to select as response variable.")
+    # Primary model: Negative Binomial GLM for count outcome (fatalities)
+    # Formula includes masfem standardized (masfem_z) as the main predictor and
+    # controls for physical intensity (wind, min, category), temporal trend (year_centered),
+    # archival effects (source), and elapsedyrs. gender_mf is included as an additional control.
+    formula = (
+        'alldeaths_count ~ masfem_z + gender_mf + wind + min + C(category) '
+        '+ year_centered + elapsedyrs + C(source)'
+    )
 
-    # Choose the first numeric column as response
-    y_col = numeric_cols[0]
+    # Fit the GLM Negative Binomial
+    glm_nb = smf.glm(formula=formula, data=data, family=sm.families.NegativeBinomial())
+    res_nb = glm_nb.fit()
 
-    # Features: all other columns
-    feature_cols = [c for c in data.columns if c != y_col]
-    if len(feature_cols) == 0:
-        # If there are no predictors, fit intercept-only model
-        y = data[y_col].astype(float)
-        X = pd.DataFrame({"const": np.ones(len(y))}, index=data.index)
-    else:
-        X_parts = []
-        for col in feature_cols:
-            col_series = data[col]
+    # Obtain robust (HC3) covariance estimates to be conservative about heteroskedasticity
+    try:
+        res_nb_robust = res_nb.get_robustcov_results(cov_type='HC3')
+    except Exception:
+        # Fallback: return the original results if robust covariance calculation fails
+        res_nb_robust = res_nb
 
-            # If the column is numeric, use as-is (convert to float to handle NaNs)
-            if np.issubdtype(col_series.dtype, np.number):
-                X_parts.append(col_series.astype(float))
-            else:
-                # For non-numeric (object/category/bool), use one-hot encoding
-                # drop_first=True to avoid multicollinearity where possible
-                dummies = pd.get_dummies(col_series, prefix=col, drop_first=True, dummy_na=False)
-                if not dummies.empty:
-                    X_parts.append(dummies)
+    # Secondary / robustness checks (returned in a dict):
+    # 1) OLS on log(alldeaths + 1)
+    ols_formula = (
+        'log_alldeaths_plus1 ~ masfem_z + gender_mf + wind + min + C(category) '
+        '+ year_centered + elapsedyrs + C(source)'
+    )
+    ols_res = smf.ols(formula=ols_formula, data=data).fit()
 
-        if not X_parts:
-            # No usable predictors -- intercept-only model
-            X = pd.DataFrame({"const": np.ones(len(data))}, index=data.index)
-        else:
-            # Concatenate all parts into a single design matrix
-            X = pd.concat(X_parts, axis=1)
-            # Ensure all columns are numeric dtype
-            for c in X.columns:
-                if not np.issubdtype(X[c].dtype, np.number):
-                    X[c] = pd.to_numeric(X[c], errors="coerce")
+    # 2) A Poisson GLM (check for overdispersion vs NB)
+    pois_res = smf.glm(formula=formula, data=data, family=sm.families.Poisson()).fit()
 
-            # Add intercept
-            X = sm.add_constant(X, has_constant="add")
-
-        y = data[y_col].astype(float)
-
-    # Align and drop rows with missing values in X or y
-    combined = pd.concat([y, X], axis=1)
-    combined = combined.dropna()
-    if combined.shape[0] == 0:
-        raise ValueError("No rows available after dropping missing values for model fitting.")
-
-    y_clean = combined.iloc[:, 0]
-    X_clean = combined.iloc[:, 1:]
-
-    # Fit Negative Binomial GLM
-    model = sm.GLM(y_clean, X_clean, family=sm.families.NegativeBinomial())
-    results = model.fit()
+    # Return a dictionary of fitted results so the caller can inspect each model
+    results = {
+        'nb_glm_robust': res_nb_robust,
+        'nb_glm': res_nb,
+        'poisson_glm': pois_res,
+        'ols_log_outcome': ols_res,
+        'model_formula': formula
+    }
 
     return results
+
+

@@ -1,130 +1,190 @@
-import typing
 from typing import Any, List
-
 import numpy as np
 import pandas as pd
-import statsmodels.api as sm
+import statsmodels.formula.api as smf
 
 
+# ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Prepare a DataFrame for modeling.
+    # Make a copy to avoid mutating original
+    df = df.copy()
 
-    Ensures:
-    - A numeric outcome column named 'y' exists (if possible, inferred from common names or first numeric column;
-      otherwise a zero column is created).
-    - At least one numeric predictor is present. Numeric predictors are taken from existing numeric columns except 'y'.
-      If none exist, categorical columns are converted to dummies. If still none, a constant predictor is created.
-    - Missing values in predictors and 'y' are filled with 0.0.
-    - The list of predictor column names is stored in df.attrs['model_predictors'] for use by model().
+    # Helper: try candidate columns and return a numeric Series (with original index) if any convertible values exist.
+    def find_numeric_series(df: pd.DataFrame, candidates: List[str]) -> pd.Series:
+        for c in candidates:
+            if c in df.columns:
+                # Try numeric conversion
+                s_num = pd.to_numeric(df[c], errors='coerce')
+                if s_num.notna().any():
+                    return s_num
+        return pd.Series(dtype=float, index=df.index)
 
-    The function returns a copy of the input DataFrame with these guarantees.
-    """
-    # Make a safe copy
-    df = pd.DataFrame(df).copy()
+    # Helper: find a series that may be categorical (e.g., 'male'/'female') and convert to binary 0/1 where possible.
+    def find_binary_female_series(df: pd.DataFrame, candidates: List[str]) -> pd.Series:
+        for c in candidates:
+            if c in df.columns:
+                s = df[c]
+                # If numeric convertible and has non-null, use numeric
+                s_num = pd.to_numeric(s, errors='coerce')
+                if s_num.notna().any():
+                    # If values are not strictly 0/1 but numeric, keep numeric (assume already coded)
+                    return s_num
+                # Otherwise try mapping common string labels
+                s_str = s.astype(str).str.strip().str.lower()
+                mapping = {'female': 1, 'f': 1, 'woman': 1, 'female_name': 1,
+                           'male': 0, 'm': 0, 'man': 0}
+                mapped = s_str.map(mapping)
+                if mapped.notna().any():
+                    return mapped
+        return pd.Series(dtype=float, index=df.index)
 
-    # Find or create the target column 'y'
-    y_candidates = [c for c in df.columns if str(c).lower() in ("y", "outcome", "target", "response", "label")]
-    if y_candidates:
-        df["y"] = pd.to_numeric(df[y_candidates[0]], errors="coerce")
+    # Candidate source columns for each conceptual final variable.
+    death_candidates = ['ndam15', 'deaths', 'fatalities', 'ndead', 'fatality']
+    femininity_coder_candidates = [
+        'Femininity_Coder', 'femininity_coder', 'masfem_coder', 'masfemcoder',
+        'coder_fem', 'coder_rating', 'name', 'masfem'  # include masfem as potential source if it encodes a rating
+    ]
+    femininity_mturk_candidates = ['masfem_mturk', 'masfem-mturk', 'mturk_fem', 'femininity_mturk']
+    binary_female_candidates = ['elapsedyrs', 'female', 'female_name', 'is_female', 'female_name_ind', 'sex', 'sex_f']
+    maxwind_candidates = ['wind', 'max_wind', 'maxwind', 'wind_speed']
+    minpressure_candidates = ['min', 'min_pressure', 'pressure_min', 'minpress']
+    saffir_candidates = ['masfem', 'saffir_simpson', 'category', 'ss_category', 'saffir']
+    year_candidates = ['alldeaths', 'year', 'yr']
+    damage_candidates = ['ind', 'damage', 'adjusted_damage', 'adj_damage', 'economic_damage']
+
+    # Create LogDeaths
+    deaths_series = find_numeric_series(df, death_candidates)
+    if not deaths_series.empty and deaths_series.notna().any():
+        df['LogDeaths'] = np.log1p(deaths_series.astype(float))
     else:
-        # Prefer first numeric column if available
-        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-        if numeric_cols:
-            df["y"] = pd.to_numeric(df[numeric_cols[0]], errors="coerce")
+        # If no numeric deaths found, create empty column of floats (will be dropped later if required)
+        df['LogDeaths'] = pd.Series(dtype=float, index=df.index)
+
+    # Femininity coder: try to find numeric rating. If candidate yields non-numeric (e.g., hurricane names), skip.
+    fem_coder_series = find_numeric_series(df, femininity_coder_candidates)
+    # If we didn't find numeric coder ratings but MTURK ratings exist, use MTURK as a fallback to populate Femininity_Coder
+    fem_mturk_series = find_numeric_series(df, femininity_mturk_candidates)
+    if fem_coder_series.notna().any():
+        df['Femininity_Coder_c'] = fem_coder_series.astype(float) - fem_coder_series.astype(float).mean()
+    else:
+        # If no coder ratings but MTURK exists, use MTURK to fill coder variable as a fallback.
+        if fem_mturk_series.notna().any():
+            df['Femininity_Coder_c'] = fem_mturk_series.astype(float) - fem_mturk_series.astype(float).mean()
         else:
-            # No numeric columns: create a zero outcome column
-            df["y"] = 0.0
+            # Create empty column
+            df['Femininity_Coder_c'] = pd.Series(dtype=float, index=df.index)
 
-    # Identify numeric predictors excluding 'y'
-    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-    predictors: List[str] = [c for c in numeric_cols if c != "y"]
+    # MTURK femininity (optional)
+    if fem_mturk_series.notna().any():
+        df['Femininity_MTURK_c'] = fem_mturk_series.astype(float) - fem_mturk_series.astype(float).mean()
+    else:
+        # Do NOT create a column of all-NaNs if no MTURK ratings are present (follow original intent).
+        # We'll simply not add Femininity_MTURK_c in that case.
+        if 'Femininity_MTURK_c' in df.columns:
+            df = df.drop(columns=['Femininity_MTURK_c'])
 
-    # If no numeric predictors, try converting categorical columns to dummies
-    if not predictors:
-        non_numeric_cols = [c for c in df.columns if c != "y"]
-        if non_numeric_cols:
-            dummies = pd.get_dummies(df[non_numeric_cols], drop_first=True)
-            if not dummies.empty:
-                # Attach dummy columns to df
-                for col in dummies.columns:
-                    df[col] = dummies[col].astype(float)
-                predictors = dummies.columns.tolist()
+    # Binary female-name indicator
+    binary_series = find_binary_female_series(df, binary_female_candidates)
+    if not binary_series.empty and binary_series.notna().any():
+        df['BinaryFemaleName'] = binary_series.astype(float)
+    else:
+        # Create empty column if no source found (will be handled downstream)
+        df['BinaryFemaleName'] = pd.Series(dtype=float, index=df.index)
 
-    # If still no predictors, create a constant predictor
-    if not predictors:
-        df["const_feature"] = 1.0
-        predictors = ["const_feature"]
+    # Intensity controls
+    maxwind_series = find_numeric_series(df, maxwind_candidates)
+    if not maxwind_series.empty and maxwind_series.notna().any():
+        df['MaxWind'] = maxwind_series.astype(float)
+    else:
+        df['MaxWind'] = pd.Series(dtype=float, index=df.index)
 
-    # Ensure y and predictors are numeric and fill NA with 0.0
-    df["y"] = pd.to_numeric(df["y"], errors="coerce").fillna(0.0)
-    for col in predictors:
-        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+    minpress_series = find_numeric_series(df, minpressure_candidates)
+    if not minpress_series.empty and minpress_series.notna().any():
+        df['MinPressure'] = minpress_series.astype(float)
+    else:
+        df['MinPressure'] = pd.Series(dtype=float, index=df.index)
 
-    # Store predictor names in DataFrame attrs for the model function to pick up
-    df.attrs["model_predictors"] = predictors
+    # Saffir-Simpson category proxy
+    saffir_series = find_numeric_series(df, saffir_candidates)
+    if not saffir_series.empty and saffir_series.notna().any():
+        df['SaffirSimpson'] = saffir_series.astype(float)
+    else:
+        df['SaffirSimpson'] = pd.Series(dtype=float, index=df.index)
+
+    # Year
+    year_series = find_numeric_series(df, year_candidates)
+    if not year_series.empty and year_series.notna().any():
+        df['Year'] = year_series.astype(float)
+    else:
+        df['Year'] = pd.Series(dtype=float, index=df.index)
+
+    # LogDamage
+    damage_series = find_numeric_series(df, damage_candidates)
+    if not damage_series.empty and damage_series.notna().any():
+        df['LogDamage'] = np.log1p(damage_series.astype(float))
+    else:
+        df['LogDamage'] = pd.Series(dtype=float, index=df.index)
+
+    # Now enforce that the FINAL required columns are present and non-missing.
+    final_required = [
+        'LogDeaths',
+        'Femininity_Coder_c',
+        'BinaryFemaleName',
+        'MaxWind',
+        'MinPressure',
+        'SaffirSimpson',
+        'Year',
+        'LogDamage'
+    ]
+    # If any of these columns are entirely missing from the df at the moment (shouldn't be), create empty cols
+    for col in final_required:
+        if col not in df.columns:
+            df[col] = pd.Series(dtype=float, index=df.index)
+
+    # Drop rows with missing values in required columns (must have complete cases for modeling)
+    df = df.dropna(subset=final_required)
 
     return df
 
 
+# ======== MODEL CODE ========
 def model(df: pd.DataFrame) -> Any:
-    """
-    Fit an OLS model with robust (HC3) standard errors on the transformed DataFrame.
+    # Ensure required final columns exist
+    required = [
+        'LogDeaths',
+        'Femininity_Coder_c',
+        'BinaryFemaleName',
+        'MaxWind',
+        'MinPressure',
+        'SaffirSimpson',
+        'Year',
+        'LogDamage'
+    ]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"Required column(s) for modeling missing from dataframe: {missing}")
 
-    Behavior:
-    - Uses predictors from df.attrs['model_predictors'] when available.
-    - Otherwise infers numeric predictors (all numeric cols except 'y').
-    - Ensures there is at least one predictor (creates a constant predictor if necessary).
-    - Drops rows with NA in y or predictors. If all rows are dropped, creates a single-row fallback dataset.
-    - Returns the fitted statsmodels RegressionResultsWrapper.
+    # Ensure there are observations with non-missing values for the primary specification
+    cols_spec1 = required.copy()
+    df1 = df.dropna(subset=cols_spec1)
+    if df1.empty:
+        raise ValueError("No observations available for modeling after transform (all rows missing required values).")
 
-    Note: The function expects the DataFrame to contain a numeric 'y' column.
-    """
-    # Defensive copy
-    df = pd.DataFrame(df).copy()
+    # Specification 1 (primary): test relationship between coder-rated femininity and log deaths,
+    # controlling for storm intensity, year, and economic damage. Use robust (HC3) SEs.
+    formula1 = 'LogDeaths ~ Femininity_Coder_c + BinaryFemaleName + MaxWind + MinPressure + SaffirSimpson + Year + LogDamage'
+    model1 = smf.ols(formula1, data=df1).fit(cov_type='HC3')
 
-    # Load predictor names from attrs if present
-    preds = df.attrs.get("model_predictors", None)
+    results = {'model_coder': model1}
 
-    if preds is None:
-        # Infer numeric predictors except 'y'
-        preds = [c for c in df.select_dtypes(include=[np.number]).columns if c != "y"]
-    else:
-        # If stored as a string (older transform might store comma-separated), handle that
-        if isinstance(preds, str):
-            preds = [p for p in preds.split(",") if p]
-
-    # Keep only predictors that actually exist in the DataFrame
-    preds = [p for p in preds if p in df.columns]
-
-    # If no valid predictors, create a constant predictor
-    if not preds:
-        df["const_feature"] = 1.0
-        preds = ["const_feature"]
-
-    # Prepare X and y
-    X = df[preds].astype(float)
-    # Add constant term if not already present
-    X = sm.add_constant(X, has_constant="skip")
-    if "y" not in df.columns:
-        # Create a fallback y (zeros) if missing
-        y = pd.Series(0.0, index=df.index, name="y")
-    else:
-        y = pd.to_numeric(df["y"], errors="coerce")
-
-    # Combine and drop rows with NA in any used column
-    data = pd.concat([y, X], axis=1)
-    data = data.dropna()
-    if data.shape[0] == 0:
-        # Fallback single-row dataset to avoid zero-size arrays in statsmodels
-        single_row = {col: 0.0 for col in X.columns}
-        single_row["y"] = 0.0
-        data = pd.DataFrame([single_row])
-
-    y_clean = data["y"]
-    X_clean = data.drop(columns=["y"])
-
-    # Fit OLS with robust covariance (HC3)
-    results = sm.OLS(y_clean, X_clean).fit(cov_type="HC3")
+    # Specification 2 (robustness): replace coder-rated femininity with MTurk-rated femininity if available
+    if 'Femininity_MTURK_c' in df.columns and df['Femininity_MTURK_c'].notnull().any():
+        cols_spec2 = ['LogDeaths', 'Femininity_MTURK_c', 'BinaryFemaleName', 'MaxWind', 'MinPressure', 'SaffirSimpson', 'Year', 'LogDamage']
+        df2 = df.dropna(subset=cols_spec2)
+        if not df2.empty:
+            formula2 = 'LogDeaths ~ Femininity_MTURK_c + BinaryFemaleName + MaxWind + MinPressure + SaffirSimpson + Year + LogDamage'
+            model2 = smf.ols(formula2, data=df2).fit(cov_type='HC3')
+            results['model_mturk'] = model2
+        # If df2 is empty, skip adding model_mturk (no usable rows)
 
     return results

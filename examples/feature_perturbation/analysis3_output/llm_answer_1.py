@@ -1,145 +1,107 @@
-import numpy as np
-
 def extract_final_answer(model_output):
     """
-    Extract a sensible final answer from a fitted model-like object.
+    Extracts coefficient, standard error, t-stat, p-value, 95% CI, number of observations, and R-squared
+    for the femininity variables from the provided statsmodels RegressionResultsWrapper objects.
 
-    The function attempts to locate a parameter related to "Femininity" (the original
-    intended variable) but falls back to searching for related terms if the exact
-    name is not present. It returns a dictionary with:
-      - "object": a dict with keys "term", "coef", "stderr", "pvalue" (or None if not available)
-      - "description": a short human-readable interpretation of the returned statistic
-
-    The function is defensive: it handles statsmodels-like result objects (with .params,
-    .pvalues, .bse), plain dict/Mapping of coefficients, and returns a clear message if
-    no appropriate variable is found.
+    Returns:
+      {
+        "object": {
+          "coder": { ... } or None,
+          "mturk": { ... } or None
+        },
+        "description": "Brief interpretation of the results in context."
+      }
     """
-    # Helper: extract mapping-like params, pvalues, bse from model_output
-    def _to_dict_like(attr):
-        if attr is None:
-            return {}
-        # If pandas Series or similar mapping
-        try:
-            # Try to iterate like mapping from keys to values
-            return {str(k): v for k, v in attr.items()}
-        except Exception:
-            pass
-        # If it's an ndarray or list with named index not available, give up
-        return {}
+    import math
+    from scipy import stats
+    results = {"coder": None, "mturk": None}
 
-    # Attempt to read attributes in several common forms
-    params = {}
-    pvalues = {}
-    bse = {}
-
-    # If the model_output itself is a mapping of coefficients
-    if isinstance(model_output, dict):
-        params = {str(k): v for k, v in model_output.items()}
-    else:
-        # Try attributes commonly found on statsmodels regression results
-        params = _to_dict_like(getattr(model_output, "params", None))
-        pvalues = _to_dict_like(getattr(model_output, "pvalues", None))
-        bse = _to_dict_like(getattr(model_output, "bse", None))
-
-        # Some objects might store these as pandas Series accessible via .params (Series)
-        # _to_dict_like above will handle Series.
-
-    # Ensure keys are strings and create lowercase mapping for searching
-    param_names = list(params.keys())
-    if not param_names:
-        description = (
-            "No parameters could be extracted from the provided model_output. "
-            "Ensure model_output is a fitted model result (e.g., statsmodels) or a dict of coefficients."
-        )
-        return {"object": None, "description": description}
-
-    lower_map = {name.lower(): name for name in param_names}
-
-    # Candidate variable names in order of preference
-    candidates = [
-        "Femininity_z", "femininity_z", "Femininity", "femininity",
-        "masfem_mturk", "masfem", "gender_mf", "masculinity", "masculinity_z"
-    ]
-
-    found_name = None
-
-    # 1) Exact (case-insensitive) match with candidates
-    for cand in candidates:
-        if cand.lower() in lower_map:
-            found_name = lower_map[cand.lower()]
-            break
-
-    # 2) Substring match: look for any param name that contains candidate as substring
-    if found_name is None:
-        for cand in candidates:
-            for pname in param_names:
-                if cand.lower() in pname.lower():
-                    found_name = pname
-                    break
-            if found_name is not None:
-                break
-
-    # 3) Generic fallback: look for anything with 'fem', 'femin', or 'mas' in its name
-    if found_name is None:
-        for substr in ("fem", "femin", "mas"):
-            for pname in param_names:
-                if substr in pname.lower():
-                    found_name = pname
-                    break
-            if found_name is not None:
-                break
-
-    # 4) If still nothing, report available parameters and return None
-    if found_name is None:
-        description = (
-            "Could not find a variable related to 'Femininity' or similar in the fitted model. "
-            f"Available parameters: {param_names}"
-        )
-        return {"object": None, "description": description}
-
-    # Extract numeric values safely, converting numpy types to Python floats where possible
-    def _safe_float(mapping, key):
-        try:
-            v = mapping.get(key, None)
-            if v is None:
-                return None
-            # convert numpy scalar to python float
-            if isinstance(v, (np.floating, np.integer)):
-                return float(v)
-            # If pandas / numpy scalar
-            try:
-                return float(v)
-            except Exception:
-                return None
-        except Exception:
+    def _extract_from_result(res, varname):
+        if res is None:
+            return None
+        params = getattr(res, "params", None)
+        if params is None or varname not in params.index:
             return None
 
-    coef = _safe_float(params, found_name)
-    stderr = _safe_float(bse, found_name)
-    pval = _safe_float(pvalues, found_name)
+        coef = float(params[varname])
+        # robust se already used in fit (cov_type='HC3'), accessible via bse
+        bse = float(res.bse[varname]) if (hasattr(res, "bse") and varname in res.bse.index) else None
+        tval = float(res.tvalues[varname]) if (hasattr(res, "tvalues") and varname in res.tvalues.index) else None
+        pval = float(res.pvalues[varname]) if (hasattr(res, "pvalues") and varname in res.pvalues.index) else None
 
-    # Build the object to return
-    result_object = {
-        "term": found_name,
-        "coef": coef,
-        "stderr": stderr,
-        "pvalue": pval
-    }
+        # Try to get conf_int; if not available in an indexable form, compute using t critical value
+        try:
+            ci = res.conf_int().loc[varname]
+            ci_lower = float(ci[0])
+            ci_upper = float(ci[1])
+        except Exception:
+            # fallback: use t critical with df_resid
+            if bse is not None and hasattr(res, "df_resid"):
+                df = float(res.df_resid)
+                if math.isfinite(df) and df > 0:
+                    t_crit = float(stats.t.ppf(0.975, df))
+                    ci_lower = coef - t_crit * bse
+                    ci_upper = coef + t_crit * bse
+                else:
+                    ci_lower = None
+                    ci_upper = None
+            else:
+                ci_lower = None
+                ci_upper = None
 
-    # Compose a concise description
-    if coef is None:
-        description = f"Found parameter '{found_name}', but its numeric value could not be retrieved."
+        nobs = int(res.nobs) if hasattr(res, "nobs") else None
+        rsq = float(res.rsquared) if hasattr(res, "rsquared") else None
+
+        return {
+            "variable": varname,
+            "coef": coef,
+            "std_err": bse,
+            "t": tval,
+            "p_value": pval,
+            "ci_95_lower": ci_lower,
+            "ci_95_upper": ci_upper,
+            "nobs": nobs,
+            "r_squared": rsq
+        }
+
+    # Extract for coder-rated femininity if present
+    if isinstance(model_output, dict) and "model_coder" in model_output:
+        try:
+            results["coder"] = _extract_from_result(model_output["model_coder"], "Femininity_Coder_c")
+        except Exception:
+            results["coder"] = None
+
+    # Extract for MTurk-rated femininity if present
+    if isinstance(model_output, dict) and "model_mturk" in model_output:
+        try:
+            results["mturk"] = _extract_from_result(model_output["model_mturk"], "Femininity_MTURK_c")
+        except Exception:
+            results["mturk"] = None
+
+    # Build a brief description interpreting the primary result (coder). If coder is missing, mention that.
+    if results["coder"] is None:
+        description = ("No estimate for coder-rated femininity (Femininity_Coder_c) could be extracted from the model output. "
+                       "Ensure the model object contains that parameter.")
     else:
-        parts = [f"Estimated coefficient for '{found_name}' = {coef:.6g}"]
-        if stderr is not None:
-            parts.append(f"(SE = {stderr:.6g})")
-        if pval is not None:
-            parts.append(f"(p = {pval:.6g})")
-        # Add brief interpretation
-        interpretation = (
-            "A positive coefficient indicates that higher values of this predictor are associated "
-            "with higher values of the outcome, while a negative coefficient indicates the opposite."
+        r = results["coder"]
+        # Interpret sign and statistical significance
+        sign_desc = "negative" if r["coef"] < 0 else ("positive" if r["coef"] > 0 else "null (≈0)")
+        sig_desc = "statistically significant" if (r["p_value"] is not None and r["p_value"] < 0.05) else "not statistically significant"
+        description = (
+            f"Primary estimate (coder-rated femininity, Femininity_Coder_c): coefficient = {r['coef']:.4g}, "
+            f"SE = {r['std_err']:.4g}, p = {r['p_value']:.4g}, 95% CI = [{r['ci_95_lower']:.4g}, {r['ci_95_upper']:.4g}] "
+            f"based on {r['nobs']} observations. The coefficient is {sign_desc} and {sig_desc}. "
+            "A negative and statistically significant coefficient would support the hypothesis that more feminine names "
+            "are associated with lower log(1+deaths) (i.e., fewer fatalities), consistent with less precautionary behavior. "
         )
-        description = " ".join(parts) + ". " + interpretation
+        # Add note about robustness (MTurk) if present
+        if results["mturk"] is not None:
+            m = results["mturk"]
+            m_sign = "negative" if m["coef"] < 0 else ("positive" if m["coef"] > 0 else "null (≈0)")
+            m_sig = "statistically significant" if (m["p_value"] is not None and m["p_value"] < 0.05) else "not statistically significant"
+            description += (f"Robustness (MTurk-rated femininity): coefficient = {m['coef']:.4g}, p = {m['p_value']:.4g} "
+                            f"({m_sign}, {m_sig}), 95% CI = [{m['ci_95_lower']:.4g}, {m['ci_95_upper']:.4g}].")
+        else:
+            description += "No MTurk-rated robustness estimate was available in the provided output."
 
-    return {"object": result_object, "description": description}
+    return {"object": results, "description": description}
