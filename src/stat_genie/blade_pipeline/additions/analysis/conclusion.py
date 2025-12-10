@@ -26,6 +26,8 @@ def write_final_answer_code(llm_provider: str, llm_model: str, task: list[str],
         task (str): The task to be answered.
         cvars_text (str): The text representation of the variables used in the analysis.
         model_code (str): The code that defines the model.
+        output_subdir (str): The directory where output files should be saved.
+        analysis_num (int): The analysis number (used for file naming purposes).
         model_output: The output of the model.
         
     Returns:
@@ -89,7 +91,11 @@ def write_final_answer_code(llm_provider: str, llm_model: str, task: list[str],
                                        {"role": "user",
                                         "content": find_answer_prompt}])
     
-    return response.text[0].content
+    # create a file llm_answer_{analysis_num}.py in the output subdir
+    with open(f"{output_subdir}/llm_answer_{analysis_num}.py", "w") as f:
+        f.write(response.text[0].content)
+    
+    return
     
 def make_conclusion(llm_provider: str, llm_model: str, task: list[str],
                     cvars_text: str,
