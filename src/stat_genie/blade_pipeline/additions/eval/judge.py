@@ -1,6 +1,182 @@
 import json
 from stat_genie.blade_pipeline.llms.config import llm
 
+def judge_models(llm_provider: str,
+                 llm_model: str,
+                 research_question: str,
+                 models1: list[dict],
+                 models2: list[dict]):
+
+    model_judge = llm(provider=llm_provider, model=llm_model)
+
+    example_research_question = (
+        "What is the effect of hormonal fluctuations associated with fertility "
+        "on women's religiosity?"
+    )
+
+    example_score_5 = {
+        "Model Set #1": [
+            {
+                "model_code": """
+                    def model(df: pd.DataFrame):
+                        \"\"\"
+                        Fit an OLS regression to estimate the effect of fertility (High vs Low) on AvgReligiosity,
+                        testing whether that effect is moderated by relationship status. Control for reported cycle length and date certainty.
+
+                        Model formula:
+                        AvgReligiosity ~ C(FertilityGroup) * InRelationship + ReportedCycleLength + DateCertainty
+                        \"\"\"
+                        import statsmodels.formula.api as smf
+
+                        df = df.copy()
+                        df['FertilityGroup'] = df['FertilityGroup'].astype('category')
+                        if 'Low' in df['FertilityGroup'].cat.categories:
+                            order = ['Low'] + [x for x in df['FertilityGroup'].cat.categories if x != 'Low']
+                            try:
+                                df['FertilityGroup'] = df['FertilityGroup'].cat.reorder_categories(order, ordered=False)
+                            except:
+                                pass
+                        formula = 'AvgReligiosity ~ C(FertilityGroup) * InRelationship + ReportedCycleLength + DateCertainty'
+                        return smf.ols(formula, data=df).fit(cov_type='HC3')
+                """
+            }
+        ],
+        "Model Set #2": [
+            {
+                "model_code": """
+                    def model(df: pd.DataFrame):
+                        \"\"\"
+                        Fit an OLS regression testing the effect of fertility group on religiosity,
+                        including relationship status as a moderator and SureAvg as a covariate.
+
+                        Model specification:
+                        AvgReligiosity ~ C(FertilityGroup) * InRelationship + SureAvg
+                        \"\"\"
+                        import statsmodels.formula.api as smf
+                        df_model = df.copy()
+                        df_model['FertilityGroup'] = df_model['FertilityGroup'].astype('category')
+                        formula = 'AvgReligiosity ~ C(FertilityGroup) * InRelationship + SureAvg'
+                        return smf.ols(formula=formula, data=df_model).fit()
+                """
+            }
+        ],
+        "Model Similarity Score": 5
+    }
+
+    example_score_1 = {
+        "Model Set #1": [
+            {
+                "model_code": """
+                    def model(df: pd.DataFrame) -> Any:
+                        \"\"\"
+                        Fit an OLS model predicting AvgReligiosity from fertility (FertileHigh),
+                        interaction with InRelationship, controls AvgSure + CycleLengthUsed.
+                        \"\"\"
+                        import statsmodels.formula.api as smf
+                        formula = 'AvgReligiosity ~ FertileHigh * InRelationship + AvgSure + CycleLengthUsed'
+                        return smf.ols(formula=formula, data=df).fit()
+                """
+            }
+        ],
+        "Model Set #2": [
+            {
+                "model_code": """
+                    def model(df: pd.DataFrame):
+                        \"\"\"
+                        OLS: fertility group + interaction + SureAvg + ReportedCycleLength.
+                        Model:
+                        AvgReligiosity ~ C(FertilityGroup) * InRelationship + SureAvg + ReportedCycleLength
+                        \"\"\"
+                        import statsmodels.formula.api as smf
+                        df = df.copy()
+                        df['FertilityGroup'] = df['FertilityGroup'].astype('category')
+                        formula = 'AvgReligiosity ~ C(FertilityGroup) * InRelationship + SureAvg + ReportedCycleLength'
+                        return smf.ols(formula=formula, data=df).fit()
+                """
+            }
+        ],
+        "Model Similarity Score": 1
+    }
+
+    example_score_3 = {
+        "Model Set #1": [
+            {
+                "model_code": """
+                    def model(df: pd.DataFrame):
+                        \"\"\"
+                        Model:
+                        AvgReligiosity ~ InRelationship * C(FertilityGroup)
+                        (No controls)
+                        \"\"\"
+                        import statsmodels.formula.api as smf
+                        formula = 'AvgReligiosity ~ InRelationship * C(FertilityGroup)'
+                        return smf.ols(formula=formula, data=df.dropna()).fit()
+                """
+            }
+        ],
+        "Model Set #2": [
+            {
+                "model_code": """
+                    def model(df: pd.DataFrame):
+                        import statsmodels.formula.api as smf
+                        formula = 'AvgReligiosity ~ C(FertilityGroup) * InRelationship + DaysFromOvulation + SureMean + ReportedCycleLength_used'
+                        return smf.ols(formula, data=df).fit(cov_type='HC3')
+                """
+            }
+        ],
+        "Model Similarity Score": 3
+    }
+
+    judge_system_prompt = (
+        "You are a meticulous research design evaluator specializing in **model specification comparison**.\n"
+        "Your responsibility is to evaluate the structural and methodological similarity between two models.\n\n"
+        "Evaluate similarity based on:\n"
+        "1. Model type (OLS, logistic, mixed-effects, etc.)\n"
+        "2. Formula structure: predictors, interactions, coding choices, controls\n"
+        "3. Functional form (e.g., categorical coding, interaction terms, covariates)\n"
+        "4. Estimation approach (robust SEs, etc.)\n"
+        "5. Whether both models test the same substantive hypothesis\n\n"
+        "Ignore superficial naming differences. Focus on methodological equivalence.\n\n"
+        "Scoring scale:\n"
+        "1 = completely different\n"
+        "2 = somewhat different\n"
+        "3 = moderately similar\n"
+        "4 = very similar\n"
+        "5 = almost identical\n"
+    )
+
+    judge_user_prompt = (
+        f"Research Question:\n{research_question}\n\n"
+        f"==================== EXAMPLE SCORES ====================\n\n"
+        f"Example Score 1:\n{example_score_1}\n\n"
+        f"Example Score 3:\n{example_score_3}\n\n"
+        f"Example Score 5:\n{example_score_5}\n\n"
+        f"==================== MODEL SET 1 ====================\n{models1}\n\n"
+        f"==================== MODEL SET 2 ====================\n{models2}\n\n"
+        f"Please evaluate the similarity between these model specifications, focusing on:\n"
+        f"- Predictors, interactions, covariates\n"
+        f"- Model type and coding strategy\n"
+        f"- Estimation and error structure\n"
+        f"- Conceptual equivalence in testing the hypothesis\n\n"
+        f"Return JSON only:\n"
+        f"{{\n"
+        f"  \"Model Similarity Score\": <number>\n"
+        f"}}"
+    )
+
+    result = model_judge.generate([
+        {"role": "system", "content": judge_system_prompt},
+        {"role": "user", "content": judge_user_prompt}
+    ])
+
+    try:
+        raw = result.text[0].content
+    except:
+        raw = result.text
+
+    return json.loads(raw)
+
+
 def make_judge_prompt(task, data_head, featA, featB, modelA, modelB, conclA, conclB):
     return (
         f"Research Question / Context:\n{task}\n\n"
