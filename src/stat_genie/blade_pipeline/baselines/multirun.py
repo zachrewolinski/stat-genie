@@ -1,18 +1,25 @@
 import asyncio
 import json
 import os
+import sys
+import pandas as pd
 from typing import Dict, Tuple, Union
 import os.path as osp
-
+import importlib.util
 from blade_bench.baselines.config import MultiRunConfig
 from stat_genie.blade_pipeline.baselines.run import SingleRunExperiment
 from blade_bench.eval.datamodel.lm_analysis import EntireAnalysis
 from blade_bench.eval.datamodel.run import RunResultModes
 from blade_bench.eval.datamodel.multirun import MultiRunResults
 from blade_bench.eval.exceptions import LMGenerationError
-from blade_bench.utils import get_dataset_csv_path
+from blade_bench.utils import get_dataset_csv_path, get_dataset_info_path
 from stat_genie.blade_pipeline.additions.prompt.prompt import PromptGenerator
 from stat_genie.blade_pipeline.additions.perturbations.feature_names import FeaturePerturbation
+from blade_bench.eval.datamodel.lm_analysis import AgentCVarsWithCol
+from stat_genie.blade_pipeline.additions.analysis.conclusion import (
+    write_final_answer_code,
+    make_conclusion
+)
 
 from blade_bench.eval.utils import (
     SAVE_CODE_TEMPLATE,
@@ -20,7 +27,7 @@ from blade_bench.eval.utils import (
 from blade_bench.logger import logger
 from stat_genie.blade_pipeline.additions.analysis.fix_code import (
     is_code_correct,
-    check_and_fix_code_with_cvars,
+    check_and_fix_code,
 )
 
 
@@ -72,6 +79,10 @@ def _format_cvars_for_prompt(cvars) -> str:
     Returns:
         Formatted string describing the conceptual variables and their columns
     """
+    
+    if isinstance(cvars, dict):
+        cvars = AgentCVarsWithCol(**cvars)
+    
     lines = []
     lines.append("Independent variables:")
     for iv in cvars.ivs:
@@ -151,12 +162,13 @@ class RunLLMMultiRun(SingleRunExperiment):
                     
                     # Fix the code (with cvars preservation)
                     try:
-                        iterations = check_and_fix_code_with_cvars(
+                        iterations = check_and_fix_code(
                             code_name=f"llm_analysis_{i}",
                             code_path=save_path,
-                            cvars_text=cvars_text,
+                            code_purpose="transform_model",
                             llm_provider=llm_provider,
                             llm_model=llm_model,
+                            cvars_text=cvars_text,
                             dataset_path=dataset_path,
                             verbose=False
                         )
@@ -183,6 +195,66 @@ class RunLLMMultiRun(SingleRunExperiment):
             f.write(results.model_dump_json(indent=2))
         with open(osp.join(self.config.output_dir, "config.json"), "w") as f:
             f.write(self.config.model_dump_json(indent=2))
+            
+        ### Step 6: Write code to arrive at final answer
+        for i in results.analyses.keys():
+            # get absolute path to code
+            code_path = osp.join(self.config.output_dir, f"llm_analysis_{i}.py")
+            # import transform and model code from file
+            spec = importlib.util.spec_from_file_location(f"llm_analysis_{i}",
+                                                          code_path)
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[f"llm_analysis_{i}"] = module
+            spec.loader.exec_module(module)
+            # read in data
+            data_info = get_dataset_info_path(self.config.run_dataset)
+            with open(data_info, "r") as f:
+                data_info = json.load(f)
+            task = data_info["research_questions"][0]
+            data_path = get_dataset_csv_path(self.config.run_dataset)
+            data = pd.read_csv(data_path)
+            transformed_data = module.transform(data)
+            model_output = module.model(transformed_data)
+            write_final_answer_code(
+                llm_provider=self.config.llm.provider,
+                llm_model=self.config.llm.model,
+                task=task, # task from the corresponding dataset info json
+                cvars_text=_format_cvars_for_prompt(results.analyses[i].cvars),
+                model_code=results.analyses[i].m_code,
+                output_subdir=self.config.output_dir,
+                analysis_num=i,
+                model_output=model_output
+            )
+            iterations = check_and_fix_code(
+                code_name=f"llm_answer_{i}",
+                code_path=osp.join(self.config.output_dir, f"llm_answer_{i}.py"),
+                code_purpose="final_answer",
+                llm_provider=self.config.llm.provider,
+                llm_model=self.config.llm.model,
+                model_output=model_output,
+            )
+            logger.info(f"Wrote final answer extraction code for analysis {i}. It required {iterations} iteration(s) to be correct.")
+            # Step 7: Make conclusion based on final answer
+            spec = importlib.util.spec_from_file_location(f"llm_answer_{i}",
+                                                          osp.join(self.config.output_dir, f"llm_answer_{i}.py"))
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[f"llm_answer_{i}"] = module
+            spec.loader.exec_module(module)
+            final_answer = module.extract_final_answer(model_output)
+            with open(osp.join(self.config.output_dir, f"llm_answer_{i}.py"), "r", encoding="utf-8") as f:
+                interpretation_code_str = f.read() # need to get code as string
+            conclusion = make_conclusion(
+                llm_provider=self.config.llm.provider,
+                llm_model=self.config.llm.model,
+                task=task,
+                cvars_text=_format_cvars_for_prompt(results.analyses[i].cvars),
+                model_code=results.analyses[i].m_code,
+                interpretation_code=interpretation_code_str,
+                interpretation_output=final_answer
+            )
+            with open(osp.join(self.config.output_dir, f"final_conclusion_{i}.txt"), "w") as f:
+                f.write(conclusion)
+            logger.info(f"Wrote final conclusion for analysis {i}.")
 
         with open(osp.join(self.config.output_dir, "propmts.json"), "w") as f:
             f.write(

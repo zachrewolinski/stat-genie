@@ -1,173 +1,168 @@
-import pandas as pd
-import numpy as np
-import statsmodels.api as sm
 from typing import Any
+import numpy as np
+import pandas as pd
+import statsmodels.api as sm
+
+# If present in the environment, this read can be left; otherwise it's harmless.
+# The functions below operate on DataFrame inputs and do not rely on this variable.
+try:
+    df = pd.read_csv('/accounts/campus/austin.zane/stat-genie/.venv/lib/python3.11/site-packages/blade_bench/datasets/hurricane/data.csv')
+except Exception:
+    df = pd.DataFrame()
 
 
+# ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Transform the input dataframe into a form suitable for statistical modeling.
-
-    Transformations performed:
-    - Work on a copy of the dataframe to avoid side-effects.
-    - Convert object-typed columns to categorical.
-    - Fill numeric missing values with the column median (or 0 if median is NaN).
-    - For categorical columns, add a 'missing' category and fill missing values with it.
-    - Create derived features when common columns exist:
-        - log_income (log of income if > 0, otherwise 0.0)
-        - has_income (indicator for income not missing)
-        - age_sq (square of age) and ensure age is non-negative
-    - Normalize/convert 'treatment' into a binary 0/1 column when present.
-    - Leaves other columns intact.
-    """
+    # Work on a copy
     df = df.copy()
 
-    # Convert object columns to categorical
-    obj_cols = df.select_dtypes(include=['object']).columns.tolist()
-    for col in obj_cols:
-        try:
-            df[col] = df[col].astype('category')
-        except Exception:
-            # If conversion fails for any reason, leave as-is
-            pass
+    # Ensure expected raw columns exist in the DataFrame (create if missing)
+    # Note: 'name' is kept as-is (may be numeric rating or string); we'll handle numeric conversion for name separately.
+    expected_cols = ['ndam15', 'name', 'elapsedyrs', 'wind', 'min', 'masfem', 'alldeaths']
+    for col in expected_cols:
+        if col not in df.columns:
+            df[col] = np.nan
 
-    # Fill numeric missing values with median (or 0 if median is NaN)
-    num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-    for col in num_cols:
-        med = df[col].median()
-        if pd.isna(med):
-            med = 0
-        df[col] = df[col].fillna(med)
+    # Convert relevant columns to numeric where appropriate (coerce errors to NaN)
+    # Exclude 'name' here to avoid accidentally turning string hurricane names into NaN;
+    # we'll explicitly convert 'name' to numeric for name_c creation below.
+    numeric_cols = ['ndam15', 'elapsedyrs', 'wind', 'min', 'masfem', 'alldeaths']
+    for c in numeric_cols:
+        df[c] = pd.to_numeric(df[c], errors='coerce')
 
-    # For categorical columns, add 'missing' and fillna with it
-    cat_cols = df.select_dtypes(include=['category']).columns.tolist()
-    for col in cat_cols:
-        try:
-            if 'missing' not in df[col].cat.categories:
-                df[col] = df[col].cat.add_categories(['missing'])
-            df[col] = df[col].fillna('missing')
-        except Exception:
-            # If any unexpected issue, fallback to string fill
-            df[col] = df[col].astype(str).fillna('missing').astype('category')
+    # Drop rows missing the dependent variable:
+    # - ndam15 is required for log_deaths (DV)
+    df = df.dropna(subset=['ndam15'])
 
-    # Derived features
-    if 'income' in df.columns:
-        # log_income: log(x) for x>0, else 0.0
-        df['log_income'] = df['income'].apply(lambda x: np.log(x) if pd.notna(x) and x > 0 else 0.0)
-        df['has_income'] = df['income'].notna().astype(int)
-
-    if 'age' in df.columns:
-        # Ensure non-negative ages and create quadratic term
-        df['age'] = pd.to_numeric(df['age'], errors='coerce').fillna(0)
-        df['age'] = df['age'].clip(lower=0)
-        df['age_sq'] = df['age'] ** 2
-
-    # Normalize/convert treatment to binary 0/1 if present
-    if 'treatment' in df.columns:
-        # If categorical, use codes (map -1 to 0)
-        if df['treatment'].dtype.name == 'category':
-            codes = df['treatment'].cat.codes.replace(-1, 0)
-            # If codes have more than two distinct values, collapse to binary by >0
-            if len(np.unique(codes)) > 2:
-                df['treatment'] = (codes > 0).astype(int)
-            else:
-                df['treatment'] = codes.astype(int)
-        else:
-            # Try numeric conversion; non-numeric -> NaN -> treated as 0
-            numeric = pd.to_numeric(df['treatment'], errors='coerce').fillna(0)
-            # If values are not binary, map >0 to 1
-            unique_vals = pd.Series(numeric).unique()
-            if set(np.unique(unique_vals)).issubset({0, 1}):
-                df['treatment'] = numeric.astype(int)
-            else:
-                df['treatment'] = (numeric > 0).astype(int)
-
-    return df
-
-
-def model(df: pd.DataFrame) -> Any:
-    """
-    Fit a linear model (OLS) on the transformed dataframe.
-
-    Behavior:
-    - Attempts to find an outcome column in the following order:
-        'outcome', 'y', 'Y', 'target'; if none found, uses the first numeric column.
-    - Drops rows with missing outcome.
-    - Uses all other columns except common id columns as predictors.
-    - Numeric predictors are used as-is.
-    - Categorical/object predictors are converted to dummy variables (drop_first=True).
-    - Adds an intercept and fits OLS with robust HC3 covariance.
-    - Returns the fitted results object (statsmodels RegressionResults).
-    """
-    if not isinstance(df, pd.DataFrame):
-        raise TypeError("Input to model(...) must be a pandas DataFrame.")
-
-    df = df.copy()
-
-    # Determine outcome variable
-    outcome_candidates = ['outcome', 'y', 'Y', 'target']
-    outcome = None
-    for c in outcome_candidates:
-        if c in df.columns:
-            outcome = c
-            break
-
-    if outcome is None:
-        num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-        if not num_cols:
-            raise ValueError("No suitable outcome column found (no numeric columns present).")
-        outcome = num_cols[0]
-
-    # Drop rows with missing outcome
-    df = df.loc[df[outcome].notna()].copy()
+    # If after dropping there are no rows, return an empty DataFrame with the required final columns
+    final_cols = ['ndam15', 'log_deaths', 'name', 'name_c', 'elapsedyrs', 'wind', 'min', 'masfem', 'alldeaths']
     if df.shape[0] == 0:
-        raise ValueError("No rows with non-missing outcome to fit the model.")
+        # Create an empty DataFrame with the required columns and appropriate dtypes
+        empty_df = pd.DataFrame({c: pd.Series(dtype=float) for c in final_cols})
+        # elapsedyrs should be integer dtype when possible
+        empty_df['elapsedyrs'] = empty_df['elapsedyrs'].astype('Int64')
+        return empty_df
 
-    # Exclude identifiers and outcome from predictors
-    exclude = {outcome}
-    for id_name in ['id', 'ID', 'Id']:
-        if id_name in df.columns:
-            exclude.add(id_name)
+    # Create dependent variable: log-transformed deaths to reduce skew
+    # Add 1 to allow zero-death storms
+    df['log_deaths'] = np.log(df['ndam15'] + 1)
 
-    predictor_cols = [c for c in df.columns if c not in exclude]
-    if not predictor_cols:
-        raise ValueError("No predictor columns available to fit the model.")
+    # Create numeric version of 'name' for constructing name_c (the continuous femininity rating).
+    # If 'name' is already numeric, this will keep values; if not, will be NaN.
+    name_num = pd.to_numeric(df['name'], errors='coerce')
 
-    # Split predictors into numeric and categorical/object
-    X_num = df[predictor_cols].select_dtypes(include=[np.number]).copy()
-    X_cat = df[predictor_cols].select_dtypes(include=['category', 'object']).copy()
-
-    # If any categorical columns exist, get dummies (drop_first=True to avoid collinearity)
-    if not X_cat.empty:
-        X_cat = pd.get_dummies(X_cat, drop_first=True)
-
-    # Combine numeric and dummy-coded categorical predictors
-    if X_num.empty and X_cat.empty:
-        raise ValueError("No valid predictors after encoding.")
-    if X_num.empty:
-        X = X_cat
-    elif X_cat.empty:
-        X = X_num
+    # If there are no numeric name ratings at all, create a default (zeros).
+    # Otherwise, impute missing numeric name ratings with the median rating.
+    if name_num.notna().sum() == 0:
+        name_num = pd.Series(0.0, index=df.index)
     else:
-        X = pd.concat([X_num, X_cat], axis=1)
+        median_name = name_num.median(skipna=True)
+        name_num = name_num.fillna(median_name)
 
-    # Ensure there are no duplicate column names and handle any all-NaN columns
-    X = X.loc[:, ~X.columns.duplicated()]
-    X = X.dropna(axis=1, how='all')
-    if X.shape[1] == 0:
-        raise ValueError("No valid predictors remain after cleaning.")
+    # Center the continuous name femininity score for interpretability
+    df['name_c'] = name_num - name_num.mean()
 
-    # Add intercept
-    X = sm.add_constant(X, has_constant='add')
+    # Ensure binary elapsedyrs is 0/1; coerce non-missing values to integers.
+    # Fill missing elapsedyrs with 0 (assumes missing means not female-coded).
+    df['elapsedyrs'] = df['elapsedyrs'].fillna(0)
+    # Some values may be non-binary; coerce to 0/1 by rounding after converting to numeric
+    df['elapsedyrs'] = pd.to_numeric(df['elapsedyrs'], errors='coerce').fillna(0).round().astype(int)
 
-    # Prepare outcome vector
-    y = pd.to_numeric(df[outcome], errors='coerce')
-    if y.isna().all():
-        raise ValueError("Outcome column could not be converted to numeric values for modeling.")
-    # Align y with X in case of any differing indices
-    y = y.loc[X.index]
+    # For control variables, impute missing values with the column median (numeric) where appropriate.
+    # This prevents excessive row loss while preserving the variables in the final DataFrame.
+    for c in ['wind', 'min', 'masfem', 'alldeaths']:
+        if c in df.columns:
+            # If entire column is NaN, fill with 0 to ensure presence
+            if df[c].notna().sum() == 0:
+                df[c] = 0.0
+            else:
+                median_val = df[c].median(skipna=True)
+                df[c] = df[c].fillna(median_val)
 
-    # Fit OLS with robust HC3 covariance
-    model_result = sm.OLS(y, X).fit(cov_type='HC3')
+    # Ensure 'name' column exists in final (keep original values; if entirely missing fill with empty string)
+    if 'name' not in df.columns:
+        df['name'] = ''
+    else:
+        # If name column is entirely NaN, fill with empty string to avoid NaN in final dataframe
+        if df['name'].isna().all():
+            df['name'] = ''
 
-    return model_result
+    # Final dataframe will include: ndam15, log_deaths, name, name_c, elapsedyrs, wind, min, masfem, alldeaths
+    # Ensure all required final columns exist (create if necessary)
+    for c in final_cols:
+        if c not in df.columns:
+            # For safety create missing columns filled with zeros (or appropriate type)
+            if c == 'elapsedyrs':
+                df[c] = 0
+            elif c == 'name':
+                df[c] = ''
+            else:
+                df[c] = 0.0
+
+    # Select and return only the final columns in the required order
+    df_final = df[final_cols].copy()
+
+    # Make sure there are no remaining NaNs in numeric final columns by filling with sensible defaults
+    numeric_final_cols = ['ndam15', 'log_deaths', 'name_c', 'elapsedyrs', 'wind', 'min', 'masfem', 'alldeaths']
+    for c in numeric_final_cols:
+        if df_final[c].isna().any():
+            if c == 'elapsedyrs':
+                df_final[c] = pd.to_numeric(df_final[c], errors='coerce').fillna(0).astype(int)
+            else:
+                df_final[c] = pd.to_numeric(df_final[c], errors='coerce').fillna(0.0)
+
+    # Ensure elapsedyrs dtype is integer
+    df_final['elapsedyrs'] = df_final['elapsedyrs'].astype(int)
+
+    return df_final
+
+
+# ======== MODEL CODE ========
+def model(df: pd.DataFrame) -> Any:
+    # Fit OLS models predicting log_deaths from name femininity and controls.
+    # Returns a dict with two fitted models for comparison:
+    #  - model_name: continuous name femininity (name_c) as primary IV
+    #  - model_binary: binary female-name indicator (elapsedyrs) as primary IV
+
+    results = {}
+
+    # Verify required columns exist
+    required_final_cols = ['ndam15', 'log_deaths', 'name_c', 'elapsedyrs', 'wind', 'min', 'masfem', 'alldeaths']
+    missing = [c for c in required_final_cols if c not in df.columns]
+    if missing:
+        raise ValueError(f"Input DataFrame is missing required columns for modeling: {missing}")
+
+    # Ensure numeric types for modeling columns
+    model_numeric_cols = ['log_deaths', 'name_c', 'elapsedyrs', 'wind', 'min', 'masfem', 'alldeaths']
+    for c in model_numeric_cols:
+        df[c] = pd.to_numeric(df[c], errors='coerce')
+
+    # Drop any rows with missing outcome or with missing exogenous variables for each model separately
+    y = df['log_deaths']
+
+    # Model 1: continuous name score as primary IV
+    X_cols_name = ['name_c', 'elapsedyrs', 'wind', 'min', 'masfem', 'alldeaths']
+    X1 = df[X_cols_name].copy()
+    # Drop rows with missing values in y or X1
+    model1_df = pd.concat([y, X1], axis=1).dropna()
+    if model1_df.shape[0] == 0:
+        raise ValueError("No observations available after dropping missing values for model_name.")
+    y1 = model1_df['log_deaths'].astype(float)
+    X1_clean = model1_df[X_cols_name].astype(float)
+    X1_clean = sm.add_constant(X1_clean, has_constant='add')
+    model_name = sm.OLS(y1, X1_clean).fit()
+    results['model_name'] = model_name
+
+    # Model 2: binary elapsedyrs as primary IV
+    X_cols_bin = ['elapsedyrs', 'wind', 'min', 'masfem', 'alldeaths']
+    X2 = df[X_cols_bin].copy()
+    model2_df = pd.concat([y, X2], axis=1).dropna()
+    if model2_df.shape[0] == 0:
+        raise ValueError("No observations available after dropping missing values for model_binary.")
+    y2 = model2_df['log_deaths'].astype(float)
+    X2_clean = model2_df[X_cols_bin].astype(float)
+    X2_clean = sm.add_constant(X2_clean, has_constant='add')
+    model_binary = sm.OLS(y2, X2_clean).fit()
+    results['model_binary'] = model_binary
+
+    return results

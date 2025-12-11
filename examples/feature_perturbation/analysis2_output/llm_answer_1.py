@@ -1,149 +1,172 @@
-#!/usr/bin/env python3
-"""
-Module providing a utility to extract a final answer / key statistics from a
-model output object.
+def extract_final_answer(model_output):
+    """
+    Extracts statistics about the effect of the standardized name femininity index (MasFem_z)
+    from the modeling output produced by the modeling function.
 
-Function:
-- extract_final_answer(model_output)
-    - Inspects model_output (dict-like or list/tuple of dicts) and extracts
-      common statistics: estimate/coefficient, standard error, p-value,
-      confidence interval (lower/upper), and an exponentiated estimate (odds
-      ratio / exp(coef)) when available.
-    - Returns a dictionary with keys:
-        - "object": a dict of extracted numeric values (missing values are NaN)
-        - "description": a brief human-readable explanation of what was returned
-"""
+    Returns a dictionary with keys:
+      - "object": a JSON-serializable dict with extracted numeric results or a status dict
+      - "description": a human-readable explanation of what was extracted and its meaning
 
-from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
-import math
+    Behavior:
+      - If a Negative Binomial (nb_results) is available, this is treated as the primary result.
+      - If nb_results is missing but an OLS (ols_results) is available, OLS is used as a sensitivity result.
+      - If neither model is present, returns a status indicating models could not be fitted and the
+        number of observations available (if any).
+    """
+    import numpy as np
 
+    nb = model_output.get('nb_results')
+    ols = model_output.get('ols_results')
+    df = model_output.get('model_dataframe')
 
-def _as_float(value: Any) -> float:
-    """Try to convert value to float, otherwise return NaN."""
+    # Helper to safely extract stats from a statsmodels result-like object
+    def _extract_from_result(res, param_name):
+        """Return dict with coef, pvalue, conf_lower, conf_upper if available, else None."""
+        try:
+            params = getattr(res, 'params', None)
+            pvalues = getattr(res, 'pvalues', None)
+            conf_int = None
+            try:
+                conf_int = res.conf_int()
+            except Exception:
+                conf_int = None
+
+            if params is None or param_name not in params.index:
+                return None
+
+            coef = float(params[param_name])
+            pval = float(pvalues[param_name]) if (pvalues is not None and param_name in pvalues.index) else None
+
+            if conf_int is not None:
+                # conf_int may be a DataFrame (with loc) or numpy array
+                try:
+                    # DataFrame-like
+                    lower, upper = conf_int.loc[param_name].tolist()
+                except Exception:
+                    # array-like; find index
+                    try:
+                        idx = list(params.index).index(param_name)
+                        lower, upper = float(conf_int[idx, 0]), float(conf_int[idx, 1])
+                    except Exception:
+                        lower, upper = None, None
+            else:
+                lower, upper = None, None
+
+            return {
+                'coef': coef,
+                'pvalue': pval,
+                'conf_lower': float(lower) if lower is not None else None,
+                'conf_upper': float(upper) if upper is not None else None
+            }
+        except Exception:
+            return None
+
+    # Determine number of observations if possible
+    n_obs = None
     try:
-        if value is None:
-            return float("nan")
-        # If it's already a float or int, cast directly
-        if isinstance(value, (float, int)):
-            return float(value)
-        # Strings that represent numbers should be converted
-        return float(str(value))
+        if df is not None:
+            n_obs = int(df.shape[0])
     except Exception:
-        return float("nan")
+        n_obs = None
 
+    # Prefer NB results if available
+    if nb is not None:
+        stats = _extract_from_result(nb, 'MasFem_z')
+        if stats is None:
+            return {
+                'object': {'status': 'no_MasFem_z_in_nb', 'n_obs': n_obs},
+                'description': "Negative Binomial model was fitted but does not contain a parameter named 'MasFem_z'."
+            }
+        # Interpret for count model: exp(coef) is multiplicative change in expected counts per 1 SD increase
+        try:
+            mult = float(np.exp(stats['coef']))
+        except Exception:
+            mult = None
 
-def _get_first(mapping: Mapping[str, Any], keys: Sequence[str]) -> Optional[Any]:
-    """Return the first present (non-None) value from mapping for keys, or None."""
-    for k in keys:
-        if k in mapping:
-            val = mapping.get(k)
-            if val is not None:
-                return val
-    return None
+        signif = None
+        try:
+            if stats['pvalue'] is None:
+                signif = 'p-value unavailable'
+            else:
+                signif = 'statistically significant (p < 0.05)' if stats['pvalue'] < 0.05 else 'not statistically significant (p >= 0.05)'
+        except Exception:
+            signif = 'significance unknown'
 
-
-def extract_final_answer(model_output: Any) -> Dict[str, Any]:
-    """
-    Extracts key statistics from a model_output object.
-
-    Parameters
-    ----------
-    model_output : Any
-        Expected to be a mapping (dict-like) or a sequence whose first element
-        is a mapping. The function looks for common keys for estimates, p-values,
-        standard errors and confidence intervals.
-
-    Returns
-    -------
-    Dict[str, Any]
-        {
-            "object": {
-                "estimate": float or NaN,
-                "std_error": float or NaN,
-                "p_value": float or NaN,
-                "ci_lower": float or NaN,
-                "ci_upper": float or NaN,
-                "exp_estimate": float or NaN  # if available
-            },
-            "description": str  # brief explanation of the above values
+        obj = {
+            'model_type': 'NegativeBinomial (GLM)',
+            'n_obs': n_obs,
+            'parameter': 'MasFem_z',
+            'coef': stats['coef'],
+            'pvalue': stats['pvalue'],
+            'conf_lower': stats['conf_lower'],
+            'conf_upper': stats['conf_upper'],
+            'multiplicative_effect_on_counts': mult,
+            'interpretation': (
+                "Multiplicative effect on expected deaths per 1 SD increase in name femininity. "
+                "E.g., value 0.90 means expected deaths are 0.90x (10% lower)."
+            )
         }
-    """
-    # Normalize model_output to a mapping if possible
-    info: Mapping[str, Any]
-    if isinstance(model_output, Mapping):
-        info = model_output
-    elif isinstance(model_output, (list, tuple)) and len(model_output) > 0 and isinstance(model_output[0], Mapping):
-        info = model_output[0]
-    else:
-        # If it's some other object, try to use its __dict__ (best effort)
-        info = getattr(model_output, "__dict__", {}) or {}
+        description = (
+            "Primary model (Negative Binomial GLM) results for MasFem_z. "
+            f"Estimated coefficient = {obj['coef']:.4f}, multiplicative effect = "
+            f"{obj['multiplicative_effect_on_counts']:.4f} (if available). "
+            f"p-value = {obj['pvalue']}. This effect is {signif}. "
+            "If multiplicative_effect_on_counts < 1 the result indicates fewer deaths (fewer fatalities) "
+            "associated with more feminine names; >1 indicates more deaths associated with more feminine names."
+        )
+        return {'object': obj, 'description': description}
 
-    # Common candidate keys for different statistics
-    estimate_keys = [
-        "estimate", "coef", "coefficient", "beta", "estimate_value", "value", "mean"
-    ]
-    se_keys = ["std_error", "std_err", "se", "sigma", "stderr"]
-    pvalue_keys = ["p_value", "pvalue", "p", "P>|t|", "pval"]
-    ci_lower_keys = [
-        "ci_lower", "ci_l", "conf_int_low", "conf_int_lower", "lower",
-        "95ci_lower", "exp_ci_95_lower", "ci_2.5%", "ci_lower_95"
-    ]
-    ci_upper_keys = [
-        "ci_upper", "ci_u", "conf_int_high", "conf_int_upper", "upper",
-        "95ci_upper", "exp_ci_95_upper", "ci_97.5%", "ci_upper_95"
-    ]
-    exp_estimate_keys = ["exp_coef", "odds_ratio", "exp_estimate", "exp"]
+    # If NB not present but OLS present, use OLS sensitivity
+    if ols is not None:
+        stats = _extract_from_result(ols, 'MasFem_z')
+        if stats is None:
+            return {
+                'object': {'status': 'no_MasFem_z_in_ols', 'n_obs': n_obs},
+                'description': "OLS model was fitted but does not contain a parameter named 'MasFem_z'."
+            }
+        # Interpret for OLS on log(deaths + 1): approximate percent change = 100*(exp(coef)-1)
+        try:
+            pct_change = float((np.exp(stats['coef']) - 1.0) * 100.0)
+        except Exception:
+            pct_change = None
 
-    # Extract values
-    raw_estimate = _get_first(info, estimate_keys)
-    raw_se = _get_first(info, se_keys)
-    raw_p = _get_first(info, pvalue_keys)
-    raw_ci_lo = _get_first(info, ci_lower_keys)
-    raw_ci_hi = _get_first(info, ci_upper_keys)
-    raw_exp = _get_first(info, exp_estimate_keys)
+        signif = None
+        try:
+            if stats['pvalue'] is None:
+                signif = 'p-value unavailable'
+            else:
+                signif = 'statistically significant (p < 0.05)' if stats['pvalue'] < 0.05 else 'not statistically significant (p >= 0.05)'
+        except Exception:
+            signif = 'significance unknown'
 
-    # If exponentiated estimate not present but keys imply exponentiated CI exist,
-    # try to get them as exp_estimate as well.
-    if raw_exp is None:
-        # Sometimes the info provides "exp_coef" under slightly different keys already attempted above.
-        raw_exp = _get_first(info, ["exp(coef)", "exp_coef", "exp_beta"])
+        obj = {
+            'model_type': 'OLS on LogDeaths (sensitivity)',
+            'n_obs': n_obs,
+            'parameter': 'MasFem_z',
+            'coef': stats['coef'],
+            'pvalue': stats['pvalue'],
+            'conf_lower': stats['conf_lower'],
+            'conf_upper': stats['conf_upper'],
+            'approx_percent_change_in_(deaths+1)': pct_change,
+            'interpretation': (
+                "Approximate percent change in (deaths + 1) per 1 SD increase in name femininity. "
+                "E.g., -10% means (deaths+1) is ~10% lower."
+            )
+        }
+        description = (
+            "Sensitivity model (OLS on log(deaths+1)) results for MasFem_z. "
+            f"Estimated coefficient = {obj['coef']:.4f}. Approximate percent change = "
+            f"{obj['approx_percent_change_in_(deaths+1)']:.2f}% (if available). "
+            f"p-value = {obj['pvalue']}. This effect is {signif}. "
+            "Negative percent change indicates fewer fatalities associated with more feminine names."
+        )
+        return {'object': obj, 'description': description}
 
-    estimate = _as_float(raw_estimate)
-    std_error = _as_float(raw_se)
-    p_value = _as_float(raw_p)
-    ci_lower = _as_float(raw_ci_lo)
-    ci_upper = _as_float(raw_ci_hi)
-    exp_estimate = _as_float(raw_exp)
-
-    # If CI missing but we have estimate and std_error, compute approximate 95% CI
-    if math.isnan(ci_lower) or math.isnan(ci_upper):
-        if not math.isnan(estimate) and not math.isnan(std_error):
-            z = 1.96
-            ci_lower = estimate - z * std_error
-            ci_upper = estimate + z * std_error
-
-    extracted = {
-        "estimate": estimate,
-        "std_error": std_error,
-        "p_value": p_value,
-        "ci_lower": ci_lower,
-        "ci_upper": ci_upper,
-        "exp_estimate": exp_estimate,
+    # Neither model is present
+    return {
+        'object': {'status': 'no_model_fitted', 'n_obs': n_obs},
+        'description': (
+            "No fitted models were returned (both 'nb_results' and 'ols_results' are None). "
+            f"Number of observations in the modeling dataframe: {n_obs}. Cannot estimate or test the effect of MasFem_z."
+        )
     }
-
-    # Build a short description
-    desc_parts = []
-    if not math.isnan(estimate):
-        desc_parts.append(f"Estimate = {estimate}")
-    if not math.isnan(std_error):
-        desc_parts.append(f"SE = {std_error}")
-    if not math.isnan(ci_lower) and not math.isnan(ci_upper):
-        desc_parts.append(f"95% CI = [{ci_lower}, {ci_upper}]")
-    if not math.isnan(p_value):
-        desc_parts.append(f"p-value = {p_value}")
-    if not math.isnan(exp_estimate):
-        desc_parts.append(f"Exp(estimate) = {exp_estimate}")
-
-    description = " | ".join(desc_parts) if desc_parts else "No numeric statistics could be extracted."
-
-    return {"object": extracted, "description": description}

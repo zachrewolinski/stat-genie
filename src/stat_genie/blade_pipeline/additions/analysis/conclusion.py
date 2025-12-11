@@ -1,8 +1,9 @@
-from stat_genie.blade_pipeline.llms.base import TextGenerator
+from stat_genie.blade_pipeline.llms.config import llm
 
-def write_final_answer_code(llm_assistant: TextGenerator, task: list[str],
-                            independent_variable: dict, dependent_variable: dict,
-                            model_code: str, model_output):
+def write_final_answer_code(llm_provider: str, llm_model: str, task: list[str],
+                            cvars_text: str,
+                            model_code: str, output_subdir: str,
+                            analysis_num: int, model_output):
     """
     In its attempt to answer the underlying question, GenAI analyst writes
     two functions: one which preprocesses the data and another that performs
@@ -20,10 +21,10 @@ def write_final_answer_code(llm_assistant: TextGenerator, task: list[str],
     to make it easy to call later in the pipeline.
     
     Args:
-        llm_assistant (TextGenerator): The LLM assistant for the evaluation.
+        llm_provider (str): The provider of the LLM to be used.
+        llm_model (str): The model of the LLM to be used.
         task (str): The task to be answered.
-        independent_variable (dict): The independent variable to be used in the analysis.
-        dependent_variable (dict): The dependent variable to be used in the analysis.
+        cvars_text (str): The text representation of the variables used in the analysis.
         model_code (str): The code that defines the model.
         model_output: The output of the model.
         
@@ -31,6 +32,9 @@ def write_final_answer_code(llm_assistant: TextGenerator, task: list[str],
         str: A python function that reaches the conclusion of the task by
             extracting the final answer from the model output.
     """
+    
+    llm_assistant = llm(provider=llm_provider, model=llm_model)
+    
     system_prompt = """You are an AI Data Analysis Assistant who is an expert at \
         drawing data-driven conclusions."""
     
@@ -39,15 +43,10 @@ def write_final_answer_code(llm_assistant: TextGenerator, task: list[str],
         {task}
         </Task>
         
-        The independent variable used in the analysis:
-        <Independent Variable>
-        {independent_variable}
-        </Independent Variable>
-        
-        The dependent variable used in the analysis:
-        <Dependent Variable>
-        {dependent_variable}
-        </Dependent Variable>
+        The variables used in the analysis:
+        <Variables>
+        {cvars_text}
+        </Variables>
         
         The model code that was executed:
         <Model Code>
@@ -92,8 +91,8 @@ def write_final_answer_code(llm_assistant: TextGenerator, task: list[str],
     
     return response.text[0].content
     
-def make_conclusion(llm_assistant: TextGenerator, task: list[str],
-                    independent_variable: dict, dependent_variable: dict,
+def make_conclusion(llm_provider: str, llm_model: str, task: list[str],
+                    cvars_text: str,
                     model_code: str, interpretation_code: str,
                     interpretation_output: dict):
     """
@@ -107,10 +106,10 @@ def make_conclusion(llm_assistant: TextGenerator, task: list[str],
     explicitly answer the yes/no question posed in the task.
     
     Args:
-        llm_assistant (TextGenerator): The LLM assistant for the evaluation.
+        llm_provider (str): The provider of the LLM to be used.
+        llm_model (str): The model of the LLM to be used.
         task (str): The task to be answered.
-        independent_variable (dict): The independent variable to be used in the analysis.
-        dependent_variable (dict): The dependent variable to be used in the analysis.
+        cvars_text (str): The text representation of the variables used in the analysis.
         model_code (str): The code that defines the model.
         interpretation_code (str): The code that interprets the model output.
         interpretation_output (dict): The output of the interpretation code.
@@ -118,6 +117,9 @@ def make_conclusion(llm_assistant: TextGenerator, task: list[str],
     Returns:
         str: The final answer to the task. Must be either "Yes", "No", or "Not enough information".
     """
+    
+    llm_assistant = llm(provider=llm_provider, model=llm_model)
+    
     system_prompt = """You are an AI Data Analysis Assistant who is an expert at \
         drawing data-driven conclusions from model summaries."""
     
@@ -126,15 +128,10 @@ def make_conclusion(llm_assistant: TextGenerator, task: list[str],
         {task}
         </Task>
         
-        The independent variable used in the analysis:
-        <Independent Variable>
-        {independent_variable}
-        </Independent Variable>
-        
-        The dependent variable used in the analysis:
-        <Dependent Variable>
-        {dependent_variable}
-        </Dependent Variable>
+        The variables used in the analysis:
+        <Variables>
+        {cvars_text}
+        </Variables>
         
         The model code that was executed:
         <Model Code>

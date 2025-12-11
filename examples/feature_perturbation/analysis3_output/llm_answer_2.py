@@ -1,169 +1,125 @@
 def extract_final_answer(model_output):
     """
-    Extract coefficients, p-values, and confidence intervals for the independent variables
-    'FemininityScore' and 'FemaleName' from a statsmodels fitted model (or a dict containing
-    such a model). Return a dict with keys "object" (detailed numeric results) and
-    "description" (plain-language interpretation regarding the hypothesis).
+    Extracts the effect of the independent variable ("name" / "name_z") on the dependent variable
+    from the provided model_output dict. Handles three possible outputs:
+      - 'nb_model' (statsmodels GLM NegativeBinomial result)
+      - 'ols_model' (statsmodels OLS result)
+      - 'ols_name_z' (statsmodels OLS result using standardized IV)
+    If any of these keys contains an error string (e.g., '*_error'), the function reports that error.
+
+    Returns:
+      {
+        "object": <dict or None>   # extracted statistics or error info
+        "description": <str>       # brief interpretation in context
+      }
     """
     import numpy as np
 
-    # Helper to coerce numpy scalars to python floats
-    def _float(x):
+    # Helper to extract stats from a fitted statsmodels result
+    def extract_from_result(res, varname):
+        out = {}
         try:
-            return float(np.asarray(x).tolist())
-        except Exception:
-            return x
-
-    # Resolve model object if a dict was passed (as in model()'s return)
-    model = None
-    if model_output is None:
-        return {
-            "object": None,
-            "description": "No model output provided."
-        }
-
-    # If a dict-like with 'ols_model' or 'nb_model', prefer OLS if available (robustness),
-    # otherwise take a fitted model object directly.
-    if isinstance(model_output, dict):
-        # Prefer OLS robustness model if present
-        for key in ('ols_model', 'nb_model', 'poisson_model_fallback'):
-            if key in model_output and model_output[key] is not None:
-                model = model_output[key]
-                break
-    else:
-        model = model_output
-
-    if model is None:
-        return {
-            "object": None,
-            "description": "No usable fitted model found in model_output."
-        }
-
-    # Check the model has required attributes
-    if not (hasattr(model, "params") and hasattr(model, "pvalues")):
-        return {
-            "object": None,
-            "description": "Provided model does not expose params/pvalues; cannot extract statistics."
-        }
-
-    varnames = ['FemininityScore', 'FemaleName']
-    results = {}
-    found_any = False
-
-    # Attempt to get confidence intervals
-    try:
-        ci = model.conf_int()
-    except Exception:
-        ci = None
-
-    for v in varnames:
-        if v in model.params.index:
-            found_any = True
-            coef = _float(model.params[v])
-            pval = _float(model.pvalues.get(v, np.nan))
-            if ci is not None:
-                try:
-                    lower = _float(ci.loc[v].iloc[0])
-                    upper = _float(ci.loc[v].iloc[1])
-                except Exception:
-                    try:
-                        # If conf_int returned numpy array with same order as params
-                        idx = list(model.params.index).index(v)
-                        lower = _float(ci[idx, 0])
-                        upper = _float(ci[idx, 1])
-                    except Exception:
-                        lower = upper = None
-            else:
-                lower = upper = None
-
-            direction = 'negative' if coef < 0 else ('positive' if coef > 0 else 'zero')
-            significant = (pval is not None) and (not np.isnan(pval)) and (pval < 0.05)
-
-            results[v] = {
+            params = res.params
+            pvals = res.pvalues
+            conf = res.conf_int()
+            coef = float(params[varname]) if varname in params.index else None
+            pval = float(pvals[varname]) if varname in pvals.index else None
+            ci_lower, ci_upper = (None, None)
+            if varname in conf.index:
+                ci_lower, ci_upper = float(conf.loc[varname, 0]), float(conf.loc[varname, 1])
+            out.update({
                 "coef": coef,
-                "p_value": pval,
-                "ci_lower_95": lower,
-                "ci_upper_95": upper,
-                "direction": direction,
-                "significant_at_0.05": bool(significant)
-            }
+                "pvalue": pval,
+                "conf_int": (ci_lower, ci_upper)
+            })
+        except Exception as e:
+            out["error"] = f"Failed extracting from result: {e}"
+        return out
+
+    # If there are explicit error messages, collect and return them
+    error_keys = [k for k in model_output.keys() if k.endswith("_error")]
+    if error_keys:
+        errors = {k: model_output[k] for k in error_keys}
+        desc = (
+            "No models were successfully fitted. The modeling step returned error messages "
+            "indicating a zero-size dataset (e.g., 'zero-size array to reduction operation maximum which has no identity'). "
+            "This means there were no observations available for estimation after the preprocessing/filters, "
+            "so no coefficient, p-value, or confidence interval can be produced. "
+            "Errors: " + "; ".join(f"{k}: {errors[k]}" for k in errors)
+        )
+        return {"object": errors, "description": desc}
+
+    # Otherwise, try to extract from any available fitted models
+    extracted = {}
+    # Negative binomial (interpret coefficient as log count change; exp(coef)=incidence rate ratio)
+    if "nb_model" in model_output:
+        nb = model_output["nb_model"]
+        # try 'name' first, fallback to 'name_z'
+        target = "name" if "name" in getattr(nb, "params", {}).index else ("name_z" if "name_z" in getattr(nb, "params", {}).index else None)
+        if target:
+            stats = extract_from_result(nb, target)
+            if "coef" in stats and stats.get("coef") is not None:
+                stats["irr"] = np.exp(stats["coef"])  # incidence rate ratio
+                if stats.get("conf_int") != (None, None):
+                    stats["irr_conf_int"] = (np.exp(stats["conf_int"][0]) if stats["conf_int"][0] is not None else None,
+                                             np.exp(stats["conf_int"][1]) if stats["conf_int"][1] is not None else None)
+            extracted["nb_model"] = {"variable": target, "stats": stats}
         else:
-            results[v] = None
+            extracted["nb_model"] = {"error": "fitted nb_model present but target variable ('name'/'name_z') not found in params"}
 
-    # If no variables found, report that
-    if not found_any:
-        return {
-            "object": results,
-            "description": (
-                "Neither 'FemininityScore' nor 'FemaleName' were found among the model's estimated "
-                "variables. Cannot evaluate the hypothesis from this model output."
-            )
-        }
+    # OLS on log(deaths + 1)
+    if "ols_model" in model_output:
+        ols = model_output["ols_model"]
+        target = "name" if "name" in getattr(ols, "params", {}).index else ("name_z" if "name_z" in getattr(ols, "params", {}).index else None)
+        if target:
+            stats = extract_from_result(ols, target)
+            extracted["ols_model"] = {"variable": target, "stats": stats}
+        else:
+            extracted["ols_model"] = {"error": "fitted ols_model present but target variable ('name'/'name_z') not found in params"}
 
-    # Formulate an overall conclusion regarding the hypothesis:
-    # Hypothesis expects negative effects for femininity (more feminine -> fewer deaths).
-    support_reasons = []
-    contradict_reasons = []
-    neutral_reasons = []
+    # OLS with name_z specifically
+    if "ols_name_z" in model_output:
+        ols_z = model_output["ols_name_z"]
+        target = "name_z"
+        if hasattr(ols_z, "params") and target in getattr(ols_z, "params", {}).index:
+            stats = extract_from_result(ols_z, target)
+            extracted["ols_name_z"] = {"variable": target, "stats": stats}
+        else:
+            extracted["ols_name_z"] = {"error": "fitted ols_name_z present but 'name_z' not found in params"}
 
-    for v in varnames:
-        info = results.get(v)
-        if info is None:
-            neutral_reasons.append(f"{v} not estimated in model.")
-            continue
-        if info['significant_at_0.05']:
-            if info['direction'] == 'negative':
-                support_reasons.append(
-                    f"{v} has a statistically significant negative association (coef={info['coef']}, p={info['p_value']})."
+    if not extracted:
+        # No error keys and no recognized fitted models found
+        desc = (
+            "Model output contains neither fitted model objects nor explicit error messages. "
+            "No statistics could be extracted. Please provide the fitted statsmodels results or error messages."
+        )
+        return {"object": None, "description": desc}
+
+    # Build a short interpretation when coefficient(s) present
+    interpretations = []
+    for mname, info in extracted.items():
+        if "stats" in info and info["stats"].get("coef") is not None:
+            coef = info["stats"]["coef"]
+            pval = info["stats"].get("pvalue")
+            var = info["variable"]
+            if mname == "nb_model":
+                irr = info["stats"].get("irr")
+                interpretations.append(
+                    f"{mname}: {var} coef={coef:.4g}, IRR={irr:.4g}, p={pval:.4g} (positive coef => higher name score => higher death counts)"
                 )
             else:
-                contradict_reasons.append(
-                    f"{v} has a statistically significant positive association (coef={info['coef']}, p={info['p_value']})."
+                interpretations.append(
+                    f"{mname}: {var} coef={coef:.4g}, p={pval:.4g} (dependent variable is log(ndam15+1); positive coef => higher name score => higher log-deaths)"
                 )
         else:
-            neutral_reasons.append(
-                f"{v} estimated with coef={info['coef']} (p={info['p_value']}); not statistically significant."
-            )
+            interpretations.append(f"{mname}: {info.get('error', 'no usable statistics available')}")
 
-    if support_reasons and not contradict_reasons:
-        overall = "The model supports the hypothesis: more feminine names are associated with fewer deaths (statistically significant)."
-    elif support_reasons and contradict_reasons:
-        overall = ("Mixed evidence: some femininity-related coefficients point in the hypothesized (negative) "
-                   "direction and are significant, while others point opposite and are significant.")
-    elif contradict_reasons and not support_reasons:
-        overall = "The model contradicts the hypothesis: femininity-related coefficient(s) are significantly positive (more feminine -> more deaths)."
-    else:
-        overall = "No statistically significant evidence supporting the hypothesis (coefficients either non-significant or not present)."
+    description = (
+        "Extracted statistics for the independent variable where available. "
+        "Interpretation notes: a positive coefficient means that a more feminine name (higher 'name' or 'name_z') "
+        "is associated with higher deaths (contrary to the hypothesis that feminine names are perceived as less threatening). "
+        "A negative coefficient would support the hypothesis. "
+        "Details: " + " | ".join(interpretations)
+    )
 
-    # Add contextual note about interpretation depending on model type
-    model_type_note = ""
-    try:
-        clsname = type(model).__name__.lower()
-        if "glm" in clsname or "generalized" in clsname or "negativebinomial" in clsname or "glmresults" in clsname:
-            model_type_note = ("Note: this is a (G)LM count model (e.g., Negative Binomial/Poisson). "
-                               "Coefficients are on the log-count scale; a negative coefficient indicates a "
-                               "lower expected count of deaths for higher femininity (multiplicative effect).")
-        elif "regressionresults" in clsname or "ols" in clsname:
-            model_type_note = ("Note: this is an OLS model on logDeaths. Coefficients represent changes in "
-                               "log(deaths+1); a negative coefficient indicates fewer deaths (approx. percent change).")
-        else:
-            model_type_note = ("Model type detected: %s. Interpret coefficients according to that model's scale." % type(model).__name__)
-    except Exception:
-        model_type_note = ""
-
-    description_parts = [overall]
-    if support_reasons:
-        description_parts.append("Support details: " + " ".join(support_reasons))
-    if contradict_reasons:
-        description_parts.append("Contradicting details: " + " ".join(contradict_reasons))
-    if neutral_reasons:
-        description_parts.append("Non-significant / missing: " + " ".join(neutral_reasons))
-    if model_type_note:
-        description_parts.append(model_type_note)
-
-    description = " ".join(description_parts)
-
-    return {
-        "object": results,
-        "description": description
-    }
+    return {"object": extracted, "description": description}
