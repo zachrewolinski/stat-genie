@@ -33,7 +33,7 @@ from stat_genie.blade_pipeline.utils import (
 )
 
 from stat_genie.blade_pipeline.additions.prompt.prompt import PromptGenerator
-from stat_genie.blade_pipeline.additions.perturbations.feature_names import FeaturePerturbation
+from stat_genie.blade_pipeline.additions.perturbations.features import FeaturePerturbation
 
 
 class SingleRunExperiment:

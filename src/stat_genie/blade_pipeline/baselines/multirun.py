@@ -14,7 +14,7 @@ from blade_bench.eval.datamodel.multirun import MultiRunResults
 from blade_bench.eval.exceptions import LMGenerationError
 from blade_bench.utils import get_dataset_csv_path, get_dataset_info_path
 from stat_genie.blade_pipeline.additions.prompt.prompt import PromptGenerator
-from stat_genie.blade_pipeline.additions.perturbations.feature_names import FeaturePerturbation
+from stat_genie.blade_pipeline.additions.perturbations.features import FeaturePerturbation
 from blade_bench.eval.datamodel.lm_analysis import AgentCVarsWithCol
 from stat_genie.blade_pipeline.additions.analysis.conclusion import (
     write_final_answer_code,

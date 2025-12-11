@@ -1,4 +1,5 @@
 import os
+import os.path as osp
 import signal
 import functools
 
@@ -80,6 +81,24 @@ def timeout(seconds=10, default=None):
 
     return decorator
 
+def list_datasets():
+    datasets_dir = get_datasets_dir()
+    return [
+        d
+        for d in os.listdir(datasets_dir)
+        if osp.isdir(osp.join(datasets_dir, d))
+        if d != "toy" and osp.exists(osp.join(datasets_dir, d, "annotations.csv"))
+    ]
+
+
+def list_datasets_mcq():
+    datasets_dir = get_datasets_dir()
+    return [
+        d
+        for d in os.listdir(datasets_dir)
+        if osp.isdir(osp.join(datasets_dir, d))
+        if osp.exists(osp.join(datasets_dir, d, "mcq_dataset.json"))
+    ]
 
 if __name__ == "__main__":
     import time

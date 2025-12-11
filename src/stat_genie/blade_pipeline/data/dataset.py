@@ -7,11 +7,11 @@ from pydantic import BaseModel, ConfigDict
 from stat_genie.blade_pipeline.data.annotation import get_annotation_data_from_df
 from stat_genie.blade_pipeline.utils import (
     get_dataset_info_path,
-    get_datasets_dir,
+    list_datasets,
     get_dataset_csv_path,
     get_dataset_annotations_path,
 )
-from stat_genie.blade_pipeline.additions.perturbations.feature_names import FeaturePerturbation
+from stat_genie.blade_pipeline.additions.perturbations.features import FeaturePerturbation
 
 
 class DatasetInfo(BaseModel):
@@ -52,24 +52,8 @@ class DatasetInfo(BaseModel):
         return ret
 
 
-def list_datasets():
-    datasets_dir = get_datasets_dir()
-    return [
-        d
-        for d in os.listdir(datasets_dir)
-        if osp.isdir(osp.join(datasets_dir, d))
-        if d != "toy" and osp.exists(osp.join(datasets_dir, d, "annotations.csv"))
-    ]
-
-
-def list_datasets_mcq():
-    datasets_dir = get_datasets_dir()
-    return [
-        d
-        for d in os.listdir(datasets_dir)
-        if osp.isdir(osp.join(datasets_dir, d))
-        if osp.exists(osp.join(datasets_dir, d, "mcq_dataset.json"))
-    ]
+# MOVED list_datasets() and list_datasets_mcq() TO
+# stat_genie.blade_pipeline.utils to prevent circular imports.
 
 
 def load_dataset_info(dataset: str, feature_perturbation: FeaturePerturbation,

@@ -1,17 +1,20 @@
 # imports
+import os
 import random
 from copy import deepcopy
 from stat_genie.blade_pipeline.additions.perturbations.utils import read_json
+from stat_genie.blade_pipeline.utils import get_dataset_info_path, list_datasets
 
 class FeaturePerturbation:
     """
-    Centralized object for perturbing feature names in JSON metadata. There
-    are currently three supported actions:
-    1. Anonymize variable names - replaces variable names with generic
+    Centralized object for perturbing features in JSON metadata. There
+    are currently four supported actions:
+    1. Add random feature to the dataset from a different BLADE dataset.
+    2. Anonymize variable names - replaces variable names with generic
        names like "feature1", "feature2", etc.
-    2. Shuffle feature order - randomly shuffles the order of features
+    3. Shuffle feature order - randomly shuffles the order of features
        in the metadata.
-    3. Shuffle feature names - randomly shuffles the feature names among the
+    4. Shuffle feature names - randomly shuffles the feature names among the
        features.
     If multiple types of feature perturbations are desired, their order will
     follow the order listed above.
@@ -19,14 +22,17 @@ class FeaturePerturbation:
     
     def __init__(self, anonymize: bool = False,
                  shuffle_order: bool = False, shuffle_names: bool = False,
-                 shuffle_order_seed: int = 42, shuffle_names_seed: int = 42):
+                 add_random_features: int = 0, shuffle_order_seed: int = 42,
+                 shuffle_names_seed: int = 42, random_features_seed: int = 42):
         
         self.anonymize = anonymize
         self.shuffle_order = shuffle_order
         self.shuffle_names = shuffle_names
+        self.add_num_features = add_random_features
         self.shuffle_order_seed = shuffle_order_seed
         self.shuffle_names_seed = shuffle_names_seed
-
+        self.random_features_seed = random_features_seed
+        
     def anonymize_variable_names(self, json_metadata: dict) -> None:
         """
         Takes a JSON (in dictionary format) and replaces variable names 
@@ -73,7 +79,6 @@ class FeaturePerturbation:
         
         Args:
             json_metadata: Dictionary containing the JSON metadata
-            seed: Random seed for reproducibility
         
         Returns:
             Nothing, modifies self.json_metadata in place
@@ -105,7 +110,6 @@ class FeaturePerturbation:
         
         Args:
             json_metadata: Dictionary containing the JSON metadata
-            seed: Random seed for reproducibility
         
         Returns:
             Nothing, modifies self.json_metadata in place
@@ -145,14 +149,71 @@ class FeaturePerturbation:
             ]
         
         return json_metadata
+
+    def add_random_features(self, json_metadata: dict, dataset_name: str) -> dict:
+        """
+        Adds randomly selected feature(s) from a different randomly selected
+        BLADE dataset to the JSON metadata.
+        
+        Args:
+            json_metadata: Dictionary containing the JSON metadata
+            dataset_name: Name of the current dataset to avoid selecting its
+                          features.
+            
+        Returns:
+            The perturbed JSON metadata as a dictionary
+        """
+        
+        # create a copy of the metadata to work with
+        json_metadata = deepcopy(json_metadata)
+        
+        # set random seed for reproducibility
+        random.seed(self.random_features_seed)
+        
+        # get list of available datasets.
+        available_datasets = list_datasets()
+        
+        # remove the current dataset if it's in the list
+        if dataset_name in available_datasets:
+            available_datasets.remove(dataset_name)
+            
+        # read in the features for each dataset
+        full_feature_set = []
+        for dataset in available_datasets:
+            dataset_info_path = get_dataset_info_path(dataset)
+            dataset_metadata = read_json(dataset_info_path)  # just to ensure the dataset is readable
+            
+            # extract features from this dataset
+            if "data_desc" in dataset_metadata and "fields" in dataset_metadata["data_desc"]:
+                full_feature_set.extend(dataset_metadata["data_desc"]["fields"])
+        print(full_feature_set)
+        # randomly select features to add
+        features_to_add = random.sample(full_feature_set, 
+                                        min(self.add_num_features, len(full_feature_set)))
+        
+        # add selected features to the current metadata
+        if "data_desc" not in json_metadata:
+            json_metadata["data_desc"] = {}
+        if "fields" not in json_metadata["data_desc"]:
+            json_metadata["data_desc"]["fields"] = []
+        json_metadata["data_desc"]["fields"].extend(features_to_add)
+        # add names to field_names array
+        if "field_names" not in json_metadata["data_desc"]:
+            json_metadata["data_desc"]["field_names"] = []
+        json_metadata["data_desc"]["field_names"].extend(
+            [feature["column"] for feature in features_to_add if "column" in feature]
+        )
+        
+        return json_metadata
     
     def perturb(self, json_path: str) -> dict:
         """
         Applies the selected perturbations to the JSON metadata in the
         following order:
-        1. Anonymize variable names
-        2. Shuffle feature order
-        3. Shuffle feature names
+        1. Add random feature(s) to the dataset from a different BLADE dataset.
+        2. Anonymize variable names
+        3. Shuffle feature order
+        4. Shuffle feature names
         
         Returns:
             The perturbed JSON metadata as a dictionary
@@ -160,6 +221,13 @@ class FeaturePerturbation:
         
         # read in json metadata
         json_metadata = read_json(json_path)
+        
+        # get name of dataset from path
+        dataset_name = os.path.basename(os.path.dirname(json_path))
+        
+        if self.add_num_features > 0:
+            json_metadata = self.add_random_features(json_metadata,
+                                                     dataset_name)
         
         if self.anonymize:
             json_metadata = self.anonymize_variable_names(json_metadata)
