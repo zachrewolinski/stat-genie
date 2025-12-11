@@ -109,7 +109,7 @@ def run_judge_evaluation_pairwise(
                 data_head=data_head
             )
             
-            modeling_dict = judge_modeling(
+            modeling_dict = judge_models(
                 llm_provider=llm_provider,
                 llm_model=llm_model,
                 research_question=task,
