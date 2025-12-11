@@ -17,47 +17,31 @@ def judge_models(llm_provider: str,
     example_score_5 = {
         "Model Set #1": [
             {
-                "model_code": """
-                    def model(df: pd.DataFrame):
-                        \"\"\"
-                        Fit an OLS regression to estimate the effect of fertility (High vs Low) on AvgReligiosity,
-                        testing whether that effect is moderated by relationship status. Control for reported cycle length and date certainty.
-
-                        Model formula:
-                        AvgReligiosity ~ C(FertilityGroup) * InRelationship + ReportedCycleLength + DateCertainty
-                        \"\"\"
-                        import statsmodels.formula.api as smf
-
-                        df = df.copy()
-                        df['FertilityGroup'] = df['FertilityGroup'].astype('category')
-                        if 'Low' in df['FertilityGroup'].cat.categories:
-                            order = ['Low'] + [x for x in df['FertilityGroup'].cat.categories if x != 'Low']
-                            try:
-                                df['FertilityGroup'] = df['FertilityGroup'].cat.reorder_categories(order, ordered=False)
-                            except:
-                                pass
-                        formula = 'AvgReligiosity ~ C(FertilityGroup) * InRelationship + ReportedCycleLength + DateCertainty'
-                        return smf.ols(formula, data=df).fit(cov_type='HC3')
-                """
+                "model_library": "statsmodels (statsmodels.formula.api)",
+                "model_class": "OLS (Ordinary Least Squares) fitted via smf.ols, returning an OLSResults object",
+                "model_parameters": (
+                    "cov_type='HC3' (heteroskedasticity-robust HC3 standard errors); "
+                    "FertilityGroup cast to categorical and reordered so 'Low' is reference; "
+                    "formula includes interaction term C(FertilityGroup) * InRelationship plus "
+                    "ReportedCycleLength and DateCertainty; no additional hyperparameters specified."
+                ),
+                "model_formula_fitting_code":
+                    "formula = 'AvgReligiosity ~ C(FertilityGroup) * InRelationship + ReportedCycleLength + DateCertainty'\n"
+                    "model = smf.ols(formula, data=df).fit(cov_type='HC3')"
             }
         ],
         "Model Set #2": [
             {
-                "model_code": """
-                    def model(df: pd.DataFrame):
-                        \"\"\"
-                        Fit an OLS regression testing the effect of fertility group on religiosity,
-                        including relationship status as a moderator and SureAvg as a covariate.
-
-                        Model specification:
-                        AvgReligiosity ~ C(FertilityGroup) * InRelationship + SureAvg
-                        \"\"\"
-                        import statsmodels.formula.api as smf
-                        df_model = df.copy()
-                        df_model['FertilityGroup'] = df_model['FertilityGroup'].astype('category')
-                        formula = 'AvgReligiosity ~ C(FertilityGroup) * InRelationship + SureAvg'
-                        return smf.ols(formula=formula, data=df_model).fit()
-                """
+                "model_library": "statsmodels (statsmodels.formula.api)",
+                "model_class": "OLS (Ordinary Least Squares) via statsmodels.formula.api.ols",
+                "model_parameters": (
+                    "Default OLS settings; no robust covariance estimator specified; "
+                    "data is cleaned by dropping NA rows; categorical coding used via C(FertilityGroup); "
+                    "formula specifies interaction: AvgReligiosity ~ InRelationship * C(FertilityGroup)."
+                ),
+                "model_formula_fitting_code":
+                    "formula = 'AvgReligiosity ~ InRelationship * C(FertilityGroup)'\n"
+                    "results = smf.ols(formula=formula, data=model_df).fit()"
             }
         ],
         "Model Similarity Score": 5
@@ -66,66 +50,71 @@ def judge_models(llm_provider: str,
     example_score_1 = {
         "Model Set #1": [
             {
-                "model_code": """
-                    def model(df: pd.DataFrame) -> Any:
-                        \"\"\"
-                        Fit an OLS model predicting AvgReligiosity from fertility (FertileHigh),
-                        interaction with InRelationship, controls AvgSure + CycleLengthUsed.
-                        \"\"\"
-                        import statsmodels.formula.api as smf
-                        formula = 'AvgReligiosity ~ FertileHigh * InRelationship + AvgSure + CycleLengthUsed'
-                        return smf.ols(formula=formula, data=df).fit()
-                """
+                "model_library": "statsmodels (statsmodels.formula.api)",
+                "model_class": "OLS (Ordinary Least Squares) fitted via smf.ols",
+                "model_parameters": (
+                    "cov_type='HC3' (heteroskedasticity-robust HC3 standard errors); "
+                    "FertilityGroup cast to categorical and reordered so 'Low' is reference; "
+                    "formula includes C(FertilityGroup) * InRelationship along with "
+                    "ReportedCycleLength and DateCertainty; no other hyperparameters specified."
+                ),
+                "model_formula_fitting_code":
+                    "formula = 'AvgReligiosity ~ C(FertilityGroup) * InRelationship + ReportedCycleLength + DateCertainty'\n"
+                    "model = smf.ols(formula, data=df).fit(cov_type='HC3')"
             }
         ],
         "Model Set #2": [
             {
-                "model_code": """
-                    def model(df: pd.DataFrame):
-                        \"\"\"
-                        OLS: fertility group + interaction + SureAvg + ReportedCycleLength.
-                        Model:
-                        AvgReligiosity ~ C(FertilityGroup) * InRelationship + SureAvg + ReportedCycleLength
-                        \"\"\"
-                        import statsmodels.formula.api as smf
-                        df = df.copy()
-                        df['FertilityGroup'] = df['FertilityGroup'].astype('category')
-                        formula = 'AvgReligiosity ~ C(FertilityGroup) * InRelationship + SureAvg + ReportedCycleLength'
-                        return smf.ols(formula=formula, data=df).fit()
-                """
+                "model_library": "statsmodels (statsmodels.formula.api)",
+                "model_class": "OLS (Ordinary Least Squares via smf.ols)",
+                "model_parameters": (
+                    "Uses default OLS estimation; FertilityGroup cast to categorical; "
+                    "formula includes interaction C(FertilityGroup) * InRelationship and controls "
+                    "DateCertainty and ReportedCycleLength_clean; no additional parameters passed to fit()."
+                ),
+                "model_formula_fitting_code":
+                    "formula = 'AvgReligiosity ~ C(FertilityGroup) * InRelationship + DateCertainty + ReportedCycleLength_clean'\n"
+                    "results = smf.ols(formula, data=model_df).fit()"
             }
         ],
         "Model Similarity Score": 1
     }
 
+
     example_score_3 = {
         "Model Set #1": [
             {
-                "model_code": """
-                    def model(df: pd.DataFrame):
-                        \"\"\"
-                        Model:
-                        AvgReligiosity ~ InRelationship * C(FertilityGroup)
-                        (No controls)
-                        \"\"\"
-                        import statsmodels.formula.api as smf
-                        formula = 'AvgReligiosity ~ InRelationship * C(FertilityGroup)'
-                        return smf.ols(formula=formula, data=df.dropna()).fit()
-                """
+                "model_library": "statsmodels (statsmodels.formula.api)",
+                "model_class": "OLS (statsmodels.formula.api.ols) – Ordinary Least Squares regression",
+                "model_parameters": (
+                    "cov_type='HC3' (heteroskedasticity-robust SEs); "
+                    "categorical encoding for FertilityGroup via C(...); interaction term "
+                    "C(FertilityGroup) * InRelationship; controls included: DaysFromOvulation, "
+                    "SureMean, ReportedCycleLength_used."
+                ),
+                "model_formula_fitting_code":
+                    "formula = 'AvgReligiosity ~ C(FertilityGroup) * InRelationship + DaysFromOvulation + SureMean + ReportedCycleLength_used'\n"
+                    "results = smf.ols(formula, data=df).fit(cov_type='HC3')"
             }
         ],
         "Model Set #2": [
             {
-                "model_code": """
-                    def model(df: pd.DataFrame):
-                        import statsmodels.formula.api as smf
-                        formula = 'AvgReligiosity ~ C(FertilityGroup) * InRelationship + DaysFromOvulation + SureMean + ReportedCycleLength_used'
-                        return smf.ols(formula, data=df).fit(cov_type='HC3')
-                """
+                "model_library": "statsmodels (statsmodels.formula.api)",
+                "model_class": "OLS (Ordinary Least Squares via statsmodels.formula.api.ols)",
+                "model_parameters": (
+                    "Default OLS settings; FertilityGroup cast to categorical; "
+                    "includes interaction C(FertilityGroup) * InRelationship; controls include "
+                    "SureAvg and ReportedCycleLength; no robust covariance estimator applied."
+                ),
+                "model_formula_fitting_code":
+                    "df['FertilityGroup'] = df['FertilityGroup'].astype('category')\n"
+                    "formula = 'AvgReligiosity ~ C(FertilityGroup) * InRelationship + SureAvg + ReportedCycleLength'\n"
+                    "results = smf.ols(formula=formula, data=df).fit()"
             }
         ],
         "Model Similarity Score": 3
     }
+
 
     judge_system_prompt = (
         "You are a meticulous research design evaluator specializing in **model specification comparison**.\n"
