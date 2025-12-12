@@ -380,10 +380,10 @@ def _combine_judge_responses(variables_dict: Dict, modeling_dict: Dict,
     
     # weighted average - all categories get equal weight for now
     weights = {
-        'independent_variables': 1.0,
-        'control_variables': 1.0,
-        'response_variables': 1.0,
-        'model_specification': 1.0,
+        'Independent Variables Similarity Score': 1.0,
+        'Control Variables Similarity Score': 1.0,
+        'Response Variables Similarity Score': 1.0,
+        'Model Similarity Score': 1.0,
         'conclusions': 1.0
     }
     
@@ -427,22 +427,42 @@ def run_judge_evaluation_pairwise(
 
     for i in range(nA):
         for j in range(nB):
-            variables_dict = judge_features(
+            
+            ind_variables_dict = judge_features(
                 llm_provider=llm_provider,
                 llm_model=llm_model,
                 research_question=task,
-                features_1=features_1[i],
-                features_2=features_2[j],
-                data_head=data_head
+                feature_type="independent_variables",
+                features1=features_1[i],
+                features2=features_2[j],
             )
+            
+            control_variables_dict = judge_features(
+                llm_provider=llm_provider,
+                llm_model=llm_model,
+                research_question=task,
+                feature_type="control_variables",
+                features1=features_1[i],
+                features2=features_2[j],
+            )
+            
+            dep_variables_dict = judge_features(
+                llm_provider=llm_provider,
+                llm_model=llm_model,
+                research_question=task,
+                feature_type="response_variables",
+                features1=features_1[i],
+                features2=features_2[j],
+            )
+            
+            variables_dict = ind_variables_dict | control_variables_dict | dep_variables_dict
             
             modeling_dict = judge_models(
                 llm_provider=llm_provider,
                 llm_model=llm_model,
                 research_question=task,
-                model_info_1=model_info_1[i],
-                model_info_2=model_info_2[j],
-                data_head=data_head
+                models1=model_info_1[i],
+                models2=model_info_2[j],
             )
             
             conclusions_dict = judge_conclusions(

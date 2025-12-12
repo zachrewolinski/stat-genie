@@ -1,155 +1,132 @@
-import numpy as np
-
 def extract_final_answer(model_output):
     """
-    Extracts statistics for the 'StudentTeacherRatio' coefficient from a fitted statsmodels OLS results object
-    (including robust-covariance results returned by get_robustcov_results).
+    Extracts statistics for the 'StudentTeacherRatio' coefficient from a statsmodels
+    RegressionResultsWrapper and returns an interpretable summary.
 
-    Returns a dictionary with keys:
-      - "object": a dict containing numeric results (coefficient, robust SE, t, p-value, 95% CI, significance flag,
-                  and a plain-language short interpretation).
-      - "description": a brief explanation of what the numbers mean in context.
-
-    This function is robust to model_output.params being either a pandas Series (with an index of parameter names)
-    or a numpy array. If params is array-like, the function attempts to obtain parameter names from:
-      - model_output.model.exog_names
-      - model_output.param_names
-      - model_output.names
+    Returns:
+      {
+        "object": {
+            "coef": float,
+            "std_error": float,
+            "t_value": float,
+            "p_value": float,
+            "ci_lower": float,
+            "ci_upper": float,
+            "std_effect": float  # standardized (beta) coefficient
+        },
+        "description": str  # short interpretation about whether lower ratio -> higher performance
+      }
     """
-    # Ensure the model_output has the expected attributes/methods
-    required_attrs = ['params', 'bse', 'tvalues', 'pvalues', 'conf_int']
-    for attr in required_attrs:
-        if not hasattr(model_output, attr):
-            raise AttributeError(f"model_output missing required attribute: {attr}")
+    import numpy as np
+    import pandas as pd
 
-    param_name = 'StudentTeacherRatio'
+    res = model_output
 
-    params = model_output.params
+    target = 'StudentTeacherRatio'
 
-    # Determine parameter names and index of the target parameter
-    if hasattr(params, 'index'):  # likely a pandas Series
-        param_names = list(params.index)
-        if param_name not in param_names:
-            raise KeyError(f"Coefficient '{param_name}' not found in model output. Available params: {param_names}")
-        idx = param_names.index(param_name)
-        coef = float(params[param_name])
-    else:
-        # params is array-like (e.g., numpy.ndarray). Try to find parameter names elsewhere.
-        param_names = None
-        if hasattr(model_output, 'model') and hasattr(model_output.model, 'exog_names'):
-            param_names = list(model_output.model.exog_names)
-        elif hasattr(model_output, 'param_names'):
-            param_names = list(model_output.param_names)
-        elif hasattr(model_output, 'names'):
-            param_names = list(model_output.names)
+    # Basic checks
+    if not hasattr(res, 'params'):
+        return {
+            "object": None,
+            "description": "The provided model_output does not appear to be a fitted statsmodels results object (missing .params)."
+        }
 
-        if param_names is None:
-            raise AttributeError(
-                "model_output.params is array-like and parameter names are not available. "
-                "Expected model_output.model.exog_names or model_output.param_names or model_output.names."
-            )
+    params = res.params
+    if target not in params.index:
+        return {
+            "object": None,
+            "description": f"The model does not contain a parameter named '{target}'. Available params: {list(params.index)}"
+        }
 
-        if param_name not in param_names:
-            raise KeyError(f"Coefficient '{param_name}' not found in model output. Available params: {param_names}")
-        idx = param_names.index(param_name)
-        coef = float(np.asarray(params)[idx])
+    # Extract coefficient, se, t, p
+    coef = float(params[target])
+    # Some res objects store bse/pvalues as Series; handle accordingly
+    try:
+        se = float(res.bse[target])
+    except Exception:
+        se = float(np.nan)
+    try:
+        tval = float(res.tvalues[target])
+    except Exception:
+        tval = float(np.nan)
+    try:
+        pval = float(res.pvalues[target])
+    except Exception:
+        pval = float(np.nan)
 
-    # Helper to extract a scalar value from model_output attributes that may be Series or array-like
-    def _get_scalar(attr_name):
-        attr = getattr(model_output, attr_name)
-        # If it's callable (unlikely for these), call it without args
-        if callable(attr) and not isinstance(attr, (np.ndarray, list, tuple)):
-            try:
-                attr = attr()
-            except TypeError:
-                # not callable without args; fall through
-                pass
+    # Confidence interval (build DataFrame for safe indexing)
+    try:
+        ci_array = res.conf_int(alpha=0.05)
+        ci_df = pd.DataFrame(ci_array, index=res.params.index, columns=['ci_lower', 'ci_upper'])
+        ci_lower = float(ci_df.loc[target, 'ci_lower'])
+        ci_upper = float(ci_df.loc[target, 'ci_upper'])
+    except Exception:
+        ci_lower = ci_upper = float(np.nan)
 
-        if hasattr(attr, 'loc') and param_name in getattr(attr, 'index', []):
-            return float(attr.loc[param_name])
-        if hasattr(attr, 'get') and param_name in getattr(attr, 'keys', lambda: [])():
-            # dict-like
-            return float(attr.get(param_name))
-        # array-like
-        arr = np.asarray(attr)
-        return float(arr[idx])
+    # Standardized effect (beta): coef * (sd(X) / sd(Y))
+    std_effect = float(np.nan)
+    try:
+        exog = np.asarray(res.model.exog)
+        endog = np.asarray(res.model.endog)
+        exog_names = list(res.model.exog_names)
+        if target in exog_names:
+            idx = exog_names.index(target)
+            x_col = exog[:, idx]
+            # Use sample standard deviation (ddof=1)
+            sd_x = np.std(x_col, ddof=1)
+            sd_y = np.std(endog, ddof=1)
+            if sd_y != 0:
+                std_effect = float(coef * (sd_x / sd_y))
+    except Exception:
+        std_effect = float(np.nan)
 
-    se = _get_scalar('bse')
-    tstat = _get_scalar('tvalues')
-    pval = _get_scalar('pvalues')
-
-    # Handle conf_int which may be a method or an attribute. Expect a 2-column structure.
-    conf_func_or_attr = getattr(model_output, 'conf_int')
-    if callable(conf_func_or_attr):
-        conf = conf_func_or_attr(alpha=0.05)
-    else:
-        conf = conf_func_or_attr
-
-    # conf might be a DataFrame-like, ndarray, or similar
-    if hasattr(conf, 'loc') and param_name in getattr(conf, 'index', []):
-        ci_row = conf.loc[param_name]
-        ci_lower = float(ci_row.iloc[0])
-        ci_upper = float(ci_row.iloc[1])
-    else:
-        conf_arr = np.asarray(conf)
-        # If conf_arr is 2D with rows corresponding to params
-        if conf_arr.ndim == 2 and conf_arr.shape[0] == len(param_names):
-            ci_lower = float(conf_arr[idx, 0])
-            ci_upper = float(conf_arr[idx, 1])
-        # If conf_arr is e.g. shape (n_params, 2) but param_names unknown, still use idx mapping
-        elif conf_arr.ndim == 2 and conf_arr.shape[1] == 2:
-            ci_lower = float(conf_arr[idx, 0])
-            ci_upper = float(conf_arr[idx, 1])
+    # Interpretation / conclusion regarding the question:
+    # "Is a lower student-teacher ratio associated with higher academic performance?"
+    # Note: StudentTeacherRatio is defined as students / teachers. A negative coef implies
+    # that higher ratio -> lower scores, so lower ratio -> higher scores.
+    conclusion = ""
+    sig_level = 0.05
+    if np.isfinite(pval):
+        if pval < sig_level:
+            if coef < 0:
+                conclusion = (
+                    "Yes — the coefficient on StudentTeacherRatio is negative and statistically significant "
+                    f"(coef = {coef:.4f}, p = {pval:.3g}). This implies that a lower student-teacher ratio "
+                    "(fewer students per teacher) is associated with higher average academic performance. "
+                    f"The 95% CI for the effect is [{ci_lower:.4f}, {ci_upper:.4f}]. "
+                    f"Standardized effect (beta) ≈ {std_effect:.4f}."
+                )
+            else:
+                conclusion = (
+                    "No — the coefficient on StudentTeacherRatio is positive and statistically significant "
+                    f"(coef = {coef:.4f}, p = {pval:.3g}). This implies that a lower student-teacher ratio "
+                    "is associated with lower average academic performance (opposite direction). "
+                    f"The 95% CI is [{ci_lower:.4f}, {ci_upper:.4f}]. "
+                    f"Standardized effect (beta) ≈ {std_effect:.4f}."
+                )
         else:
-            raise ValueError("Unable to interpret conf_int output structure.")
-
-    # Determine statistical significance at conventional levels
-    significant_05 = pval < 0.05
-    significant_01 = pval < 0.01
-
-    # Interpret direction in context:
-    # StudentTeacherRatio = students / teachers. Higher ratio => more students per teacher (larger class sizes).
-    if coef < 0:
-        direction_text = (
-            "Negative coef: higher student-teacher ratio (more students per teacher) is associated with LOWER average test scores; "
-            "equivalently, a LOWER student-teacher ratio (fewer students per teacher, smaller classes) is associated with HIGHER scores."
-        )
-    elif coef > 0:
-        direction_text = (
-            "Positive coef: higher student-teacher ratio (more students per teacher) is associated with HIGHER average test scores; "
-            "equivalently, a LOWER student-teacher ratio is associated with LOWER scores."
-        )
+            conclusion = (
+                "No strong evidence — the coefficient on StudentTeacherRatio is not statistically significant "
+                f"(coef = {coef:.4f}, p = {pval:.3g}). We cannot conclude that lower student-teacher ratio is "
+                "associated with higher academic performance based on this model. "
+                f"The 95% CI is [{ci_lower:.4f}, {ci_upper:.4f}] (contains zero). "
+                f"Standardized effect (beta) ≈ {std_effect:.4f}."
+            )
     else:
-        direction_text = "Coefficient is exactly zero (no association)."
+        conclusion = "Could not determine statistical significance (p-value unavailable)."
 
-    significance_text = (
-        "This association is statistically significant at the 5% level."
-        if significant_05 else
-        "This association is NOT statistically significant at the 5% level."
-    )
-
-    short_interpretation = f"{direction_text} {significance_text}"
-
-    result_object = {
-        "variable": param_name,
+    extracted = {
         "coef": coef,
-        "std_err": se,
-        "t_stat": tstat,
+        "std_error": se,
+        "t_value": tval,
         "p_value": pval,
-        "ci_2.5%": ci_lower,
-        "ci_97.5%": ci_upper,
-        "significant_at_0.05": bool(significant_05),
-        "significant_at_0.01": bool(significant_01),
-        # plain-language summary useful for automated decisions
-        "interpretation": short_interpretation
+        "ci_lower": ci_lower,
+        "ci_upper": ci_upper,
+        "std_effect": std_effect,
+        "note": "coef units = change in AvgScore per 1 additional student per teacher"
     }
 
-    description = (
-        "Extracted the estimate and inference for the student-teacher ratio from the OLS results (robust HC3 SEs). "
-        "coef = estimated change in district average test score (AvgScore) for a one-unit increase in StudentTeacherRatio "
-        "(i.e., one additional student per teacher). The p-value and 95% CI assess statistical significance and precision. "
-        "A negative coefficient implies that reducing the student-teacher ratio (fewer students per teacher) is associated "
-        "with higher average test scores; the description field above states whether this association is statistically significant."
-    )
-
-    return {"object": result_object, "description": description}
+    return {
+        "object": extracted,
+        "description": conclusion
+    }

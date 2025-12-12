@@ -1,109 +1,109 @@
 def extract_final_answer(model_output):
     """
-    Extracts coefficient, standard error, t-stat, p-value, 95% CI, and a brief interpretation
-    for the 'StudentTeacherRatio' variable from a fitted statsmodels RegressionResultsWrapper.
+    Extracts the coefficient, standard error, t-statistic, p-value, 95% CI, and a standardized effect
+    for the StudentTeacherRatio variable from a fitted statsmodels regression results object.
 
-    Returns a dict with keys:
-      - "object": dict of numeric results for StudentTeacherRatio
-      - "description": brief text interpreting the sign and statistical significance
+    Returns a dictionary:
+      - "object": dict with numeric results for StudentTeacherRatio
+      - "description": plain-English interpretation of what those numbers imply about whether
+                       a lower student-teacher ratio is associated with higher academic performance.
     """
-    # Prepare return structure
-    result_obj = {}
-    description = ""
-    
-    # Basic checks
-    if model_output is None:
-        return {
-            "object": None,
-            "description": "No model output provided."
-        }
-    
+    import numpy as np
+
+    # Ensure model_output looks like a statsmodels RegressionResults
+    if not hasattr(model_output, "params") or not hasattr(model_output, "bse"):
+        raise ValueError("model_output does not appear to be a statsmodels regression results object.")
+
+    # Parameter name we care about
+    param_name = 'StudentTeacherRatio'
+
+    params = model_output.params
+    if param_name not in params.index:
+        raise ValueError(f"Parameter '{param_name}' not found in model_output.params")
+
+    # Extract point estimate, SE, t, p
+    coef = float(params[param_name])
+    se = float(model_output.bse[param_name]) if param_name in model_output.bse.index else float(np.nan)
+    tval = float(model_output.tvalues[param_name]) if param_name in model_output.tvalues.index else float(np.nan)
+    pval = float(model_output.pvalues[param_name]) if param_name in model_output.pvalues.index else float(np.nan)
+
+    # 95% confidence interval (robust handling if conf_int returns ndarray or DataFrame)
     try:
-        params = model_output.params
-    except Exception as e:
-        return {
-            "object": None,
-            "description": f"Provided object does not appear to be a statsmodels results object: {e}"
-        }
-    
-    var_name = 'StudentTeacherRatio'
-    if var_name not in params.index:
-        return {
-            "object": None,
-            "description": f"Variable '{var_name}' not found in the model parameters."
-        }
-    
-    # Extract statistics
-    coef = float(params[var_name])
-    try:
-        std_err = float(model_output.bse[var_name])
-    except Exception:
-        # fallback: compute from covariance if available
+        ci_all = model_output.conf_int(alpha=0.05)
+        # Try DataFrame-style access
         try:
-            std_err = float(model_output.normalized_cov_params[var_name].get(var_name, float('nan')))
+            ci_lower, ci_upper = ci_all.loc[param_name].tolist()
         except Exception:
-            std_err = float('nan')
-    try:
-        t_stat = float(model_output.tvalues[var_name])
+            # ndarray-style: find index position of param
+            param_list = list(params.index)
+            idx = param_list.index(param_name)
+            ci_lower, ci_upper = float(ci_all[idx, 0]), float(ci_all[idx, 1])
     except Exception:
-        t_stat = float('nan')
+        ci_lower, ci_upper = float(np.nan), float(np.nan)
+
+    # Compute a standardized (beta) coefficient if model stores the original exog & endog
+    std_beta = None
     try:
-        p_value = float(model_output.pvalues[var_name])
+        exog_names = list(model_output.model.exog_names)
+        if param_name in exog_names:
+            idx = exog_names.index(param_name)
+            X = np.asarray(model_output.model.exog)[:, idx]
+            Y = np.asarray(model_output.model.endog)
+            # use sample standard deviation (ddof=1) to be conventional
+            sx = X.std(ddof=1)
+            sy = Y.std(ddof=1)
+            if sy != 0:
+                std_beta = float(coef * (sx / sy))
+            else:
+                std_beta = None
     except Exception:
-        p_value = float('nan')
-    try:
-        ci = model_output.conf_int(alpha=0.05).loc[var_name].values
-        ci_lower, ci_upper = float(ci[0]), float(ci[1])
-    except Exception:
-        ci_lower, ci_upper = float('nan'), float('nan')
-    
-    # Significance at conventional 5% level
-    significant_05 = False
-    if (not (p_value != p_value)) and p_value < 0.05:  # check for NaN then threshold
-        significant_05 = True
-    
-    # Directional interpretation:
-    # StudentTeacherRatio is defined as number of students per teacher (higher = worse/larger ratio).
-    # A negative coefficient implies that higher student-teacher ratio is associated with LOWER AvgScore,
-    # which equivalently means a lower student-teacher ratio (fewer students per teacher) is associated
-    # with HIGHER academic performance.
+        std_beta = None
+
+    # Interpretation about direction and statistical significance
+    # Note: StudentTeacherRatio is students per teacher. A negative coef means fewer students per teacher
+    # (i.e., lower ratio) is associated with higher AvgScore.
+    significance = "not statistically significant"
+    if not np.isnan(pval):
+        if pval < 0.01:
+            significance = "statistically significant at p < 0.01"
+        elif pval < 0.05:
+            significance = "statistically significant at p < 0.05"
+        elif pval < 0.1:
+            significance = "marginally significant (p < 0.1)"
+        else:
+            significance = "not statistically significant (p >= 0.1)"
+
     if coef < 0:
-        direction_text = (
-            "Coefficient is negative: higher student-teacher ratio (more students per teacher) "
-            "is associated with lower AvgScore. Thus, lower student-teacher ratios are associated "
-            "with higher academic performance."
-        )
+        direction_statement = ("Negative coefficient: higher student-teacher ratio (more students per teacher) "
+                               "is associated with LOWER AvgScore; equivalently, a lower student-teacher ratio "
+                               "(fewer students per teacher) is associated with HIGHER AvgScore.")
     elif coef > 0:
-        direction_text = (
-            "Coefficient is positive: higher student-teacher ratio (more students per teacher) "
-            "is associated with higher AvgScore. Thus, lower student-teacher ratios would be "
-            "associated with lower academic performance."
-        )
+        direction_statement = ("Positive coefficient: higher student-teacher ratio (more students per teacher) "
+                               "is associated with HIGHER AvgScore; equivalently, a lower student-teacher ratio "
+                               "(fewer students per teacher) is associated with LOWER AvgScore.")
     else:
-        direction_text = "Coefficient is exactly zero (no estimated association)."
-    
-    sig_text = (
-        "The association is statistically significant at the 5% level."
-        if significant_05 else
-        "The association is NOT statistically significant at the 5% level."
-    )
-    
-    # Build object to return
-    result_obj = {
-        "variable": var_name,
-        "coef": coef,
-        "std_err": std_err,
-        "t_stat": t_stat,
-        "p_value": p_value,
+        direction_statement = "Coefficient is zero (no estimated association)."
+
+    # Build the object to return
+    result_object = {
+        "parameter": param_name,
+        "coefficient": coef,
+        "std_error": se,
+        "t_value": tval,
+        "p_value": pval,
         "ci_lower_95": ci_lower,
         "ci_upper_95": ci_upper,
-        "significant_at_0.05": significant_05
+        "standardized_beta": std_beta  # may be None if cannot be computed
     }
-    
-    description = (
-        f"Estimated effect of '{var_name}' on AvgScore: coefficient = {coef:.4f}, "
-        f"SE = {std_err:.4f}, t = {t_stat:.3f}, p = {p_value:.3g}, "
-        f"95% CI = [{ci_lower:.4f}, {ci_upper:.4f}]. {direction_text} {sig_text}"
-    )
-    
-    return {"object": result_obj, "description": description}
+
+    description_lines = [
+        f"Estimate for '{param_name}': coefficient = {coef:.4g}, SE = {se:.4g}, t = {tval:.4g}, p = {pval:.4g}.",
+        f"95% CI = [{ci_lower:.4g}, {ci_upper:.4g}]." if not (np.isnan(ci_lower) or np.isnan(ci_upper)) else "95% CI unavailable.",
+        f"Standardized (beta) coefficient = {std_beta:.4g}." if std_beta is not None else "Standardized coefficient unavailable.",
+        direction_statement,
+        f"Statistical evidence: {significance}.",
+        "Interpretation: If the coefficient is negative and statistically significant, this provides evidence that a LOWER student-teacher ratio (fewer students per teacher) is associated with HIGHER 5th-grade average test scores, controlling for the included covariates. If the coefficient is not statistically significant, there is no strong evidence of an association after controlling for those covariates."
+    ]
+    description = " ".join(description_lines)
+
+    return {"object": result_object, "description": description}

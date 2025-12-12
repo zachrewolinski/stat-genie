@@ -1,226 +1,183 @@
-from typing import Any
-import re
-
+from typing import Dict, FrozenSet, List, Literal, Optional, Set, Tuple, Any
 import numpy as np
 import pandas as pd
+import sklearn
+import scipy
 import statsmodels.api as sm
+import statsmodels.formula.api as smf
+import matplotlib.pyplot as plt
+import pickle
 
 
-# ======== TRANSFORM CODE ========
+def _find_first_column(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
+    """
+    Return the first column name from candidates that exists in df (case-insensitive).
+    If none found, return None.
+    """
+    lower_map = {col.lower(): col for col in df.columns}
+    for cand in candidates:
+        if cand is None:
+            continue
+        key = cand.lower()
+        if key in lower_map:
+            return lower_map[key]
+    return None
+
+
 def transform(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Transform the raw dataset into a dataframe ready for modeling.
-
-    Steps:
-    - Work on a copy of the input dataframe.
-    - Convert necessary columns to numeric where appropriate.
-    - Compute AvgScore (mean of feature14 and feature15).
-    - Compute StudentTeacherRatio = feature6 / feature7. Handle zero teachers as missing.
-    - Compute ComputersPerStudent = feature10 / feature6.
-    - Create a binary GradeSpan_KK08 indicator from feature5.
-    - Winsorize StudentTeacherRatio at the 1st and 99th percentiles to reduce extreme influence.
-    - Standardize (z-score) continuous control variables and the independent variable.
-    - Drop rows with missing values in any columns needed for the model.
-
-    Returns the dataframe including these columns (and not removing original raw columns except by making a copy):
-    AvgScore, StudentTeacherRatio, StudentTeacherRatio_z, PercentReducedLunch_z, PercentEnglishLearners_z,
-    PercentCalWorks_z, ExpenditurePerStudent_z, AvgIncome_k_z, ComputersPerStudent_z, GradeSpan_KK08
+    Transform the raw dataset into a dataframe ready for modeling. The function will:
+    - Locate raw columns that correspond to the conceptual variables (robust to common name variants)
+    - Ensure numeric columns are numeric
+    - Drop rows missing core variables (enrollment, teachers, reading, math)
+    - Remove rows with non-positive teacher counts
+    - Create StudentTeacherRatio = Enrollment / NumTeachers
+    - Create AvgScore = mean(reading, math)
+    - Rename / copy relevant control variables to deterministic column names
+    - Return only the columns used in the model (in a stable order)
     """
-    # operate on a copy
     df = df.copy()
 
-    # Ensure numeric conversion for numeric-feeling columns; if a column is missing, create it as NaN series
-    numeric_cols = [
-        'feature6', 'feature7', 'feature8', 'feature9', 'feature10',
-        'feature11', 'feature12', 'feature13', 'feature14', 'feature15'
+    # Candidate names for the core raw columns (robust matching)
+    enroll_cands = [
+        'feature6', 'enrollment', 'enroll', 'total_enrollment', 'totalenrollment', 'ENROLL', 'Enrollment',
+        'students', 'student', 'students_total', 'enrolled'
     ]
-    for c in numeric_cols:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors='coerce')
-        else:
-            df[c] = pd.Series(np.nan, index=df.index, dtype='float')
+    teachers_cands = [
+        'feature7', 'numteachers', 'num_teachers', 'teachers', 'Teachers', 'NumTeachers', 'teacher_count', 'teacher'
+    ]
+    reading_cands = [
+        'feature14', 'reading', 'read', 'avg_reading', 'reading_avg', 'AvgReading', 'AverageReading'
+    ]
+    math_cands = [
+        'feature15', 'math', 'Math', 'avg_math', 'math_avg', 'AvgMath', 'AverageMath'
+    ]
 
-    # Compute dependent variable: average of reading (feature14) and math (feature15)
-    # Use row-wise mean skipping NA so if one of the scores exists we use it.
-    df['AvgScore'] = df[['feature14', 'feature15']].mean(axis=1, skipna=True)
+    # Find core columns
+    enroll_col = _find_first_column(df, enroll_cands)
+    teachers_col = _find_first_column(df, teachers_cands)
+    reading_col = _find_first_column(df, reading_cands)
+    math_col = _find_first_column(df, math_cands)
 
-    # If AvgScore is entirely missing, try fallbacks before giving up:
-    if df['AvgScore'].isna().all():
-        # Prefer feature14 then feature15
-        df['AvgScore'] = df['feature14'].fillna(df['feature15'])
-        # If still all missing, attempt to use any numeric information from feature14/15 stack
-        if df['AvgScore'].isna().all():
-            stacked = pd.to_numeric(df[['feature14', 'feature15']].stack(), errors='coerce')
-            global_mean = stacked.mean() if not stacked.empty else np.nan
-            if np.isnan(global_mean):
-                # As a last resort, set a neutral constant (0.0) so the pipeline can proceed.
-                # This is a pragmatic choice to avoid failing entirely; real analysis should not impute the DV.
-                global_mean = 0.0
-            df['AvgScore'] = df['AvgScore'].fillna(global_mean)
+    # If any core columns are missing, raise a clear error
+    if not all([enroll_col, teachers_col, reading_col, math_col]):
+        available = list(df.columns)
+        missing = []
+        if not enroll_col:
+            missing.append('enrollment (candidates: {})'.format(enroll_cands))
+        if not teachers_col:
+            missing.append('num teachers (candidates: {})'.format(teachers_cands))
+        if not reading_col:
+            missing.append('reading score (candidates: {})'.format(reading_cands))
+        if not math_col:
+            missing.append('math score (candidates: {})'.format(math_cands))
+        raise ValueError(f"Could not find required raw columns in the input dataframe. Missing: {missing}. Available columns: {available}")
 
-    # Compute student-teacher ratio
-    # If teachers (feature7) is zero or missing, set ratio to NaN
-    df.loc[df['feature7'] == 0, 'feature7'] = np.nan
-    df['StudentTeacherRatio'] = df['feature6'] / df['feature7']
+    # Convert core columns to numeric (coerce errors to NaN)
+    df[enroll_col] = pd.to_numeric(df[enroll_col], errors='coerce')
+    df[teachers_col] = pd.to_numeric(df[teachers_col], errors='coerce')
+    df[reading_col] = pd.to_numeric(df[reading_col], errors='coerce')
+    df[math_col] = pd.to_numeric(df[math_col], errors='coerce')
 
-    # Computers per student (feature10 / feature6)
-    df.loc[df['feature6'] == 0, 'feature6'] = np.nan
-    df['ComputersPerStudent'] = df['feature10'] / df['feature6']
+    # Drop rows missing the core variables needed to compute the IV and DV
+    df = df.dropna(subset=[enroll_col, teachers_col, reading_col, math_col])
 
-    # Control variables - map features to clearer names (these will exist because we ensured numeric columns above)
-    df['PercentCalWorks'] = df['feature8']
-    df['PercentReducedLunch'] = df['feature9']
-    df['PercentEnglishLearners'] = df['feature13']
-    df['ExpenditurePerStudent'] = df['feature11']
-    # feature12 is already in thousands of USD per dataset description
-    df['AvgIncome_k'] = df['feature12']
+    # Remove rows with non-positive number of teachers to avoid division errors
+    df = df[df[teachers_col] > 0]
 
-    # Grade span binary indicator (KK-08 vs KK-06). Make robust to various string formats and numeric codes.
-    # 1 if indicates K-8/KK-08, 0 if indicates K-6/KK-06, otherwise NaN.
-    if 'feature5' in df.columns:
-        raw = df['feature5']
-        # Create string versions only for non-missing entries
-        non_missing = raw.notna()
-        raw_str = pd.Series(np.nan, index=df.index, dtype=object)
-        raw_str.loc[non_missing] = raw.loc[non_missing].astype(str).str.strip().str.upper()
+    # Create clear column names for modeling (these exact names are required by contract)
+    df['Enrollment'] = df[enroll_col]
+    df['NumTeachers'] = df[teachers_col]
+    df['StudentTeacherRatio'] = df['Enrollment'] / df['NumTeachers']
 
-        # Detect presence of '8' or '6' as indicators of grade span.
-        # Use regex to find standalone 8 or 6 or occurrences in forms like 'K-8', 'K8', etc.
-        contains_8 = raw_str.str.contains(r'(^|[^0-9])8([^0-9]|$)', regex=True, na=False)
-        contains_6 = raw_str.str.contains(r'(^|[^0-9])6([^0-9]|$)', regex=True, na=False)
+    # Dependent variable: average of reading and math scores
+    df['AvgScore'] = df[[reading_col, math_col]].mean(axis=1)
 
-        # If both match (unlikely), prefer 8 (treat as 8); else assign 1 for 8, 0 for 6, NaN otherwise.
-        grade_span = pd.Series(np.nan, index=df.index, dtype=float)
-        grade_span.loc[contains_8] = 1.0
-        grade_span.loc[~contains_8 & contains_6] = 0.0
-
-        df['GradeSpan_KK08'] = grade_span
-    else:
-        df['GradeSpan_KK08'] = pd.Series(np.nan, index=df.index, dtype=float)
-
-    # Winsorize StudentTeacherRatio to 1st/99th percentiles to reduce extreme leverage
-    if df['StudentTeacherRatio'].notna().sum() > 0:
-        q_low, q_high = df['StudentTeacherRatio'].quantile([0.01, 0.99])
-        df['StudentTeacherRatio'] = df['StudentTeacherRatio'].clip(lower=q_low, upper=q_high)
-
-    # Replace infinite values (from divisions) with NaN
-    df.replace([np.inf, -np.inf], np.nan, inplace=True)
-
-    # Standardize (z-score) continuous predictors and controls (use sample std ddof=1)
-    def zscore(series: pd.Series) -> pd.Series:
-        s = series.astype(float)
-        if s.isna().all():
-            # If the entire series is missing, return a zero-centered series (all zeros).
-            # This prevents dropping all observations downstream while preserving mean=0 for the control.
-            return pd.Series(0.0, index=series.index)
-        mean = s.mean(skipna=True)
-        std = s.std(ddof=1, skipna=True)
-        if std == 0 or np.isnan(std):
-            # If no variation, return zero-mean series (subtract mean) resulting in zeros where data existed.
-            return s - mean
-        return (s - mean) / std
-
-    # Map raw columns to z-scored final column names
-    z_map = {
-        'StudentTeacherRatio': 'StudentTeacherRatio_z',
-        'PercentReducedLunch': 'PercentReducedLunch_z',
-        'PercentEnglishLearners': 'PercentEnglishLearners_z',
-        'PercentCalWorks': 'PercentCalWorks_z',
-        'ExpenditurePerStudent': 'ExpenditurePerStudent_z',
-        'AvgIncome_k': 'AvgIncome_k_z',
-        'ComputersPerStudent': 'ComputersPerStudent_z'
+    # Controls mapping: try to find plausible source columns for each control; if not found, create NA column
+    control_candidates = {
+        'PercentCalWorks': ['feature8', 'calworks', 'percent_calworks', 'percentcalworks', 'CalWorks', 'PercentCalWorks'],
+        'PercentReducedLunch': ['feature9', 'reduced_lunch', 'percent_reduced_lunch', 'PercentReducedLunch', 'lunch', 'free_reduced_lunch'],
+        'NumComputers': ['feature10', 'numcomputers', 'num_computers', 'computers', 'NumComputers', 'computer', 'computers_count'],
+        'ExpenditurePerStudent': ['feature11', 'expenditureperstudent', 'expenditure_per_student', 'expend_per_student', 'ExpenditurePerStudent', 'expenditure'],
+        'AvgIncome': ['feature12', 'avgincome', 'avg_income', 'average_income', 'AvgIncome', 'income'],
+        'PercentEnglishLearners': ['feature13', 'english_learners', 'percent_english_learners', 'PercentEnglishLearners', 'english']
     }
 
-    for raw_col, z_col in z_map.items():
-        if raw_col in df.columns:
-            df[z_col] = zscore(df[raw_col])
+    for out_col, cands in control_candidates.items():
+        src = _find_first_column(df, cands)
+        if src is not None:
+            # convert to numeric
+            df[out_col] = pd.to_numeric(df[src], errors='coerce')
         else:
-            # If the raw column is missing entirely, provide a zero column so model can still run.
-            df[z_col] = pd.Series(0.0, index=df.index)
+            df[out_col] = np.nan
 
-    # Final drop: ensure AvgScore exists and model columns exist
-    model_cols = ['AvgScore'] + list(z_map.values()) + ['GradeSpan_KK08']
+    # Categorical controls: county and grade span
+    county_cands = ['feature4', 'county', 'County', 'COUNTY']
+    gradespan_cands = ['feature5', 'gradespan', 'GradeSpan', 'grade_span', 'GradeSpanType', 'grades', 'gradespan_type', 'gradespan']
 
-    # If GradeSpan_KK08 is fully NaN, fill with zeros (assume KK-06) to avoid dropping all rows.
-    if df['GradeSpan_KK08'].isna().all():
-        df['GradeSpan_KK08'] = 0.0
+    county_src = _find_first_column(df, county_cands)
+    gradespan_src = _find_first_column(df, gradespan_cands)
 
-    # Ensure the final expected columns exist (do not change names)
-    keep_cols = [
-        'AvgScore', 'StudentTeacherRatio', 'StudentTeacherRatio_z',
-        'PercentReducedLunch_z', 'PercentEnglishLearners_z', 'PercentCalWorks_z',
-        'ExpenditurePerStudent_z', 'AvgIncome_k_z', 'ComputersPerStudent_z', 'GradeSpan_KK08'
+    if county_src is not None:
+        df['County'] = df[county_src].astype(str)
+    else:
+        df['County'] = ''  # empty string indicates missing category
+
+    if gradespan_src is not None:
+        df['GradeSpan'] = df[gradespan_src].astype(str)
+    else:
+        df['GradeSpan'] = ''
+
+    # Keep only rows with finite StudentTeacherRatio and AvgScore
+    df = df[df['StudentTeacherRatio'].replace([np.inf, -np.inf], np.nan).notna()]
+    df = df[df['AvgScore'].replace([np.inf, -np.inf], np.nan).notna()]
+
+    # Return just the columns needed for modeling (in stable order)
+    out_cols = [
+        'StudentTeacherRatio', 'AvgScore',
+        'PercentCalWorks', 'PercentReducedLunch', 'NumComputers', 'ExpenditurePerStudent',
+        'AvgIncome', 'PercentEnglishLearners', 'Enrollment', 'NumTeachers',
+        'County', 'GradeSpan'
     ]
-    for c in keep_cols:
-        if c not in df.columns:
-            df[c] = np.nan
+    # Ensure all out_cols exist in df (they should, but create missing as NA to be safe)
+    for col in out_cols:
+        if col not in df.columns:
+            df[col] = np.nan
 
-    # Drop rows with missing AvgScore (we attempted sensible fallbacks above).
-    df = df.dropna(subset=['AvgScore'])
-
-    # Now drop rows with any remaining NaNs among model cols.
-    # Because z-scored columns are imputed to zeros when lacking data, this should primarily remove rows lacking AvgScore.
-    df = df.dropna(subset=model_cols)
-
-    return df
+    return df[out_cols]
 
 
-# ======== MODEL CODE ========
 def model(df: pd.DataFrame) -> Any:
     """
-    Fit an OLS regression predicting AvgScore from standardized student-teacher ratio and controls.
+    Fit an OLS regression of AvgScore on StudentTeacherRatio controlling for district characteristics.
+    Uses robust (heteroskedasticity-consistent) standard errors (HC3).
 
-    Model form:
-    AvgScore = beta0 + beta1 * StudentTeacherRatio_z + sum(beta_k * control_k) + epsilon
+    Model formula:
+      AvgScore ~ StudentTeacherRatio + PercentCalWorks + PercentReducedLunch + NumComputers
+                 + ExpenditurePerStudent + AvgIncome + PercentEnglishLearners + Enrollment
+                 + C(County) + C(GradeSpan)
 
-    Controls included (all standardized except GradeSpan_KK08):
-      - PercentReducedLunch_z
-      - PercentEnglishLearners_z
-      - PercentCalWorks_z
-      - ExpenditurePerStudent_z
-      - AvgIncome_k_z
-      - ComputersPerStudent_z
-      - GradeSpan_KK08 (binary)
-
-    Returns the fitted statsmodels RegressionResults object.
+    Returns the fitted statsmodels RegressionResults object with robust covariance (HC3).
     """
-    # Ensure we operate on a copy
-    df = df.copy()
-
-    # Define predictors (these must match transformed dataframe column names)
-    predictors = [
-        'StudentTeacherRatio_z',
-        'PercentReducedLunch_z',
-        'PercentEnglishLearners_z',
-        'PercentCalWorks_z',
-        'ExpenditurePerStudent_z',
-        'AvgIncome_k_z',
-        'ComputersPerStudent_z',
-        'GradeSpan_KK08'
-    ]
-
-    # Confirm predictors are present
-    missing = [c for c in predictors + ['AvgScore'] if c not in df.columns]
-    if len(missing) > 0:
+    # Ensure the expected columns are present
+    required = ['AvgScore', 'StudentTeacherRatio', 'PercentCalWorks', 'PercentReducedLunch',
+                'NumComputers', 'ExpenditurePerStudent', 'AvgIncome', 'PercentEnglishLearners',
+                'Enrollment', 'County', 'GradeSpan']
+    missing = [c for c in required if c not in df.columns]
+    if missing:
         raise ValueError(f"Missing required columns for modeling: {missing}")
 
-    # Prepare X and y, drop any remaining rows with missing values
-    model_df = df[['AvgScore'] + predictors].dropna()
+    formula = (
+        'AvgScore ~ StudentTeacherRatio + PercentCalWorks + PercentReducedLunch + NumComputers '
+        '+ ExpenditurePerStudent + AvgIncome + PercentEnglishLearners + Enrollment '
+        '+ C(County) + C(GradeSpan)'
+    )
 
-    if model_df.shape[0] == 0:
-        raise ValueError(
-            "No observations available for modeling after dropping missing values in required columns. "
-            "Ensure transform produced at least one complete row for: " + ", ".join(['AvgScore'] + predictors)
-        )
+    # Fit OLS and then compute robust (HC3) covariance results
+    ols_mod = smf.ols(formula=formula, data=df)
+    res = ols_mod.fit()
+    robust_res = res.get_robustcov_results(cov_type='HC3')
 
-    y = model_df['AvgScore'].astype(float)
-    X = model_df[predictors].astype(float)
-
-    # Add constant
-    X = sm.add_constant(X, has_constant='add')
-
-    # Fit OLS
-    results = sm.OLS(y, X).fit()
-
-    # Return the fitted results object for inspection (summary, params, etc.)
-    return results
+    # Print a brief summary and return the fitted model with robust covariance
+    print(robust_res.summary())
+    return robust_res

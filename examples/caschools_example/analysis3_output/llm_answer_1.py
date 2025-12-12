@@ -1,158 +1,175 @@
 def extract_final_answer(model_output):
     """
-    Extracts the estimate, uncertainty, sample size and an interpretation for the
-    StudentTeacherRatio coefficient from a fitted model output.
+    Extracts coefficient, SE, p-value, confidence interval, and simple interpretations
+    for the effect of LogStudentTeacherRatio on AcademicPerformance from a fitted
+    statsmodels RegressionResultsWrapper (or compatible) object.
 
     Returns a dict with keys:
-      - "object": dict or None. If dict, contains keys:
-            "coef", "p_value", "ci_lower", "ci_upper", "nobs",
-            "significant_at_0.05", "supports_lower_ratio_higher_perf"
-      - "description": human-readable interpretation of the extracted results
+      - "object": a dictionary of numeric results and interpretation flags
+      - "description": a concise human-readable interpretation of the results
     """
     import numpy as np
+    import math
 
+    res = model_output
+
+    # Find the parameter name in a case-insensitive / fuzzy way
+    target_tokens = ['log', 'student', 'teacher', 'ratio']
+    param_key = None
     try:
-        # Helpers to safely access attributes / dict-like items
-        def has_key_like(container, key):
-            try:
-                if container is None:
-                    return False
-                if hasattr(container, 'index'):
-                    return key in container.index
-                if isinstance(container, dict):
-                    return key in container
-                return False
-            except Exception:
-                return False
+        param_index = list(res.params.index)
+    except Exception as e:
+        raise ValueError(f"Could not read params from model_output: {e}")
 
-        key = 'StudentTeacherRatio'
+    for name in param_index:
+        lname = str(name).lower()
+        if all(tok in lname for tok in ['student', 'teacher']) and ('log' in lname or 'ln' in lname):
+            param_key = name
+            break
+    # Fallback to exact name if not found
+    if param_key is None:
+        for candidate in ['LogStudentTeacherRatio', 'logstudentteacherratio', 'log_student_teacher_ratio', 'log_student_teacher']:
+            for name in param_index:
+                if str(name).lower() == candidate.lower():
+                    param_key = name
+                    break
+            if param_key is not None:
+                break
+    # Final fallback: look for any param containing both 'student' and 'teacher'
+    if param_key is None:
+        for name in param_index:
+            lname = str(name).lower()
+            if 'student' in lname and 'teacher' in lname:
+                param_key = name
+                break
 
-        # Attempt to read params, pvalues, conf_int, nobs
-        params = getattr(model_output, 'params', None)
-        pvalues = getattr(model_output, 'pvalues', None)
-        nobs = getattr(model_output, 'nobs', None)
+    if param_key is None:
+        raise KeyError("Could not locate the model parameter for LogStudentTeacherRatio in model_output.params.")
 
-        # Try to extract coefficient
-        coef = None
-        if has_key_like(params, key):
-            coef = params[key]
-            try:
-                coef = float(coef)
-            except Exception:
-                coef = None
-
-        # Try to extract p-value
-        pval = None
-        if has_key_like(pvalues, key):
-            try:
-                pval = float(pvalues[key])
-            except Exception:
-                pval = None
-
-        # Try to extract confidence interval via conf_int() if available
-        ci_lower = ci_upper = None
-        if hasattr(model_output, 'conf_int'):
-            try:
-                conf = model_output.conf_int()
-                # conf may be a DataFrame or ndarray; prefer indexing by row label
-                if hasattr(conf, 'loc') and key in conf.index:
-                    row = conf.loc[key]
-                    ci_lower, ci_upper = float(row[0]), float(row[1])
-                else:
-                    # If conf is array-like with same order as params, try to locate index position
-                    if hasattr(params, 'index') and key in params.index:
-                        pos = list(params.index).index(key)
-                        ci_lower, ci_upper = float(conf[pos, 0]), float(conf[pos, 1])
-            except Exception:
-                ci_lower = ci_upper = None
-
-        # Normalize nobs if possible
+    # Safely extract statistics
+    def safe_get(series_like, key):
         try:
-            if nobs is not None:
-                # statsmodels sometimes stores nobs as numpy scalar
-                nobs = int(nobs)
+            return float(series_like[key])
+        except Exception:
+            return None
+
+    coef = safe_get(res.params, param_key)
+    se = safe_get(getattr(res, 'bse', {}), param_key)
+    pval = safe_get(getattr(res, 'pvalues', {}), param_key)
+
+    # Confidence interval (may return a DataFrame)
+    ci_low, ci_high = (None, None)
+    try:
+        ci = res.conf_int()
+        if param_key in ci.index:
+            ci_low = float(ci.loc[param_key, 0])
+            ci_high = float(ci.loc[param_key, 1])
+        else:
+            # try by position match
+            idx = list(ci.index).index(param_key) if param_key in list(ci.index) else None
+    except Exception:
+        ci = None
+
+    # Sample size and fit stats
+    try:
+        nobs = int(res.nobs)
+    except Exception:
+        try:
+            nobs = int(getattr(res.model, 'nobs', np.nan))
         except Exception:
             nobs = None
+    try:
+        r_squared = float(res.rsquared)
+    except Exception:
+        r_squared = None
+    try:
+        adj_r_squared = float(res.rsquared_adj)
+    except Exception:
+        adj_r_squared = None
 
-        # If coefficient missing or NaN or no observations, return informative message
-        if coef is None or (isinstance(coef, float) and np.isnan(coef)) or nobs == 0:
-            description = (
-                "The model output does not contain a valid estimated coefficient for "
-                "'StudentTeacherRatio' (parameters are missing, NaN, or there are zero observations). "
-                "Cannot determine whether a lower student–teacher ratio is associated with higher academic performance."
-            )
-            return {"object": None, "description": description}
-
-        # Determine statistical significance if p-value present
-        significant = None
-        if pval is not None and not np.isnan(pval):
-            significant = (pval < 0.05)
-
-        # Interpretation: recall StudentTeacherRatio is larger when there are more students per teacher.
-        # A negative coefficient => higher ratio (more students per teacher) lowers scores => therefore lower ratio (fewer students per teacher) is associated with higher scores.
+    # Interpretations:
+    # - Coefficient sign: if coef < 0 then higher student-teacher ratio (more students per teacher)
+    #   is associated with lower academic performance, implying that lower ratio (fewer students
+    #   per teacher) is associated with higher performance.
+    supports_hypothesis = None
+    evidence_strength = "insufficient"
+    if coef is not None and pval is not None:
+        # We consider conventional p < 0.05 as evidence
+        supports_hypothesis = (coef < 0) and (pval < 0.05)
+        if pval < 0.01:
+            evidence_strength = "strong"
+        elif pval < 0.05:
+            evidence_strength = "moderate"
+        elif pval < 0.1:
+            evidence_strength = "weak"
+        else:
+            evidence_strength = "none"
+    else:
         supports_hypothesis = None
-        try:
-            supports_hypothesis = (float(coef) < 0)
-        except Exception:
-            supports_hypothesis = None
 
-        # Build object to return
-        obj = {
-            "coef": float(coef),
-            "p_value": float(pval) if pval is not None else None,
-            "ci_lower": float(ci_lower) if ci_lower is not None else None,
-            "ci_upper": float(ci_upper) if ci_upper is not None else None,
-            "nobs": nobs,
-            "significant_at_0.05": bool(significant) if significant is not None else None,
-            "supports_lower_ratio_higher_perf": bool(supports_hypothesis) if supports_hypothesis is not None else None
-        }
+    # Compute effect sizes for convenience:
+    # - Change in AcademicPerformance associated with a 10% decrease in student-teacher ratio:
+    #     delta_score_10pct_decrease = coef * log(0.9)
+    # - Change associated with a 10% increase: coef * log(1.10)
+    effect_10pct_decrease = None
+    effect_10pct_increase = None
+    if coef is not None:
+        effect_10pct_increase = coef * math.log(1.10)  # approx coef * 0.09531
+        effect_10pct_decrease = coef * math.log(0.90)  # approx coef * -0.10536
 
-        # Build human-readable description
-        desc_parts = []
-        desc_parts.append(f"Estimated coefficient for StudentTeacherRatio = {obj['coef']:.4f}.")
-        if obj['p_value'] is not None:
-            desc_parts.append(f"p-value = {obj['p_value']:.3g}.")
-        if obj['ci_lower'] is not None and obj['ci_upper'] is not None:
-            desc_parts.append(f"95% CI = [{obj['ci_lower']:.4f}, {obj['ci_upper']:.4f}].")
-        if obj['nobs'] is not None:
-            desc_parts.append(f"n = {obj['nobs']}.")
+    # Build the object to return
+    result_object = {
+        'parameter_name': str(param_key),
+        'coefficient': coef,
+        'std_error': se,
+        'p_value': pval,
+        'conf_int_95_low': ci_low,
+        'conf_int_95_high': ci_high,
+        'nobs': nobs,
+        'r_squared': r_squared,
+        'adj_r_squared': adj_r_squared,
+        'effect_10pct_decrease_in_ratio__score_change': effect_10pct_decrease,
+        'effect_10pct_increase_in_ratio__score_change': effect_10pct_increase,
+        'supports_hypothesis_lower_ratio_associated_with_higher_performance': supports_hypothesis,
+        'evidence_strength': evidence_strength
+    }
 
-        # Interpret direction and significance
-        if obj['significant_at_0.05'] is True:
-            if obj['supports_lower_ratio_higher_perf']:
-                desc_parts.append(
-                    "The (negative) effect is statistically significant at the 0.05 level, "
-                    "which supports the hypothesis that a lower student–teacher ratio (fewer students per teacher) "
-                    "is associated with higher average test scores, controlling for the included covariates."
-                )
-            else:
-                desc_parts.append(
-                    "The (positive) effect is statistically significant at the 0.05 level, "
-                    "which indicates the opposite of the hypothesis: lower ratios would be associated with lower scores."
-                )
-        elif obj['significant_at_0.05'] is False:
-            desc_parts.append(
-                "The coefficient is not statistically significant at the 0.05 level; "
-                "we cannot conclude there is a relationship between student–teacher ratio and test scores."
+    # Compose a human-readable description
+    if coef is None:
+        description = "Could not extract the coefficient for LogStudentTeacherRatio from the model output."
+    else:
+        sign_phrase = ("negative" if coef < 0 else "positive" if coef > 0 else "zero")
+        sig_phrase = ""
+        if pval is not None:
+            sig_phrase = f" (p = {pval:.3g})"
+        description_lines = []
+        description_lines.append(f"The estimated coefficient on {param_key} is {coef:.4g} with a {sign_phrase} sign{sig_phrase}.")
+        if ci_low is not None and ci_high is not None:
+            description_lines.append(f"95% CI: [{ci_low:.4g}, {ci_high:.4g}].")
+        if effect_10pct_decrease is not None:
+            # Interpret direction relative to hypothesis
+            direction = "increase" if effect_10pct_decrease > 0 else "decrease" if effect_10pct_decrease < 0 else "no change"
+            description_lines.append(
+                f"A 10% decrease in the student-teacher ratio is associated with an expected change of "
+                f"{effect_10pct_decrease:.4g} points in AcademicPerformance ({direction})."
+            )
+        if supports_hypothesis is True:
+            description_lines.append(
+                f"Conclusion: The estimate is consistent with the hypothesis that a lower student-teacher ratio "
+                f"is associated with higher academic performance; evidence is {evidence_strength} (p = {pval:.3g})."
+            )
+        elif supports_hypothesis is False:
+            description_lines.append(
+                f"Conclusion: The estimate does not support the hypothesis. The coefficient sign and/or significance "
+                f"is inconsistent with lower ratios improving performance (p = {pval:.3g})."
             )
         else:
-            # p-value unavailable
-            if obj['supports_lower_ratio_higher_perf']:
-                desc_parts.append(
-                    "The coefficient is negative (suggesting lower ratios may be associated with higher scores), "
-                    "but a p-value was not available to assess statistical significance."
-                )
-            else:
-                desc_parts.append(
-                    "The coefficient is positive or zero (suggesting lower ratios may be associated with lower or no change in scores), "
-                    "but a p-value was not available to assess statistical significance."
-                )
+            description_lines.append(
+                "Conclusion: Unable to determine strong support due to missing statistical information (e.g., p-value)."
+            )
+        # include sample size and fit
+        if nobs is not None:
+            description_lines.append(f"Model sample size: {nobs}. R-squared: {r_squared:.3g} (adj: {adj_r_squared:.3g}).")
+        description = " ".join(description_lines)
 
-        description = " ".join(desc_parts)
-        return {"object": obj, "description": description}
-
-    except Exception as e:
-        return {
-            "object": None,
-            "description": f"An error occurred while extracting results: {e}"
-        }
+    return {"object": result_object, "description": description}
