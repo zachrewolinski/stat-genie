@@ -1,246 +1,214 @@
 from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
-import statsmodels.api as sm
+import statsmodels.formula.api as smf
 
 
 def _find_column(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
     """
-    Return the first column name from df.columns that matches any candidate (case-insensitive).
-    Performs exact (case-insensitive) match first then substring match.
+    Find the first matching column name in df from a list of candidate names.
+    Matches are case-insensitive.
+    Returns the actual column name from df if found, otherwise None.
     """
-    if not candidates:
-        return None
-    cols_lower = {c.lower(): c for c in df.columns}
+    lower_map = {col.lower(): col for col in df.columns}
     for cand in candidates:
-        if cand is None:
-            continue
-        cand_l = str(cand).lower().strip()
-        if cand_l in cols_lower:
-            return cols_lower[cand_l]
-    # Fallback: substring match (prefer exact token matches)
-    for cand in candidates:
-        cand_l = str(cand).lower().strip()
-        for col in df.columns:
-            if cand_l in col.lower():
-                return col
+        # Direct exact match first
+        if cand in df.columns:
+            return cand
+        # Case-insensitive match
+        key = cand.lower()
+        if key in lower_map:
+            return lower_map[key]
     return None
 
 
 def transform(df: pd.DataFrame) -> pd.DataFrame:
-    # Work on a copy
+    """
+    Transform the raw dataset into a dataframe suitable for modeling.
+    Produces the following final columns (these exact names are required downstream):
+      - StudentTeacherRatio_clipped: Enrollment / NumTeachers, clipped at 1st and 99th percentiles
+      - AvgScore: mean of ReadingScore and MathScore (computed from whatever scores are available)
+      - NumComputers, ExpenditurePerStudent, DistrictIncomeK, PercEnglishLearners,
+        PercReducedLunch, PercCalWorks, County, GradeSpan, Enrollment, NumTeachers
+
+    The function is robust to a variety of raw column namings by searching for common aliases.
+    """
     df = df.copy()
 
-    # If the final columns are already present, assume data is already transformed.
+    # Define candidate raw names for each conceptual final column (common variants)
+    alias_map: Dict[str, List[str]] = {
+        'Enrollment': ['feature6', 'Feature6', 'enrollment', 'enroll', 'students', 'total_enrollment'],
+        'NumTeachers': ['feature7', 'Feature7', 'numteachers', 'teachers', 'num_teachers'],
+        'NumComputers': ['feature10', 'Feature10', 'numcomputers', 'computers'],
+        'ExpenditurePerStudent': ['feature11', 'Feature11', 'expenditureperstudent', 'expenditure_per_student'],
+        'DistrictIncomeK': ['feature12', 'Feature12', 'districtincomek', 'district_income_k', 'incomek'],
+        'PercEnglishLearners': ['feature13', 'Feature13', 'percenglishlearners', 'perc_english_learners', 'englishlearners'],
+        'PercReducedLunch': ['feature9', 'Feature9', 'percreducedlunch', 'perc_reduced_lunch', 'reduced_lunch'],
+        'PercCalWorks': ['feature8', 'Feature8', 'perccalworks', 'perc_cal_works', 'calworks'],
+        'ReadingScore': ['feature14', 'Feature14', 'readingscore', 'reading_score', 'reading'],
+        'MathScore': ['feature15', 'Feature15', 'mathscore', 'math_score', 'math'],
+        'County': ['feature4', 'Feature4', 'county'],
+        'GradeSpan': ['feature5', 'Feature5', 'gradespan', 'grade_span', 'grade']
+    }
+
+    # Build a rename map from actual raw column names to the required final column names
+    rename_map: Dict[str, str] = {}
+    for final_name, candidates in alias_map.items():
+        found = _find_column(df, candidates)
+        if found is not None:
+            rename_map[found] = final_name
+
+    # Apply renaming for any found columns
+    if rename_map:
+        df = df.rename(columns=rename_map)
+
+    # Ensure numeric columns are numeric (coerce non-numeric to NaN)
+    numeric_cols = [
+        'Enrollment', 'NumTeachers', 'NumComputers', 'ExpenditurePerStudent',
+        'DistrictIncomeK', 'PercEnglishLearners', 'PercReducedLunch',
+        'PercCalWorks', 'ReadingScore', 'MathScore'
+    ]
+    for c in numeric_cols:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors='coerce')
+
+    # At this point, Enrollment and NumTeachers should exist (renamed); if not, create as NaN
+    # so that final dataframe always contains the required columns.
+    if 'Enrollment' not in df.columns:
+        df['Enrollment'] = np.nan
+    if 'NumTeachers' not in df.columns:
+        df['NumTeachers'] = np.nan
+
+    # Compute student-teacher ratio; guard against division by zero and missing values
+    # Create an intermediate column StudentTeacherRatio (not part of final required names)
+    df['StudentTeacherRatio'] = np.where(
+        (df['NumTeachers'].notna()) & (df['NumTeachers'] != 0),
+        df['Enrollment'] / df['NumTeachers'],
+        np.nan
+    )
+
+    # Compute average score from reading and math (AvgScore is required final name)
+    # Use available scores: take mean across the two, skipping NaNs so that if one score is present we use it.
+    if ('ReadingScore' in df.columns) or ('MathScore' in df.columns):
+        # Ensure missing score columns are treated as NaN if they don't exist
+        cols_for_avg = [c for c in ['ReadingScore', 'MathScore'] if c in df.columns]
+        if cols_for_avg:
+            df['AvgScore'] = df[cols_for_avg].mean(axis=1, skipna=True)
+        else:
+            df['AvgScore'] = np.nan
+    else:
+        df['AvgScore'] = np.nan
+
+    # Replace infinite values and drop rows missing the core variables needed to compute ratio and outcome
+    df = df.replace([np.inf, -np.inf], np.nan)
+    # Keep only rows where both StudentTeacherRatio and AvgScore are present (model needs both)
+    df = df.dropna(subset=['StudentTeacherRatio', 'AvgScore'])
+
+    # Clip extreme StudentTeacherRatio values at 1st and 99th percentiles to reduce influence of outliers
+    if not df.empty:
+        lower = df['StudentTeacherRatio'].quantile(0.01)
+        upper = df['StudentTeacherRatio'].quantile(0.99)
+        if pd.isna(lower) or pd.isna(upper):
+            df['StudentTeacherRatio_clipped'] = df['StudentTeacherRatio']
+        else:
+            df['StudentTeacherRatio_clipped'] = df['StudentTeacherRatio'].clip(lower, upper)
+    else:
+        # No rows to operate on; create the column to preserve schema
+        df['StudentTeacherRatio_clipped'] = pd.Series(dtype=float)
+
+    # Fill missing control variables with median (simple imputation)
+    control_cols = [
+        'NumComputers', 'ExpenditurePerStudent', 'DistrictIncomeK',
+        'PercEnglishLearners', 'PercReducedLunch', 'PercCalWorks'
+    ]
+    for c in control_cols:
+        if c in df.columns:
+            median_val = df[c].median()
+            if not pd.isna(median_val):
+                df[c] = df[c].fillna(median_val)
+
+    # Ensure categorical controls are present (if missing, create as NA)
+    if 'GradeSpan' not in df.columns:
+        df['GradeSpan'] = np.nan
+    if 'County' not in df.columns:
+        df['County'] = np.nan
+
+    # Ensure all required final columns exist in the returned dataframe (create with NA if absent)
     final_cols = [
-        'StudentTeacherRatio', 'AvgScore', 'ExpenditurePerStudent', 'PercentCalWorks',
-        'PercentReducedPriceLunch', 'PercentEnglishLearners', 'DistrictAvgIncome',
-        'GradeSpan_KK08', 'LogTotalEnrollment'
+        'StudentTeacherRatio_clipped', 'AvgScore',
+        'NumComputers', 'ExpenditurePerStudent', 'DistrictIncomeK',
+        'PercEnglishLearners', 'PercReducedLunch', 'PercCalWorks',
+        'County', 'GradeSpan', 'Enrollment', 'NumTeachers'
     ]
-    if all(col in df.columns for col in final_cols):
-        # Ensure numeric types for model columns
-        for col in final_cols:
-            if col != 'GradeSpan_KK08':  # GradeSpan_KK08 can be int/bool
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-        return df
+    for col in final_cols:
+        if col not in df.columns:
+            df[col] = np.nan
 
-    # Define candidate raw column names for each required conceptual variable.
-    candidates: Dict[str, List[str]] = {
-        'TotalEnrollment': ['feature6', 'enroll', 'enrollment', 'total_enrollment', 'totalenrollment', 'ENROLL', 'total enrollment'],
-        'NumTeachers': ['feature7', 'teachers', 'num_teachers', 'numteachers', 'TEACHERS', 'num teacher'],
-        'NumComputers': ['feature10', 'computers', 'num_computers', 'numcomputers', 'comput'],
-        'ExpenditurePerStudent': ['feature11', 'expenditure_per_student', 'expenditure', 'exp_per_student', 'exppp', 'expenditure per student'],
-        'DistrictAvgIncome': ['feature12', 'avg_income', 'district_avg_income', 'avginc', 'AvgIncome', 'average income'],
-        'PercentCalWorks': ['feature8', 'calworks', 'percent_calworks', 'PercentCalWorks', 'cal works'],
-        'PercentReducedPriceLunch': ['feature9', 'reduced_price_lunch', 'percent_reduced_price_lunch', 'reducedlunch', 'PercentReducedPriceLunch', 'reduced price lunch'],
-        'PercentEnglishLearners': ['feature13', 'ell', 'english_learners', 'percent_english_learners', 'PercentEnglishLearners'],
-        'GradeSpan': ['feature5', 'grade_span', 'gradespan', 'GradeSpan', 'grade span'],
-        'ReadingScore': ['feature14', 'read', 'reading', 'read_score', 'average_reading', 'avg_read'],
-        'MathScore': ['feature15', 'math', 'math_score', 'average_math', 'avg_math'],
-        'AvgScore': ['avgscore', 'avg_score', 'avg', 'average_score', 'AverageScore']
-    }
-
-    # Locate columns
-    located: Dict[str, Optional[str]] = {}
-    for key, cands in candidates.items():
-        located[key] = _find_column(df, cands)
-
-    # If AvgScore exists directly in raw df, use it.
-    if located.get('AvgScore') is not None:
-        df['AvgScore'] = pd.to_numeric(df[located['AvgScore']], errors='coerce')
-    else:
-        # Need reading and math scores to compute AvgScore
-        read_col = located.get('ReadingScore')
-        math_col = located.get('MathScore')
-
-        # If either reading or math is missing, try to find any two plausible numeric score columns
-        if read_col is None or math_col is None:
-            # Look for columns likely corresponding to reading/math by scanning column names
-            possible_scores = []
-            for col in df.columns:
-                lname = col.lower()
-                if any(tok in lname for tok in ['read', 'math', 'score', 'avg', 'test']):
-                    possible_scores.append(col)
-            # Keep only numeric-convertible ones
-            numeric_scores = []
-            for col in possible_scores:
-                ser = pd.to_numeric(df[col], errors='coerce')
-                if ser.notna().sum() > 0:
-                    numeric_scores.append(col)
-            # Choose two distinct columns
-            numeric_scores = list(dict.fromkeys(numeric_scores))  # preserve order, unique
-            if len(numeric_scores) >= 2:
-                read_col, math_col = numeric_scores[0], numeric_scores[1]
-            else:
-                # As a last resort, try to use any two numeric columns excluding clearly non-score fields
-                numeric_candidates = []
-                for col in df.columns:
-                    ser = pd.to_numeric(df[col], errors='coerce')
-                    if ser.notna().sum() > 0:
-                        numeric_candidates.append(col)
-                # Remove columns we will use for controls (to avoid picking them as scores)
-                exclude_keywords = ['enroll', 'teacher', 'comput', 'exp', 'income', 'calwork', 'ell', 'reduce', 'grade', 'log']
-                numeric_candidates = [c for c in numeric_candidates if not any(k in c.lower() for k in exclude_keywords)]
-                numeric_candidates = list(dict.fromkeys(numeric_candidates))
-                if len(numeric_candidates) >= 2:
-                    read_col, math_col = numeric_candidates[0], numeric_candidates[1]
-                else:
-                    raise KeyError(
-                        "Could not locate reading and math score columns (feature14 & feature15). "
-                        "Ensure the input DataFrame contains score columns or AvgScore."
-                    )
-
-        # Convert and compute AvgScore
-        df[read_col] = pd.to_numeric(df[read_col], errors='coerce')
-        df[math_col] = pd.to_numeric(df[math_col], errors='coerce')
-        df['AvgScore'] = df[[read_col, math_col]].mean(axis=1)
-
-    # Locate and convert other raw columns; raise error if essential ones missing
-    raw_mappings = {
-        'TotalEnrollment': ['feature6', 'TotalEnrollment'],
-        'NumTeachers': ['feature7', 'NumTeachers'],
-        'NumComputers': ['feature10', 'NumComputers'],
-        'ExpenditurePerStudent': ['feature11', 'ExpenditurePerStudent'],
-        'DistrictAvgIncome': ['feature12', 'DistrictAvgIncome'],
-        'PercentCalWorks': ['feature8', 'PercentCalWorks'],
-        'PercentReducedPriceLunch': ['feature9', 'PercentReducedPriceLunch'],
-        'PercentEnglishLearners': ['feature13', 'PercentEnglishLearners'],
-    }
-
-    # For each conceptual variable, attempt to map to an existing raw column (using candidates above)
-    mapped_cols: Dict[str, str] = {}
-    for concept, cands in raw_mappings.items():
-        # Prefer previously located column if found
-        raw_col = located.get(concept)
-        if raw_col is None:
-            # Try the generic candidate list first, then the raw_mappings list
-            raw_col = _find_column(df, candidates.get(concept, []) or cands)
-            if raw_col is None:
-                raw_col = _find_column(df, cands)
-
-        # If still not found, try a heuristic fallback:
-        if raw_col is None:
-            # Heuristic: choose a numeric column that looks like counts (large median)
-            possible = []
-            for col in df.columns:
-                # Skip already-constructed or obvious non-raw columns
-                if col in ['AvgScore', 'StudentTeacherRatio', 'LogTotalEnrollment', 'GradeSpan_KK08', 'ComputersPerStudent']:
-                    continue
-                ser = pd.to_numeric(df[col], errors='coerce')
-                if ser.notna().sum() < max(1, int(0.1 * len(df))):
-                    continue
-                lower = col.lower()
-                # For enrollment, avoid percent/score/income-like names
-                if any(k in lower for k in ['percent', 'pct', '%', 'score', 'avg', 'income', 'math', 'read', 'grade', 'ell', 'calwork', 'lunch']):
-                    continue
-                median_val = float(ser.median(skipna=True)) if ser.notna().sum() > 0 else 0.0
-                possible.append((col, median_val))
-            if possible:
-                # pick the column with the largest median (likely enrollment or expenditure depending on concept)
-                possible.sort(key=lambda x: x[1], reverse=True)
-                raw_col = possible[0][0]
-
-        if raw_col is None:
-            raise KeyError(f"Could not locate a column for required variable '{concept}'. Searched candidates.")
-
-        # Convert to numeric where appropriate
-        df[raw_col] = pd.to_numeric(df[raw_col], errors='coerce')
-        mapped_cols[concept] = raw_col
-
-    # Assign final column names according to the contract
-    df['TotalEnrollment'] = df[mapped_cols['TotalEnrollment']]
-    df['NumTeachers'] = df[mapped_cols['NumTeachers']]
-    df['NumComputers'] = df[mapped_cols['NumComputers']]
-    df['ExpenditurePerStudent'] = df[mapped_cols['ExpenditurePerStudent']]
-    df['DistrictAvgIncome'] = df[mapped_cols['DistrictAvgIncome']]
-    df['PercentCalWorks'] = df[mapped_cols['PercentCalWorks']]
-    df['PercentReducedPriceLunch'] = df[mapped_cols['PercentReducedPriceLunch']]
-    df['PercentEnglishLearners'] = df[mapped_cols['PercentEnglishLearners']]
-
-    # Student-teacher ratio (students per teacher). Avoid division by zero/invalid teachers.
-    df.loc[(df['NumTeachers'] <= 0) | (df['NumTeachers'].isna()), 'NumTeachers'] = np.nan
-    df['StudentTeacherRatio'] = df['TotalEnrollment'] / df['NumTeachers']
-
-    # Log-transformed enrollment (natural log). Replace nonpositive totals with NaN.
-    df.loc[(df['TotalEnrollment'] <= 0) | (df['TotalEnrollment'].isna()), 'TotalEnrollment'] = np.nan
-    df['LogTotalEnrollment'] = np.log(df['TotalEnrollment'])
-
-    # Grade span indicator: 1 if KK-08, 0 if KK-06 or otherwise 0.
-    grade_col = located.get('GradeSpan') or _find_column(df, ['feature5', 'GradeSpan', 'grade_span', 'gradespan', 'grade span'])
-    if grade_col is not None:
-        # Work on a string-safe version of the grade column
-        df['GradeSpan_KK08'] = df[grade_col].astype(str).str.strip().apply(lambda x: 1 if x == 'KK-08' else 0)
-    else:
-        # If we cannot find a grade span column, default to 0 (KK-06 or unknown)
-        df['GradeSpan_KK08'] = 0
-
-    # Optionally compute computers per student as a descriptive variable
-    df['ComputersPerStudent'] = df['NumComputers'] / df['TotalEnrollment']
-
-    # Keep only rows with the necessary data for the model
-    required_cols = [
-        'StudentTeacherRatio', 'AvgScore', 'ExpenditurePerStudent', 'PercentCalWorks',
-        'PercentReducedPriceLunch', 'PercentEnglishLearners', 'DistrictAvgIncome',
-        'GradeSpan_KK08', 'LogTotalEnrollment'
-    ]
-
-    df = df.dropna(subset=required_cols)
-
-    # Return the dataframe with the new columns
-    return df
+    # Return dataframe with final columns in the specified order
+    return df[final_cols]
 
 
 def model(df: pd.DataFrame) -> Any:
-    # Build design matrix X and outcome y using the transformed dataframe columns
-    X_cols = [
-        'StudentTeacherRatio',
-        'ExpenditurePerStudent',
-        'PercentCalWorks',
-        'PercentReducedPriceLunch',
-        'PercentEnglishLearners',
-        'DistrictAvgIncome',
-        'GradeSpan_KK08',
-        'LogTotalEnrollment'
-    ]
+    """
+    Fit an OLS regression to estimate the association between student-teacher ratio and average academic performance.
+    Model specification:
+      AvgScore ~ StudentTeacherRatio_clipped + controls + categorical GradeSpan + categorical County
 
-    # Verify required columns exist
-    missing = [c for c in X_cols + ['AvgScore'] if c not in df.columns]
-    if missing:
-        raise KeyError(f"The input dataframe is missing required columns for the model: {missing}")
+    Uses heteroskedasticity-robust (HC3) standard errors.
+    Returns the fitted regression results object (with robust covariance applied).
+    """
+    # Confirm required columns exist
+    required = ['AvgScore', 'StudentTeacherRatio_clipped']
+    for col in required:
+        if col not in df.columns:
+            raise ValueError(f"Required column '{col}' not found in dataframe passed to model().")
 
-    X = df[X_cols].copy()
-    # Ensure numeric types
-    X = X.apply(pd.to_numeric, errors='coerce')
-    X = sm.add_constant(X)
-    y = pd.to_numeric(df['AvgScore'], errors='coerce')
+    # Build formula with controls and categorical variables if present and valid (at least 2 non-missing distinct levels)
+    cat_terms: List[str] = []
 
-    # Fit OLS with robust (HC3) standard errors to be resilient to heteroskedasticity
-    model_res = sm.OLS(y, X, missing='drop').fit(cov_type='HC3')
+    def _has_enough_levels(series: pd.Series) -> bool:
+        # Return True if series has at least 2 non-missing distinct levels after stripping empty strings.
+        if series.name not in df.columns:
+            return False
+        s = series.copy()
+        # Normalize object dtype strings: trim and treat empty strings as missing
+        if s.dtype == object or pd.api.types.is_string_dtype(s):
+            s = s.astype(object)
+            s = s.replace(r'^\s*$', np.nan, regex=True)
+        non_na = s.dropna()
+        return non_na.nunique() >= 2
 
-    # Print a short summary and return the fitted model results object
-    try:
-        print(model_res.summary())
-    except Exception:
-        pass
+    if 'GradeSpan' in df.columns and _has_enough_levels(df['GradeSpan']):
+        cat_terms.append('C(GradeSpan)')
+    if 'County' in df.columns and _has_enough_levels(df['County']):
+        cat_terms.append('C(County)')
 
-    return model_res
+    controls: List[str] = []
+    for c in ['NumComputers', 'ExpenditurePerStudent', 'DistrictIncomeK',
+              'PercEnglishLearners', 'PercReducedLunch', 'PercCalWorks']:
+        # Include control only if present and has at least one non-missing value (transform may have imputed medians)
+        if c in df.columns and df[c].notna().any():
+            controls.append(c)
+
+    rhs_terms = ['StudentTeacherRatio_clipped'] + controls + cat_terms
+    formula = 'AvgScore ~ ' + ' + '.join(rhs_terms)
+
+    # Before fitting, ensure there is at least one row with non-missing values for all variables used in the model
+    vars_for_model = ['AvgScore', 'StudentTeacherRatio_clipped'] + controls
+    # include categorical columns in the check only if they are part of the formula
+    if 'C(GradeSpan)' in cat_terms:
+        vars_for_model.append('GradeSpan')
+    if 'C(County)' in cat_terms:
+        vars_for_model.append('County')
+    # keep only those that actually exist in df
+    vars_for_model = [v for v in vars_for_model if v in df.columns]
+    df_for_fit = df[vars_for_model].dropna()
+    if df_for_fit.shape[0] == 0:
+        raise ValueError("No observations available after dropping rows with missing values for model variables.")
+
+    # Fit OLS on the cleaned dataframe and then obtain robust covariance (HC3)
+    ols_model = smf.ols(formula=formula, data=df_for_fit)
+    results = ols_model.fit()
+    robust_results = results.get_robustcov_results(cov_type='HC3')
+
+    return robust_results

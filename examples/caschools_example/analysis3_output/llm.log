@@ -1,5 +1,5 @@
 
-===================[PROMPT (API Time: 55.69066309928894, Cache Time: None)]=====================
+===================[PROMPT (API Time: 47.106961488723755, Cache Time: None)]=====================
 =====[SYSTEM]=====:
 You are an AI Data Analysis Assistant who is an expert at writing an end-to-end scientific analysis given a research question and a dataset. You are skilled at understanding a research question, relecting on the data and relevant domain knowledge, and representing this conceptual knowledge in a statistical model. Key to this modeling process is formalizing the conceptual model, which includes variables and their relationships that are relevant to the domain and data.
 =====[USER]=====:
@@ -541,50 +541,643 @@ Dataset Schema: {
 }
 Result: 
 
-===================[gpt-5-mini RESPONSE (3293)]=====================
+===================[gpt-5-mini RESPONSE (3380)]=====================
 {
   "cvars": {
     "ivs": [
       {
-        "description": "Student-teacher ratio computed as total student enrollment divided by number of full-time equivalent teachers (lower ratio = fewer students per teacher).",
+        "description": "District student-teacher ratio (number of students enrolled per full-time-equivalent teacher). Lower values indicate fewer students per teacher.",
         "columns": [
           "StudentTeacherRatio"
         ]
       }
     ],
     "dv": {
-      "description": "District-level average academic performance: mean of the available standardized test score columns (5th-grade Stanford-9 like scores).",
+      "description": "District average academic performance measured as the mean of the two available standardized test score columns ('grades' and 'rownames'). These columns contain the district-level standardized test scores (e.g., Stanford-9 scaled scores).",
       "columns": [
-        "AvgScore"
+        "AvgTestScore"
       ]
     },
     "controls": [
       {
-        "description": "Expenditure per student (district-level), included as a control for resourcing differences.",
+        "description": "District expenditure per student (continuous). Controls for district-level funding differences that can affect test scores.",
         "is_moderator": false,
-        "moderator_on": "",
+        "moderator_on": null,
         "columns": [
-          "ExpenditurePerStudent"
+          "expenditure"
         ]
       },
       {
-        "description": "Percent of students qualifying for reduced-price lunch (proxy for socioeconomic disadvantage).",
+        "description": "Percent of students qualifying for reduced-price lunch (socioeconomic status proxy).",
         "is_moderator": false,
-        "moderator_on": "",
+        "moderator_on": null,
         "columns": [
-          "PctFreeLunch"
+          "math"
         ]
       },
       {
-        "description": "Percent of students who are English learners (language background may affect standardized scores).",
+        "description": "Percent of English learners in the district (language background of students).",
         "is_moderator": false,
-        "moderator_on": "",
+        "moderator_on": null,
         "columns": [
-          "PctEnglishLearners"
+          "district"
         ]
       },
       {
-        "description": "District average income (as provided in dataset), included to control for socioeconomic status beyond free-lunch measure.",
+        "description": "Number of computers (or similar technology resource) in the district (continuous).",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "english"
+        ]
+      },
+      {
+        "description": "District grade span indicator (categorical: e.g., KK-06 vs KK-08). Included as categorical fixed-effect control.",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "school"
+        ]
+      }
+    ]
+  },
+  "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw district-level dataframe into a modeling-ready dataframe.\n\n    Steps:\n    - Coerce relevant columns to numeric where appropriate.\n    - Drop rows with missing or invalid enrollment / teacher / score data.\n    - Compute StudentTeacherRatio = total enrollment ('calworks') / number of teachers ('teachers').\n    - Compute AvgTestScore as the mean of the two available test-score columns ('grades' and 'rownames').\n    - Drop rows missing any variables used in the model.\n    - Return the dataframe with newly created columns used in modeling: 'StudentTeacherRatio' and 'AvgTestScore'.\n    \"\"\"\n    # Work on a copy\n    df = df.copy()\n\n    # Coerce columns to numeric where possible (these names come from provided schema)\n    numeric_cols = ['calworks', 'teachers', 'grades', 'rownames', 'expenditure', 'math', 'district', 'english']\n    for col in numeric_cols:\n        if col in df.columns:\n            df[col] = pd.to_numeric(df[col], errors='coerce')\n\n    # Ensure 'school' exists (categorical control)\n    if 'school' in df.columns:\n        # keep as-is; convert to string category\n        df['school'] = df['school'].astype('category')\n    else:\n        # create a placeholder single-category if missing to avoid later errors\n        df['school'] = 'unknown'\n        df['school'] = df['school'].astype('category')\n\n    # Drop rows missing enrollment, teachers, or test scores used to compute outcome or IV\n    required_for_ratio_and_score = ['calworks', 'teachers', 'grades', 'rownames']\n    required_existing = [c for c in required_for_ratio_and_score if c in df.columns]\n    df = df.dropna(subset=required_existing)\n\n    # Remove implausible / invalid teacher counts (zero or negative)\n    if 'teachers' in df.columns:\n        df = df[df['teachers'] > 0]\n\n    # Compute student-teacher ratio\n    df['StudentTeacherRatio'] = df['calworks'] / df['teachers']\n\n    # Compute the average test score using the two provided score columns\n    df['AvgTestScore'] = df[['grades', 'rownames']].mean(axis=1)\n\n    # Keep rows that have all model columns (IV, DV, and controls)\n    model_columns = ['StudentTeacherRatio', 'AvgTestScore', 'expenditure', 'math', 'district', 'english', 'school']\n    # Only require those model columns that actually exist in the dataframe (robustness)\n    model_columns_present = [c for c in model_columns if c in df.columns]\n    df = df.dropna(subset=model_columns_present)\n\n    # Optional: reset index for a clean output\n    df = df.reset_index(drop=True)\n\n    return df\n",
+  "m_code": "def model(df: pd.DataFrame) -> any:\n    \"\"\"\n    Fit an OLS regression predicting AvgTestScore from StudentTeacherRatio and controls.\n\n    Model specification:\n    AvgTestScore ~ StudentTeacherRatio + expenditure + math + district + english + categorical school fixed effects\n\n    Returns the fitted statsmodels regression results object.\n    \"\"\"\n    # Work on a copy\n    df = df.copy()\n\n    # Ensure required columns present\n    required = ['StudentTeacherRatio', 'AvgTestScore']\n    for c in required:\n        if c not in df.columns:\n            raise ValueError(f\"Required column '{c}' not found in dataframe\")\n\n    # Predictor matrix X\n    predictors = ['StudentTeacherRatio']\n    controls = [c for c in ['expenditure', 'math', 'district', 'english'] if c in df.columns]\n    predictors += controls\n\n    X = df[predictors].copy()\n\n    # Add school dummies (categorical fixed effects) if school column exists\n    if 'school' in df.columns:\n        school_dummies = pd.get_dummies(df['school'], prefix='school', drop_first=True, dtype=float)\n        if not school_dummies.empty:\n            X = pd.concat([X, school_dummies], axis=1)\n\n    # Add constant\n    X = sm.add_constant(X, has_constant='add')\n\n    # Outcome\n    y = df['AvgTestScore']\n\n    # Fit OLS\n    results = sm.OLS(y, X).fit()\n\n    return results\n"
+}
+===================[TOKENS]=====================
+Number of prompt tokens: 5430
+Number of total tokens: 8810
+
+===================[PROMPT (API Time: 41.260753870010376, Cache Time: None)]=====================
+=====[SYSTEM]=====:
+You are an AI Data Analysis Assistant who is an expert at writing an end-to-end scientific analysis given a research question and a dataset. You are skilled at understanding a research question, relecting on the data and relevant domain knowledge, and representing this conceptual knowledge in a statistical model. Key to this modeling process is formalizing the conceptual model, which includes variables and their relationships that are relevant to the domain and data.
+=====[USER]=====:
+<Instruction> 
+Given the research question, dataset formulate the conceptual model and write an analysis including all necessary data transformations and a statistical model to answer the research question. 
+</Instruction>
+
+<Format Instructions>
+You will return 3 things:
+1. The conceptual variables which includes a natural language description of the variables, the variable type (i.e., Independent, Dependent, Control), and any relationships between the variables. Each variable should also describe which column(s) in the final dataframe (output of the transform function and used in the statistical model) it is associated with. IMPORTANT: The column names in the conceptual variables should be the EXACT column names used in the model code.     
+2. The transform function which follows the which will take the original dataframe and return the dataframe after all transformations. The returned dataframe should include all the columns that are necessary for the subsequent statistical modeling. If you are changing any values of columns or deriving new columns, you should add this as a new column to the dataframe.     
+3. The model function which will take the transformed dataframe and run a statistical model on it. The model function should return the results of the model.
+
+The following libraries are already imported but you can import any popular libraries you need:
+import numpy as np
+import pandas as pd
+import sklearn
+import scipy
+import statsmodels.api as sm
+import matplotlib.pyplot as plt
+
+Here is the code template for the transform function:
+```python
+def transform(df: pd.DataFrame) -> pd.DataFrame:
+    # Your code here
+    return df
+```
+Here is the code template for the model function:
+```python
+def model(df: pd.DataFrame) -> Any:
+    # Your code here
+    return results
+```
+
+Please return the conceptual variables, the transform function, and the model function in the format specified below:
+The output should be formatted as a JSON instance that conforms to the JSON schema below.
+
+As an example, for the schema {"properties": {"foo": {"title": "Foo", "description": "a list of strings", "type": "array", "items": {"type": "string"}}}, "required": ["foo"]}
+the object {"foo": ["bar", "baz"]} is a well-formatted instance of the schema. The object {"properties": {"foo": ["bar", "baz"]}} is not well-formatted.
+
+Here is the output schema:
+```
+{"$defs": {"AgentCVarsWithCol": {"properties": {"ivs": {"items": {"$ref": "#/$defs/IVarWithCol"}, "title": "Independent variables", "type": "array"}, "dv": {"allOf": [{"$ref": "#/$defs/DVarWithCol"}], "title": "Dependent variable"}, "controls": {"items": {"$ref": "#/$defs/ControlVarWithCol"}, "title": "Control variables", "type": "array"}}, "required": ["ivs", "dv", "controls"], "title": "AgentCVarsWithCol", "type": "object"}, "ControlVarWithCol": {"properties": {"description": {"title": "Description of the control variable variable", "type": "string"}, "is_moderator": {"title": "Whether the variable is a moderator.", "type": "boolean"}, "moderator_on": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": "", "title": "The variable that the control variable is moderating. Only applicable for control variables that are moderators."}, "columns": {"items": {"type": "string"}, "title": "The column(s) in the FINAL dataframe used in the STATISTICAL MODEL that corresponds to the control variable", "type": "array"}}, "required": ["description", "is_moderator", "columns"], "title": "ControlVarWithCol", "type": "object"}, "DVarWithCol": {"properties": {"description": {"title": "Description of the dependent variable variable", "type": "string"}, "columns": {"items": {"type": "string"}, "title": "The column(s) in the FINAL dataframe used in the STATISTICAL MODEL that corresponds to the dependent variable", "type": "array"}}, "required": ["description", "columns"], "title": "DVarWithCol", "type": "object"}, "IVarWithCol": {"properties": {"description": {"title": "Description of the independent variable variable", "type": "string"}, "columns": {"items": {"type": "string"}, "title": "The column(s) in the FINAL dataframe used in the STATISTICAL MODEL that corresponds to the independent variable", "type": "array"}}, "required": ["description", "columns"], "title": "IVarWithCol", "type": "object"}}, "properties": {"cvars": {"allOf": [{"$ref": "#/$defs/AgentCVarsWithCol"}], "title": "Conceptual variables"}, "transform_code": {"title": "The code that transforms the data", "type": "string"}, "m_code": {"title": "The code for the statistical modeling", "type": "string"}}, "required": ["cvars", "transform_code", "m_code"]}
+```
+</Format Instructions>
+<Example>
+Research Question: What is the effect of hormonal fluctuations associated with fertility on women's religiosity?
+Dataset Schema: {
+  "dataset_description": "A total of 275 women participated in the study for this dataset. Each participant was asked to answer three religiosity items using a 9-point scale. Further, each participant was asked to indicate the typical length of her menstrual cycle, the start date of her last menstrual period, and the start date of her previous menstrual period. In addition, each woman indicated how sure she was about these two start dates, using a 9-point scale. Finally, each woman was asked to indicate her current romantic relationship status with the following four response options: (1) not dating/romantically involved with anyone, (2) dating or involved with only one partner, (3) engaged or living with my partner, and (4) married.",
+  "fields": [
+    {
+      "column": "WorkerID",
+      "properties": {
+        "dtype": "number",
+        "std": 79.52986860293433,
+        "min": 1,
+        "max": 275,
+        "samples": [
+          31,
+          140,
+          196
+        ],
+        "num_unique_values": 275,
+        "description": "The unique identifier of a participant."
+      }
+    },
+    {
+      "column": "Rel1",
+      "properties": {
+        "dtype": "number",
+        "std": 3.284246850080361,
+        "min": 1,
+        "max": 9,
+        "samples": [
+          4,
+          1,
+          9
+        ],
+        "num_unique_values": 9,
+        "description": "'How much do you believe in God?' 1 \u2013 9"
+      }
+    },
+    {
+      "column": "Rel2",
+      "properties": {
+        "dtype": "number",
+        "std": 3.087872913331648,
+        "min": 1.0,
+        "max": 9.0,
+        "samples": [
+          4.0,
+          2.0,
+          6.0
+        ],
+        "num_unique_values": 9,
+        "description": "'I see myself as a religiously oriented person.' 1 \u2013 9"
+      }
+    },
+    {
+      "column": "Rel3",
+      "properties": {
+        "dtype": "number",
+        "std": 3.333610823065186,
+        "min": 1.0,
+        "max": 9.0,
+        "samples": [
+          3.0,
+          1.0,
+          7.0
+        ],
+        "num_unique_values": 9,
+        "description": "'I believe that God or a Higher Power is responsible for my existence.' 1 \u2013 9"
+      }
+    },
+    {
+      "column": "Sure1",
+      "properties": {
+        "dtype": "number",
+        "std": 1.5732501786909676,
+        "min": 1,
+        "max": 9,
+        "samples": [
+          4,
+          7,
+          9
+        ],
+        "num_unique_values": 8,
+        "description": "In reference to `StartDateofLastPeriod`,  'How sure are you about that date?' 1 \u2013 9."
+      }
+    },
+    {
+      "column": "Sure2",
+      "properties": {
+        "dtype": "number",
+        "std": 2.221975065515302,
+        "min": 1,
+        "max": 9,
+        "samples": [
+          6,
+          3,
+          7
+        ],
+        "num_unique_values": 9,
+        "description": "In reference to `StartDateofPeriodBeforeLast`,  'How sure are you about that date?' 1 \u2013 9."
+      }
+    },
+    {
+      "column": "Relationship",
+      "properties": {
+        "dtype": "number",
+        "std": 1.167327837424664,
+        "min": 1,
+        "max": 4,
+        "samples": [
+          1,
+          2,
+          3
+        ],
+        "num_unique_values": 4,
+        "description": "Answer to 'What is your current romantic relationship status?' (1) not dating/romantically involved with anyone, (2) dating or involved with only one partner, (3) engaged or living with my partner, (4) married"
+      }
+    },
+    {
+      "column": "ReportedCycleLength",
+      "properties": {
+        "dtype": "number",
+        "std": 2.6714983210492633,
+        "min": 21.0,
+        "max": 38.0,
+        "samples": [
+          21.0,
+          22.0,
+          26.0
+        ],
+        "num_unique_values": 17,
+        "description": "Answer to 'How many days long are your menstrual cycles? (for most women, the range is between 25-35 days) Keep in mind this is the number of days from the start of one menstrual period to the start of the next menstrual period and NOT the length of your menstrual bleeding.'"
+      }
+    },
+    {
+      "column": "DateTesting",
+      "properties": {
+        "dtype": "date",
+        "min": "03/12/12",
+        "max": "04/27/12",
+        "samples": [
+          "04/06/12",
+          "04/26/12",
+          "03/12/12"
+        ],
+        "num_unique_values": 13,
+        "description": "Date of participant filling in the questionnaire"
+      }
+    },
+    {
+      "column": "StartDateofLastPeriod",
+      "properties": {
+        "dtype": "date",
+        "min": "02/06/12",
+        "max": "04/26/12",
+        "samples": [
+          "02/16/12",
+          "03/01/12",
+          "04/25/12"
+        ],
+        "num_unique_values": 61,
+        "description": "Answer to 'Please give your best estimate of the date on which you started your last period (please be as precise as possible). This date was probably within the last few weeks. Sometimes thinking of where you were when you started your last period helps. For instance, was it on a weekend?, were you at work, was it during a football game?, etc. Please write the date in mm/dd/yyyy format (e.g., 8/18/2012).'"
+      }
+    },
+    {
+      "column": "StartDateofPeriodBeforeLast",
+      "properties": {
+        "dtype": "date",
+        "min": "01/03/12",
+        "max": "03/29/12",
+        "samples": [
+          "01/15/12",
+          "02/04/12",
+          "03/24/12"
+        ],
+        "num_unique_values": 61,
+        "description": "Answer to 'Please give your best estimate of the date on which you started the period before your last period (please be as precise as possible). Please write the date in mm/dd/yyyy format (e.g., 7/18/2012).'"
+      }
+    }
+  ],
+  "num_rows": 275,
+  "field_names": [
+    "WorkerID",
+    "Rel1",
+    "Rel2",
+    "Rel3",
+    "Sure1",
+    "Sure2",
+    "Relationship",
+    "ReportedCycleLength",
+    "DateTesting",
+    "StartDateofLastPeriod",
+    "StartDateofPeriodBeforeLast"
+  ]
+}
+Result: {
+  "cvars": {
+    "ivs": [
+      {
+        "description": "Women's fertility",
+        "columns": [
+          "FertilityGroup"
+        ]
+      }
+    ],
+    "dv": {
+      "description": "Women's religiosity",
+      "columns": [
+        "AvgReligiosity"
+      ]
+    },
+    "controls": [
+      {
+        "description": "Relationship status of the individual",
+        "is_moderator": true,
+        "moderator_on": "Women's fertility",
+        "columns": [
+          "InRelationship"
+        ]
+      }
+    ]
+  },
+  "transform_code": "# drop the rows with missing values in the ReportedCycleLength, Rel1, Rel2, and Rel3 columns\ndf = df.dropna(subset=['ReportedCycleLength'])\ndf = df.dropna(subset=['Rel1', 'Rel2', 'Rel3'])\n\ndf['AvgReligiosity'] = df[['Rel1', 'Rel2', 'Rel3']].mean(axis=1)\n\n\n# Convert date columns to datetime format\ndf['DateTesting'] = pd.to_datetime(df['DateTesting'], format='%m/%d/%y')\ndf['StartDateofLastPeriod'] = pd.to_datetime(df['StartDateofLastPeriod'], format='%m/%d/%y')\ndf['StartDateofPeriodBeforeLast'] = pd.to_datetime(df['StartDateofPeriodBeforeLast'], format='%m/%d/%y')\n\n# Calculate the cycle length based on provided dates\ndf['ReportedCycleLength'] = (df['StartDateofLastPeriod'] - df['StartDateofPeriodBeforeLast']).dt.days\n# Calculate the expected start date of the next menstrual period\n\ndf['ExpectedNextPeriod'] = df['StartDateofLastPeriod'] + pd.to_timedelta(df['ReportedCycleLength'], unit='d')\n\n# Calculate the day of ovulation by subtracting 14 days from the expected start date of the next period\n# since ovulation typically occurs around 14 days before the start of the next period\ndf['OvulationDate'] = df['ExpectedNextPeriod'] - pd.to_timedelta(14, unit='d')\n# Calculate the cycle day on the date of testing\ndf['CycleDay'] = (df['DateTesting'] - df['OvulationDate']).dt.days + 14\n# Define high-fertility (cycle days 6-14) and low-fertility (cycle days 17-27) groups\ndf['FertilityGroup'] = df['CycleDay'].apply(lambda x: 'High-Fertility' if 6 <= x <= 14 else ('Low-Fertility' if 17 <= x <= 27 else 'Other'))\n# Filter out the 'Other' group to focus on the high and low fertility groups\ndf = df[df['FertilityGroup'].isin(['High-Fertility', 'Low-Fertility'])]\n\n\ndf['IsIncommittedRelationship'] = df['Relationship'].apply(lambda x: 0 if x in [1,2] else 1)\ndf['InRelationship'] = df['Relationship'].apply(lambda x: 0 if x == 1 else 1)\ndf['IsInRelationship'] = df['Relationship'].apply(lambda x: 0 if x == 1 else 1)\n",
+  "m_code": "model = smf.ols('AvgReligiosity ~ InRelationship * FertilityGroup', data=df).fit()\n# Display the regression results\nprint(model.summary())\n"
+}
+</Example>
+Research Question: Is a lower student-teacher ratio associated with higher academic performance?
+Dataset Schema: {
+  "dataset_description": "The data used here are from all 420 K-6 and K-8 districts in California with data available for 1998 and 1999. Test scores are on the Stanford 9 standardized test administered to 5th grade students. School characteristics (averaged across the district) include enrollment, number of teachers (measured as \u201cfull-time equivalents\u201d, number of computers per classroom, and expenditures per student. Demographic variables for the students are averaged across the district. The demographic variables include the percentage of students in the public assistance program CalWorks (formerly AFDC), the percentage of students that qualify for a reduced price lunch, and the percentage of students that are English learners (that is, students for whom English is a second language).",
+  "fields": [
+    {
+      "column": "computer",
+      "properties": {
+        "dtype": "number",
+        "std": 121.38780828402827,
+        "min": 1,
+        "max": 420,
+        "samples": [
+          146,
+          335,
+          176
+        ],
+        "num_unique_values": 420,
+        "semantic_type": "",
+        "description": ""
+      }
+    },
+    {
+      "column": "county",
+      "properties": {
+        "dtype": "number",
+        "std": 3466.994655283721,
+        "min": 61382,
+        "max": 75440,
+        "samples": [
+          68205,
+          71654,
+          63032
+        ],
+        "num_unique_values": 420,
+        "semantic_type": "",
+        "description": "character. District code."
+      }
+    },
+    {
+      "column": "lunch",
+      "properties": {
+        "dtype": "string",
+        "samples": [
+          "Red Bluff Union Elementary",
+          "Banta Elementary",
+          "Bellevue Union Elementary"
+        ],
+        "num_unique_values": 409,
+        "semantic_type": "",
+        "description": "character. School name."
+      }
+    },
+    {
+      "column": "students",
+      "properties": {
+        "dtype": "category",
+        "samples": [
+          "Calaveras",
+          "Lake",
+          "Sutter"
+        ],
+        "num_unique_values": 45,
+        "semantic_type": "",
+        "description": "factor indicating county."
+      }
+    },
+    {
+      "column": "school",
+      "properties": {
+        "dtype": "category",
+        "samples": [
+          "KK-06",
+          "KK-08"
+        ],
+        "num_unique_values": 2,
+        "semantic_type": "",
+        "description": "factor indicating grade span of district."
+      }
+    },
+    {
+      "column": "calworks",
+      "properties": {
+        "dtype": "number",
+        "std": 3913.104984901447,
+        "min": 81,
+        "max": 27176,
+        "samples": [
+          446,
+          6219,
+          25151
+        ],
+        "num_unique_values": 391,
+        "semantic_type": "",
+        "description": "Total enrollment."
+      }
+    },
+    {
+      "column": "expenditure",
+      "properties": {
+        "dtype": "number",
+        "std": 187.9126794313481,
+        "min": 4.849999905,
+        "max": 1429.0,
+        "samples": [
+          16.28000069,
+          90.40000153,
+          42.06999969
+        ],
+        "num_unique_values": 374,
+        "semantic_type": "",
+        "description": "Number of teachers."
+      }
+    },
+    {
+      "column": "income",
+      "properties": {
+        "dtype": "number",
+        "std": 11.4548209903578,
+        "min": 0.0,
+        "max": 78.99420166,
+        "samples": [
+          20.63489914,
+          12.69200039,
+          19.83119965
+        ],
+        "num_unique_values": 411,
+        "semantic_type": "",
+        "description": "Percent qualifying for CalWorks (income assistance)."
+      }
+    },
+    {
+      "column": "math",
+      "properties": {
+        "dtype": "number",
+        "std": 27.123381081221236,
+        "min": 0.0,
+        "max": 100.0,
+        "samples": [
+          86.02940369,
+          34.03609848,
+          30.44169998
+        ],
+        "num_unique_values": 407,
+        "semantic_type": "",
+        "description": "Percent qualifying for reduced-price lunch."
+      }
+    },
+    {
+      "column": "english",
+      "properties": {
+        "dtype": "number",
+        "std": 441.34129818958604,
+        "min": 0,
+        "max": 3324,
+        "samples": [
+          177,
+          4,
+          27
+        ],
+        "num_unique_values": 270,
+        "semantic_type": "",
+        "description": "Number of computers."
+      }
+    },
+    {
+      "column": "read",
+      "properties": {
+        "dtype": "number",
+        "std": 633.9370531365888,
+        "min": 3926.06958,
+        "max": 7711.506836,
+        "samples": [
+          5124.836426,
+          4357.826172,
+          5504.025391
+        ],
+        "num_unique_values": 420,
+        "semantic_type": "",
+        "description": "Expenditure per student."
+      }
+    },
+    {
+      "column": "teachers",
+      "properties": {
+        "dtype": "number",
+        "std": 7.225889763125027,
+        "min": 5.335000038,
+        "max": 55.32799911,
+        "samples": [
+          10.47200012,
+          11.9119997,
+          11.08100033
+        ],
+        "num_unique_values": 337,
+        "semantic_type": "",
+        "description": "District average income (in USD 1,000)."
+      }
+    },
+    {
+      "column": "district",
+      "properties": {
+        "dtype": "number",
+        "std": 18.285927467535604,
+        "min": 0.0,
+        "max": 85.53971863,
+        "samples": [
+          1.68350172,
+          49.82307053,
+          85.53971863
+        ],
+        "num_unique_values": 372,
+        "semantic_type": "",
+        "description": "Percent of English learners."
+      }
+    },
+    {
+      "column": "grades",
+      "properties": {
+        "dtype": "number",
+        "std": 20.10798002199425,
+        "min": 604.5,
+        "max": 704.0,
+        "samples": [
+          650.0,
+          650.7999878,
+          662.0999756
+        ],
+        "num_unique_values": 322,
+        "semantic_type": "",
+        "description": "Average reading score."
+      }
+    },
+    {
+      "column": "rownames",
+      "properties": {
+        "dtype": "number",
+        "std": 18.754202173212242,
+        "min": 605.4000244,
+        "max": 709.5,
+        "samples": [
+          646.0999756,
+          645.0999756,
+          648.4000244
+        ],
+        "num_unique_values": 324,
+        "semantic_type": "",
+        "description": "Average math score."
+      }
+    }
+  ],
+  "num_rows": 420,
+  "field_names": [
+    "computer",
+    "county",
+    "lunch",
+    "students",
+    "school",
+    "calworks",
+    "expenditure",
+    "income",
+    "math",
+    "english",
+    "read",
+    "teachers",
+    "district",
+    "grades",
+    "rownames"
+  ]
+}
+Result: 
+
+===================[gpt-5-mini RESPONSE (3052)]=====================
+{
+  "cvars": {
+    "ivs": [
+      {
+        "description": "Student-teacher ratio computed as total district enrollment divided by number of full-time-equivalent teachers (higher values = more students per teacher). This is the main independent variable testing whether lower ratio (fewer students per teacher) is associated with higher academic performance.",
+        "columns": [
+          "StudentTeacherRatio"
+        ]
+      }
+    ],
+    "dv": {
+      "description": "District-level average standardized test score (Stanford-9 style scaled score). Higher values indicate better academic performance.",
+      "columns": [
+        "AvgTestScore"
+      ]
+    },
+    "controls": [
+      {
+        "description": "Expenditure per student; a numeric control for district resources.",
+        "is_moderator": false,
+        "moderator_on": "",
+        "columns": [
+          "Expenditure"
+        ]
+      },
+      {
+        "description": "District average income proxy / percent (as provided in the dataset). Included to control for socioeconomic status.",
         "is_moderator": false,
         "moderator_on": "",
         "columns": [
@@ -592,31 +1185,23 @@ Result:
         ]
       },
       {
-        "description": "Number of computers (proxy for technology resources) — included as an additional resource control.",
+        "description": "Percent of students who are English learners (controls for language-related differences in test scores).",
         "is_moderator": false,
         "moderator_on": "",
         "columns": [
-          "Computers"
-        ]
-      },
-      {
-        "description": "Total enrollment (kept for transparency; note student-teacher ratio is directly derived from Enrollment and Teachers).",
-        "is_moderator": false,
-        "moderator_on": "",
-        "columns": [
-          "Enrollment"
+          "PctEnglishLearners"
         ]
       }
     ]
   },
-  "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw dataset into a dataframe suitable for modeling.\n\n    Produces the following columns used in the model:\n      - Enrollment: from 'calworks' (interpreted as total enrollment)\n      - Teachers: from 'teachers' (FTE count)\n      - StudentTeacherRatio: Enrollment / Teachers\n      - AvgScore: average of available standardized-score columns ('grades' and 'rownames')\n      - ExpenditurePerStudent: from 'expenditure'\n      - PctFreeLunch: from 'math' (dataset documentation suggests this column contains percent reduced-price lunch)\n      - PctEnglishLearners: from 'district' (dataset documentation suggests this column contains percent English learners)\n      - Income: from 'income'\n      - Computers: from 'english' (interpreted as number of computers)\n\n    Notes: the original schema has inconsistent/descriptive labels; mapping is chosen to best reflect likely intended variables.\n    \"\"\"\n    df = df.copy()\n\n    # Map / coerce source columns to the canonical names we will use\n    # Enrollment (use 'calworks' as total enrollment)\n    if 'calworks' in df.columns:\n        df['Enrollment'] = pd.to_numeric(df['calworks'], errors='coerce')\n    else:\n        df['Enrollment'] = np.nan\n\n    # Teachers (use 'teachers')\n    if 'teachers' in df.columns:\n        df['Teachers'] = pd.to_numeric(df['teachers'], errors='coerce')\n    else:\n        df['Teachers'] = np.nan\n\n    # Expenditure per student\n    if 'expenditure' in df.columns:\n        df['ExpenditurePerStudent'] = pd.to_numeric(df['expenditure'], errors='coerce')\n    else:\n        df['ExpenditurePerStudent'] = np.nan\n\n    # Percent free/reduced-price lunch (schema suggests 'math' contains this)\n    if 'math' in df.columns:\n        df['PctFreeLunch'] = pd.to_numeric(df['math'], errors='coerce')\n    else:\n        df['PctFreeLunch'] = np.nan\n\n    # Percent English learners (schema suggests 'district' contains this)\n    if 'district' in df.columns:\n        df['PctEnglishLearners'] = pd.to_numeric(df['district'], errors='coerce')\n    else:\n        df['PctEnglishLearners'] = np.nan\n\n    # Income (district average income)\n    if 'income' in df.columns:\n        df['Income'] = pd.to_numeric(df['income'], errors='coerce')\n    else:\n        df['Income'] = np.nan\n\n    # Computers (use 'english' which in schema appears to be count of computers)\n    if 'english' in df.columns:\n        df['Computers'] = pd.to_numeric(df['english'], errors='coerce')\n    else:\n        df['Computers'] = np.nan\n\n    # Standardized test scores: use 'grades' and 'rownames' (schema samples suggest these are scaled scores ~600-700)\n    score_cols = []\n    for c in ['grades', 'rownames']:\n        if c in df.columns:\n            df[c] = pd.to_numeric(df[c], errors='coerce')\n            score_cols.append(c)\n\n    # Create AvgScore as the mean of available score columns\n    if len(score_cols) > 0:\n        df['AvgScore'] = df[score_cols].mean(axis=1, skipna=True)\n    else:\n        df['AvgScore'] = np.nan\n\n    # Compute StudentTeacherRatio: Enrollment divided by Teachers\n    # Remove records with non-positive or missing teachers to avoid division by zero\n    df['StudentTeacherRatio'] = np.nan\n    mask_valid = df['Enrollment'].notna() & df['Teachers'].notna()\n    mask_positive_teachers = mask_valid & (df['Teachers'] > 0)\n    df.loc[mask_positive_teachers, 'StudentTeacherRatio'] = (\n        df.loc[mask_positive_teachers, 'Enrollment'] / df.loc[mask_positive_teachers, 'Teachers']\n    )\n\n    # Keep only rows with necessary variables for modeling\n    needed_cols = [\n        'StudentTeacherRatio', 'AvgScore', 'ExpenditurePerStudent',\n        'PctFreeLunch', 'PctEnglishLearners', 'Income', 'Computers', 'Enrollment', 'Teachers'\n    ]\n\n    df = df[needed_cols].copy()\n\n    # Drop rows with missing dependent variable or independent variable\n    df = df.dropna(subset=['StudentTeacherRatio', 'AvgScore'])\n\n    # For modeling, it is useful to drop rows with no control information entirely missing\n    # but allow some controls missing so model uses available cases (we'll drop any remaining rows with NA in controls)\n    df = df.dropna(subset=['ExpenditurePerStudent', 'PctFreeLunch', 'PctEnglishLearners', 'Income'])\n\n    # Optionally, winsorize or remove extreme StudentTeacherRatio values (extreme outliers can distort OLS)\n    # We'll cap ratio at the 99.5th percentile to reduce influence of extreme outliers\n    if not df['StudentTeacherRatio'].empty:\n        upper = df['StudentTeacherRatio'].quantile(0.995)\n        df.loc[df['StudentTeacherRatio'] > upper, 'StudentTeacherRatio'] = upper\n\n    # Reset index and return\n    df = df.reset_index(drop=True)\n    return df\n",
-  "m_code": "def model(df: pd.DataFrame):\n    \"\"\"\n    Fit an OLS regression to test whether lower student-teacher ratio is associated\n    with higher average academic performance, controlling for expenditure and\n    student composition variables. Returns the fitted results object with robust SEs.\n\n    Model specification:\n      AvgScore ~ StudentTeacherRatio + ExpenditurePerStudent + PctFreeLunch\n                 + PctEnglishLearners + Income + Computers\n\n    Interpretation: coefficient on StudentTeacherRatio indicates the change in AvgScore\n    associated with a one-unit increase in students per teacher (we expect a negative\n    coefficient if lower ratio -> higher performance).\n    \"\"\"\n    df = df.copy()\n\n    # Define outcome and predictors\n    y = df['AvgScore']\n    X = df[['StudentTeacherRatio', 'ExpenditurePerStudent', 'PctFreeLunch', 'PctEnglishLearners', 'Income', 'Computers']]\n\n    # Add constant\n    X = sm.add_constant(X, has_constant='add')\n\n    # Fit OLS with robust (HC3) standard errors\n    model = sm.OLS(y, X, missing='drop')\n    results = model.fit(cov_type='HC3')\n\n    # Return the fitted results object (caller can print summary or access params)\n    return results\n"
+  "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw dataset into the analysis dataframe.\n\n    Produces the following columns that are used in the model:\n      - TotalEnrollment: numeric, from original 'calworks' column (interpreted as enrollment)\n      - Teachers: numeric, from original 'teachers' column (FTE teachers)\n      - AvgTestScore: numeric, from original 'grades' column (district average test score)\n      - Expenditure: numeric, from original 'expenditure' column (expenditure per student)\n      - Income: numeric, from original 'income' column (income / poverty proxy)\n      - PctEnglishLearners: numeric, from original 'district' column (percent English learners)\n      - StudentTeacherRatio: computed TotalEnrollment / Teachers\n      - LogSTR: natural log of StudentTeacherRatio (for diagnostics / potential sensitivity analyses)\n\n    The function coerces relevant columns to numeric, drops rows with missing or invalid values for the core variables\n    and avoids division by zero for teacher counts.\n    \"\"\"\n    df = df.copy()\n\n    # Coerce relevant raw columns to numeric, mapping likely-misaligned names in schema to usable fields\n    df['TotalEnrollment'] = pd.to_numeric(df.get('calworks', pd.Series(dtype='float')), errors='coerce')\n    df['Teachers'] = pd.to_numeric(df.get('teachers', pd.Series(dtype='float')), errors='coerce')\n    df['AvgTestScore'] = pd.to_numeric(df.get('grades', pd.Series(dtype='float')), errors='coerce')\n    df['Expenditure'] = pd.to_numeric(df.get('expenditure', pd.Series(dtype='float')), errors='coerce')\n    df['Income'] = pd.to_numeric(df.get('income', pd.Series(dtype='float')), errors='coerce')\n    df['PctEnglishLearners'] = pd.to_numeric(df.get('district', pd.Series(dtype='float')), errors='coerce')\n\n    # Remove rows missing the essential variables\n    df = df.dropna(subset=['TotalEnrollment', 'Teachers', 'AvgTestScore'])\n\n    # Remove or flag invalid teacher counts (avoid division by zero)\n    df = df[df['Teachers'] > 0]\n\n    # Compute student-teacher ratio\n    df['StudentTeacherRatio'] = df['TotalEnrollment'] / df['Teachers']\n\n    # Clip extreme ratios to avoid numerical issues in logs (retain information but avoid -inf)\n    df['StudentTeacherRatio'] = df['StudentTeacherRatio'].clip(lower=0.1)\n\n    # Log transform for diagnostics and possible nonlinearity checks\n    df['LogSTR'] = np.log(df['StudentTeacherRatio'])\n\n    # Keep only columns needed for modeling plus original identifiers (do not drop extras here)\n    # Final dataframe contains the columns referenced in the statistical model\n    return df\n",
+  "m_code": "def model(df: pd.DataFrame) -> Any:\n    \"\"\"\n    Fit an OLS regression of AvgTestScore on StudentTeacherRatio with controls.\n\n    Model specification:\n      AvgTestScore_i = beta0 + beta1 * StudentTeacherRatio_i + beta2 * Expenditure_i\n                        + beta3 * Income_i + beta4 * PctEnglishLearners_i + eps_i\n\n    The function returns the fitted statsmodels results object using robust (HC3) standard errors.\n    \"\"\"\n    # Ensure we operate on a copy\n    df = df.copy()\n\n    # Drop rows with missing controls used in the model\n    model_vars = ['AvgTestScore', 'StudentTeacherRatio', 'Expenditure', 'Income', 'PctEnglishLearners']\n    # If any control columns are entirely missing in the dataset, drop them from the model formulation\n    present_vars = [v for v in model_vars if v in df.columns]\n    df = df.dropna(subset=present_vars)\n\n    # Prepare X and y\n    y = df['AvgTestScore']\n\n    # If some controls are absent, include only available ones (this is defensive).\n    X_vars = ['StudentTeacherRatio']\n    if 'Expenditure' in df.columns:\n        X_vars.append('Expenditure')\n    if 'Income' in df.columns:\n        X_vars.append('Income')\n    if 'PctEnglishLearners' in df.columns:\n        X_vars.append('PctEnglishLearners')\n\n    X = df[X_vars]\n    X = sm.add_constant(X)\n\n    # Fit OLS with robust standard errors (HC3)\n    model = sm.OLS(y, X)\n    results = model.fit(cov_type='HC3')\n\n    # Return the full results object for examination (summary, params, conf_int, etc.)\n    return results\n"
 }
 ===================[TOKENS]=====================
 Number of prompt tokens: 5430
-Number of total tokens: 8723
+Number of total tokens: 8482
 
-===================[PROMPT (API Time: 47.175973653793335, Cache Time: None)]=====================
+===================[PROMPT (API Time: 65.9212896823883, Cache Time: None)]=====================
 =====[SYSTEM]=====:
 You are an AI Data Analysis Assistant who is an expert at writing an end-to-end scientific analysis given a research question and a dataset. You are skilled at understanding a research question, relecting on the data and relevant domain knowledge, and representing this conceptual knowledge in a statistical model. Key to this modeling process is formalizing the conceptual model, which includes variables and their relationships that are relevant to the domain and data.
 =====[USER]=====:
@@ -1158,704 +1743,69 @@ Dataset Schema: {
 }
 Result: 
 
-===================[gpt-5-mini RESPONSE (3153)]=====================
+===================[gpt-5-mini RESPONSE (3909)]=====================
 {
   "cvars": {
     "ivs": [
       {
-        "description": "Student-teacher ratio computed as total district enrollment divided by number of teachers (FTE). Lower values indicate fewer students per teacher.",
+        "description": "Student-teacher ratio computed as total enrolled students divided by number of full-time-equivalent teachers. Lower values indicate fewer students per teacher.",
         "columns": [
-          "StudentTeacherRatio",
-          "LogStudentTeacherRatio"
+          "StudentTeacherRatio_z"
         ]
       }
     ],
     "dv": {
-      "description": "Academic performance as measured by the district-level standardized test score (use 'grades' column from the raw data as the primary outcome). Higher values indicate better performance.",
+      "description": "Average academic performance at the district level, computed as the mean of the available standardized reading and math scores (columns 'grades' and 'rownames'). Higher values indicate better performance.",
       "columns": [
-        "AcademicPerformance"
+        "AvgTestScore"
       ]
     },
     "controls": [
       {
-        "description": "Expenditure per student (district average spending per student). Controls for resource intensity per pupil.",
+        "description": "Expenditure per student (district-level). Continuous control to account for funding differences.",
         "is_moderator": false,
         "moderator_on": null,
         "columns": [
-          "ExpenditurePerStudent"
+          "expenditure_z"
         ]
       },
       {
-        "description": "Percent English learners in the district (controls for language composition which affects test scores).",
+        "description": "Percent (or proxy) of low-income / CalWorks eligibility or related socioeconomic indicator. Continuous control for socioeconomic status.",
         "is_moderator": false,
         "moderator_on": null,
         "columns": [
-          "PctEnglishLearners"
+          "income_z"
         ]
       },
       {
-        "description": "Percent of students qualifying for CalWorks / income assistance (proxy for socioeconomic disadvantage).",
+        "description": "Percent English learners (district-level) or analogous share of students for whom English is a second language. Continuous control.",
         "is_moderator": false,
         "moderator_on": null,
         "columns": [
-          "PctCalWorks"
+          "district_z"
         ]
       },
       {
-        "description": "Percent of students qualifying for reduced-price lunch (another proxy for socioeconomic status).",
+        "description": "Number of computers (district-level). Control for technology resources.",
         "is_moderator": false,
         "moderator_on": null,
         "columns": [
-          "PctReducLunch"
+          "computer_z"
         ]
       },
       {
-        "description": "Number of computers (district-level resource measure) to account for technology differences.",
+        "description": "Grade-span category of the district (dummy). Categorical control capturing structural differences in district grade span (KK-06 vs KK-08). Implemented as a dummy column; the specific dummy kept after drop_first is 'school_KK_08' if present in the data.",
         "is_moderator": false,
         "moderator_on": null,
         "columns": [
-          "Computers"
-        ]
-      },
-      {
-        "description": "School grade span indicator (categorical: KK-06 vs KK-08). Included as a control to absorb differences in district grade configurations.",
-        "is_moderator": false,
-        "moderator_on": null,
-        "columns": [
-          "School_KK_06"
-        ]
-      },
-      {
-        "description": "Raw total enrollment and number of teachers kept for transparency and potential alternative specifications.",
-        "is_moderator": false,
-        "moderator_on": null,
-        "columns": [
-          "TotalEnrollment",
-          "NumTeachers"
+          "school_KK_08"
         ]
       }
     ]
   },
-  "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw dataset to the analysis-ready dataframe.\n\n    Produces the following new columns (used in the model):\n      - TotalEnrollment: from column 'calworks' (interpreted as total enrollment)\n      - NumTeachers: from column 'teachers'\n      - StudentTeacherRatio: TotalEnrollment / NumTeachers\n      - LogStudentTeacherRatio: log(StudentTeacherRatio)\n      - AcademicPerformance: from column 'grades' (district average test score)\n      - ExpenditurePerStudent: from column 'expenditure'\n      - PctEnglishLearners: from column 'district'\n      - PctCalWorks: from column 'income'\n      - PctReducLunch: from column 'math'\n      - Computers: from column 'computer'\n      - School_KK_06: dummy for school == 'KK-06' (school type indicator)\n\n    Notes: we coerce relevant columns to numeric, drop rows missing key variables.\n    \"\"\"\n\n    # Make a copy to avoid modifying original\n    df = df.copy()\n\n    # Map raw columns to the analysis columns. Use pd.to_numeric to coerce non-numeric entries to NaN.\n    df['TotalEnrollment'] = pd.to_numeric(df.get('calworks'), errors='coerce')\n    df['NumTeachers'] = pd.to_numeric(df.get('teachers'), errors='coerce')\n    df['ExpenditurePerStudent'] = pd.to_numeric(df.get('expenditure'), errors='coerce')\n    df['PctEnglishLearners'] = pd.to_numeric(df.get('district'), errors='coerce')\n    df['PctCalWorks'] = pd.to_numeric(df.get('income'), errors='coerce')\n    df['PctReducLunch'] = pd.to_numeric(df.get('math'), errors='coerce')\n    df['Computers'] = pd.to_numeric(df.get('computer'), errors='coerce')\n\n    # Academic outcome (use 'grades' as average test score)\n    df['AcademicPerformance'] = pd.to_numeric(df.get('grades'), errors='coerce')\n\n    # Clean up number of teachers edge cases: if NumTeachers is zero or missing, set to NaN\n    df.loc[df['NumTeachers'] <= 0, 'NumTeachers'] = np.nan\n\n    # Compute student-teacher ratio and log ratio\n    df['StudentTeacherRatio'] = df['TotalEnrollment'] / df['NumTeachers']\n\n    # Replace zero or negative ratios with NaN (defensive)\n    df.loc[df['StudentTeacherRatio'] <= 0, 'StudentTeacherRatio'] = np.nan\n\n    # Log transform (natural log). Add a small constant if needed, but here we have removed nonpositive.\n    df['LogStudentTeacherRatio'] = np.log(df['StudentTeacherRatio'])\n\n    # Create school type dummy(s). We'll create dummy for 'KK-06' so model can include it (drop_first handled later).\n    # Ensure 'school' exists and is string\n    df['school'] = df.get('school').astype(str)\n    df['School_KK_06'] = (df['school'] == 'KK-06').astype(int)\n\n    # Select and keep only rows with non-missing values for the dependent variable, IV, and main controls\n    required_cols = [\n        'AcademicPerformance',\n        'StudentTeacherRatio',\n        'LogStudentTeacherRatio',\n        'ExpenditurePerStudent',\n        'PctEnglishLearners',\n        'PctCalWorks',\n        'PctReducLunch'\n    ]\n\n    df = df.dropna(subset=required_cols)\n\n    # Optionally, create standardized versions of continuous controls if desired (not strictly necessary for OLS):\n    # Here we keep raw measures but ensure numeric dtype\n    for col in ['ExpenditurePerStudent', 'PctEnglishLearners', 'PctCalWorks', 'PctReducLunch', 'Computers', 'TotalEnrollment', 'NumTeachers']:\n        if col in df.columns:\n            df[col] = pd.to_numeric(df[col], errors='coerce')\n\n    # Final drop for any numeric controls that ended up NA after coercion\n    df = df.dropna(subset=['ExpenditurePerStudent', 'PctEnglishLearners', 'PctCalWorks', 'PctReducLunch'])\n\n    # Reset index for cleanliness\n    df = df.reset_index(drop=True)\n\n    return df\n",
-  "m_code": "def model(df: pd.DataFrame):\n    \"\"\"\n    Fit an OLS model of AcademicPerformance on student-teacher ratio and controls.\n\n    Returns the fitted statsmodels RegressionResultsWrapper object.\n    The model uses a log transform of the student-teacher ratio to reduce skew and allow elasticity interpretation.\n    Robust (HC3) standard errors are used to mitigate heteroskedasticity.\n    \"\"\"\n\n    # Ensure the transformed columns exist\n    required = ['AcademicPerformance', 'LogStudentTeacherRatio', 'ExpenditurePerStudent',\n                'PctEnglishLearners', 'PctCalWorks', 'PctReducLunch', 'Computers', 'School_KK_06']\n    missing = [c for c in required if c not in df.columns]\n    if len(missing) > 0:\n        raise ValueError(f\"Missing required columns for modeling: {missing}\")\n\n    # Define outcome and predictors\n    y = df['AcademicPerformance']\n\n    # Base set of controls\n    X_vars = [\n        'LogStudentTeacherRatio',\n        'ExpenditurePerStudent',\n        'PctEnglishLearners',\n        'PctCalWorks',\n        'PctReducLunch',\n        'Computers',\n        'School_KK_06'\n    ]\n\n    X = df[X_vars].copy()\n\n    # Add constant\n    X = sm.add_constant(X)\n\n    # Fit OLS with robust (HC3) standard errors\n    model_result = sm.OLS(y, X).fit(cov_type='HC3')\n\n    # Return the fitted model object (caller may examine summary or params)\n    return model_result\n"
+  "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw district-level dataframe to the modeling dataframe.\n\n    Produces the following new/derived columns used in modeling:\n      - StudentTeacherRatio: calworks / teachers (enrollment per teacher)\n      - AvgTestScore: mean of 'grades' and 'rownames' (reading & math average)\n      - *_z: z-score standardized versions of continuous predictors used in the model\n      - school_*: dummy(s) for the 'school' category with non-alphanumeric characters replaced by '_'\n\n    Notes about column mapping (based on the provided schema):\n      - 'calworks' is used as total enrollment\n      - 'teachers' is used as number of FTE teachers\n      - 'grades' and 'rownames' are used as district average reading and math scores\n    \"\"\"\n\n    # Work on a copy\n    df = df.copy()\n\n    # Ensure numeric columns are numeric where expected\n    numeric_cols = ['calworks', 'teachers', 'grades', 'rownames', 'expenditure', 'income', 'district', 'computer']\n    for col in numeric_cols:\n        if col in df.columns:\n            df[col] = pd.to_numeric(df[col], errors='coerce')\n\n    # Drop rows missing the key variables needed to compute ratio and outcome\n    required = ['calworks', 'teachers', 'grades', 'rownames']\n    df = df.dropna(subset=[c for c in required if c in df.columns])\n\n    # Remove implausible teacher counts (<=0) to avoid division by zero\n    if 'teachers' in df.columns:\n        df = df[df['teachers'] > 0]\n\n    # Compute student-teacher ratio\n    df['StudentTeacherRatio'] = df['calworks'] / df['teachers']\n\n    # Compute average test score as mean of reading and math\n    df['AvgTestScore'] = df[['grades', 'rownames']].mean(axis=1)\n\n    # Standardize continuous predictors (z-scores). Use ddof=0 for population-like standardization.\n    def zscore(s: pd.Series) -> pd.Series:\n        return (s - s.mean()) / (s.std(ddof=0) if s.std(ddof=0) != 0 else 1.0)\n\n    # Create z-scores for IV and continuous controls that will be used in the model\n    df['StudentTeacherRatio_z'] = zscore(df['StudentTeacherRatio'])\n\n    # Controls: expenditure, income, district, computer\n    for c in ['expenditure', 'income', 'district', 'computer']:\n        if c in df.columns:\n            df[c + '_z'] = zscore(df[c])\n        else:\n            # if a control is missing, create a NaN column so downstream code fails noisily rather than silently\n            df[c + '_z'] = np.nan\n\n    # Clean up school category strings to produce safe dummy column names\n    if 'school' in df.columns:\n        df['school'] = df['school'].astype(str).fillna('NA').str.replace('[^0-9A-Za-z_]+', '_', regex=True)\n        school_dummies = pd.get_dummies(df['school'], prefix='school', drop_first=True)\n        df = pd.concat([df, school_dummies], axis=1)\n    else:\n        # If school not present, create a placeholder column to keep model pipeline stable\n        df['school'] = 'NA'\n\n    # Final: keep only rows with non-missing values in model columns\n    model_cols_needed = ['StudentTeacherRatio_z', 'AvgTestScore', 'expenditure_z', 'income_z', 'district_z', 'computer_z']\n    # also add any school dummy columns that were created\n    school_dummy_cols = [c for c in df.columns if c.startswith('school_')]\n    model_cols_needed += school_dummy_cols\n\n    df = df.dropna(subset=[c for c in model_cols_needed if c in df.columns])\n\n    # Return the dataframe containing all columns (original + derived). The modeling function will select needed columns.\n    return df\n",
+  "m_code": "def model(df: pd.DataFrame) -> Any:\n    \"\"\"\n    Fit an OLS model predicting AvgTestScore from StudentTeacherRatio (z-scored) controlling for expenditure, income,\n    percent English learners (district), computer resources, and school grade-span dummy(s).\n\n    Returns a fitted statsmodels regression results object (with robust HC3 standard errors).\n    \"\"\"\n\n    # Copy to avoid side-effects\n    df = df.copy()\n\n    # Identify school dummy columns created in transform\n    school_dummy_cols = [c for c in df.columns if c.startswith('school_')]\n\n    # Define predictors to include in the model\n    predictor_cols = ['StudentTeacherRatio_z', 'expenditure_z', 'income_z', 'district_z', 'computer_z'] + school_dummy_cols\n\n    # Ensure all predictors exist in df\n    missing = [c for c in predictor_cols if c not in df.columns]\n    if missing:\n        raise ValueError(f\"Missing predictors in dataframe required for model: {missing}\")\n\n    # Outcome and design matrix\n    y = df['AvgTestScore']\n    X = df[predictor_cols]\n    X = sm.add_constant(X)\n\n    # Fit OLS with robust (HC3) standard errors\n    model_fit = sm.OLS(y, X).fit(cov_type='HC3')\n\n    # Return fitted results object\n    return model_fit\n"
 }
 ===================[TOKENS]=====================
 Number of prompt tokens: 5430
-Number of total tokens: 8583
-
-===================[PROMPT (API Time: 51.77147889137268, Cache Time: None)]=====================
-=====[SYSTEM]=====:
-You are an AI Data Analysis Assistant who is an expert at writing an end-to-end scientific analysis given a research question and a dataset. You are skilled at understanding a research question, relecting on the data and relevant domain knowledge, and representing this conceptual knowledge in a statistical model. Key to this modeling process is formalizing the conceptual model, which includes variables and their relationships that are relevant to the domain and data.
-=====[USER]=====:
-<Instruction> 
-Given the research question, dataset formulate the conceptual model and write an analysis including all necessary data transformations and a statistical model to answer the research question. 
-</Instruction>
-
-<Format Instructions>
-You will return 3 things:
-1. The conceptual variables which includes a natural language description of the variables, the variable type (i.e., Independent, Dependent, Control), and any relationships between the variables. Each variable should also describe which column(s) in the final dataframe (output of the transform function and used in the statistical model) it is associated with. IMPORTANT: The column names in the conceptual variables should be the EXACT column names used in the model code.     
-2. The transform function which follows the which will take the original dataframe and return the dataframe after all transformations. The returned dataframe should include all the columns that are necessary for the subsequent statistical modeling. If you are changing any values of columns or deriving new columns, you should add this as a new column to the dataframe.     
-3. The model function which will take the transformed dataframe and run a statistical model on it. The model function should return the results of the model.
-
-The following libraries are already imported but you can import any popular libraries you need:
-import numpy as np
-import pandas as pd
-import sklearn
-import scipy
-import statsmodels.api as sm
-import matplotlib.pyplot as plt
-
-Here is the code template for the transform function:
-```python
-def transform(df: pd.DataFrame) -> pd.DataFrame:
-    # Your code here
-    return df
-```
-Here is the code template for the model function:
-```python
-def model(df: pd.DataFrame) -> Any:
-    # Your code here
-    return results
-```
-
-Please return the conceptual variables, the transform function, and the model function in the format specified below:
-The output should be formatted as a JSON instance that conforms to the JSON schema below.
-
-As an example, for the schema {"properties": {"foo": {"title": "Foo", "description": "a list of strings", "type": "array", "items": {"type": "string"}}}, "required": ["foo"]}
-the object {"foo": ["bar", "baz"]} is a well-formatted instance of the schema. The object {"properties": {"foo": ["bar", "baz"]}} is not well-formatted.
-
-Here is the output schema:
-```
-{"$defs": {"AgentCVarsWithCol": {"properties": {"ivs": {"items": {"$ref": "#/$defs/IVarWithCol"}, "title": "Independent variables", "type": "array"}, "dv": {"allOf": [{"$ref": "#/$defs/DVarWithCol"}], "title": "Dependent variable"}, "controls": {"items": {"$ref": "#/$defs/ControlVarWithCol"}, "title": "Control variables", "type": "array"}}, "required": ["ivs", "dv", "controls"], "title": "AgentCVarsWithCol", "type": "object"}, "ControlVarWithCol": {"properties": {"description": {"title": "Description of the control variable variable", "type": "string"}, "is_moderator": {"title": "Whether the variable is a moderator.", "type": "boolean"}, "moderator_on": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": "", "title": "The variable that the control variable is moderating. Only applicable for control variables that are moderators."}, "columns": {"items": {"type": "string"}, "title": "The column(s) in the FINAL dataframe used in the STATISTICAL MODEL that corresponds to the control variable", "type": "array"}}, "required": ["description", "is_moderator", "columns"], "title": "ControlVarWithCol", "type": "object"}, "DVarWithCol": {"properties": {"description": {"title": "Description of the dependent variable variable", "type": "string"}, "columns": {"items": {"type": "string"}, "title": "The column(s) in the FINAL dataframe used in the STATISTICAL MODEL that corresponds to the dependent variable", "type": "array"}}, "required": ["description", "columns"], "title": "DVarWithCol", "type": "object"}, "IVarWithCol": {"properties": {"description": {"title": "Description of the independent variable variable", "type": "string"}, "columns": {"items": {"type": "string"}, "title": "The column(s) in the FINAL dataframe used in the STATISTICAL MODEL that corresponds to the independent variable", "type": "array"}}, "required": ["description", "columns"], "title": "IVarWithCol", "type": "object"}}, "properties": {"cvars": {"allOf": [{"$ref": "#/$defs/AgentCVarsWithCol"}], "title": "Conceptual variables"}, "transform_code": {"title": "The code that transforms the data", "type": "string"}, "m_code": {"title": "The code for the statistical modeling", "type": "string"}}, "required": ["cvars", "transform_code", "m_code"]}
-```
-</Format Instructions>
-<Example>
-Research Question: What is the effect of hormonal fluctuations associated with fertility on women's religiosity?
-Dataset Schema: {
-  "dataset_description": "A total of 275 women participated in the study for this dataset. Each participant was asked to answer three religiosity items using a 9-point scale. Further, each participant was asked to indicate the typical length of her menstrual cycle, the start date of her last menstrual period, and the start date of her previous menstrual period. In addition, each woman indicated how sure she was about these two start dates, using a 9-point scale. Finally, each woman was asked to indicate her current romantic relationship status with the following four response options: (1) not dating/romantically involved with anyone, (2) dating or involved with only one partner, (3) engaged or living with my partner, and (4) married.",
-  "fields": [
-    {
-      "column": "WorkerID",
-      "properties": {
-        "dtype": "number",
-        "std": 79.52986860293433,
-        "min": 1,
-        "max": 275,
-        "samples": [
-          31,
-          140,
-          196
-        ],
-        "num_unique_values": 275,
-        "description": "The unique identifier of a participant."
-      }
-    },
-    {
-      "column": "Rel1",
-      "properties": {
-        "dtype": "number",
-        "std": 3.284246850080361,
-        "min": 1,
-        "max": 9,
-        "samples": [
-          4,
-          1,
-          9
-        ],
-        "num_unique_values": 9,
-        "description": "'How much do you believe in God?' 1 \u2013 9"
-      }
-    },
-    {
-      "column": "Rel2",
-      "properties": {
-        "dtype": "number",
-        "std": 3.087872913331648,
-        "min": 1.0,
-        "max": 9.0,
-        "samples": [
-          4.0,
-          2.0,
-          6.0
-        ],
-        "num_unique_values": 9,
-        "description": "'I see myself as a religiously oriented person.' 1 \u2013 9"
-      }
-    },
-    {
-      "column": "Rel3",
-      "properties": {
-        "dtype": "number",
-        "std": 3.333610823065186,
-        "min": 1.0,
-        "max": 9.0,
-        "samples": [
-          3.0,
-          1.0,
-          7.0
-        ],
-        "num_unique_values": 9,
-        "description": "'I believe that God or a Higher Power is responsible for my existence.' 1 \u2013 9"
-      }
-    },
-    {
-      "column": "Sure1",
-      "properties": {
-        "dtype": "number",
-        "std": 1.5732501786909676,
-        "min": 1,
-        "max": 9,
-        "samples": [
-          4,
-          7,
-          9
-        ],
-        "num_unique_values": 8,
-        "description": "In reference to `StartDateofLastPeriod`,  'How sure are you about that date?' 1 \u2013 9."
-      }
-    },
-    {
-      "column": "Sure2",
-      "properties": {
-        "dtype": "number",
-        "std": 2.221975065515302,
-        "min": 1,
-        "max": 9,
-        "samples": [
-          6,
-          3,
-          7
-        ],
-        "num_unique_values": 9,
-        "description": "In reference to `StartDateofPeriodBeforeLast`,  'How sure are you about that date?' 1 \u2013 9."
-      }
-    },
-    {
-      "column": "Relationship",
-      "properties": {
-        "dtype": "number",
-        "std": 1.167327837424664,
-        "min": 1,
-        "max": 4,
-        "samples": [
-          1,
-          2,
-          3
-        ],
-        "num_unique_values": 4,
-        "description": "Answer to 'What is your current romantic relationship status?' (1) not dating/romantically involved with anyone, (2) dating or involved with only one partner, (3) engaged or living with my partner, (4) married"
-      }
-    },
-    {
-      "column": "ReportedCycleLength",
-      "properties": {
-        "dtype": "number",
-        "std": 2.6714983210492633,
-        "min": 21.0,
-        "max": 38.0,
-        "samples": [
-          21.0,
-          22.0,
-          26.0
-        ],
-        "num_unique_values": 17,
-        "description": "Answer to 'How many days long are your menstrual cycles? (for most women, the range is between 25-35 days) Keep in mind this is the number of days from the start of one menstrual period to the start of the next menstrual period and NOT the length of your menstrual bleeding.'"
-      }
-    },
-    {
-      "column": "DateTesting",
-      "properties": {
-        "dtype": "date",
-        "min": "03/12/12",
-        "max": "04/27/12",
-        "samples": [
-          "04/06/12",
-          "04/26/12",
-          "03/12/12"
-        ],
-        "num_unique_values": 13,
-        "description": "Date of participant filling in the questionnaire"
-      }
-    },
-    {
-      "column": "StartDateofLastPeriod",
-      "properties": {
-        "dtype": "date",
-        "min": "02/06/12",
-        "max": "04/26/12",
-        "samples": [
-          "02/16/12",
-          "03/01/12",
-          "04/25/12"
-        ],
-        "num_unique_values": 61,
-        "description": "Answer to 'Please give your best estimate of the date on which you started your last period (please be as precise as possible). This date was probably within the last few weeks. Sometimes thinking of where you were when you started your last period helps. For instance, was it on a weekend?, were you at work, was it during a football game?, etc. Please write the date in mm/dd/yyyy format (e.g., 8/18/2012).'"
-      }
-    },
-    {
-      "column": "StartDateofPeriodBeforeLast",
-      "properties": {
-        "dtype": "date",
-        "min": "01/03/12",
-        "max": "03/29/12",
-        "samples": [
-          "01/15/12",
-          "02/04/12",
-          "03/24/12"
-        ],
-        "num_unique_values": 61,
-        "description": "Answer to 'Please give your best estimate of the date on which you started the period before your last period (please be as precise as possible). Please write the date in mm/dd/yyyy format (e.g., 7/18/2012).'"
-      }
-    }
-  ],
-  "num_rows": 275,
-  "field_names": [
-    "WorkerID",
-    "Rel1",
-    "Rel2",
-    "Rel3",
-    "Sure1",
-    "Sure2",
-    "Relationship",
-    "ReportedCycleLength",
-    "DateTesting",
-    "StartDateofLastPeriod",
-    "StartDateofPeriodBeforeLast"
-  ]
-}
-Result: {
-  "cvars": {
-    "ivs": [
-      {
-        "description": "Women's fertility",
-        "columns": [
-          "FertilityGroup"
-        ]
-      }
-    ],
-    "dv": {
-      "description": "Women's religiosity",
-      "columns": [
-        "AvgReligiosity"
-      ]
-    },
-    "controls": [
-      {
-        "description": "Relationship status of the individual",
-        "is_moderator": true,
-        "moderator_on": "Women's fertility",
-        "columns": [
-          "InRelationship"
-        ]
-      }
-    ]
-  },
-  "transform_code": "# drop the rows with missing values in the ReportedCycleLength, Rel1, Rel2, and Rel3 columns\ndf = df.dropna(subset=['ReportedCycleLength'])\ndf = df.dropna(subset=['Rel1', 'Rel2', 'Rel3'])\n\ndf['AvgReligiosity'] = df[['Rel1', 'Rel2', 'Rel3']].mean(axis=1)\n\n\n# Convert date columns to datetime format\ndf['DateTesting'] = pd.to_datetime(df['DateTesting'], format='%m/%d/%y')\ndf['StartDateofLastPeriod'] = pd.to_datetime(df['StartDateofLastPeriod'], format='%m/%d/%y')\ndf['StartDateofPeriodBeforeLast'] = pd.to_datetime(df['StartDateofPeriodBeforeLast'], format='%m/%d/%y')\n\n# Calculate the cycle length based on provided dates\ndf['ReportedCycleLength'] = (df['StartDateofLastPeriod'] - df['StartDateofPeriodBeforeLast']).dt.days\n# Calculate the expected start date of the next menstrual period\n\ndf['ExpectedNextPeriod'] = df['StartDateofLastPeriod'] + pd.to_timedelta(df['ReportedCycleLength'], unit='d')\n\n# Calculate the day of ovulation by subtracting 14 days from the expected start date of the next period\n# since ovulation typically occurs around 14 days before the start of the next period\ndf['OvulationDate'] = df['ExpectedNextPeriod'] - pd.to_timedelta(14, unit='d')\n# Calculate the cycle day on the date of testing\ndf['CycleDay'] = (df['DateTesting'] - df['OvulationDate']).dt.days + 14\n# Define high-fertility (cycle days 6-14) and low-fertility (cycle days 17-27) groups\ndf['FertilityGroup'] = df['CycleDay'].apply(lambda x: 'High-Fertility' if 6 <= x <= 14 else ('Low-Fertility' if 17 <= x <= 27 else 'Other'))\n# Filter out the 'Other' group to focus on the high and low fertility groups\ndf = df[df['FertilityGroup'].isin(['High-Fertility', 'Low-Fertility'])]\n\n\ndf['IsIncommittedRelationship'] = df['Relationship'].apply(lambda x: 0 if x in [1,2] else 1)\ndf['InRelationship'] = df['Relationship'].apply(lambda x: 0 if x == 1 else 1)\ndf['IsInRelationship'] = df['Relationship'].apply(lambda x: 0 if x == 1 else 1)\n",
-  "m_code": "model = smf.ols('AvgReligiosity ~ InRelationship * FertilityGroup', data=df).fit()\n# Display the regression results\nprint(model.summary())\n"
-}
-</Example>
-Research Question: Is a lower student-teacher ratio associated with higher academic performance?
-Dataset Schema: {
-  "dataset_description": "The data used here are from all 420 K-6 and K-8 districts in California with data available for 1998 and 1999. Test scores are on the Stanford 9 standardized test administered to 5th grade students. School characteristics (averaged across the district) include enrollment, number of teachers (measured as \u201cfull-time equivalents\u201d, number of computers per classroom, and expenditures per student. Demographic variables for the students are averaged across the district. The demographic variables include the percentage of students in the public assistance program CalWorks (formerly AFDC), the percentage of students that qualify for a reduced price lunch, and the percentage of students that are English learners (that is, students for whom English is a second language).",
-  "fields": [
-    {
-      "column": "computer",
-      "properties": {
-        "dtype": "number",
-        "std": 121.38780828402827,
-        "min": 1,
-        "max": 420,
-        "samples": [
-          146,
-          335,
-          176
-        ],
-        "num_unique_values": 420,
-        "semantic_type": "",
-        "description": ""
-      }
-    },
-    {
-      "column": "county",
-      "properties": {
-        "dtype": "number",
-        "std": 3466.994655283721,
-        "min": 61382,
-        "max": 75440,
-        "samples": [
-          68205,
-          71654,
-          63032
-        ],
-        "num_unique_values": 420,
-        "semantic_type": "",
-        "description": "character. District code."
-      }
-    },
-    {
-      "column": "lunch",
-      "properties": {
-        "dtype": "string",
-        "samples": [
-          "Red Bluff Union Elementary",
-          "Banta Elementary",
-          "Bellevue Union Elementary"
-        ],
-        "num_unique_values": 409,
-        "semantic_type": "",
-        "description": "character. School name."
-      }
-    },
-    {
-      "column": "students",
-      "properties": {
-        "dtype": "category",
-        "samples": [
-          "Calaveras",
-          "Lake",
-          "Sutter"
-        ],
-        "num_unique_values": 45,
-        "semantic_type": "",
-        "description": "factor indicating county."
-      }
-    },
-    {
-      "column": "school",
-      "properties": {
-        "dtype": "category",
-        "samples": [
-          "KK-06",
-          "KK-08"
-        ],
-        "num_unique_values": 2,
-        "semantic_type": "",
-        "description": "factor indicating grade span of district."
-      }
-    },
-    {
-      "column": "calworks",
-      "properties": {
-        "dtype": "number",
-        "std": 3913.104984901447,
-        "min": 81,
-        "max": 27176,
-        "samples": [
-          446,
-          6219,
-          25151
-        ],
-        "num_unique_values": 391,
-        "semantic_type": "",
-        "description": "Total enrollment."
-      }
-    },
-    {
-      "column": "expenditure",
-      "properties": {
-        "dtype": "number",
-        "std": 187.9126794313481,
-        "min": 4.849999905,
-        "max": 1429.0,
-        "samples": [
-          16.28000069,
-          90.40000153,
-          42.06999969
-        ],
-        "num_unique_values": 374,
-        "semantic_type": "",
-        "description": "Number of teachers."
-      }
-    },
-    {
-      "column": "income",
-      "properties": {
-        "dtype": "number",
-        "std": 11.4548209903578,
-        "min": 0.0,
-        "max": 78.99420166,
-        "samples": [
-          20.63489914,
-          12.69200039,
-          19.83119965
-        ],
-        "num_unique_values": 411,
-        "semantic_type": "",
-        "description": "Percent qualifying for CalWorks (income assistance)."
-      }
-    },
-    {
-      "column": "math",
-      "properties": {
-        "dtype": "number",
-        "std": 27.123381081221236,
-        "min": 0.0,
-        "max": 100.0,
-        "samples": [
-          86.02940369,
-          34.03609848,
-          30.44169998
-        ],
-        "num_unique_values": 407,
-        "semantic_type": "",
-        "description": "Percent qualifying for reduced-price lunch."
-      }
-    },
-    {
-      "column": "english",
-      "properties": {
-        "dtype": "number",
-        "std": 441.34129818958604,
-        "min": 0,
-        "max": 3324,
-        "samples": [
-          177,
-          4,
-          27
-        ],
-        "num_unique_values": 270,
-        "semantic_type": "",
-        "description": "Number of computers."
-      }
-    },
-    {
-      "column": "read",
-      "properties": {
-        "dtype": "number",
-        "std": 633.9370531365888,
-        "min": 3926.06958,
-        "max": 7711.506836,
-        "samples": [
-          5124.836426,
-          4357.826172,
-          5504.025391
-        ],
-        "num_unique_values": 420,
-        "semantic_type": "",
-        "description": "Expenditure per student."
-      }
-    },
-    {
-      "column": "teachers",
-      "properties": {
-        "dtype": "number",
-        "std": 7.225889763125027,
-        "min": 5.335000038,
-        "max": 55.32799911,
-        "samples": [
-          10.47200012,
-          11.9119997,
-          11.08100033
-        ],
-        "num_unique_values": 337,
-        "semantic_type": "",
-        "description": "District average income (in USD 1,000)."
-      }
-    },
-    {
-      "column": "district",
-      "properties": {
-        "dtype": "number",
-        "std": 18.285927467535604,
-        "min": 0.0,
-        "max": 85.53971863,
-        "samples": [
-          1.68350172,
-          49.82307053,
-          85.53971863
-        ],
-        "num_unique_values": 372,
-        "semantic_type": "",
-        "description": "Percent of English learners."
-      }
-    },
-    {
-      "column": "grades",
-      "properties": {
-        "dtype": "number",
-        "std": 20.10798002199425,
-        "min": 604.5,
-        "max": 704.0,
-        "samples": [
-          650.0,
-          650.7999878,
-          662.0999756
-        ],
-        "num_unique_values": 322,
-        "semantic_type": "",
-        "description": "Average reading score."
-      }
-    },
-    {
-      "column": "rownames",
-      "properties": {
-        "dtype": "number",
-        "std": 18.754202173212242,
-        "min": 605.4000244,
-        "max": 709.5,
-        "samples": [
-          646.0999756,
-          645.0999756,
-          648.4000244
-        ],
-        "num_unique_values": 324,
-        "semantic_type": "",
-        "description": "Average math score."
-      }
-    }
-  ],
-  "num_rows": 420,
-  "field_names": [
-    "computer",
-    "county",
-    "lunch",
-    "students",
-    "school",
-    "calworks",
-    "expenditure",
-    "income",
-    "math",
-    "english",
-    "read",
-    "teachers",
-    "district",
-    "grades",
-    "rownames"
-  ]
-}
-Result: 
-
-===================[gpt-5-mini RESPONSE (3284)]=====================
-{
-  "cvars": {
-    "ivs": [
-      {
-        "description": "Student-teacher ratio: the number of enrolled students per full-time-equivalent teacher in the district (higher values = larger class sizes). Computed as Enrollment / Teachers.",
-        "columns": [
-          "StudentTeacherRatio"
-        ]
-      }
-    ],
-    "dv": {
-      "description": "Academic performance: district-level average standardized achievement measured as the mean of the reported reading and math scores.",
-      "columns": [
-        "AvgScore"
-      ]
-    },
-    "controls": [
-      {
-        "description": "Expenditure per student (district-level): controls for spending differences across districts.",
-        "is_moderator": false,
-        "moderator_on": "",
-        "columns": [
-          "expenditure"
-        ]
-      },
-      {
-        "description": "Percent of students qualifying for reduced-price lunch (proxy for socioeconomic disadvantage).",
-        "is_moderator": false,
-        "moderator_on": "",
-        "columns": [
-          "PctReducedLunch"
-        ]
-      },
-      {
-        "description": "Percent of English learners in the district.",
-        "is_moderator": false,
-        "moderator_on": "",
-        "columns": [
-          "PctEnglishLearners"
-        ]
-      },
-      {
-        "description": "Number of computers per classroom (or computers indicator available in the dataset).",
-        "is_moderator": false,
-        "moderator_on": "",
-        "columns": [
-          "ComputersPerClassroom"
-        ]
-      },
-      {
-        "description": "Total enrollment in the district (used both to compute the ratio and as a separate control).",
-        "is_moderator": false,
-        "moderator_on": "",
-        "columns": [
-          "Enrollment"
-        ]
-      },
-      {
-        "description": "District grade-span type (KK-06 vs KK-08). Treated as a categorical control.",
-        "is_moderator": false,
-        "moderator_on": "",
-        "columns": [
-          "school"
-        ]
-      }
-    ]
-  },
-  "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    # Make a working copy\n    df = df.copy()\n\n    # Ensure numeric columns are numeric (coerce errors to NaN)\n    num_cols = ['calworks', 'teachers', 'grades', 'rownames', 'expenditure', 'math', 'district', 'computer']\n    for col in num_cols:\n        if col in df.columns:\n            df[col] = pd.to_numeric(df[col], errors='coerce')\n\n    # Rename/derive clearer columns used in analysis\n    # According to provided schema, 'calworks' corresponds to total enrollment.\n    if 'calworks' in df.columns:\n        df['Enrollment'] = df['calworks']\n    else:\n        # if Enrollment already present, keep it\n        if 'Enrollment' not in df.columns:\n            df['Enrollment'] = np.nan\n\n    # Drop rows missing the essential variables needed to compute ratio and outcome\n    required_for_ratio_and_outcome = ['Enrollment', 'teachers', 'grades', 'rownames']\n    df = df.dropna(subset=required_for_ratio_and_outcome)\n\n    # Prevent division by zero for teachers\n    df.loc[df['teachers'] == 0, 'teachers'] = np.nan\n    df = df.dropna(subset=['teachers'])\n\n    # Compute Student-Teacher ratio\n    df['StudentTeacherRatio'] = df['Enrollment'] / df['teachers']\n\n    # Compute outcome: average of reading and math scores (columns: 'grades' = reading, 'rownames' = math per schema)\n    df['AvgScore'] = df[['grades', 'rownames']].mean(axis=1)\n\n    # Controls: map to clearer column names\n    # 'math' column in schema appears to represent percent reduced-price lunch\n    if 'math' in df.columns:\n        df['PctReducedLunch'] = df['math']\n    else:\n        df['PctReducedLunch'] = np.nan\n\n    # 'district' per schema is percent English learners\n    if 'district' in df.columns:\n        df['PctEnglishLearners'] = df['district']\n    else:\n        df['PctEnglishLearners'] = np.nan\n\n    # Computers per classroom (or a computers indicator) - use 'computer' column if present\n    if 'computer' in df.columns:\n        df['ComputersPerClassroom'] = pd.to_numeric(df['computer'], errors='coerce')\n    else:\n        df['ComputersPerClassroom'] = np.nan\n\n    # Keep the school categorical variable as-is for later encoding\n    if 'school' not in df.columns:\n        df['school'] = np.nan\n\n    # Final set of columns to keep in transformed dataframe (keeps existing columns plus derived ones)\n    keep_cols = list(df.columns)  # return full dataframe with new columns; model will select necessary columns\n\n    return df\n",
-  "m_code": "def model(df: pd.DataFrame) -> any:\n    import statsmodels.api as sm\n    # Working copy\n    df = df.copy()\n\n    # Required model columns\n    model_cols = ['AvgScore', 'StudentTeacherRatio', 'expenditure', 'PctReducedLunch', 'PctEnglishLearners', 'ComputersPerClassroom', 'Enrollment', 'school']\n\n    # Ensure model columns exist\n    missing = [c for c in model_cols if c not in df.columns]\n    if missing:\n        raise ValueError(f\"Missing needed columns for modeling: {missing}\")\n\n    # Drop rows with missing data on model variables\n    df_model = df.dropna(subset=['AvgScore', 'StudentTeacherRatio'])\n\n    # For controls, allow some missing but drop rows that are missing core controls as well\n    df_model = df_model.dropna(subset=['expenditure', 'PctReducedLunch', 'PctEnglishLearners', 'ComputersPerClassroom', 'Enrollment'])\n\n    # Create design matrix X\n    X = df_model[['StudentTeacherRatio', 'expenditure', 'PctReducedLunch', 'PctEnglishLearners', 'ComputersPerClassroom', 'Enrollment']].copy()\n\n    # Encode categorical school variable using one-hot dummies (drop first to avoid multicollinearity)\n    if 'school' in df_model.columns:\n        dummies = pd.get_dummies(df_model['school'].astype(str), prefix='school', drop_first=True)\n        if not dummies.empty:\n            X = pd.concat([X, dummies], axis=1)\n\n    # Add constant\n    X = sm.add_constant(X, has_constant='add')\n\n    # Dependent variable\n    y = df_model['AvgScore']\n\n    # Fit OLS model\n    model_res = sm.OLS(y, X).fit()\n\n    # Print a brief summary and return the full results object\n    print(model_res.summary())\n    return model_res\n"
-}
-===================[TOKENS]=====================
-Number of prompt tokens: 5430
-Number of total tokens: 8714
+Number of total tokens: 9339

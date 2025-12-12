@@ -1,95 +1,151 @@
 def extract_final_answer(model_output):
     """
-    Extracts coefficient, standard error, p-value, 95% CI, and a brief conclusion
-    about the association between StudentTeacherRatio and AvgScore from a
-    statsmodels RegressionResultsWrapper (fitted with robust cov_type if desired).
+    Extract statistics about the StudentTeacherRatio coefficient from a fitted statsmodels OLS result.
 
-    Returns:
-      {
-        "object": {  # numeric results
-          "coef": float,
-          "std_err": float,
-          "p_value": float,
-          "ci_lower": float,
-          "ci_upper": float,
-          "nobs": int
-        },
-        "description": str  # brief interpretation in context
-      }
+    Returns a dict with keys:
+      - "object": a dictionary of numerical outputs (coef, se, t, p-value, 95% CI, standardized beta if computable,
+                  nobs, r_squared, significance boolean, and a short categorical conclusion).
+      - "description": a human-readable interpretation of the coefficient in context (direction and significance).
     """
+    import numpy as np
     import pandas as pd
 
-    try:
-        # Extract core quantities
-        params = model_output.params
-        bse = model_output.bse
-        pvalues = model_output.pvalues
-        nobs = int(getattr(model_output, "nobs", None)) if getattr(model_output, "nobs", None) is not None else None
-
-        if "StudentTeacherRatio" not in params.index:
-            return {
-                "object": None,
-                "description": "Model output does not contain a parameter named 'StudentTeacherRatio'."
-            }
-
-        coef = float(params["StudentTeacherRatio"])
-        std_err = float(bse["StudentTeacherRatio"]) if "StudentTeacherRatio" in bse.index else None
-        p_value = float(pvalues["StudentTeacherRatio"]) if "StudentTeacherRatio" in pvalues.index else None
-
-        # Confidence interval (handle both DataFrame and ndarray returns)
-        ci = model_output.conf_int()
-        try:
-            if isinstance(ci, pd.DataFrame):
-                ci_row = ci.loc["StudentTeacherRatio"]
-                ci_lower, ci_upper = float(ci_row.iloc[0]), float(ci_row.iloc[1])
-            else:
-                # ci is an ndarray; find index of the parameter
-                param_index = list(params.index).index("StudentTeacherRatio")
-                ci_lower, ci_upper = float(ci[param_index, 0]), float(ci[param_index, 1])
-        except Exception:
-            # Fallback if indexing fails
-            ci_lower, ci_upper = None, None
-
-        # Interpret the result in context:
-        # coef = change in AvgScore for a one-unit increase in students-per-teacher.
-        # Lower student-teacher ratio (fewer students per teacher) corresponds to a decrease in StudentTeacherRatio.
-        if p_value is None:
-            significance_text = "could not determine statistical significance (p-value unavailable)."
-        else:
-            significance_text = "statistically significant (p < 0.05)." if p_value < 0.05 else "not statistically significant (p >= 0.05)."
-
-        if coef < 0:
-            direction_text = (
-                "The coefficient is negative, so a lower student-teacher ratio (fewer students per teacher) "
-                "is associated with higher average academic performance."
-            )
-        elif coef > 0:
-            direction_text = (
-                "The coefficient is positive, so a lower student-teacher ratio (fewer students per teacher) "
-                "would be associated with lower average academic performance (opposite of the expected sign)."
-            )
-        else:
-            direction_text = "The coefficient is zero (no estimated association)."
-
-        description = (
-            f"Estimate for StudentTeacherRatio: coef = {coef:.4f}, SE = {std_err:.4f}."
-            f" 95% CI = [{ci_lower:.4f}, {ci_upper:.4f}] (if available). p-value = {p_value:.4g}."
-            f" Interpretation: {direction_text} This effect is {significance_text}"
-        )
-
-        result_object = {
-            "coef": coef,
-            "std_err": std_err,
-            "p_value": p_value,
-            "ci_lower": ci_lower,
-            "ci_upper": ci_upper,
-            "nobs": nobs
-        }
-
-        return {"object": result_object, "description": description}
-
-    except Exception as e:
+    # Basic validation
+    if not hasattr(model_output, "params"):
         return {
             "object": None,
-            "description": f"An error occurred while extracting results: {e}"
+            "description": "Input does not appear to be a statsmodels RegressionResults object (missing .params)."
         }
+
+    params = model_output.params
+
+    # Find the parameter name corresponding to StudentTeacherRatio (case-insensitive, allowance for slight naming differences)
+    target_lower = "studentteacherratio"
+    matches = [name for name in params.index if name.lower() == target_lower]
+    if not matches:
+        # try looser match: contains both 'student' and 'ratio'
+        matches = [name for name in params.index if ("student" in name.lower() and "ratio" in name.lower())]
+    if not matches:
+        return {
+            "object": None,
+            "description": "The fitted model does not include a parameter matching 'StudentTeacherRatio'."
+        }
+
+    name = matches[0]
+
+    # Extract core statistics, guarding against missing attributes
+    try:
+        coef = float(params[name])
+    except Exception:
+        coef = None
+
+    def safe_get(attr, key):
+        try:
+            val = getattr(model_output, attr)
+            return float(val[key])
+        except Exception:
+            return None
+
+    se = safe_get("bse", name)
+    tval = safe_get("tvalues", name)
+    pval = safe_get("pvalues", name)
+
+    # 95% CI
+    try:
+        ci_df = model_output.conf_int()
+        # conf_int() can return ndarray or DataFrame; handle both
+        if isinstance(ci_df, (list, tuple, np.ndarray)):
+            # convert to DataFrame with param names if possible
+            ci_df = pd.DataFrame(ci_df, index=model_output.params.index)
+        ci_lower = float(ci_df.loc[name, 0])
+        ci_upper = float(ci_df.loc[name, 1])
+        ci = [ci_lower, ci_upper]
+    except Exception:
+        ci = None
+
+    # Sample size and R-squared if available
+    nobs = int(model_output.nobs) if hasattr(model_output, "nobs") else None
+    r_squared = float(model_output.rsquared) if hasattr(model_output, "rsquared") else None
+
+    # Standardized (beta) coefficient if exog/endog accessible
+    std_beta = None
+    try:
+        exog = model_output.model.exog
+        exog_names = list(model_output.model.exog_names)
+        if name in exog_names:
+            idx = exog_names.index(name)
+            x_std = float(np.std(exog[:, idx], ddof=0))
+            y = model_output.model.endog
+            y_std = float(np.std(y, ddof=0))
+            if y_std != 0:
+                std_beta = float(coef * x_std / y_std)
+    except Exception:
+        std_beta = None
+
+    # Significance judgement at alpha = 0.05
+    significant = (pval is not None and pval < 0.05)
+
+    # Interpretation: recall StudentTeacherRatio higher => more students per teacher.
+    if coef is None:
+        interpretation_direction = "Coefficient unavailable."
+    else:
+        if coef < 0:
+            interpretation_direction = (
+                "Negative coefficient: higher student-teacher ratio (more students per teacher) is associated with LOWER AvgTestScore; "
+                "consequently, a LOWER student-teacher ratio (fewer students per teacher) is associated with HIGHER AvgTestScore."
+            )
+        elif coef > 0:
+            interpretation_direction = (
+                "Positive coefficient: higher student-teacher ratio (more students per teacher) is associated with HIGHER AvgTestScore; "
+                "consequently, a LOWER student-teacher ratio would be associated with LOWER AvgTestScore (opposite of the hypothesized direction)."
+            )
+        else:
+            interpretation_direction = "Coefficient is zero (no association)."
+
+    sig_text = (
+        "This association is statistically significant at alpha=0.05."
+        if significant else
+        "This association is NOT statistically significant at alpha=0.05."
+    )
+
+    # Build description
+    desc_parts = []
+    desc_parts.append(f"Parameter examined: '{name}'.")
+    if coef is not None:
+        desc_parts.append(f"Estimate = {coef:.4f} (SE = {se:.4f}, t = {tval:.3f}, p = {pval:.4g}).")
+    else:
+        desc_parts.append("Estimate and standard errors could not be retrieved.")
+    if ci is not None:
+        desc_parts.append(f"95% CI = [{ci[0]:.4f}, {ci[1]:.4f}].")
+    if std_beta is not None:
+        desc_parts.append(f"Standardized (beta) = {std_beta:.4f}.")
+    if nobs is not None:
+        desc_parts.append(f"Sample size n = {nobs}.")
+    if r_squared is not None:
+        desc_parts.append(f"R-squared = {r_squared:.3f}.")
+
+    desc_parts.append(interpretation_direction)
+    desc_parts.append(sig_text)
+
+    description = " ".join(desc_parts)
+
+    result_object = {
+        "param_name": name,
+        "coef": coef,
+        "se": se,
+        "t_value": tval,
+        "p_value": pval,
+        "ci_95": ci,
+        "standardized_beta": std_beta,
+        "nobs": nobs,
+        "r_squared": r_squared,
+        "significant_0.05": significant,
+        # short categorical conclusion helpful for programmatic checks:
+        "conclusion": (
+            "lower_ratio_associated_with_higher_performance"
+            if (coef is not None and coef < 0 and significant)
+            else ("opposite_direction_significant" if (coef is not None and coef > 0 and significant) else "no_statistical_evidence")
+        )
+    }
+
+    return {"object": result_object, "description": description}

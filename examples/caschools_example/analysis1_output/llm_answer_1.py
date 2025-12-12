@@ -1,117 +1,91 @@
 def extract_final_answer(model_output):
     """
-    Extracts statistics for the StudentTeacherRatio coefficient from a fitted statsmodels OLS result
-    and returns a dictionary with numeric outputs ("object") and a short interpretation ("description").
+    Extracts coefficient, p-value, 95% CI, and (if possible) a standardized effect for the
+    'log_ST_Ratio' variable from a statsmodels RegressionResultsWrapper.
 
-    Returned structure:
-    {
-      "object": {
-        "variable": "StudentTeacherRatio",
-        "coef": float,
-        "std_err": float,
-        "t_value": float,
-        "p_value": float,
-        "conf_int": [lower, upper],
-        "nobs": int or None,
-        "significant_at_0.05": bool
-      },
-      "description": str
-    }
+    Returns a dictionary with keys:
+      - "object": dict containing numeric results and a simple decision about association
+      - "description": brief explanation of what was extracted and how to interpret it
     """
-    variable = 'StudentTeacherRatio'
-    result = {
-        "variable": variable,
-        "coef": None,
-        "std_err": None,
-        "t_value": None,
-        "p_value": None,
-        "conf_int": [None, None],
-        "nobs": None,
-        "significant_at_0.05": None,
-    }
+    import pandas as pd
+
+    res = model_output
+    var = 'log_ST_Ratio'
+
+    # Extract coefficient and p-value
+    try:
+        coef = float(res.params[var])
+    except Exception as e:
+        raise KeyError(f"Could not extract parameter '{var}' from model_output: {e}")
 
     try:
-        # Coefficient and standard statistics
-        params = getattr(model_output, 'params', None)
-        bse = getattr(model_output, 'bse', None)
-        tvalues = getattr(model_output, 'tvalues', None)
-        pvalues = getattr(model_output, 'pvalues', None)
-
-        if params is None or variable not in params.index:
-            raise KeyError(f"Variable '{variable}' not found in model parameters.")
-
-        result["coef"] = float(params[variable])
-        # Some models store bse/tvalues/pvalues as Series; guard access
-        if bse is not None and variable in bse.index:
-            result["std_err"] = float(bse[variable])
-        if tvalues is not None and variable in tvalues.index:
-            result["t_value"] = float(tvalues[variable])
-        if pvalues is not None and variable in pvalues.index:
-            result["p_value"] = float(pvalues[variable])
-
-        # Confidence interval
-        try:
-            ci = model_output.conf_int()
-            if variable in ci.index:
-                lower, upper = ci.loc[variable].tolist()
-                result["conf_int"] = [float(lower), float(upper)]
-        except Exception:
-            # fallback: conf_int as array-like
-            try:
-                ci_arr = model_output.conf_int()
-                idx = list(params.index).index(variable)
-                lower, upper = ci_arr[idx]
-                result["conf_int"] = [float(lower), float(upper)]
-            except Exception:
-                pass
-
-        # Number of observations if available
-        if hasattr(model_output, 'nobs'):
-            try:
-                result["nobs"] = int(model_output.nobs)
-            except Exception:
-                result["nobs"] = None
-
-        # Significance at 0.05
-        if result["p_value"] is not None:
-            result["significant_at_0.05"] = (result["p_value"] < 0.05)
-
+        pvalue = float(res.pvalues[var])
     except Exception as e:
-        # If something goes wrong, return whatever we could collect plus an explanatory description
-        description = (
-            f"Failed to extract complete statistics for '{variable}'. Error: {e}. "
-            "Returned partial results in 'object'."
-        )
-        return {"object": result, "description": description}
+        raise KeyError(f"Could not extract p-value for '{var}' from model_output: {e}")
 
-    # Formulate a concise interpretation specific to the research question:
-    # "Is a lower student-teacher ratio associated with higher academic performance?"
-    coef = result["coef"]
-    pval = result["p_value"]
-    sig = result["significant_at_0.05"]
+    # Extract 95% confidence interval
+    try:
+        ci_array = res.conf_int(alpha=0.05)  # returns (k x 2) array
+        ci_df = pd.DataFrame(ci_array, index=res.params.index, columns=['ci_lower', 'ci_upper'])
+        ci_lower = float(ci_df.loc[var, 'ci_lower'])
+        ci_upper = float(ci_df.loc[var, 'ci_upper'])
+    except Exception:
+        # Fallback if indexing fails
+        try:
+            ci = res.conf_int(alpha=0.05)
+            # find position of var in params index
+            idx = list(res.params.index).index(var)
+            ci_lower = float(ci[idx, 0])
+            ci_upper = float(ci[idx, 1])
+        except Exception as e:
+            raise RuntimeError(f"Could not extract confidence interval for '{var}': {e}")
 
-    if coef is None or pval is None:
-        description = (
-            "Could not determine effect: coefficient or p-value for StudentTeacherRatio is missing. "
-            "See 'object' for available extracted values."
-        )
+    # Attempt to compute a standardized (beta) effect if original data are available
+    std_effect = None
+    std_info = None
+    try:
+        df = res.model.data.frame  # statsmodels stores the DataFrame used for the model here
+        if var in df.columns and 'AvgScore' in df.columns:
+            std_x = float(df[var].std(ddof=0))
+            std_y = float(df['AvgScore'].std(ddof=0))
+            if std_y != 0:
+                std_effect = float(coef * std_x / std_y)
+                std_info = {'std_x': std_x, 'std_y': std_y}
+    except Exception:
+        # If anything fails, leave standardized effect as None (not critical)
+        std_effect = None
+        std_info = None
+
+    # Formulate decision about association: we interpret negative coef as "lower ratio -> higher AvgScore"
+    alpha = 0.05
+    if (coef < 0) and (pvalue < alpha):
+        decision = ("Yes — statistically significant negative association: "
+                    "lower student-teacher ratio (fewer students per teacher) is associated with higher AvgScore.")
+    elif (coef < 0) and (pvalue >= alpha):
+        decision = ("Negative point estimate (lower ratio associated with higher AvgScore) but not statistically significant "
+                    f"(p = {pvalue:.3f}).")
+    elif (coef > 0) and (pvalue < alpha):
+        decision = ("No — statistically significant positive association: higher student-teacher ratio associated with higher AvgScore.")
     else:
-        # Negative coefficient means higher ratio (more students per teacher) predicts lower scores,
-        # so lower ratio (fewer students per teacher) is associated with higher performance.
-        direction = "negative" if coef < 0 else ("positive" if coef > 0 else "zero")
-        significance_text = "statistically significant (p < 0.05)" if sig else "not statistically significant (p >= 0.05)"
+        decision = ("No statistically significant association detected between student-teacher ratio and AvgScore "
+                    f"(coef = {coef:.4f}, p = {pvalue:.3f}).")
 
-        conclusion_yesno = "Yes" if (coef < 0 and sig) else "No" if (coef >= 0 and sig) else "Inconclusive"
-        # Build description
-        description = (
-            f"The estimated effect of StudentTeacherRatio on AvgScore is {coef:.4f} "
-            f"(SE={result['std_err']:.4f}, t={result['t_value']:.3f}, p={pval:.4f}, "
-            f"95% CI=[{result['conf_int'][0]:.4f}, {result['conf_int'][1]:.4f}]). "
-            f"The coefficient is {direction} and {significance_text}. "
-            f"Interpretation: a one-unit increase in StudentTeacherRatio (one more student per teacher) "
-            f"is associated with a {abs(coef):.4f}-point {'decrease' if coef < 0 else 'increase' if coef > 0 else 'change'} "
-            f"in AvgScore. Answering the posed question directly: '{conclusion_yesno}' — "
-            f"{'A lower student-teacher ratio is associated with higher academic performance.' if conclusion_yesno == 'Yes' else 'The evidence does not support that conclusion.'}"
-        )
+    result_object = {
+        'variable': var,
+        'coefficient': coef,
+        'p_value': pvalue,
+        'ci_95': [ci_lower, ci_upper],
+        'standardized_effect': std_effect,   # None if not computable
+        'standardized_info': std_info,       # None if not computable
+        'decision': decision
+    }
 
-    return {"object": result, "description": description}
+    description = (
+        f"Extracted statistics for '{var}': coefficient = {coef:.4f}, p-value = {pvalue:.4f}, "
+        f"95% CI = [{ci_lower:.4f}, {ci_upper:.4f}]. A negative coefficient indicates that a lower "
+        "student-teacher ratio (fewer students per teacher) is associated with higher AvgScore. "
+        "If available, a standardized effect (beta) is also provided. The 'decision' field summarizes "
+        "whether the association is statistically significant and in which direction."
+    )
+
+    return {"object": result_object, "description": description}
