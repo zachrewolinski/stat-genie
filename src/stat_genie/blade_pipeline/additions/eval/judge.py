@@ -329,36 +329,36 @@ def judge_models(llm_provider: str,
     return json.loads(raw)
 
 
-def make_judge_prompt(task, data_head, featA, featB, modelA, modelB, conclA, conclB):
-    return (
-        f"Research Question / Context:\n{task}\n\n"
-        "Here is a sample of the dataset to understand the structure and variables:\n"
-        f"{data_head}\n\n"
-        "Compare the two trials methodologically and interpretively based on the provided variables, model specifications, and conclusions.\n\n"
-        "==================== TRIAL A ====================\n\n"
-        "Independent Variables:\n"
-        f"{featA['independent_variables']}\n\n"
-        "Control Variables:\n"
-        f"{featA.get('control_variables')}\n\n"
-        "Response Variables:\n"
-        f"{featA['response_variables']}\n\n"
-        "Model Specification:\n"
-        f"{modelA}\n\n"
-        "Conclusion:\n"
-        f"{conclA}\n\n"
-        "==================== TRIAL B ====================\n\n"
-        "Independent Variables:\n"
-        f"{featB['independent_variables']}\n\n"
-        "Control Variables:\n"
-        f"{featB.get('control_variables')}\n\n"
-        "Response Variables:\n"
-        f"{featB['response_variables']}\n\n"
-        "Model Specification:\n"
-        f"{modelB}\n\n"
-        "Conclusion:\n"
-        f"{conclB}\n\n"
-        "Now, following your reasoning plan, provide similarity ratings as JSON only."
-    )
+# def make_judge_prompt(task, data_head, featA, featB, modelA, modelB, conclA, conclB):
+#     return (
+#         f"Research Question / Context:\n{task}\n\n"
+#         "Here is a sample of the dataset to understand the structure and variables:\n"
+#         f"{data_head}\n\n"
+#         "Compare the two trials methodologically and interpretively based on the provided variables, model specifications, and conclusions.\n\n"
+#         "==================== TRIAL A ====================\n\n"
+#         "Independent Variables:\n"
+#         f"{featA['independent_variables']}\n\n"
+#         "Control Variables:\n"
+#         f"{featA.get('control_variables')}\n\n"
+#         "Response Variables:\n"
+#         f"{featA['response_variables']}\n\n"
+#         "Model Specification:\n"
+#         f"{modelA}\n\n"
+#         "Conclusion:\n"
+#         f"{conclA}\n\n"
+#         "==================== TRIAL B ====================\n\n"
+#         "Independent Variables:\n"
+#         f"{featB['independent_variables']}\n\n"
+#         "Control Variables:\n"
+#         f"{featB.get('control_variables')}\n\n"
+#         "Response Variables:\n"
+#         f"{featB['response_variables']}\n\n"
+#         "Model Specification:\n"
+#         f"{modelB}\n\n"
+#         "Conclusion:\n"
+#         f"{conclB}\n\n"
+#         "Now, following your reasoning plan, provide similarity ratings as JSON only."
+#     )
 
 def _combine_judge_responses(variables_dict: Dict, modeling_dict: Dict, 
                               conclusions_dict: Dict) -> Dict:
@@ -426,7 +426,7 @@ def run_judge_evaluation_pairwise(
     nB = len(features_2)
 
     for i in range(nA):
-        for j in range(nB):
+        for j in range(i, nB): # avoids redundancy by excluding lower triangle
             
             ind_variables_dict = judge_features(
                 llm_provider=llm_provider,
