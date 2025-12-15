@@ -1,42 +1,28 @@
 import ast
 import json
-import time
-import astor
 import os.path as osp
-
+import time
 from typing import List, Literal, Tuple, Union
 
-from stat_genie.blade_pipeline.data.dataset import DatasetInfo
+import astor
+from blade_bench.data.annotation import AnnotationDataTransforms
+from blade_bench.data.datamodel import (
+    TransformDataReturn,
+    TransformDatasetState,
+)
 from blade_bench.eval.datamodel import (
-    ModelAndColumns,
     EntireAnalysis,
     EntireAnalysisProcessed,
-    RunResultModes,
     EvalRunResults,
+    ModelAndColumns,
+    RunResultModes,
 )
 from blade_bench.eval.exceptions import (
-    LMSubmissionExecutionError,
     LMSubmissionEmptyError,
     LMSubmissionExecutionError,
     RunError,
 )
-from stat_genie.blade_pipeline.eval.llm.code_to_model import CodeToModelLLM
-from stat_genie.blade_pipeline.eval.llm.code_to_transforms import CodeToTransformsLLM
-
-from stat_genie.blade_pipeline.llms.base import TextGenerator
-from stat_genie.blade_pipeline.llms.datamodel.gen_config import GenConfig, LLMHistory
-from stat_genie.blade_pipeline.llms.utils import cache_request
-from blade_bench.nb.simple_code_executor import ExecutorReturn
-
-
-from blade_bench.nb import TransformCodeExecutor, TransformObjExecutor
-from blade_bench.data.datamodel import TransformDataReturn, TransformDatasetState
-from blade_bench.data.annotation import AnnotationDataTransforms
 from blade_bench.eval.llm import DebugCodeLM
-from blade_bench.parse_code import extract_code_inside_functions_and_func_names
-from stat_genie.blade_pipeline.utils import get_dataset_csv_path
-from stat_genie.blade_pipeline.data.dataset import load_dataset_info
-
 from blade_bench.logger import (
     CODE_ENV_QUERY,
     CODE_ENV_RESP,
@@ -44,7 +30,26 @@ from blade_bench.logger import (
     TS_STATE_RESP,
     logger,
 )
+from blade_bench.nb import TransformCodeExecutor, TransformObjExecutor
+from blade_bench.nb.simple_code_executor import ExecutorReturn
+from blade_bench.parse_code import extract_code_inside_functions_and_func_names
 from diskcache import Cache
+
+from stat_genie.blade_pipeline.data.dataset import (
+    DatasetInfo,
+    load_dataset_info,
+)
+from stat_genie.blade_pipeline.eval.llm.code_to_model import CodeToModelLLM
+from stat_genie.blade_pipeline.eval.llm.code_to_transforms import (
+    CodeToTransformsLLM,
+)
+from stat_genie.blade_pipeline.llms.base import TextGenerator
+from stat_genie.blade_pipeline.llms.datamodel.gen_config import (
+    GenConfig,
+    LLMHistory,
+)
+from stat_genie.blade_pipeline.llms.utils import cache_request
+from stat_genie.blade_pipeline.utils import get_dataset_csv_path
 
 
 class Convert:
@@ -192,7 +197,7 @@ class Convert:
                 logger.bind(
                     from_cache=True,
                     message=(
-                        f"[Success]\n" + code_res.output
+                        "[Success]\n" + code_res.output
                         if code_res.success
                         else "[Error]\n" + code_res.output
                     ),
@@ -210,7 +215,7 @@ class Convert:
             from_cache=False,
             api_elapsed_time=elapsed_time,
             message=(
-                f"[Success]\n" + code_res.output
+                "[Success]\n" + code_res.output
                 if code_res.success
                 else "[Error]\n" + code_res.output
             ),
@@ -253,7 +258,7 @@ class Convert:
             else:
                 retries += 1
                 if retries < max_retries:
-                    logger.warning(f"Code conversion failed, retrying")
+                    logger.warning("Code conversion failed, retrying")
                     background_code = self.transform_executor.init_code.format(
                         data_path="data.csv"
                     )

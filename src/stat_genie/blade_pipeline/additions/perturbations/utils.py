@@ -1,6 +1,7 @@
 # imports
 import json
 
+
 def read_json(json_path):
     """
     Reads a JSON file from the given file path and returns the parsed metadata.

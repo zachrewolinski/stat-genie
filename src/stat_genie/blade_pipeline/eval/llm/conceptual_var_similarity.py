@@ -1,19 +1,19 @@
+import json
 import re
 from typing import List, Union
-import json
 
-from stat_genie.blade_pipeline.data.dataset import DatasetInfo
 from blade_bench.data.datamodel import ConceptualVarSpec
 from blade_bench.eval.datamodel import MatchCvar, MatchedCvars
-
-from stat_genie.blade_pipeline.llms.llm import LLMBase
 from blade_bench.eval.llm.examples import (
+    FERTILITY_CVAR_SIMILARITY_RESULT,
     FERTILITY_DINFO,
     FERTILITY_VARIABLES_A,
     FERTILITY_VARIABLES_B,
-    FERTILITY_CVAR_SIMILARITY_RESULT,
 )
 from blade_bench.logger import logger
+
+from stat_genie.blade_pipeline.data.dataset import DatasetInfo
+from stat_genie.blade_pipeline.llms.llm import LLMBase
 
 SYSTEM_PROMPT = """You are an AI Data Analysis assistant who is an expert at \
 understanding a research question, relecting on the data and relevant domain \

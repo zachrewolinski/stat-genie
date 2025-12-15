@@ -1,15 +1,14 @@
 import asyncio
 import json
 import os
-import traceback
 import os.path as osp
+import traceback
 from typing import List, Union
-from pydantic import BaseModel
-from stat_genie.blade_pipeline.baselines.config import EvalConfig
+
 from blade_bench.data.annotation import AnnotationDBData
 from blade_bench.data.datamodel.transforms import TransformDatasetState
 from blade_bench.data.load_annotation import load_ground_truth
-from stat_genie.blade_pipeline.eval.convert import Convert
+
 # from stat_genie.blade_pipeline.eval.datamodel.lm_analysis import (
 #     EntireAnalysis,
 #     EntireAnalysisProcessed,
@@ -18,28 +17,36 @@ from blade_bench.eval.datamodel.lm_analysis import (
     EntireAnalysis,
     EntireAnalysisProcessed,
 )
+from blade_bench.eval.datamodel.multirun import MultiRunResults
+from blade_bench.eval.datamodel.result import EvalResult, EvalResults
+from blade_bench.eval.datamodel.run import (
+    EvalRunResults,
+    RunResultModes,
+)
+from blade_bench.eval.datamodel.submission import DatasetSubmission
 from blade_bench.eval.exceptions import (
+    GetMetricsError,
     LMSubmissionConversionError,
-    RunError,
     LoadGroundTruthError,
     MatchAnnotationsError,
-    GetMetricsError,
+    RunError,
 )
-from stat_genie.blade_pipeline.eval.datamodel.match import MatchedAnnotations
-from blade_bench.eval.datamodel.result import EvalResult, EvalResults
-from stat_genie.blade_pipeline.eval.match.match_submission import SubmissionMatch
 from blade_bench.eval.metrics.all_metrics import get_metrics_from_match_obj
 from blade_bench.eval.metrics.calc_metrics import CalcSubmissionMetrics
-from blade_bench.eval.results_loader.load_lm_analyses import load_lm_analyses_glob
+from blade_bench.eval.results_loader.load_lm_analyses import (
+    load_lm_analyses_glob,
+)
+from blade_bench.logger import logger
+from pydantic import BaseModel
+
+from stat_genie.blade_pipeline.baselines.config import EvalConfig
+from stat_genie.blade_pipeline.eval.convert import Convert
+from stat_genie.blade_pipeline.eval.datamodel.match import MatchedAnnotations
+from stat_genie.blade_pipeline.eval.match.match_submission import (
+    SubmissionMatch,
+)
 from stat_genie.blade_pipeline.llms.base import TextGenerator
 from stat_genie.blade_pipeline.llms.datamodel.gen_config import LLMHistory
-from blade_bench.logger import logger
-from blade_bench.eval.datamodel.run import (
-    RunResultModes,
-    EvalRunResults,
-)
-from blade_bench.eval.datamodel.multirun import MultiRunResults
-from blade_bench.eval.datamodel.submission import DatasetSubmission
 
 
 class Evaluator:
@@ -117,7 +124,7 @@ class Evaluator:
                 logger.error(eval_result.info)
                 logger.info("Continuing with the next step, skipping transformations.")
                 self.transform_run_result = eval_result
-        except Exception as e:
+        except Exception:
             raise LMSubmissionConversionError(
                 f"Failed to convert submission: {traceback.format_exc()}"
             )
@@ -126,7 +133,7 @@ class Evaluator:
     async def load_ground_truth(self) -> Union[AnnotationDBData, EvalRunResults]:
         try:
             gnd_truth = load_ground_truth(self.submission.dataset_name, self.output_dir)
-        except Exception as e:
+        except Exception:
             raise LoadGroundTruthError(
                 f"Failed to load ground truth: {traceback.format_exc()}"
             )
@@ -139,7 +146,7 @@ class Evaluator:
             matched_annotations: MatchedAnnotations = await self.matcher.match_all(
                 gnd_truth, analysis_processed
             )
-        except Exception as e:
+        except Exception:
             raise MatchAnnotationsError(
                 f"Failed to match submission: {traceback.format_exc()}"
             )
@@ -148,7 +155,7 @@ class Evaluator:
     async def get_metrics(self, matched_annotations: MatchedAnnotations):
         try:
             match_metrics = get_metrics_from_match_obj(matched_annotations)
-        except Exception as e:
+        except Exception:
             raise GetMetricsError(
                 f"Failed to get match metrics: {traceback.format_exc()}"
             )
@@ -175,7 +182,7 @@ class Evaluator:
             matched_annotations = await self.match_annotations(
                 gnd_truth, analysis_processed
             )
-            logger.success(f"Got matched annotations")
+            logger.success("Got matched annotations")
             # print("matched annotations:", matched_annotations)
             match_metrics = await self.get_metrics(matched_annotations)
             run_results = await self.get_run_results(

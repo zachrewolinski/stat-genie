@@ -1,15 +1,16 @@
 import json
 import re
 from typing import Dict, List, Tuple
+
 from blade_bench.data.datamodel import ModelSpec
-from stat_genie.blade_pipeline.eval.datamodel.match import MatchModel
-from stat_genie.blade_pipeline.llms.llm import LLMBase
 from blade_bench.eval.llm.examples import (
     FERTILITY_MODELS_A,
     FERTILITY_MODELS_B,
     FERTILITY_MODELS_SIMILARITY_RESULT,
 )
 
+from stat_genie.blade_pipeline.eval.datamodel.match import MatchModel
+from stat_genie.blade_pipeline.llms.llm import LLMBase
 
 SYSTEM_PROMPT = """You are an AI Data Analysis assistant who is an expert at \
 statistical modeling and understands the similarities, nuances, and differences \

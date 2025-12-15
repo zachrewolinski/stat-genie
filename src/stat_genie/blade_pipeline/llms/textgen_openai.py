@@ -1,13 +1,21 @@
 import os
 from typing import List, Union
+
 import backoff
 import openai
 from openai import AzureOpenAI, OpenAI
 
-
-from stat_genie.blade_pipeline.llms.utils import backoff_hdlr, num_tokens_from_messages
-from stat_genie.blade_pipeline.llms.datamodel.gen_config import OpenAIGenConfig, TextGenResponse, Message, UsageData
 from stat_genie.blade_pipeline.llms.base import TextGenerator
+from stat_genie.blade_pipeline.llms.datamodel.gen_config import (
+    Message,
+    OpenAIGenConfig,
+    TextGenResponse,
+    UsageData,
+)
+from stat_genie.blade_pipeline.llms.utils import (
+    backoff_hdlr,
+    num_tokens_from_messages,
+)
 
 
 class OpenAITextGenerator(TextGenerator):

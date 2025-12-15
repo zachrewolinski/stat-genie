@@ -1,5 +1,10 @@
-from stat_genie.blade_pipeline.baselines.lm.gen_analysis import \
-    SYSTEM_PROMPT, INSTRUCTION_PROMPT, EXAMPLE, POST_FIX
+from stat_genie.blade_pipeline.baselines.lm.gen_analysis import (
+    EXAMPLE,
+    INSTRUCTION_PROMPT,
+    POST_FIX,
+    SYSTEM_PROMPT,
+)
+
 
 class PromptGenerator:
     """

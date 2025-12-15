@@ -1,11 +1,20 @@
-from abc import ABC, abstractmethod
 import os.path as osp
 import time
+from abc import ABC, abstractmethod
 from typing import List, Union
-from diskcache import Cache
-from stat_genie.blade_pipeline.llms.datamodel.gen_config import ProviderModelConfig, TextGenConfig, TextGenResponse
-from stat_genie.blade_pipeline.llms.utils import cache_request, get_user_cache_dir
+
 from blade_bench.logger import API_LEVEL_NAME, logger
+from diskcache import Cache
+
+from stat_genie.blade_pipeline.llms.datamodel.gen_config import (
+    ProviderModelConfig,
+    TextGenConfig,
+    TextGenResponse,
+)
+from stat_genie.blade_pipeline.llms.utils import (
+    cache_request,
+    get_user_cache_dir,
+)
 
 
 class TextGenerator(ABC):

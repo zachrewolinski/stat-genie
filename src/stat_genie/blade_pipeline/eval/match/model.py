@@ -1,24 +1,40 @@
 import json
-from typing import Any, Dict, List, Tuple, Union
 from collections import defaultdict
-from blade_bench.data.datamodel import ModelSpec
-from blade_bench.data.annotation import AnnotationDBData
+from typing import Any, Dict, List, Tuple, Union
 
+from blade_bench.data.annotation import AnnotationDBData
+from blade_bench.data.datamodel import ModelSpec
+from blade_bench.eval.match.base import BaseMatcher
 from blade_bench.llms import (
-    OpenAIGenConfig,
-    GeminiGenConfig,
     AnthropicGenConfig,
+    GeminiGenConfig,
+    OpenAIGenConfig,
+)
+
+from stat_genie.blade_pipeline.data.dataset import (
+    DatasetInfo,
+    load_dataset_info,
+)
+from stat_genie.blade_pipeline.eval.datamodel.lm_analysis import (
+    EntireAnalysisProcessed,
+)
+from stat_genie.blade_pipeline.eval.datamodel.match import (
+    MatchedCvars,
+    MatchedModels,
+    MatchModel,
+)
+from stat_genie.blade_pipeline.eval.llm.conceptual_var_similarity import (
+    ConceptualVarSimilarity,
+)
+from stat_genie.blade_pipeline.eval.llm.model_similarity import (
+    StatsModelSimilarity,
 )
 from stat_genie.blade_pipeline.llms.base import TextGenerator
-from stat_genie.blade_pipeline.llms.datamodel.gen_config import GenConfig, LLMHistory
-from stat_genie.blade_pipeline.eval.llm.conceptual_var_similarity import ConceptualVarSimilarity
-from stat_genie.blade_pipeline.eval.llm.model_similarity import StatsModelSimilarity
-from blade_bench.eval.match.base import BaseMatcher
-from stat_genie.blade_pipeline.eval.datamodel.match import MatchedModels, MatchModel, MatchedCvars
-from stat_genie.blade_pipeline.eval.datamodel.lm_analysis import EntireAnalysisProcessed
-
+from stat_genie.blade_pipeline.llms.datamodel.gen_config import (
+    GenConfig,
+    LLMHistory,
+)
 from stat_genie.blade_pipeline.utils import get_dataset_info_path
-from stat_genie.blade_pipeline.data.dataset import load_dataset_info, DatasetInfo
 
 
 class StatsModelMatcher(BaseMatcher):

@@ -1,24 +1,21 @@
 import json
 import re
 from typing import Any, Callable, Dict, List, Union
+
+from blade_bench.logger import LLM_LEVEL_NAME, PROMPT_LEVEL_NAME, logger
 from langchain.schema import BaseOutputParser
 from langchain.schema.output_parser import OutputParserException
 
-
+from stat_genie.blade_pipeline.llms.base import TextGenerator
 from stat_genie.blade_pipeline.llms.config import get_llm_config, get_text_gen
-
 from stat_genie.blade_pipeline.llms.datamodel.gen_config import (
     AnthropicGenConfig,
+    GeminiGenConfig,
     LLMHistory,
     OpenAIGenConfig,
-    GeminiGenConfig,
     PromptHistoryEntry,
     TextGenResponse,
 )
-from stat_genie.blade_pipeline.llms.base import TextGenerator
-
-
-from blade_bench.logger import LLM_LEVEL_NAME, PROMPT_LEVEL_NAME, logger
 
 FORMAT_SYSTEM_PROMPT = """You are an AI Data Analysis assistant who is an expert at \
 parsing JSON from text given the JSON schema."""
@@ -85,7 +82,7 @@ class LLMBase:
                 if prompt_variables:
                     try:
                         content = entry["content"].format(**prompt_variables)
-                    except KeyError as e:
+                    except KeyError:
                         formatted_str = (
                             entry["content"].replace("{", "{{").replace("}", "}}")
                         )
@@ -235,7 +232,7 @@ class LLMBase:
             if ret is not None:
                 return ret
             if retries == 0:
-                raise ValueError(f"Failed to parse the response after retries")
+                raise ValueError("Failed to parse the response after retries")
 
             prompt_template = [
                 {

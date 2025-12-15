@@ -1,10 +1,10 @@
 from collections import defaultdict
-from typing import Any, Dict, List, Literal, Optional, Union
-from pydantic import BaseModel, Field, model_validator
 from pathlib import Path
+from typing import Any, Dict, List, Literal, Optional, Union
 
 from blade_bench.llms.datamodel.usage import UsageData
 from blade_bench.llms.local.local_client import LocalLLMClient
+from pydantic import BaseModel, Field, model_validator
 
 
 class Message(BaseModel):

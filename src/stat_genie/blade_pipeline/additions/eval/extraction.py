@@ -2,6 +2,7 @@
 from stat_genie.blade_pipeline.llms.base import TextGenerator
 from stat_genie.blade_pipeline.llms.config import llm
 
+
 def get_feature_transforms(llm_assistant: TextGenerator, transform_code: str,
                            feature_columns: list[str],
                            feature_description: str):
@@ -15,10 +16,11 @@ def get_feature_transforms(llm_assistant: TextGenerator, transform_code: str,
         feature_columns (list[str]): The list of feature columns to check.
         
     Returns:
-        dict: A dictionary of feature columns and the code that performs the transformation.
+        dict: A dictionary of feature columns and the code that performs the
+              transformation.
     """
-    system_prompt = """You are an AI Data Analysis Assistant who is an expert at \
-        performing data cleaning and preprocessing tasks."""
+    system_prompt = """You are an AI Data Analysis Assistant who is an expert \
+        at performing data cleaning and preprocessing tasks."""
     transform_responses = []
     for feature_column in feature_columns:
         find_transform_prompt = f"""Given the following code:
@@ -33,9 +35,9 @@ def get_feature_transforms(llm_assistant: TextGenerator, transform_code: str,
             <Feature Description>
             {feature_description}
             </Feature Description>
-            determine if the column is transformed in the code. \
-            If it is, return only the corresponding lines of code that perform the transformation. \
-            If it is not, return "No transformation code found."
+            determine if the column is transformed in the code. If it is, return
+            only the corresponding lines of code that perform the
+            transformation. If it is not, return "No transformation code found."
             """
         response = llm_assistant.generate([{"role": "system",
                                             "content": system_prompt},
@@ -56,18 +58,26 @@ def get_model_information(llm_assistant: TextGenerator, model_code: str):
         dict: A dictionary of model information, particularly model class.
     """
     
-    system_prompt = """You are an AI Data Analysis Assistant who is an expert at \
-        choosing, identifying, and implementing different types of ML models."""
+    system_prompt = """You are an AI Data Analysis Assistant who is an expert \
+        at choosing, identifying, and implementing different types of ML models.
+        """
     
     find_model_prompt = f"""Given the following code:
         <Code>
         {model_code}
         </Code>
-        extract relevant information about the model. The returned value should be a dictionary with the following keys:
-        1. "model_library": The library or framework used (e.g., "sklearn", "statsmodels", "pytorch", "tensorflow").
-        2. "model_class": The specific model class or type (e.g., "LinearRegression", "RandomForestClassifier", "LogisticRegression").
-        3. "model_parameters": Any parameters or hyperparameters that are set when instantiating or configuring the model.
-        4. "model_formula_fitting_code": The code that defines the model formula and/or the code that fits/trains the model.
+        extract relevant information about the model. The returned value should
+        be a dictionary with the following keys:
+        1. "model_library": The library or framework used (e.g., "sklearn",
+                            "statsmodels", "pytorch", "tensorflow").
+        2. "model_class": The specific model class or type (e.g.,
+                          "LinearRegression", "RandomForestClassifier",
+                          "LogisticRegression").
+        3. "model_parameters": Any parameters or hyperparameters that are set
+                               when instantiating or configuring the model.
+        4. "model_formula_fitting_code": The code that defines the model formula
+                                         and/or the code that fits/trains the
+                                         model.
         
         The values of the dictionary should be strings.
         """
@@ -94,7 +104,7 @@ def format_features(multirun_analyses: dict, num_runs: int,
         # get the features from each analysis
         # this should include the independent and control variables
         ind_vars = multirun_analyses['analyses'][str(i)]['cvars']['ivs']
-        control_vars = multirun_analyses['analyses'][str(i)]['cvars']['controls']
+        contr_vars = multirun_analyses['analyses'][str(i)]['cvars']['controls']
 
         # get any lines from the transform code that represent transformations
         # of the independent or control variables
@@ -113,16 +123,16 @@ def format_features(multirun_analyses: dict, num_runs: int,
         features[i]['independent_variables'] = ind_vars
         
         # tkae same approach for control variables
-        for dict_idx, var in enumerate(control_vars):
+        for dict_idx, var in enumerate(contr_vars):
             transform_responses = get_feature_transforms(llm_assistant,
                                                          transform_code,
                                                          var['columns'],
                                                          var['description'])
-            control_vars[dict_idx]['transform_code'] = \
+            contr_vars[dict_idx]['transform_code'] = \
                 [response.text[0].content for response in transform_responses]
         
         # save updated control variables in features dict
-        features[i]['control_variables'] = control_vars
+        features[i]['control_variables'] = contr_vars
 
         # get the dependent variables
         response_vars = multirun_analyses['analyses'][str(i)]['cvars']['dv']
@@ -130,9 +140,9 @@ def format_features(multirun_analyses: dict, num_runs: int,
         # for each variable in response_vars, check if it is transformed
         # in the transform_code by using an LLM assistant
         transform_responses = get_feature_transforms(llm_assistant,
-                                                     transform_code,
-                                                     response_vars['columns'],
-                                                     response_vars['description'])
+                                                transform_code,
+                                                response_vars['columns'],
+                                                response_vars['description'])
         response_vars['transform_code'] = [response.text[0].content \
             for response in transform_responses]
 

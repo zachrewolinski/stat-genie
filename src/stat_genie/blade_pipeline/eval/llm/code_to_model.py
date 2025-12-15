@@ -1,6 +1,7 @@
-from langchain.output_parsers import PydanticOutputParser
-from stat_genie.blade_pipeline.llms.llm import LLMBase
 from blade_bench.eval.datamodel import ModelAndColumns
+from langchain.output_parsers import PydanticOutputParser
+
+from stat_genie.blade_pipeline.llms.llm import LLMBase
 
 SYSTEM_PROMPT = """You are an AI Python Data Science assistant \
 who is an expert at understanding statistical modeling code."""

@@ -1,9 +1,8 @@
-from collections import defaultdict
-from typing import Dict, List, Literal, Union, Optional
 import pickle
-from pydantic import BaseModel, Field
-import networkx as nx
+from collections import defaultdict
+from typing import Dict, List, Literal, Optional, Union
 
+import networkx as nx
 from blade_bench.data.datamodel import (
     ConceptualVarSpec,
     ModelSpec,
@@ -14,6 +13,7 @@ from blade_bench.parse_code import (
     get_function_arg_name,
     replace_variable_name,
 )
+from pydantic import BaseModel, Field
 
 
 class IVar(BaseModel):

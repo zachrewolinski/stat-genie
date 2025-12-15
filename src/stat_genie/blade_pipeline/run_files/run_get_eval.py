@@ -4,17 +4,20 @@ import json
 import os
 import os.path as osp
 from typing import List
+
 import click
 import yaml
-from blade_bench.eval.datamodel.submission import DatasetSubmission
-from blade_bench.logger import logger, formatter
-from stat_genie.blade_pipeline.baselines.config import EvalConfig
-from blade_bench.eval.datamodel.multirun import MultiRunResults
-from stat_genie.blade_pipeline.eval.evaluator import run_eval_on_analyses
+
 # from blade_bench.eval.evaluator import run_eval_on_analyses
 from blade_bench.data.datamodel.transforms import (
     TransformDataReturn,
 )  # ❗️ this import needs to be kept here for the eval code to work
+from blade_bench.eval.datamodel.multirun import MultiRunResults
+from blade_bench.eval.datamodel.submission import DatasetSubmission
+from blade_bench.logger import formatter, logger
+
+from stat_genie.blade_pipeline.baselines.config import EvalConfig
+from stat_genie.blade_pipeline.eval.evaluator import run_eval_on_analyses
 from stat_genie.blade_pipeline.utils import get_absolute_dir
 
 
@@ -62,7 +65,7 @@ def run_eval(
     # remove old file
     if osp.exists(osp.join(output_dir, "run_eval.log")):
         os.remove(osp.join(output_dir, "run_eval.log"))
-    logger.add(osp.join(output_dir, f"run_eval.log"), format=formatter.format)
+    logger.add(osp.join(output_dir, "run_eval.log"), format=formatter.format)
 
     command_string = f"python {__file__} "
     if multirun_load_path:

@@ -1,39 +1,36 @@
 import ast
 import os
 import os.path as osp
-
 import traceback
 from typing import Union
 
-from langchain.output_parsers import PydanticOutputParser
-
-from blade_bench.eval.exceptions import (
-    LMGenerationError,
-)
-from blade_bench.llms.datamodel import LLMHistory
-from blade_bench.llms.llm import LLMBase
-from stat_genie.blade_pipeline.baselines.config import SingleRunConfig
-
-from blade_bench.eval.utils import (
-    normalize_code_string,
-    SAVE_CODE_TEMPLATE,
-)
-
+from blade_bench.baselines.agent import ReActAgent
 from blade_bench.eval.datamodel import (
     EntireAnalysis,
     RunResultModes,
     RunResults,
 )
-from blade_bench.baselines.agent import ReActAgent
-from stat_genie.blade_pipeline.baselines.lm.gen_analysis import GenAnalysisLM
+from blade_bench.eval.exceptions import (
+    LMGenerationError,
+)
+from blade_bench.eval.utils import (
+    SAVE_CODE_TEMPLATE,
+    normalize_code_string,
+)
+from blade_bench.llms.datamodel import LLMHistory
+from blade_bench.llms.llm import LLMBase
+from langchain.output_parsers import PydanticOutputParser
 
+from stat_genie.blade_pipeline.additions.perturbations.features import (
+    FeaturePerturbation,
+)
+from stat_genie.blade_pipeline.additions.prompt.prompt import PromptGenerator
+from stat_genie.blade_pipeline.baselines.config import SingleRunConfig
+from stat_genie.blade_pipeline.baselines.lm.gen_analysis import GenAnalysisLM
 from stat_genie.blade_pipeline.data.dataset import load_dataset_info
 from stat_genie.blade_pipeline.utils import (
     get_dataset_csv_path,
 )
-
-from stat_genie.blade_pipeline.additions.prompt.prompt import PromptGenerator
-from stat_genie.blade_pipeline.additions.perturbations.features import FeaturePerturbation
 
 
 class SingleRunExperiment:
@@ -79,13 +76,13 @@ class SingleRunExperiment:
             if not resp:
                 raise LMGenerationError(f"No valid response given: {response}")
 
-        except Exception as e:
+        except Exception:
             raise LMGenerationError(
                 f"Failed to parse response: {traceback.format_exc()}"
             )
         try:
             ast.parse(resp.transform_code)
-        except Exception as e:
+        except Exception:
             resp.transform_code = normalize_code_string(resp.transform_code)
         try:
             ast.parse(resp.m_code)
@@ -109,7 +106,7 @@ class SingleRunExperiment:
         if self.config.use_agent:
             try:
                 resp = self.agent.run()
-            except Exception as e:
+            except Exception:
                 raise LMGenerationError(
                     f"Failed to run agent: {traceback.format_exc()}"
                 )

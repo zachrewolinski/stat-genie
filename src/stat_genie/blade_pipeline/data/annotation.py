@@ -1,17 +1,15 @@
-from collections import defaultdict
 import json
 import pickle
+from collections import defaultdict
 from typing import Any, Dict, List, Literal, Optional, Set, Union
+
 import networkx as nx
 import numpy as np
 import pandas as pd
-from pydantic import BaseModel, ConfigDict, Field, computed_field
-
-
 from blade_bench.data.datamodel import (
-    ROOT_SPEC_ID,
     CONCEPTUAL_VAR_SPEC_COLUMN_NAME,
     MODEL_SPEC_COLUMN_NAME,
+    ROOT_SPEC_ID,
     TRANSFORM_SPEC_COLUMN_NAME,
     ConceptualVarSpec,
     ModelSpec,
@@ -19,11 +17,11 @@ from blade_bench.data.datamodel import (
 )
 from blade_bench.data.datamodel.graph import SerialGraphCodeRunInfo
 from blade_bench.data.datamodel.specs import BaseSpec, Branch
-from blade_bench.data.process.transforms.graph_paths import GraphPaths
-from blade_bench.parse_code import process_groupby_code
 from blade_bench.data.datamodel.transforms import TransformDatasetState
 from blade_bench.data.process import AnnotationDataTransforms
-
+from blade_bench.data.process.transforms.graph_paths import GraphPaths
+from blade_bench.parse_code import process_groupby_code
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 COL_NAME_TO_CLASS = {
     TRANSFORM_SPEC_COLUMN_NAME: TransformSpec,

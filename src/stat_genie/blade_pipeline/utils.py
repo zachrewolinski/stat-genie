@@ -1,7 +1,7 @@
+import functools
 import os
 import os.path as osp
 import signal
-import functools
 
 from blade_bench.logger import logger
 
@@ -87,7 +87,8 @@ def list_datasets():
         d
         for d in os.listdir(datasets_dir)
         if osp.isdir(osp.join(datasets_dir, d))
-        if d != "toy" and osp.exists(osp.join(datasets_dir, d, "annotations.csv"))
+        if d != "toy" and osp.exists(osp.join(datasets_dir, d,
+                                              "annotations.csv"))
     ]
 
 

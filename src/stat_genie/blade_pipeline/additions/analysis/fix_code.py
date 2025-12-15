@@ -1,9 +1,12 @@
 # imports
-import pandas as pd
-import sys
 import importlib.util
+import sys
 import traceback
+
+import pandas as pd
+
 from stat_genie.blade_pipeline.llms.config import llm
+
 
 def is_code_correct(code_name: str,
                     code_path: str,
@@ -67,7 +70,7 @@ def is_code_correct(code_name: str,
                 if verbose:
                     print(msg)
                 return msg
-    except Exception as e:
+    except Exception:
         error_trace = traceback.format_exc()
         msg = f"Error prior to runtime:\n{error_trace}"
         if verbose:
@@ -160,137 +163,155 @@ def llm_correction(code_path: str,
             "Parameter `cvars_text` must be provided when \
             `code_purpose` is 'transform_model'"
         code_fix_user_prompt = f"""
-                            <code>
-                            {code_content}
-                            </code>
-                            
-                            You are fixing Python code that defines TWO functions:
+            <code>
+            {code_content}
+            </code>
+            
+            You are fixing Python code that defines TWO functions:
 
-                            1. A transform function:
+            1. A transform function:
 
-                                def transform(df: pd.DataFrame) -> pd.DataFrame:
-                                    ...
+                def transform(df: pd.DataFrame) -> pd.DataFrame:
+                    ...
 
-                               This function reads a raw dataframe and returns a FINAL dataframe with all columns
-                               needed for the statistical model.
+                This function reads a raw dataframe and returns a FINAL
+                dataframe with all columns needed for the statistical model.
 
-                            2. A model function:
+            2. A model function:
 
-                                def model(df: pd.DataFrame) -> Any:
-                                    ...
+                def model(df: pd.DataFrame) -> Any:
+                    ...
 
-                               This function takes the FINAL dataframe (output of transform) and fits a statistical model.
+                This function takes the FINAL dataframe (output of transform)
+                and fits a statistical model.
 
-                            ============================================================
-                            CONCEPTUAL VARIABLES AND REQUIRED FINAL DATAFRAME COLUMNS
-                            ============================================================
+            ============================================================
+            CONCEPTUAL VARIABLES AND REQUIRED FINAL DATAFRAME COLUMNS
+            ============================================================
 
-                            The conceptual variables and their REQUIRED FINAL dataframe columns are:
+            The conceptual variables and their REQUIRED FINAL dataframe
+            columns are:
 
-                            {cvars_text}
+            {cvars_text}
 
-                            Each item above specifies:
-                            - A conceptual variable (independent / dependent / control)
-                            - The EXACT column name(s) in the FINAL dataframe that implement that variable.
+            Each item above specifies:
+            - A conceptual variable (independent / dependent / control)
+            - The EXACT column name(s) in the FINAL dataframe that implement
+              that variable.
 
-                            These conceptual variables and their column names are ALREADY fixed and are used
-                            elsewhere (e.g., in JSON outputs and evaluation). They MUST NOT change.
+            These conceptual variables and their column names are ALREADY fixed
+            and are used elsewhere (e.g., in JSON outputs and evaluation).
+            They MUST NOT change.
 
-                            Your job is to fix the code so that it runs correctly WHILE STRICTLY PRESERVING
-                            this contract.
+            Your job is to fix the code so that it runs correctly
+            WHILE STRICTLY PRESERVING this contract.
 
-                            ------------------------------------------------------------
-                            HARD CONSTRAINTS YOU MUST FOLLOW
-                            ------------------------------------------------------------
+            ------------------------------------------------------------
+            HARD CONSTRAINTS YOU MUST FOLLOW
+            ------------------------------------------------------------
 
-                            1. DO NOT change any of the column names listed in the block above.
-                               - You MUST NOT rename, delete, or alter the spelling/casing of these columns
-                                 anywhere in either the transform or model code.
-                               - If the current code uses different names, you MUST change the CODE so that it
-                                 uses the EXACT names listed above instead.
+            1. DO NOT change any of the column names listed in the block above.
+                - You MUST NOT rename, delete, or alter the spelling/casing of
+                  these columns anywhere in either the transform or model code.
+                - If the current code uses different names, you MUST change the
+                  CODE so that it uses the EXACT names listed above instead.
 
-                            2. DO NOT change which columns the model uses as inputs for these conceptual variables.
-                               - The identity and roles of IVs, DV, and controls are fixed by the conceptual
-                                 variables and their associated column names above.
-                               - You MUST NOT introduce new model input columns that are not in this list.
-                               - You MUST NOT swap, drop, or reinterpret which column corresponds to which
-                                 conceptual variable.
+            2. DO NOT change which columns the model uses as inputs for these
+               conceptual variables.
+                - The identity and roles of IVs, DV, and controls are fixed by
+                  the conceptual variables and their associated column names
+                  above.
+                - You MUST NOT introduce new model input columns that are not
+                  in this list.
+                - You MUST NOT swap, drop, or reinterpret which column
+                  corresponds to which conceptual variable.
 
-                            3. You MAY add internal helper columns inside the transform function, BUT:
-                               - These helper columns are for intermediate computation only.
-                               - They MUST NOT be treated as new conceptual variables.
-                               - They MUST NOT be required inputs to the model beyond what is already
-                                 specified by the conceptual variables block.
-                               - The model's effective inputs (its formula, design matrix, etc.) must still
-                                 ultimately be the same conceptual variables/columns listed above.
+            3. You MAY add internal helper columns inside the transform
+               function, BUT:
+                - These helper columns are for intermediate computation only.
+                - They MUST NOT be treated as new conceptual variables.
+                - They MUST NOT be required inputs to the model beyond what is
+                  already specified by the conceptual variables block.
+                - The model's effective inputs (its formula, design matrix,
+                  etc.) must still ultimately be the same conceptual
+                  variables/columns listed above.
 
-                            4. You MUST preserve the function signatures and return types:
-                               - transform(df: pd.DataFrame) -> pd.DataFrame
-                               - model(df: pd.DataFrame) -> Any
+            4. You MUST preserve the function signatures and return types:
+                - transform(df: pd.DataFrame) -> pd.DataFrame
+                - model(df: pd.DataFrame) -> Any
 
-                            5. You MUST NOT change the high-level semantics of the analysis:
-                               - The research question, conceptual meaning of variables, and their mapping
-                                 to final dataframe columns must remain exactly the same.
-                               - Assume that the JSON representation of the analysis (including cvars and
-                                 their columns) is authoritative and must remain valid.
+            5. You MUST NOT change the high-level semantics of the analysis:
+                - The research question, conceptual meaning of variables, and
+                  their mapping to final dataframe columns must remain exactly
+                  the same.
+                - Assume that the JSON representation of the analysis (including
+                  cvars and  their columns) is authoritative and must remain
+                  valid.
 
-                            ------------------------------------------------------------
-                            WHAT IS WRONG WITH THE CURRENT CODE
-                            ------------------------------------------------------------
+            ------------------------------------------------------------
+            WHAT IS WRONG WITH THE CURRENT CODE
+            ------------------------------------------------------------
 
-                            The current code has the following issue:
+            The current code has the following issue:
 
-                            {error_message}
+            {error_message}
 
-                            ------------------------------------------------------------
-                            YOUR TASK
-                            ------------------------------------------------------------
+            ------------------------------------------------------------
+            YOUR TASK
+            ------------------------------------------------------------
 
-                            Please provide a corrected version of the FULL code file that:
+            Please provide a corrected version of the FULL code file that:
 
-                            - Fixes the issue described above so that the code runs without errors
-                              when transform is applied to the dataset and model is called on the
-                              transformed dataframe.
-                            - STRICTLY respects all constraints about column names and conceptual
-                              variables described above.
-                            - May introduce internal helper columns ONLY as allowed above.
+            - Fixes the issue described above so that the code runs without
+              errors when transform is applied to the dataset and model is
+              called on the transformed dataframe.
+            - STRICTLY respects all constraints about column names and
+              conceptual variables described above.
+            - May introduce internal helper columns ONLY as allowed above.
 
-                            Your response MUST:
+            Your response MUST:
 
-                            - Contain ONLY the corrected Python code file contents (no explanations).
-                            - Be valid Python that can be saved directly as a .py file and imported.
-                            """
+            - Contain ONLY the corrected Python code file contents
+              (no explanations).
+            - Be valid Python that can be saved directly as a .py file and
+              imported.
+            """
     elif code_purpose == 'final_answer':
         code_fix_user_prompt = f"""
-                            <code>
-                            {code_content}
-                            </code>
-                            
-                            The above Python code should define one function, `extract_final_answer`:
-                           
-                            The function should:
-                            - Take the model_output as input
-                            - Extract the necessary statistics from the model output object
-                            - Return a dictionary with:
-                                - "object": The actual value you would like to return (e.g. a coefficient, p-value, etc.)
-                                - "description": A brief explanation of the extracted statistics/return object and what it means in the context of the task
-                            
-                            Here is the code template for the extract_final_answer function:
-                            ```python
-                            def extract_final_answer(model_output):
-                                # Your code here to extract and interpret statistics from model_output
-                                # Return a dictionary with keys: "object", "description"
-                                pass
-                            ```
+            <code>
+            {code_content}
+            </code>
+            
+            The above Python code should define one function,
+            `extract_final_answer`:
+            
+            The function should:
+            - Take the model_output as input
+            - Extract the necessary statistics from the model output object
+            - Return a dictionary with:
+                - "object": The actual value you would like to return (e.g. a
+                  coefficient, p-value, etc.)
+                - "description": A brief explanation of the extracted
+                  statistics/return object and what it means in the context
+                  of the task
+            
+            Here is the code template for the extract_final_answer function:
+            ```python
+            def extract_final_answer(model_output):
+                # Your code here to extract & interpret stats from model_output
+                # Return a dictionary with keys: "object", "description"
+                pass
+            ```
 
-                            This function should be able to run without errors. \
-                            However, the current code has the following issue:
-                            {error_message}
-                            
-                            Please provide a corrected version of the full code that resolves this issue. \
-                            Your response should only include the corrected code file contents without any additional explanations, \
-                            and should be able to be instantly converted into a .py file.
-                            """
+            This function should be able to run without errors. \
+            However, the current code has the following issue:
+            {error_message}
+            
+            Please provide a corrected version of the full code that resolves
+            this issue. Your response should only include the corrected code \
+            file contents without any additional explanations, \
+            and should be able to be instantly converted into a .py file.
+            """
     else:
         raise ValueError("Parameter `code_purpose` must be either \
             'transform_model' or 'final_answer'")
@@ -352,7 +373,8 @@ def check_and_fix_code(code_name: str,
     
     # initiate loop that only breaks when iter max has hit or code is correct
     while True:
-        # append iteration count to the end of the analysis_code_name to avoid import issues
+        # append iteration count to the end of the analysis_code_name
+        # (to avoid import issues)
         code_name_iter = f"{code_name}_{iterations}"
         
         # call helper function above

@@ -1,6 +1,8 @@
 import json
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Any, Dict, List, Optional, Tuple
+
 from stat_genie.blade_pipeline.llms.config import llm
+
 
 def judge_features(llm_provider: str,
                    llm_model: str,

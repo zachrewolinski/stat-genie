@@ -1,16 +1,16 @@
 import base64
+import hashlib
 import json
 import logging
 import os
-from typing import Any, List, Union
-from diskcache import Cache
-import hashlib
 import platform
+from typing import Any, List, Union
 
 import tiktoken
-from stat_genie.blade_pipeline.llms.datamodel.gen_config import Message
-
 from blade_bench.logger import logger
+from diskcache import Cache
+
+from stat_genie.blade_pipeline.llms.datamodel.gen_config import Message
 
 
 def backoff_hdlr(details):

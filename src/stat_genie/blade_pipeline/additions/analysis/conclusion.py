@@ -1,5 +1,6 @@
 from stat_genie.blade_pipeline.llms.config import llm
 
+
 def write_final_answer_code(llm_provider: str, llm_model: str, task: list[str],
                             cvars_text: str,
                             model_code: str, output_subdir: str,
@@ -24,7 +25,8 @@ def write_final_answer_code(llm_provider: str, llm_model: str, task: list[str],
         llm_provider (str): The provider of the LLM to be used.
         llm_model (str): The model of the LLM to be used.
         task (str): The task to be answered.
-        cvars_text (str): The text representation of the variables used in the analysis.
+        cvars_text (str): The text representation of the variables used
+                          in the analysis.
         model_code (str): The code that defines the model.
         output_subdir (str): The directory where output files should be saved.
         analysis_num (int): The analysis number (used for file naming purposes).
@@ -37,8 +39,8 @@ def write_final_answer_code(llm_provider: str, llm_model: str, task: list[str],
     
     llm_assistant = llm(provider=llm_provider, model=llm_model)
     
-    system_prompt = """You are an AI Data Analysis Assistant who is an expert at \
-        drawing data-driven conclusions."""
+    system_prompt = """You are an AI Data Analysis Assistant who is an expert \
+        at drawing data-driven conclusions."""
     
     find_answer_prompt = f"""Given the following task/question:
         <Task>
@@ -55,23 +57,26 @@ def write_final_answer_code(llm_provider: str, llm_model: str, task: list[str],
         {model_code}
         </Model Code>
         
-        The output from running the modeling function (this is the raw model object, not an interpreted answer):
+        The output from running the modeling function (this is the raw model \
+            object, not an interpreted answer):
         <Model Output>
         {model_output}
         </Model Output>
         
-        The modeling function does not explicitly answer the yes/no question posed in the task. 
-        The model output is simply the raw model object returned by the model code (e.g., a fitted 
-        statsmodels model, sklearn model, etc.). To answer the yes/no question, you need to:
+        The modeling function does not explicitly answer the yes/no question
+        posed in the task. The model output is simply the raw model object
+        returned by the model code (e.g., a fitted statsmodels model, sklearn
+        model, etc.). To answer the yes/no question, you need to:
         
-        Write Python code that extracts relevant statistics from the model output object 
-        (e.g., coefficients, p-values, confidence intervals, effect sizes) that relate 
-        to the independent variable's effect on the dependent variable.
+        Write Python code that extracts relevant statistics from the model
+        output object (e.g., coefficients, p-values, confidence intervals,
+        effect sizes) that relate to the independent variable's effect on the
+        dependent variable.
                 
         The Python function needs to have the following function header:
         ```python
         def extract_final_answer(model_output):
-            # Your code here to extract and interpret statistics from model_output
+            # Your code here to extract and interpret stats from model_output
             # Return a dictionary with keys: "object", "description"
             pass
         ```
@@ -80,10 +85,14 @@ def write_final_answer_code(llm_provider: str, llm_model: str, task: list[str],
         - Take the model_output as input
         - Extract the necessary statistics from the model output object
         - Return a dictionary with:
-            - "object": The actual value you would like to return (e.g. a coefficient, p-value, etc.)
-            - "description": A brief explanation of the extracted statistics/return object and what it means in the context of the task
+            - "object": The actual value you would like to return (e.g. a
+                        coefficient, p-value, etc.)
+            - "description": A brief explanation of the extracted
+                             statistics/return object and what it means in the
+                             context of the task
         
-        Provide the complete function code that can be executed to extract the final answer.
+        Provide the complete function code that can be executed to extract
+        the final answer.
         """
     
     response = llm_assistant.generate([{"role": "system",
@@ -115,19 +124,21 @@ def make_conclusion(llm_provider: str, llm_model: str, task: list[str],
         llm_provider (str): The provider of the LLM to be used.
         llm_model (str): The model of the LLM to be used.
         task (str): The task to be answered.
-        cvars_text (str): The text representation of the variables used in the analysis.
+        cvars_text (str): The text representation of the variables used
+                          in the analysis.
         model_code (str): The code that defines the model.
         interpretation_code (str): The code that interprets the model output.
         interpretation_output (dict): The output of the interpretation code.
         
     Returns:
-        str: The final answer to the task. Must be either "Yes", "No", or "Not enough information".
+        str: The final answer to the task. Must be either "Yes", "No", or
+             "Not enough information".
     """
     
     llm_assistant = llm(provider=llm_provider, model=llm_model)
     
-    system_prompt = """You are an AI Data Analysis Assistant who is an expert at \
-        drawing data-driven conclusions from model summaries."""
+    system_prompt = """You are an AI Data Analysis Assistant who is an expert \
+        at drawing data-driven conclusions from model summaries."""
     
     find_answer_prompt = f"""Given the following task/question:
         <Task>
@@ -154,9 +165,12 @@ def make_conclusion(llm_provider: str, llm_model: str, task: list[str],
         {interpretation_output}
         </Model Interpretation Output>
         
-        Analyze the model interpretation output and determine the final answer to the yes/no question posed in the task. 
-        Return only a clear yes or no answer, with a brief justification if helpful. The final answer should be a dictionary with the following keys:
-        1. "answer": The final answer to the question. Only valid options are "Yes", "No", or "Not enough information".
+        Analyze the model interpretation output and determine the final answer
+        to the yes/no question posed in the task. Return only a clear yes or no
+        answer, with a brief justification if helpful. The final answer should
+        be a dictionary with the following keys:
+        1. "answer": The final answer to the question. Only valid options are
+                     "Yes", "No", or "Not enough information".
         2. "justification": A brief justification for the answer.
         """
     
