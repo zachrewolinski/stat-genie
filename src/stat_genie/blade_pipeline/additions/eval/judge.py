@@ -302,6 +302,7 @@ def judge_models(llm_provider: str,
     judge_user_prompt = (
         f"Research Question:\n{research_question}\n\n"
         f"==================== EXAMPLE SCORES ====================\n\n"
+        f"Example Research Question: {example_research_question}"
         f"Example Score 1:\n{example_score_1}\n\n"
         f"Example Score 3:\n{example_score_3}\n\n"
         f"Example Score 5:\n{example_score_5}\n\n"
