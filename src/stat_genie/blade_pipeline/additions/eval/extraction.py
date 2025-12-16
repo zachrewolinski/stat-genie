@@ -108,28 +108,29 @@ def format_features(multirun_analyses: dict, num_runs: int,
 
         # get any lines from the transform code that represent transformations
         # of the independent or control variables
-        transform_code = multirun_analyses['analyses'][str(i)]['transform_code']
+        # FOR NOW - COMMENTING OUT TRANSFORM CODE ADDITIONS
+        # transform_code = multirun_analyses['analyses'][str(i)]['transform_code']
         # for each variable in ind_vars, check if it is transformed
         # in the transform_code by using an LLM assistant
-        for dict_idx, var in enumerate(ind_vars):
-            transform_responses = get_feature_transforms(llm_assistant,
-                                                         transform_code,
-                                                         var['columns'],
-                                                         var['description'])
-            ind_vars[dict_idx]['transform_code'] = \
-                [response.text[0].content for response in transform_responses]
+        # for dict_idx, var in enumerate(ind_vars):
+        #     transform_responses = get_feature_transforms(llm_assistant,
+        #                                                  transform_code,
+        #                                                  var['columns'],
+        #                                                  var['description'])
+        #     ind_vars[dict_idx]['transform_code'] = \
+        #         [response.text[0].content for response in transform_responses]
             
         # save updated independent variables in features dict
         features[i]['independent_variables'] = ind_vars
         
         # tkae same approach for control variables
-        for dict_idx, var in enumerate(contr_vars):
-            transform_responses = get_feature_transforms(llm_assistant,
-                                                         transform_code,
-                                                         var['columns'],
-                                                         var['description'])
-            contr_vars[dict_idx]['transform_code'] = \
-                [response.text[0].content for response in transform_responses]
+        # for dict_idx, var in enumerate(contr_vars):
+        #     transform_responses = get_feature_transforms(llm_assistant,
+        #                                                  transform_code,
+        #                                                  var['columns'],
+        #                                                  var['description'])
+        #     contr_vars[dict_idx]['transform_code'] = \
+        #         [response.text[0].content for response in transform_responses]
         
         # save updated control variables in features dict
         features[i]['control_variables'] = contr_vars
@@ -139,12 +140,12 @@ def format_features(multirun_analyses: dict, num_runs: int,
 
         # for each variable in response_vars, check if it is transformed
         # in the transform_code by using an LLM assistant
-        transform_responses = get_feature_transforms(llm_assistant,
-                                                transform_code,
-                                                response_vars['columns'],
-                                                response_vars['description'])
-        response_vars['transform_code'] = [response.text[0].content \
-            for response in transform_responses]
+        # transform_responses = get_feature_transforms(llm_assistant,
+        #                                         transform_code,
+        #                                         response_vars['columns'],
+        #                                         response_vars['description'])
+        # response_vars['transform_code'] = [response.text[0].content \
+        #     for response in transform_responses]
 
         # save updated response variables in features dict
         features[i]['response_variables'] = response_vars
