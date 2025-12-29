@@ -1,11 +1,15 @@
 # imports
 import os
 import random
+import pandas as pd
 from copy import deepcopy
 
 from stat_genie.blade_pipeline.additions.perturbations.utils import read_json
-from stat_genie.blade_pipeline.utils import get_dataset_info_path, list_datasets
-
+from stat_genie.blade_pipeline.utils import (
+    get_dataset_info_path,
+    get_dataset_csv_path,
+    list_datasets,
+)
 
 class FeaturePerturbation:
     """
@@ -169,6 +173,10 @@ class FeaturePerturbation:
         # create a copy of the metadata to work with
         json_metadata = deepcopy(json_metadata)
         
+        # read in the dataframe
+        df_path = get_dataset_csv_path(dataset_name)
+        df = pd.read_csv(df_path)
+        
         # set random seed for reproducibility
         random.seed(self.random_features_seed)
         
@@ -180,25 +188,26 @@ class FeaturePerturbation:
             available_datasets.remove(dataset_name)
             
         # read in the features for each dataset
-        full_feature_set = []
+        full_feature_set = [] # list of tuples (dataset_name, feature_dict)
         for dataset in available_datasets:
             dataset_info_path = get_dataset_info_path(dataset)
             dataset_metadata = read_json(dataset_info_path)  # just to ensure the dataset is readable
             
             # extract features from this dataset
             if "data_desc" in dataset_metadata and "fields" in dataset_metadata["data_desc"]:
-                full_feature_set.extend(dataset_metadata["data_desc"]["fields"])
-        print(full_feature_set)
+                full_feature_set.extend([(dataset, feature) for feature in dataset_metadata["data_desc"]["fields"]])
+
         # randomly select features to add
         features_to_add = random.sample(full_feature_set, 
-                                        min(self.add_num_features, len(full_feature_set)))
+                                        min(self.add_num_features,
+                                            len(full_feature_set)))
         
         # add selected features to the current metadata
         if "data_desc" not in json_metadata:
             json_metadata["data_desc"] = {}
         if "fields" not in json_metadata["data_desc"]:
             json_metadata["data_desc"]["fields"] = []
-        json_metadata["data_desc"]["fields"].extend(features_to_add)
+        json_metadata["data_desc"]["fields"].extend([feature for _, feature in features_to_add])
         # add names to field_names array
         if "field_names" not in json_metadata["data_desc"]:
             json_metadata["data_desc"]["field_names"] = []
@@ -206,7 +215,23 @@ class FeaturePerturbation:
             [feature["column"] for feature in features_to_add if "column" in feature]
         )
         
-        return json_metadata
+        # add selected features to the dataframe
+        for dataset, feature in features_to_add:
+            feature_name = feature["column"]
+            feature_df = pd.read_csv(get_dataset_csv_path(dataset),
+                                     usecols=[feature_name])
+            # make feature_df the correct length by shortening or repeating rows
+            if len(feature_df) > len(df):
+                feature_df = feature_df.sample(n=len(df),
+                                               random_state=self.random_features_seed).reset_index(drop=True)
+            elif len(feature_df) < len(df):
+                repeats = (len(df) // len(feature_df)) + 1
+                feature_df = pd.concat([feature_df] * repeats,
+                                       ignore_index=True).iloc[:len(df)]
+            # add the feature column to the main dataframe
+            df[feature_name] = feature_df[feature_name]
+                
+        return json_metadata, df
     
     def perturb(self, json_path: str) -> dict:
         """
@@ -228,8 +253,10 @@ class FeaturePerturbation:
         dataset_name = os.path.basename(os.path.dirname(json_path))
         
         if self.add_num_features > 0:
-            json_metadata = self.add_random_features(json_metadata,
-                                                     dataset_name)
+            json_metadata, df = self.add_random_features(json_metadata,
+                                                         dataset_name)
+        else:
+            df = None
         
         if self.anonymize:
             json_metadata = self.anonymize_variable_names(json_metadata)
@@ -240,4 +267,4 @@ class FeaturePerturbation:
         if self.shuffle_names:
             json_metadata = self.shuffle_feature_names(json_metadata)
         
-        return json_metadata
+        return json_metadata, df

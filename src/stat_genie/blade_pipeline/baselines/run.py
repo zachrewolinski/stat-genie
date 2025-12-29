@@ -36,10 +36,12 @@ from stat_genie.blade_pipeline.utils import (
 class SingleRunExperiment:
     GEN_ANALYSIS_FNAME = "llm_analysis.json"
 
-    def __init__(self, config: SingleRunConfig, prompt: PromptGenerator, feature_perturbation: FeaturePerturbation):
+    def __init__(self, config: SingleRunConfig, prompt: PromptGenerator,
+                 feature_perturbation: FeaturePerturbation):
         self.config = config
         # NOTE: THIS IS WHERE WE APPLY FEATURE PERTURBATION
-        self.dinfo = load_dataset_info(config.run_dataset, feature_perturbation)
+        self.dinfo = load_dataset_info(config.run_dataset, feature_perturbation,
+                                       edited_df_path=config.output_dir)
         self.llm_history = LLMHistory()
         self.format_lm = LLMBase(config.llm_eval.texgt_gen)
         self.eval_text_gen = config.llm_eval.texgt_gen

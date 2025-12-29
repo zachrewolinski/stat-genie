@@ -63,17 +63,32 @@ class DatasetInfo(BaseModel):
 
 
 def load_dataset_info(dataset: str, feature_perturbation: FeaturePerturbation,
-                      load_df=False):
+                      load_df=False, edited_df_path: Optional[str]=None) -> DatasetInfo:
     data_info_path = get_dataset_info_path(dataset)
     if not osp.exists(data_info_path):
         raise FileNotFoundError(f"Dataset info file not found: {data_info_path}")
     # NOTE: THIS IS WHERE WE APPLY THE FEATURE PERTURBATION.
-    dataset_info = feature_perturbation.perturb(data_info_path)
+    dataset_info, df = feature_perturbation.perturb(data_info_path)
     dinfo = DatasetInfo(**dataset_info)
+    # if the feature perturbation modified the data, we need to apply the
+    # same perturbation to the dataframe for consistency with the metadata
+    if df is not None:
+        # write df to the analysis subdir for eval purposes
+        if edited_df_path is not None:
+            df.to_csv(osp.join(edited_df_path, f"{dataset}.csv"),
+                      index=False)
+        else:
+            # throw error
+            raise ValueError("edited_df_path must be provided if feature "
+                             "perturbation modifies the dataframe.")
     if load_df:
-        df_path = get_dataset_csv_path(dataset)
-        df = pd.read_csv(df_path)
-        dinfo.df = df
+        if df is None:
+            df_path = get_dataset_csv_path(dataset)
+            df = pd.read_csv(df_path)
+            dinfo.df = df
+        else:
+            dinfo.df = df
+
     return dinfo
 
 
