@@ -1,9 +1,10 @@
 # imports
-from stat_genie.blade_pipeline.llms.base import TextGenerator
 from stat_genie.blade_pipeline.llms.config import llm
+from joblib import Parallel, delayed
+from copy import deepcopy
 
-
-def get_feature_transforms(llm_assistant: TextGenerator, transform_code: str,
+def get_feature_transforms(llm_provider: str, llm_model: str,
+                           transform_code: str,
                            feature_columns: list[str],
                            feature_description: str):
     """
@@ -11,7 +12,8 @@ def get_feature_transforms(llm_assistant: TextGenerator, transform_code: str,
     transform code and return the code that performs the transformation.
     
     Args:
-        llm_assistant (TextGenerator): The LLM assistant for the evaluation.
+        llm_provider (str): The provider of the LLM.
+        llm_model (str): The model of the LLM.
         transform_code (str): The code that performs the transformations.
         feature_columns (list[str]): The list of feature columns to check.
         
@@ -39,6 +41,7 @@ def get_feature_transforms(llm_assistant: TextGenerator, transform_code: str,
             only the corresponding lines of code that perform the
             transformation. If it is not, return "No transformation code found."
             """
+        llm_assistant = llm(provider=llm_provider, model=llm_model)
         response = llm_assistant.generate([{"role": "system",
                                             "content": system_prompt},
                                            {"role": "user",
@@ -46,12 +49,13 @@ def get_feature_transforms(llm_assistant: TextGenerator, transform_code: str,
         transform_responses.append(response)
     return transform_responses
 
-def get_model_information(llm_assistant: TextGenerator, model_code: str):
+def get_model_information(llm_provider: str, llm_model: str, model_code: str):
     """
     Given modeling code, extract relevant information.
     
     Args:
-        llm_assistant (TextGenerator): The LLM assistant for the evaluation.
+        llm_provider (str): The provider of the LLM.
+        llm_model (str): The model of the LLM.
         model_code (str): The code that defines the model.
         
     Returns:
@@ -81,6 +85,8 @@ def get_model_information(llm_assistant: TextGenerator, model_code: str):
         
         The values of the dictionary should be strings.
         """
+        
+    llm_assistant = llm(provider=llm_provider, model=llm_model)
     
     response = llm_assistant.generate([{"role": "system",
                                         "content": system_prompt},
@@ -90,86 +96,101 @@ def get_model_information(llm_assistant: TextGenerator, model_code: str):
     return response.text[0].content
 
 def format_features(multirun_analyses: dict, num_runs: int,
-                    llm_assistant: TextGenerator):
+                    llm_provider: str, llm_model: str, n_jobs: int=-1):
     
-    # create dict to store features
-    features = {}
-    
-    # loop through analyses
-    for i in range(num_runs):
+    # helper function to process a single run
+    def process_single_run(i):
         
         # create internal dict for analysis features
-        features[i] = {}
+        run_features = {}
         
         # get the features from each analysis
         # this should include the independent and control variables
-        ind_vars = multirun_analyses['analyses'][str(i)]['cvars']['ivs']
-        contr_vars = multirun_analyses['analyses'][str(i)]['cvars']['controls']
+        ind_vars = deepcopy(multirun_analyses['analyses'][str(i)]['cvars']['ivs'])
+        contr_vars = deepcopy(multirun_analyses['analyses'][str(i)]['cvars']['controls'])
+        response_vars = deepcopy(multirun_analyses['analyses'][str(i)]['cvars']['dv'])
 
         # get any lines from the transform code that represent transformations
         # of the independent or control variables
-        # FOR NOW - COMMENTING OUT TRANSFORM CODE ADDITIONS
-        # transform_code = multirun_analyses['analyses'][str(i)]['transform_code']
+        transform_code = multirun_analyses['analyses'][str(i)]['transform_code']
+        
         # for each variable in ind_vars, check if it is transformed
         # in the transform_code by using an LLM assistant
-        # for dict_idx, var in enumerate(ind_vars):
-        #     transform_responses = get_feature_transforms(llm_assistant,
-        #                                                  transform_code,
-        #                                                  var['columns'],
-        #                                                  var['description'])
-        #     ind_vars[dict_idx]['transform_code'] = \
-        #         [response.text[0].content for response in transform_responses]
+        for dict_idx, var in enumerate(ind_vars):
+            transform_responses = get_feature_transforms(llm_provider,
+                                                         llm_model,
+                                                         transform_code,
+                                                         var['columns'],
+                                                         var['description'])
+            ind_vars[dict_idx]['transform_code'] = \
+                [response.text[0].content for response in transform_responses]
             
         # save updated independent variables in features dict
-        features[i]['independent_variables'] = ind_vars
+        run_features['independent_variables'] = ind_vars
         
-        # tkae same approach for control variables
-        # for dict_idx, var in enumerate(contr_vars):
-        #     transform_responses = get_feature_transforms(llm_assistant,
-        #                                                  transform_code,
-        #                                                  var['columns'],
-        #                                                  var['description'])
-        #     contr_vars[dict_idx]['transform_code'] = \
-        #         [response.text[0].content for response in transform_responses]
+        # take same approach for control variables
+        for dict_idx, var in enumerate(contr_vars):
+            transform_responses = get_feature_transforms(llm_provider,
+                                                         llm_model,
+                                                         transform_code,
+                                                         var['columns'],
+                                                         var['description'])
+            contr_vars[dict_idx]['transform_code'] = \
+                [response.text[0].content for response in transform_responses]
         
         # save updated control variables in features dict
-        features[i]['control_variables'] = contr_vars
-
-        # get the dependent variables
-        response_vars = multirun_analyses['analyses'][str(i)]['cvars']['dv']
+        run_features['control_variables'] = contr_vars
 
         # for each variable in response_vars, check if it is transformed
         # in the transform_code by using an LLM assistant
-        # transform_responses = get_feature_transforms(llm_assistant,
-        #                                         transform_code,
-        #                                         response_vars['columns'],
-        #                                         response_vars['description'])
-        # response_vars['transform_code'] = [response.text[0].content \
-        #     for response in transform_responses]
+        transform_responses = get_feature_transforms(llm_provider,
+                                                     llm_model,
+                                                transform_code,
+                                                response_vars['columns'],
+                                                response_vars['description'])
+        response_vars['transform_code'] = [response.text[0].content \
+            for response in transform_responses]
 
         # save updated response variables in features dict
-        features[i]['response_variables'] = response_vars
+        run_features['response_variables'] = response_vars
         
+        return i, run_features
+    
+    # parallelized looping through analyses
+    results = Parallel(n_jobs=n_jobs)(
+        delayed(process_single_run)(i) for i in range(num_runs)
+    )
+
+    # convert results list to dictionary
+    features = {i: run_features for i, run_features in results}
+    
     # return the features dict
     return features
 
 def format_model_info(multirun_analyses: dict, num_runs: int,
-                      llm_assistant: TextGenerator):
+                      llm_provider: str, llm_model: str, n_jobs: int=-1):
     
     # create dict to store model information
     model_info = {}
     
-    # loop through analyses
-    for i in range(num_runs):
+    # helper function to process a single run
+    def process_single_run(i):
         
         # get the model code
         model_code = multirun_analyses['analyses'][str(i)]['m_code']
         
         # get the model information using an LLM assistant
-        model_information = get_model_information(llm_assistant, model_code)
+        model_information = get_model_information(llm_provider,
+                                                  llm_model,
+                                                  model_code)
         
-        # save the model information in the dict
-        model_info[i] = model_information
+        return i, model_information
+    
+    # parallelized looping through analyses
+    results = Parallel(n_jobs=n_jobs)(
+        delayed(process_single_run)(i) for i in range(num_runs)
+    )
+    model_info = {i: info for i, info in results}
         
     # return the model information dict
     return model_info
