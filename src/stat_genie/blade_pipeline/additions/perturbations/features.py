@@ -30,7 +30,6 @@ class FeaturePerturbation:
                  shuffle_order: bool = False, shuffle_names: bool = False,
                  add_random_features: int = 0, shuffle_order_seed: int = 42,
                  shuffle_names_seed: int = 42, random_features_seed: int = 42):
-        
         self.anonymize = anonymize
         self.shuffle_order = shuffle_order
         self.shuffle_names = shuffle_names
@@ -249,7 +248,6 @@ class FeaturePerturbation:
         
         # read in json metadata
         json_metadata = read_json(json_path)
-        
         # get name of dataset from path
         dataset_name = os.path.basename(os.path.dirname(json_path))
         
