@@ -37,10 +37,19 @@ if [ -z "$OPENAI_API_KEY" ]; then
     exit 1
 fi
 
+DATASET="caschools"
+NUM_MULTIRUNS=3
+LLM_PROVIDER="openai"
+LLM_MODEL="gpt-5-mini"
+
 echo "Job ID: ${SLURM_JOB_ID}"
 
 START_TIME=$(date +%s)
-poetry run python scripts/run_pairwise_eval.py
+poetry run python scripts/run_pairwise_eval.py \
+    --dataset "$DATASET" \
+    --num-multiruns "$NUM_MULTIRUNS" \
+    --llm-provider "$LLM_PROVIDER" \
+    --llm-model "$LLM_MODEL"
 EXIT_CODE=$?
 END_TIME=$(date +%s)
 

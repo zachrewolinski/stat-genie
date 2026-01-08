@@ -3,6 +3,7 @@
 import os
 import json
 import sys
+import argparse
 from datetime import datetime
 from pathlib import Path
 
@@ -13,10 +14,17 @@ from stat_genie.blade_pipeline.additions.eval.utils import evaluate
 
 
 def run_pairwise_eval():
-    dataset_name = "mortgage"
-    num_multiruns = 3
-    llm_provider = "openai"
-    llm_model = "gpt-5-mini"
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dataset", default="mortgage", help="Dataset name")
+    parser.add_argument("--num-multiruns", type=int, default=3, help="Number of multiruns")
+    parser.add_argument("--llm-provider", default="openai", help="LLM provider")
+    parser.add_argument("--llm-model", default="gpt-5-mini", help="LLM model")
+    args = parser.parse_args()
+    
+    dataset_name = args.dataset
+    num_multiruns = args.num_multiruns
+    llm_provider = args.llm_provider
+    llm_model = args.llm_model
     
     project_root = Path(__file__).parent.parent
     
