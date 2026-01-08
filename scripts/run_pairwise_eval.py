@@ -14,7 +14,7 @@ from stat_genie.blade_pipeline.additions.eval.utils import evaluate
 
 def run_pairwise_eval():
     dataset_name = "mortgage"
-    num_multiruns = 1
+    num_multiruns = 3
     llm_provider = "openai"
     llm_model = "gpt-5-mini"
     
@@ -43,13 +43,19 @@ def run_pairwise_eval():
     output_dir = project_root / "outputs" / "pairwise_eval" / dataset_name / run_id
     output_dir.mkdir(parents=True, exist_ok=True)
     
+    # Convert absolute paths to relative paths for portability
+    analysis_result_paths_relative = [
+        str(Path(p).relative_to(project_root)) for p in analysis_result_paths
+    ]
+    output_dir_relative = str(output_dir.relative_to(project_root))
+    
     run_config = {
         "dataset_name": dataset_name,
         "num_multiruns": num_multiruns,
-        "analysis_result_paths": analysis_result_paths,
+        "analysis_result_paths": analysis_result_paths_relative,
         "llm_provider": llm_provider,
         "llm_model": llm_model,
-        "output_dir": str(output_dir),
+        "output_dir": output_dir_relative,
         "run_id": run_id,
         "timestamp": datetime.now().isoformat(),
         "slurm_job_id": slurm_job_id,

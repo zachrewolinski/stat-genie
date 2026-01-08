@@ -7,7 +7,7 @@
 #SBATCH --mail-type=FAIL,TIME_LIMIT
 #
 #SBATCH -p yugroup
-#SBATCH --cpus-per-task=20
+#SBATCH --cpus-per-task=30
 #SBATCH --mem=64G
 #SBATCH --ntasks=1
 #SBATCH -t 0:30:00
@@ -37,7 +37,6 @@ if [ -z "$OPENAI_API_KEY" ]; then
     exit 1
 fi
 
-echo "Running pairwise eval (mortgage, 1 multirun, openai/gpt-5-mini)"
 echo "Job ID: ${SLURM_JOB_ID}"
 
 START_TIME=$(date +%s)
