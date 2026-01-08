@@ -46,6 +46,7 @@ def evaluate(
     llm_provider: str,
     llm_model: str,
     output_path: Optional[str] = None,
+    use_cache: bool = True,
     ):
     """
     Evaluate pairwise similarity between multiple multirun analyses.
@@ -127,6 +128,7 @@ def evaluate(
                 llm_provider=llm_provider,
                 llm_model=llm_model,
                 output_path=output_path,
+                use_cache=use_cache,
             ),
         )
     pairwise_results = Parallel(n_jobs=-1)(

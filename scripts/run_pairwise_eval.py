@@ -1,0 +1,94 @@
+#!/usr/bin/env python3
+
+import os
+import json
+import sys
+from datetime import datetime
+from pathlib import Path
+
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
+
+from stat_genie.blade_pipeline.additions.eval.utils import evaluate
+
+
+def run_pairwise_eval():
+    dataset_name = "mortgage"
+    num_multiruns = 1
+    llm_provider = "openai"
+    llm_model = "gpt-5-mini"
+    
+    project_root = Path(__file__).parent.parent
+    
+    analysis_result_paths = [
+        str(project_root / "examples" / dataset_name / f"analysis{i}_output")
+        for i in range(1, num_multiruns + 1)
+    ]
+    analysis_result_paths = [os.path.abspath(p) for p in analysis_result_paths]
+    
+    for path in analysis_result_paths:
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Analysis path does not exist: {path}")
+        if not os.path.exists(os.path.join(path, "multirun_analyses.json")):
+            raise FileNotFoundError(f"multirun_analyses.json not found in: {path}")
+    
+    slurm_job_id = os.environ.get("SLURM_JOB_ID", None)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    if slurm_job_id:
+        run_id = f"job_{slurm_job_id}"
+    else:
+        run_id = f"timestamp_{timestamp}"
+    
+    output_dir = project_root / "outputs" / "pairwise_eval" / dataset_name / run_id
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    run_config = {
+        "dataset_name": dataset_name,
+        "num_multiruns": num_multiruns,
+        "analysis_result_paths": analysis_result_paths,
+        "llm_provider": llm_provider,
+        "llm_model": llm_model,
+        "output_dir": str(output_dir),
+        "run_id": run_id,
+        "timestamp": datetime.now().isoformat(),
+        "slurm_job_id": slurm_job_id,
+        "command": " ".join(sys.argv),
+    }
+    
+    config_path = output_dir / "run_config.json"
+    with open(config_path, "w") as f:
+        json.dump(run_config, f, indent=2)
+    
+    print(f"Output: {output_dir}")
+    print(f"Running eval: {dataset_name}, {num_multiruns} multiruns, {llm_provider}/{llm_model}")
+    
+    features, model_info, conclusions, pairwise_similarities = evaluate(
+        dataset_name=dataset_name,
+        analysis_results_paths=analysis_result_paths,
+        llm_provider=llm_provider,
+        llm_model=llm_model,
+        output_path=None,
+        use_cache=False,
+    )
+    
+    def convert_tuple_keys(obj):
+        if isinstance(obj, dict):
+            return {f"{k[0]}_{k[1]}" if isinstance(k, tuple) else str(k): convert_tuple_keys(v) 
+                    for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [convert_tuple_keys(item) for item in obj]
+        return obj
+    
+    results_path = output_dir / "pairwise_similarities.json"
+    with open(results_path, "w") as f:
+        json.dump(convert_tuple_keys(pairwise_similarities), f, indent=2)
+    
+    print(f"Results saved to {results_path}")
+    
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(run_pairwise_eval())
+

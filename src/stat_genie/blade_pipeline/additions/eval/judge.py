@@ -9,10 +9,11 @@ def judge_features(llm_provider: str,
                    research_question: str,
                    feature_type: str,
                    features1: list[dict],
-                   features2: list[dict]):
+                   features2: list[dict],
+                   use_cache: bool = True):
     
     # instantiate the LLM
-    feature_judge = llm(provider=llm_provider, model=llm_model)
+    feature_judge = llm(provider=llm_provider, model=llm_model, use_cache=use_cache)
     
     # define the feature type descriptions
     feature_type_description = {
@@ -184,9 +185,10 @@ def judge_models(llm_provider: str,
                  llm_model: str,
                  research_question: str,
                  models1: list[dict],
-                 models2: list[dict]):
+                 models2: list[dict],
+                 use_cache: bool = True):
 
-    model_judge = llm(provider=llm_provider, model=llm_model)
+    model_judge = llm(provider=llm_provider, model=llm_model, use_cache=use_cache)
 
     example_research_question = (
         "What is the effect of hormonal fluctuations associated with fertility "
@@ -417,7 +419,8 @@ def run_judge_evaluation_pairwise(
     model_info_1: List[str], model_info_2: List[str],
     conclusions_1: List[str], conclusions_2: List[str],
     llm_provider: str = "openai", llm_model: str = "gpt-5-mini",
-    output_path: Optional[str] = None
+    output_path: Optional[str] = None,
+    use_cache: bool = True
 ) -> Dict[Tuple[int, int], Dict]:
     """
     Run pairwise evaluation comparing two sets of analyses using three separate judges.
@@ -452,6 +455,7 @@ def run_judge_evaluation_pairwise(
                 feature_type="independent_variables",
                 features1=features_1[i],
                 features2=features_2[j],
+                use_cache=use_cache,
             )
             
             control_variables_dict = judge_features(
@@ -461,6 +465,7 @@ def run_judge_evaluation_pairwise(
                 feature_type="control_variables",
                 features1=features_1[i],
                 features2=features_2[j],
+                use_cache=use_cache,
             )
             
             dep_variables_dict = judge_features(
@@ -470,6 +475,7 @@ def run_judge_evaluation_pairwise(
                 feature_type="response_variables",
                 features1=features_1[i],
                 features2=features_2[j],
+                use_cache=use_cache,
             )
             
             variables_dict = ind_variables_dict | control_variables_dict | dep_variables_dict
@@ -480,6 +486,7 @@ def run_judge_evaluation_pairwise(
                 research_question=task,
                 models1=model_info_1[i],
                 models2=model_info_2[j],
+                use_cache=use_cache,
             )
             
             conclusions_dict = judge_conclusions(
@@ -488,7 +495,8 @@ def run_judge_evaluation_pairwise(
                 research_question=task,
                 conclusion_1=conclusions_1[i],
                 conclusion_2=conclusions_2[j],
-                data_head=data_head
+                data_head=data_head,
+                use_cache=use_cache,
             )
             
             combined_result = _combine_judge_responses(
@@ -509,7 +517,8 @@ def judge_conclusions(
     research_question: str,
     conclusion_1: str,
     conclusion_2: str,
-    data_head: Optional[Any] = None
+    data_head: Optional[Any] = None,
+    use_cache: bool = True
 ) -> Dict:
     """
     Evaluate the similarity of two conclusions using an LLM judge.
@@ -580,7 +589,7 @@ def judge_conclusions(
         "Now, provide similarity rating for conclusions as JSON only."
     )
     
-    llm_judge = llm(provider=llm_provider, model=llm_model)
+    llm_judge = llm(provider=llm_provider, model=llm_model, use_cache=use_cache)
     result = llm_judge.generate([
         {"role": "system", "content": judge_system_prompt},
         {"role": "user", "content": user_prompt}
