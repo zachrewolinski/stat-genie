@@ -180,7 +180,7 @@ class RunLLMMultiRun(SingleRunExperiment):
                             llm_model=llm_model,
                             cvars_text=cvars_text,
                             dataset_path=dataset_path,
-                            verbose=False
+                            verbose=True
                         )
                         
                         if iterations >= 0:
@@ -242,6 +242,7 @@ class RunLLMMultiRun(SingleRunExperiment):
                 llm_provider=self.config.llm.provider,
                 llm_model=self.config.llm.model,
                 model_output=model_output,
+                verbose=True
             )
             logger.info(f"Wrote final answer extraction code for analysis {i}. It required {iterations} iteration(s) to be correct.")
             # Step 7: Make conclusion based on final answer
