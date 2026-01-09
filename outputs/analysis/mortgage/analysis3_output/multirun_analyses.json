@@ -1,0 +1,92 @@
+{
+  "dataset_name": "mortgage",
+  "n": 1,
+  "analyses": {
+    "0": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Applicant gender: indicator for female applicants (1 = female, 0 = male). Derived from the dataset column 'consumer_credit' when present (this column in the source indicates 1 if applicant is female, 0 if male). In the final dataframe this variable is named 'female'.",
+            "columns": [
+              "female"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Mortgage application denial indicator (1 = application denied, 0 = application accepted). Taken from 'mortgage_credit' when available (schema: 1 = denied, 0 = accepted). In the final dataframe this column is named 'mortgage_denied'.",
+          "columns": [
+            "mortgage_denied"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Applicant's credit score / consumer credit rating (ordinal or numeric). Taken from source column 'accept' and renamed to 'credit_score' in the final dataframe.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "credit_score"
+            ]
+          },
+          {
+            "description": "Loan-to-value ratio (numeric, proportion). Uses source column 'loan_to_value' and kept with the same name in the final dataframe.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "loan_to_value"
+            ]
+          },
+          {
+            "description": "Housing expense ratio (housing expenses / income). Uses source column 'housing_expense_ratio' and kept with the same name in the final dataframe.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "housing_expense_ratio"
+            ]
+          },
+          {
+            "description": "Payment-to-income ratio or similar debt-service ratio (source column 'PI_ratio'). Kept as 'PI_ratio' in the final dataframe.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "PI_ratio"
+            ]
+          },
+          {
+            "description": "Self-employment indicator (1 = self-employed, 0 = not). Source column 'self_employed' -> final column 'self_employed'.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "self_employed"
+            ]
+          },
+          {
+            "description": "Marital status indicator (1 = married, 0 = not married). Source column 'married' -> final column 'married'.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "married"
+            ]
+          },
+          {
+            "description": "Applicant race indicator for being Black (1 = Black, 0 = not). Uses source column 'bad_history' which in the provided schema was described as a Black indicator; final column name is 'black'.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "black"
+            ]
+          },
+          {
+            "description": "Denied private mortgage insurance (PMI) rate or related continuous measure, kept as 'denied_PMI' in the final dataframe. Included as a control for financing structure differences.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "denied_PMI"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Prepare the dataframe for modeling gender effects on mortgage denial.\n\n    Produces the following columns (exact names used by the model):\n      - female: 0/1 indicator for female applicant\n      - mortgage_denied: 0/1 indicator where 1 = denied, 0 = accepted\n      - credit_score: numeric/ordinal credit score from 'accept'\n      - loan_to_value, housing_expense_ratio, PI_ratio, self_employed, married, black, denied_PMI\n\n    The function is defensive: it will try to map multiple possible source columns to the required final columns when the schema is ambiguous.\n    \"\"\"\n    df = df.copy()\n\n    # --- Create female indicator ---\n    if 'consumer_credit' in df.columns:\n        # Schema: consumer_credit described as 1 if applicant is female, 0 if male\n        df['female'] = pd.to_numeric(df['consumer_credit'], errors='coerce')\n    elif 'female' in df.columns:\n        # Some datasets might already have a female column; coerce to numeric and map to 0/1\n        df['female'] = pd.to_numeric(df['female'], errors='coerce')\n    else:\n        # If no gender column is present, create NA column so downstream will drop\n        df['female'] = np.nan\n\n    # Normalize female to strict 0/1 when possible\n    df['female'] = df['female'].where(df['female'].isna(), df['female'].astype(float))\n    df.loc[~df['female'].isna(), 'female'] = df.loc[~df['female'].isna(), 'female'].apply(lambda x: 1 if float(x) >= 0.5 else 0)\n\n    # --- Create mortgage_denied dependent variable ---\n    # Prefer a clearly described column 'mortgage_credit' (schema: 1 = denied, 0 = accepted)\n    if 'mortgage_credit' in df.columns:\n        df['mortgage_denied'] = pd.to_numeric(df['mortgage_credit'], errors='coerce')\n    elif 'deny' in df.columns:\n        # 'deny' sometimes holds counts or indicators; attempt to coerce to binary (non-zero -> denied)\n        tmp = pd.to_numeric(df['deny'], errors='coerce')\n        df['mortgage_denied'] = tmp.apply(lambda x: 1 if (not pd.isna(x) and x != 0) else (0 if not pd.isna(x) else np.nan))\n    elif 'Unnamed: 0' in df.columns:\n        # In some provided descriptions 'Unnamed: 0' was used as acceptance flag; try to interpret\n        tmp = pd.to_numeric(df['Unnamed: 0'], errors='coerce')\n        # If Unnamed: 0 encodes 1 = accepted, 0 = denied (ambiguous), we try to detect and convert.\n        # We assume 1 -> accepted, 0 -> denied -> so mortgage_denied = 1 - Unnamed: 0\n        df['mortgage_denied'] = tmp.apply(lambda x: (1 - x) if not pd.isna(x) else np.nan)\n    else:\n        df['mortgage_denied'] = np.nan\n\n    # Ensure mortgage_denied is numeric 0/1 when possible\n    df['mortgage_denied'] = df['mortgage_denied'].where(df['mortgage_denied'].isna(), pd.to_numeric(df['mortgage_denied'], errors='coerce').astype(float))\n    df.loc[~df['mortgage_denied'].isna(), 'mortgage_denied'] = df.loc[~df['mortgage_denied'].isna(), 'mortgage_denied'].apply(lambda x: 1 if float(x) >= 0.5 else 0)\n\n    # --- Controls: coerce and rename from schema columns ---\n    # credit_score from 'accept'\n    if 'accept' in df.columns:\n        df['credit_score'] = pd.to_numeric(df['accept'], errors='coerce')\n    else:\n        df['credit_score'] = np.nan\n\n    # loan_to_value\n    if 'loan_to_value' in df.columns:\n        df['loan_to_value'] = pd.to_numeric(df['loan_to_value'], errors='coerce')\n    else:\n        df['loan_to_value'] = np.nan\n\n    # housing_expense_ratio\n    if 'housing_expense_ratio' in df.columns:\n        df['housing_expense_ratio'] = pd.to_numeric(df['housing_expense_ratio'], errors='coerce')\n    else:\n        df['housing_expense_ratio'] = np.nan\n\n    # PI_ratio (payment-to-income or similar)\n    if 'PI_ratio' in df.columns:\n        df['PI_ratio'] = pd.to_numeric(df['PI_ratio'], errors='coerce')\n    else:\n        df['PI_ratio'] = np.nan\n\n    # self_employed\n    if 'self_employed' in df.columns:\n        df['self_employed'] = pd.to_numeric(df['self_employed'], errors='coerce')\n    else:\n        df['self_employed'] = np.nan\n\n    # married\n    if 'married' in df.columns:\n        df['married'] = pd.to_numeric(df['married'], errors='coerce')\n    else:\n        df['married'] = np.nan\n\n    # black (race) -- schema indicates 'bad_history' was the Black indicator in this dataset description\n    if 'bad_history' in df.columns:\n        df['black'] = pd.to_numeric(df['bad_history'], errors='coerce')\n    elif 'black' in df.columns:\n        df['black'] = pd.to_numeric(df['black'], errors='coerce')\n    else:\n        df['black'] = np.nan\n\n    # denied_PMI\n    if 'denied_PMI' in df.columns:\n        df['denied_PMI'] = pd.to_numeric(df['denied_PMI'], errors='coerce')\n    else:\n        df['denied_PMI'] = np.nan\n\n    # --- Final housekeeping: drop rows missing the DV or the main IV ---\n    required_for_model = ['mortgage_denied', 'female', 'credit_score', 'loan_to_value', 'housing_expense_ratio', 'PI_ratio', 'self_employed', 'married', 'black', 'denied_PMI']\n\n    # It's often better to keep as many rows as possible; however, the model requires no NA in predictors and outcome.\n    df = df.dropna(subset=required_for_model)\n\n    # Convert columns to appropriate dtypes (int for binary indicators)\n    df['female'] = df['female'].astype(int)\n    df['mortgage_denied'] = df['mortgage_denied'].astype(int)\n    df['married'] = df['married'].apply(lambda x: int(x) if (not pd.isna(x) and float(x) in [0,1]) else int(x) if not pd.isna(x) else x)\n    df['self_employed'] = df['self_employed'].apply(lambda x: int(x) if (not pd.isna(x) and float(x) in [0,1]) else int(x) if not pd.isna(x) else x)\n\n    # Ensure numeric types for continuous predictors\n    numeric_cols = ['credit_score', 'loan_to_value', 'housing_expense_ratio', 'PI_ratio', 'denied_PMI', 'black']\n    for c in numeric_cols:\n        df[c] = pd.to_numeric(df[c], errors='coerce')\n\n    # Return the dataframe containing all columns necessary for the model (plus any original columns still present).\n    return df",
+      "m_code": "def model(df: pd.DataFrame):\n    \"\"\"\n    Fit a logistic regression predicting mortgage denial from applicant gender controlling for credit and application covariates.\n\n    Returns a dictionary with keys:\n      - 'fit': the fitted statsmodels results object\n      - 'marginal_effects': average marginal effects dataframe (if computable)\n\n    Exact predictor column names used (must exist in df returned by transform):\n      female, credit_score, loan_to_value, housing_expense_ratio, PI_ratio, self_employed, married, black, denied_PMI\n    Dependent variable: mortgage_denied\n    \"\"\"\n    df = df.copy()\n\n    # Columns to use\n    predictors = ['female', 'credit_score', 'loan_to_value', 'housing_expense_ratio', 'PI_ratio', 'self_employed', 'married', 'black', 'denied_PMI']\n    outcome = 'mortgage_denied'\n\n    # Ensure no missing data for the model\n    model_df = df.dropna(subset=predictors + [outcome]).copy()\n\n    # Design matrix\n    X = model_df[predictors]\n    X = sm.add_constant(X, has_constant='add')\n    y = model_df[outcome]\n\n    # Fit logistic regression (Logit). If Logit fails to converge/use, fall back to GLM with binomial family.\n    try:\n        logit_res = sm.Logit(y, X).fit(disp=False)\n    except Exception:\n        logit_res = sm.GLM(y, X, family=sm.families.Binomial()).fit()\n\n    # Robust (heteroskedasticity-consistent) covariance if available\n    try:\n        # Recompute fit with robust covariance for more reliable SEs\n        logit_res_robust = logit_res.get_robustcov_results(cov_type='HC3')\n    except Exception:\n        logit_res_robust = logit_res\n\n    # Average marginal effects for the female indicator and other predictors (if supported)\n    try:\n        margeff = logit_res_robust.get_margeff(at='overall', method='dydx')\n        margeff_df = margeff.summary_frame()\n    except Exception:\n        margeff_df = None\n\n    results = {\n        'fit': logit_res_robust,\n        'marginal_effects': margeff_df,\n        'predictors': predictors,\n        'outcome': outcome,\n        'n_obs': int(model_df.shape[0])\n    }\n\n    return results"
+    }
+  }
+}
