@@ -32,6 +32,9 @@ from stat_genie.blade_pipeline.additions.analysis.fix_code import (
 from stat_genie.blade_pipeline.additions.perturbations.features import (
     FeaturePerturbation,
 )
+from stat_genie.blade_pipeline.additions.perturbations.data import (
+    DataPerturbation,
+)
 from stat_genie.blade_pipeline.additions.prompt.prompt import PromptGenerator
 from stat_genie.blade_pipeline.baselines.run import SingleRunExperiment
 
@@ -131,8 +134,9 @@ def _update_analysis_with_fixed_code(
 
 class RunLLMMultiRun(SingleRunExperiment):
     def __init__(self, config: MultiRunConfig, prompt: PromptGenerator,
-                 feature_perturbation: FeaturePerturbation):
-        super().__init__(config, prompt, feature_perturbation)
+                 feature_perturbation: FeaturePerturbation,
+                 data_perturbation: DataPerturbation):
+        super().__init__(config, prompt, feature_perturbation, data_perturbation)
         self.config = config
         self.prompt = prompt
         self.feature_perturbation = feature_perturbation
@@ -146,7 +150,7 @@ class RunLLMMultiRun(SingleRunExperiment):
                 save_path = osp.join(self.config.output_dir, f"llm_analysis_{i}.py")
                 with open(save_path, "w") as f:
                     code = SAVE_CODE_TEMPLATE.format(
-                        data_path=f"{get_dataset_csv_path(self.config.run_dataset)}",
+                        data_path=osp.join(os.path.abspath(self.config.output_dir), f"{self.config.run_dataset}.csv"),
                         transform_code=analysis.transform_code,
                         model_code=analysis.m_code,
                     )
@@ -154,7 +158,8 @@ class RunLLMMultiRun(SingleRunExperiment):
         
         # Step 2: Fix .py files (if enabled) and update analyses with fixed code
         if self.config.fix_code:
-            dataset_path = get_dataset_csv_path(self.config.run_dataset)
+            # dataset_path = get_dataset_csv_path(self.config.run_dataset)
+            dataset_path = osp.join(os.path.abspath(self.config.output_dir), f"{self.config.run_dataset}.csv")
             llm_provider = self.config.llm.provider
             llm_model = self.config.llm.model
             
@@ -216,7 +221,7 @@ class RunLLMMultiRun(SingleRunExperiment):
             with open(data_info, "r") as f:
                 data_info = json.load(f)
             task = data_info["research_questions"][0]
-            data_path = get_dataset_csv_path(self.config.run_dataset)
+            data_path = osp.join(os.path.abspath(self.config.output_dir), f"{self.config.run_dataset}.csv")
             data = pd.read_csv(data_path)
             transformed_data = module.transform(data)
             model_output = module.model(transformed_data)
@@ -294,13 +299,17 @@ class RunLLMMultiRun(SingleRunExperiment):
 
 
 def multirun_llm(config: MultiRunConfig, prompt: PromptGenerator = None,
-                 feature_perturbation: FeaturePerturbation = None):
+                 feature_perturbation: FeaturePerturbation = None,
+                 data_perturbation: DataPerturbation = None):
     # if no prompt is provided, create a default one
     if prompt is None:
         prompt = PromptGenerator() # no args gives default (BLADE-style prompts)
     # if no feature perturbation is provided, create a default one
     if feature_perturbation is None:
         feature_perturbation = FeaturePerturbation() # no args gives default (no perturbation)
-    runner = RunLLMMultiRun(config, prompt, feature_perturbation)
+    # if no data perturbation is provided, create a default one
+    if data_perturbation is None:
+        data_perturbation = DataPerturbation() # no args gives default (no perturbation)
+    runner = RunLLMMultiRun(config, prompt, feature_perturbation, data_perturbation)
     results = asyncio.run(runner.run(config.save_results))
     logger.success("Completed, everything is logged at: " + config.output_dir)

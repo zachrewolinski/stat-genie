@@ -24,6 +24,9 @@ from langchain.output_parsers import PydanticOutputParser
 from stat_genie.blade_pipeline.additions.perturbations.features import (
     FeaturePerturbation,
 )
+from stat_genie.blade_pipeline.additions.perturbations.data import (
+    DataPerturbation,
+)
 from stat_genie.blade_pipeline.additions.prompt.prompt import PromptGenerator
 from stat_genie.blade_pipeline.baselines.config import SingleRunConfig
 from stat_genie.blade_pipeline.baselines.lm.gen_analysis import GenAnalysisLM
@@ -37,11 +40,14 @@ class SingleRunExperiment:
     GEN_ANALYSIS_FNAME = "llm_analysis.json"
 
     def __init__(self, config: SingleRunConfig, prompt: PromptGenerator,
-                 feature_perturbation: FeaturePerturbation):
+                 feature_perturbation: FeaturePerturbation,
+                 data_perturbation: DataPerturbation):
         self.config = config
-        # NOTE: THIS IS WHERE WE APPLY FEATURE PERTURBATION
-        self.dinfo = load_dataset_info(config.run_dataset, feature_perturbation,
-                                       edited_df_path=config.output_dir)
+        # NOTE: THIS IS WHERE WE APPLY FEATURE AND DATA PERTURBATION
+        self.dinfo = load_dataset_info(dataset=config.run_dataset,
+                                       feature_perturbation=feature_perturbation,
+                                       data_perturbation=data_perturbation,
+                                       edited_df_path=os.path.abspath(config.output_dir))
         self.llm_history = LLMHistory()
         self.format_lm = LLMBase(config.llm_eval.texgt_gen)
         self.eval_text_gen = config.llm_eval.texgt_gen
@@ -59,7 +65,7 @@ class SingleRunExperiment:
             self.agent = ReActAgent(
                 self.gen_analysis_lm,
                 dinfo=self.dinfo,
-                data_path=get_dataset_csv_path(config.run_dataset),
+                data_path=osp.join(os.path.abspath(config.output_dir), f"{config.run_dataset}.csv"),
                 use_data_desc=config.use_data_desc,
                 use_code_cache=config.use_code_cache,
             )
