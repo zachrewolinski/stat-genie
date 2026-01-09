@@ -19,6 +19,8 @@ def run_pairwise_eval():
     parser.add_argument("--num-multiruns", type=int, default=3, help="Number of multiruns")
     parser.add_argument("--llm-provider", default="openai", help="LLM provider")
     parser.add_argument("--llm-model", default="gpt-5-mini", help="LLM model")
+    parser.add_argument("--analysis-base-dir", type=str, default=None,
+                       help="Base directory for analysis outputs (default: outputs/analysis)")
     args = parser.parse_args()
     
     dataset_name = args.dataset
@@ -28,8 +30,15 @@ def run_pairwise_eval():
     
     project_root = Path(__file__).parent.parent
     
+    if args.analysis_base_dir:
+        base_dir = Path(args.analysis_base_dir)
+        if not base_dir.is_absolute():
+            base_dir = project_root / base_dir
+    else:
+        base_dir = project_root / "outputs" / "analysis"
+    
     analysis_result_paths = [
-        str(project_root / "examples" / dataset_name / f"analysis{i}_output")
+        str(base_dir / dataset_name / f"analysis{i}_output")
         for i in range(1, num_multiruns + 1)
     ]
     analysis_result_paths = [os.path.abspath(p) for p in analysis_result_paths]
@@ -51,16 +60,21 @@ def run_pairwise_eval():
     output_dir = project_root / "outputs" / "pairwise_eval" / dataset_name / run_id
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Convert absolute paths to relative paths for portability
     analysis_result_paths_relative = [
         str(Path(p).relative_to(project_root)) for p in analysis_result_paths
     ]
     output_dir_relative = str(output_dir.relative_to(project_root))
     
+    try:
+        analysis_base_dir_relative = str(base_dir.relative_to(project_root))
+    except ValueError:
+        analysis_base_dir_relative = str(base_dir)
+    
     run_config = {
         "dataset_name": dataset_name,
         "num_multiruns": num_multiruns,
         "analysis_result_paths": analysis_result_paths_relative,
+        "analysis_base_dir": analysis_base_dir_relative,
         "llm_provider": llm_provider,
         "llm_model": llm_model,
         "output_dir": output_dir_relative,

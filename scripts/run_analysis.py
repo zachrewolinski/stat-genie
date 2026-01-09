@@ -120,7 +120,7 @@ def run_analysis():
     
     multirun_llm(single_run_config, feature_perturbation=feature_perturbation)
     
-    print(f"Analysis {analysis_num} completed: {output_dir}")
+    print(f"Analysis {analysis_num} completed")
     
     return 0
 
