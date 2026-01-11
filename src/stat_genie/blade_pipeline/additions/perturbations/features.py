@@ -201,7 +201,6 @@ class FeaturePerturbation:
         features_to_add = random.sample(full_feature_set, 
                                         min(self.add_num_features,
                                             len(full_feature_set)))
-        
         # add selected features to the current metadata
         if "data_desc" not in json_metadata:
             json_metadata["data_desc"] = {}
@@ -212,7 +211,7 @@ class FeaturePerturbation:
         if "field_names" not in json_metadata["data_desc"]:
             json_metadata["data_desc"]["field_names"] = []
         json_metadata["data_desc"]["field_names"].extend(
-            [feature["column"] for feature in features_to_add if "column" in feature]
+            [feature[1]["column"] for feature in features_to_add if "column" in feature[1]]
         )
         
         # add selected features to the dataframe
@@ -243,7 +242,9 @@ class FeaturePerturbation:
         4. Shuffle feature names
         
         Returns:
-            The perturbed JSON metadata as a dictionary
+        - The perturbed JSON metadata as a dictionary
+        - The perturbed dataframe with added features as a pandas DataFrame
+          (if add_random_features > 0), otherwise None
         """
         
         # read in json metadata

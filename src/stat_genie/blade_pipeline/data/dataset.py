@@ -9,6 +9,9 @@ from pydantic import BaseModel, ConfigDict
 from stat_genie.blade_pipeline.additions.perturbations.features import (
     FeaturePerturbation,
 )
+from stat_genie.blade_pipeline.additions.perturbations.data import (
+    DataPerturbation,
+)
 from stat_genie.blade_pipeline.data.annotation import (
     get_annotation_data_from_df,
 )
@@ -63,7 +66,9 @@ class DatasetInfo(BaseModel):
 
 
 def load_dataset_info(dataset: str, feature_perturbation: FeaturePerturbation,
-                      load_df=False, edited_df_path: Optional[str]=None) -> DatasetInfo:
+                      data_perturbation: DataPerturbation,
+                      edited_df_path: str,
+                      load_df=False) -> DatasetInfo:
     data_info_path = get_dataset_info_path(dataset)
     if not osp.exists(data_info_path):
         raise FileNotFoundError(f"Dataset info file not found: {data_info_path}")
@@ -73,14 +78,21 @@ def load_dataset_info(dataset: str, feature_perturbation: FeaturePerturbation,
     # if the feature perturbation modified the data, we need to apply the
     # same perturbation to the dataframe for consistency with the metadata
     if df is not None:
+        # NOTE: HERE IS WHERE WE APPLY THE DATA PERTURBATION.
+        df = data_perturbation.perturb(df)
         # write df to the analysis subdir for eval purposes
-        if edited_df_path is not None:
-            df.to_csv(osp.join(edited_df_path, f"{dataset}.csv"),
+        df.to_csv(osp.join(edited_df_path, f"{dataset}.csv"),
                       index=False)
-        else:
-            # throw error
-            raise ValueError("edited_df_path must be provided if feature "
-                             "perturbation modifies the dataframe.")
+    else:
+        # if the feature perturbation did not modify the data, we need to load
+        # the original dataframe and apply the data perturbation to it
+        df_path = get_dataset_csv_path(dataset)
+        if not osp.exists(df_path):
+            raise FileNotFoundError(f"Dataset CSV file not found: {df_path}")
+        df = pd.read_csv(df_path)
+        df = data_perturbation.perturb(df)
+        df.to_csv(osp.join(edited_df_path, f"{dataset}.csv"),
+                  index=False)
     if load_df:
         if df is None:
             df_path = get_dataset_csv_path(dataset)

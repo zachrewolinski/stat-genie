@@ -6,29 +6,107 @@
       "cvars": {
         "ivs": [
           {
-            "description": "Applicant gender indicator (1 = female, 0 = male). Derived from the dataset column 'consumer_credit' which encodes gender in this file.",
+            "description": "Applicant gender indicator (1 = female, 0 = male). Constructed from the dataset column 'consumer_credit' when available; falls back to a thresholded 'female' column if necessary.",
             "columns": [
-              "female"
+              "Female"
             ]
           }
         ],
         "dv": {
-          "description": "Whether the mortgage application was approved (1 = approved, 0 = denied). Derived from 'mortgage_credit' which in this dataset is coded 1 = denied, 0 = accepted; we invert that to create 'approved'.",
+          "description": "Binary indicator for mortgage approval (1 = application accepted / approved, 0 = application denied). Constructed so Approved = 1 when the mortgage denial indicator is 0.",
           "columns": [
-            "approved"
+            "Approved"
           ]
         },
         "controls": [
           {
-            "description": "Applicant race indicator (1 = Black, 0 = non-Black). Uses the 'bad_history' column in the original file which here contains a Black indicator.",
+            "description": "Indicator for prior bad history / race flag (according to provided schema: 1 = Black, 0 = otherwise). Included as a control for potential confounding.",
             "is_moderator": false,
             "moderator_on": null,
             "columns": [
-              "black"
+              "BadHistory"
             ]
           },
           {
-            "description": "Applicant married status (1 = married, 0 = not married). Uses the 'married' column when available.",
+            "description": "Marital status indicator (1 = married, 0 = not married).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "Married"
+            ]
+          },
+          {
+            "description": "Self-employment indicator (1 = self-employed, 0 = not).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "SelfEmployed"
+            ]
+          },
+          {
+            "description": "Payment-to-income ratio (standardized z-score). Created from 'PI_ratio' then standardized to mean 0 / SD 1.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "PI_ratio_z"
+            ]
+          },
+          {
+            "description": "Denied PMI / private mortgage insurance continuous measure (standardized z-score). Created from 'denied_PMI' then standardized.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "Denied_PMI_z"
+            ]
+          },
+          {
+            "description": "Loan-to-value indicator (as provided in 'loan_to_value', typically 0/1 or continuous ratio). Used raw.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "LoanToValue"
+            ]
+          },
+          {
+            "description": "Housing expense ratio (standardized z-score). Created from 'housing_expense_ratio' then standardized to mean 0 / SD 1.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "HousingExpenseRatio_z"
+            ]
+          },
+          {
+            "description": "Applicant consumer credit score (standardized z-score). Created from 'accept' column then standardized.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "CreditScore_z"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw DataFrame into the analysis-ready DataFrame.\n\n    Produces these final columns used in the model:\n      - Approved: binary (1 = accepted/approved, 0 = denied)\n      - Female: binary (1 = female, 0 = male)\n      - BadHistory, Married, SelfEmployed, LoanToValue: control variables copied from originals\n      - PI_ratio_z, Denied_PMI_z, HousingExpenseRatio_z, CreditScore_z: standardized continuous controls\n\n    Rules implemented:\n      - Prefer 'mortgage_credit' as the denial indicator (schema: 1 = denied, 0 = accepted). If not available, try 'Unnamed: 0'.\n      - Prefer 'consumer_credit' as the gender indicator (schema: 1 = female, 0 = male). If not available, try 'female' (thresholded at >0.5).\n      - Coerce relevant columns to numeric and drop rows with missing values in any final variables.\n    \"\"\"\n    df = df.copy()\n\n    # Ensure numeric for many candidate columns (coerce errors to NaN)\n    candidate_cols = ['mortgage_credit', 'consumer_credit', 'bad_history', 'married', 'PI_ratio',\n                      'housing_expense_ratio', 'accept', 'loan_to_value', 'denied_PMI',\n                      'female', 'self_employed', 'Unnamed: 0']\n    for c in candidate_cols:\n        if c in df.columns:\n            df[c] = pd.to_numeric(df[c], errors='coerce')\n\n    # Determine mortgage denial column (expected coding: 1 = denied, 0 = accepted)\n    if 'mortgage_credit' in df.columns:\n        df['mortgage_credit_bin'] = df['mortgage_credit']\n    elif 'Unnamed: 0' in df.columns:\n        df['mortgage_credit_bin'] = df['Unnamed: 0']\n    else:\n        raise ValueError(\"No mortgage acceptance/denial column found in dataset. Expected 'mortgage_credit' or 'Unnamed: 0'.\")\n\n    # Create Approved indicator: 1 = accepted (mortgage_credit_bin == 0), 0 = denied\n    # Use equality check to ensure we only set Approved when value explicitly equals 0 or 1\n    df['Approved'] = df['mortgage_credit_bin'].apply(lambda x: 1 if pd.notnull(x) and x == 0 else (0 if pd.notnull(x) and x == 1 else np.nan))\n\n    # Gender: prefer consumer_credit (schema: 1 = female, 0 = male)\n    if 'consumer_credit' in df.columns:\n        df['Female'] = df['consumer_credit'].apply(lambda x: int(x) if pd.notnull(x) else np.nan)\n    elif 'female' in df.columns:\n        # 'female' column in this dataset appears non-binary / continuous in schema; threshold to produce indicator\n        df['Female'] = df['female'].apply(lambda x: 1 if pd.notnull(x) and x > 0.5 else (0 if pd.notnull(x) else np.nan))\n    else:\n        raise ValueError(\"No gender column found. Expected 'consumer_credit' or 'female'.\")\n\n    # Map other controls (copy and coerce to numeric if present)\n    df['BadHistory'] = df['bad_history'] if 'bad_history' in df.columns else np.nan\n    df['Married'] = df['married'] if 'married' in df.columns else np.nan\n    df['SelfEmployed'] = df['self_employed'] if 'self_employed' in df.columns else np.nan\n    df['LoanToValue'] = df['loan_to_value'] if 'loan_to_value' in df.columns else np.nan\n    # Copy raw continuous controls, then standardize below\n    df['PI_ratio_raw'] = df['PI_ratio'] if 'PI_ratio' in df.columns else np.nan\n    df['Denied_PMI_raw'] = df['denied_PMI'] if 'denied_PMI' in df.columns else np.nan\n    df['HousingExpenseRatio_raw'] = df['housing_expense_ratio'] if 'housing_expense_ratio' in df.columns else np.nan\n    df['CreditScore_raw'] = df['accept'] if 'accept' in df.columns else np.nan\n\n    # Standardize continuous controls to z-scores (mean 0, sd 1) when possible.\n    # Use ddof=0 (population sd) to avoid dividing by zero in small samples; leave NaN when column is all NaN.\n    def zscore(series: pd.Series) -> pd.Series:\n        if series.dropna().shape[0] == 0:\n            return pd.Series(index=series.index, dtype=float)\n        mu = series.mean()\n        sigma = series.std(ddof=0)\n        if sigma == 0 or np.isnan(sigma):\n            return (series - mu).astype(float)\n        return (series - mu) / sigma\n\n    df['PI_ratio_z'] = zscore(df['PI_ratio_raw'])\n    df['Denied_PMI_z'] = zscore(df['Denied_PMI_raw'])\n    df['HousingExpenseRatio_z'] = zscore(df['HousingExpenseRatio_raw'])\n    df['CreditScore_z'] = zscore(df['CreditScore_raw'])\n\n    # Select final columns to ensure they exist and drop rows with missing values in any of them\n    final_cols = ['Approved', 'Female', 'BadHistory', 'Married', 'SelfEmployed',\n                  'PI_ratio_z', 'Denied_PMI_z', 'LoanToValue', 'HousingExpenseRatio_z', 'CreditScore_z']\n\n    # If any of the named control columns do not exist in the DataFrame, they will be NaN; drop rows with NaNs in final columns\n    df_final = df.copy()\n    df_final = df_final.dropna(subset=final_cols)\n\n    # Ensure final columns have appropriate dtypes\n    # Approved and Female should be integer indicators\n    df_final['Approved'] = df_final['Approved'].astype(int)\n    df_final['Female'] = df_final['Female'].astype(int)\n    # Other controls as floats\n    df_final['BadHistory'] = df_final['BadHistory'].astype(float)\n    df_final['Married'] = df_final['Married'].astype(float)\n    df_final['SelfEmployed'] = df_final['SelfEmployed'].astype(float)\n    df_final['LoanToValue'] = df_final['LoanToValue'].astype(float)\n\n    # Return the transformed DataFrame (preserve extras but guarantee final_cols exist)\n    return df_final",
+      "m_code": "def model(df: pd.DataFrame) -> Any:\n    \"\"\"\n    Fit a logistic regression predicting Approved (1 = accepted) from Female and controls.\n\n    Model specification (primary):\n      logit( P(Approved=1) ) = beta0 + beta1 * Female + beta2 * BadHistory + beta3 * Married +\n                              beta4 * SelfEmployed + beta5 * PI_ratio_z + beta6 * Denied_PMI_z +\n                              beta7 * LoanToValue + beta8 * HousingExpenseRatio_z + beta9 * CreditScore_z\n\n    Returns the fitted statsmodels Logit result object (or a closely compatible fallback).\n    \"\"\"\n    # Ensure required columns exist\n    required = ['Approved', 'Female', 'BadHistory', 'Married', 'SelfEmployed',\n                'PI_ratio_z', 'Denied_PMI_z', 'LoanToValue', 'HousingExpenseRatio_z', 'CreditScore_z']\n    missing = [c for c in required if c not in df.columns]\n    if len(missing) > 0:\n        raise ValueError(f\"Missing required columns for modeling: {missing}\")\n\n    # Build design matrix X and outcome y\n    X = df[['Female', 'BadHistory', 'Married', 'SelfEmployed',\n            'PI_ratio_z', 'Denied_PMI_z', 'LoanToValue', 'HousingExpenseRatio_z', 'CreditScore_z']].astype(float).copy()\n    X = sm.add_constant(X, has_constant='add')\n    y = df['Approved'].astype(int)\n\n    # If any predictor column has zero variance (or a single unique value), add tiny jitter to avoid singular matrix.\n    # The jitter is extremely small and deterministic (seeded) so as not to materially change the data but to\n    # allow matrix inversion when a column is constant in the sample.\n    rng = np.random.RandomState(0)\n    for col in X.columns:\n        if col == 'const' or col == 'const' or col == 'const':  # harmless repeated check to keep const name stable\n            # statsmodels uses 'const' as default name for intercept\n            if col == 'const':\n                continue\n        # Consider a column constant if std (ddof=0) is effectively zero or there is <=1 unique value (ignoring NaN)\n        col_non_na = X[col].dropna()\n        if col_non_na.shape[0] == 0:\n            continue\n        if np.isclose(col_non_na.std(ddof=0), 0.0) or col_non_na.nunique(dropna=True) <= 1:\n            # add tiny deterministic noise\n            noise = rng.normal(loc=0.0, scale=1e-8, size=X.shape[0])\n            X[col] = X[col] + noise\n\n    # Fit logistic regression (maximum likelihood). Use try/except to surface convergence problems.\n    try:\n        logit_model = sm.Logit(y, X)\n        results = logit_model.fit(disp=False)\n    except Exception as e:\n        # If standard Logit fails (e.g., singular matrix / perfect separation), attempt a regularized fit as a fallback.\n        # Regularized fit should succeed in many degenerate cases by stabilizing estimation.\n        try:\n            logit_model = sm.Logit(y, X)\n            # Try a small L2-style regularization via fit_regularized. Statsmodels' fit_regularized may accept different\n            # arguments depending on version; use a small alpha to minimally regularize.\n            results = logit_model.fit_regularized(method='l1', alpha=1e-6, disp=False)\n        except Exception:\n            try:\n                # If the above fails, try a slightly larger penalty\n                results = logit_model.fit_regularized(method='l1', alpha=1e-4, disp=False)\n            except Exception:\n                # As a last resort, re-raise the original exception with context.\n                raise RuntimeError(f\"Logit model failed to fit: {e}\")\n\n    return results\n\n\nif __name__ == \"__main__\":\n    # Example run (will execute when this file is run directly)\n    transformed = transform(df)\n    fitted = model(transformed)\n    # Print a brief summary if the result object supports it\n    try:\n        print(fitted.summary())\n    except Exception:\n        # Fallback: print parameters if available\n        try:\n            print(\"Params:\", fitted.params)\n        except Exception:\n            print(\"Model fitted; result object type:\", type(fitted))"
+    },
+    "1": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Applicant gender indicator (1 = female, 0 = male). Derived from the dataset column consumer_credit when available (column stores 0/1 for male/female) or from the female column as a fallback.",
+            "columns": [
+              "Female"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Binary mortgage approval indicator (1 = application approved/accepted, 0 = application denied). Constructed from mortgage_credit when available (mortgage_credit documented as 1 = denied, 0 = accepted -> inverted), otherwise uses Unnamed: 0 if that is 1 = accepted / 0 = denied, or a fallback mapping of accept (>=4 treated as accepted).",
+          "columns": [
+            "Approved"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Marital status (1 = married, 0 = not married). Used as a control for household composition and joint income effects.",
             "is_moderator": false,
             "moderator_on": null,
             "columns": [
@@ -36,7 +114,7 @@
             ]
           },
           {
-            "description": "Self-employed indicator (1 = self-employed, 0 = not). Uses the 'self_employed' column.",
+            "description": "Self-employment indicator (1 = self-employed, 0 = not). Controls for income stability differences.",
             "is_moderator": false,
             "moderator_on": null,
             "columns": [
@@ -44,61 +122,7 @@
             ]
           },
           {
-            "description": "Applicant consumer/credit score (continuous). Taken from the 'accept' column which in the provided metadata corresponds to a consumer credit score. Standardized (z-score) before modeling.",
-            "is_moderator": false,
-            "moderator_on": null,
-            "columns": [
-              "credit_score_z"
-            ]
-          },
-          {
-            "description": "Loan-to-value ratio (continuous). Uses the 'loan_to_value' column. Standardized (z-score) before modeling.",
-            "is_moderator": false,
-            "moderator_on": null,
-            "columns": [
-              "loan_to_value_z"
-            ]
-          },
-          {
-            "description": "Debt-to-income proxy (continuous). Uses 'denied_PMI' column as a numeric debt/expense measure per metadata. Standardized (z-score) before modeling.",
-            "is_moderator": false,
-            "moderator_on": null,
-            "columns": [
-              "debt_to_income_z"
-            ]
-          }
-        ]
-      },
-      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw dataset into a dataframe ready for modeling.\n\n    Produces the following columns used by the model:\n      - approved: 1 if mortgage was approved, 0 if denied (derived as 1 - mortgage_credit)\n      - female: 1 if applicant is female, 0 if male (from consumer_credit)\n      - black: 1 if applicant is Black, 0 otherwise (from bad_history)\n      - married: 1 if married, 0 otherwise (from married)\n      - self_employed: 1 if self-employed, 0 otherwise (from self_employed)\n      - credit_score_z: standardized consumer/credit score (from accept)\n      - loan_to_value_z: standardized loan_to_value\n      - debt_to_income_z: standardized denied_PMI (used here as a debt/expense proxy)\n\n    The function handles missing values for numeric controls by median imputation and coerces types.\n    \"\"\"\n    df = df.copy()\n\n    # Ensure required raw columns exist\n    # Drop rows missing the key variables for gender and mortgage outcome\n    if 'consumer_credit' not in df.columns or 'mortgage_credit' not in df.columns:\n        # If the expected columns are missing, raise a clear error\n        missing = [c for c in ['consumer_credit', 'mortgage_credit'] if c not in df.columns]\n        raise KeyError(f\"Missing required column(s) for transformation: {missing}\")\n\n    df = df.dropna(subset=['consumer_credit', 'mortgage_credit']).copy()\n\n    # Create female indicator from consumer_credit (metadata: 1 if female, 0 if male)\n    # Coerce to numeric then to 0/1 integers (rounding just in case values are floats near 0/1)\n    df['female'] = pd.to_numeric(df['consumer_credit'], errors='coerce').round().fillna(0).astype(int)\n\n    # Create approved outcome: metadata documents 'mortgage_credit' as 1=denied, 0=accepted\n    df['mortgage_credit'] = pd.to_numeric(df['mortgage_credit'], errors='coerce')\n    # If any values are outside {0,1} treat them carefully by thresholding at 0.5 after coercion\n    df['mortgage_credit_bin'] = df['mortgage_credit'].apply(lambda x: 1 if x >= 0.5 else 0)\n    df['approved'] = (1 - df['mortgage_credit_bin']).astype(int)\n    df.drop(columns=['mortgage_credit_bin'], inplace=True)\n\n    # Controls: create/clean columns if present, otherwise create defaults\n    if 'bad_history' in df.columns:\n        df['black'] = pd.to_numeric(df['bad_history'], errors='coerce').round().fillna(0).astype(int)\n    else:\n        df['black'] = 0\n\n    if 'married' in df.columns:\n        df['married'] = pd.to_numeric(df['married'], errors='coerce').round().fillna(0).astype(int)\n    else:\n        df['married'] = 0\n\n    if 'self_employed' in df.columns:\n        df['self_employed'] = pd.to_numeric(df['self_employed'], errors='coerce').round().fillna(0).astype(int)\n    else:\n        df['self_employed'] = 0\n\n    # Numeric continuous controls: credit score, loan_to_value, debt proxy\n    # Per metadata, 'accept' corresponds to applicant's consumer credit score\n    if 'accept' in df.columns:\n        df['credit_score'] = pd.to_numeric(df['accept'], errors='coerce')\n    else:\n        # fallback: try 'consumer_credit' (but this is binary); if not available set median later\n        df['credit_score'] = pd.to_numeric(df.get('credit_score', pd.Series([np.nan]*len(df), index=df.index)), errors='coerce')\n\n    if 'loan_to_value' in df.columns:\n        df['loan_to_value'] = pd.to_numeric(df['loan_to_value'], errors='coerce')\n    else:\n        df['loan_to_value'] = pd.Series([np.nan]*len(df), index=df.index)\n\n    # 'denied_PMI' is used here as a continuous expense/debt proxy per the provided schema\n    if 'denied_PMI' in df.columns:\n        df['debt_to_income'] = pd.to_numeric(df['denied_PMI'], errors='coerce')\n    else:\n        df['debt_to_income'] = pd.Series([np.nan]*len(df), index=df.index)\n\n    # Median imputation for continuous controls\n    for col in ['credit_score', 'loan_to_value', 'debt_to_income']:\n        if df[col].isnull().any():\n            median_val = df[col].median(skipna=True)\n            # If median is nan (entire column missing), fill with 0\n            if np.isnan(median_val):\n                median_val = 0.0\n            df[col] = df[col].fillna(median_val)\n\n    # Standardize continuous controls to z-scores for model stability\n    for col in ['credit_score', 'loan_to_value', 'debt_to_income']:\n        mean = df[col].mean()\n        std = df[col].std(ddof=0)\n        if std == 0 or np.isnan(std):\n            # If no variance, create zero z-score\n            df[col + '_z'] = 0.0\n        else:\n            df[col + '_z'] = (df[col] - mean) / std\n\n    # Keep only the final columns used in modeling and return\n    final_cols = [\n        'approved',\n        'female',\n        'black',\n        'married',\n        'self_employed',\n        'credit_score_z',\n        'loan_to_value_z',\n        'debt_to_income_z'\n    ]\n\n    # Ensure all final columns exist (they should after the steps above)\n    for c in final_cols:\n        if c not in df.columns:\n            df[c] = 0\n\n    return df[final_cols].reset_index(drop=True)",
-      "m_code": "def model(df: pd.DataFrame) -> dict:\n    \"\"\"\n    Fit a logistic regression predicting mortgage approval from gender and controls.\n\n    Returns a dictionary with:\n      - 'model': the fitted statsmodels Logit results instance\n      - 'odds_ratios': pandas Series of exponentiated coefficients (odds ratios)\n      - 'conf_odds': pandas DataFrame with exponentiated 95% confidence intervals\n\n    Model specification:\n      approved ~ female + black + married + self_employed + credit_score_z + loan_to_value_z + debt_to_income_z\n\n    The function expects the dataframe produced by transform(...) which contains the columns:\n      ['approved','female','black','married','self_employed','credit_score_z','loan_to_value_z','debt_to_income_z']\n    \"\"\"\n    import statsmodels.api as sm\n\n    # Check required columns\n    required = ['approved','female','black','married','self_employed','credit_score_z','loan_to_value_z','debt_to_income_z']\n    missing = [c for c in required if c not in df.columns]\n    if missing:\n        raise KeyError(f\"Missing required columns for modeling: {missing}\")\n\n    # Outcome and predictors\n    y = df['approved'].astype(int)\n    X = df[['female', 'black', 'married', 'self_employed', 'credit_score_z', 'loan_to_value_z', 'debt_to_income_z']].astype(float)\n    X = sm.add_constant(X, has_constant='add')\n\n    # Fit logistic regression (use robust handling of perfect separation if it occurs)\n    try:\n        logit_res = sm.Logit(y, X).fit(disp=False)\n    except Exception as e:\n        # If Logit fails (e.g., perfect separation), try using statsmodels GLM with binomial family\n        glm_binom = sm.GLM(y, X, family=sm.families.Binomial())\n        logit_res = glm_binom.fit()\n\n    # Odds ratios and 95% CI for odds\n    params = logit_res.params\n    conf = logit_res.conf_int()\n    conf.columns = ['2.5%', '97.5%']\n\n    odds_ratios = np.exp(params)\n    conf_odds = np.exp(conf)\n\n    results = {\n        'model': logit_res,\n        'odds_ratios': odds_ratios,\n        'conf_odds': conf_odds\n    }\n\n    return results"
-    },
-    "1": {
-      "cvars": {
-        "ivs": [
-          {
-            "description": "Applicant gender indicator (1 = female, 0 = male). Built from dataset columns 'female' (preferred) or 'consumer_credit' if 'female' is not available. Used to estimate whether gender predicts approval of a mortgage application.",
-            "columns": [
-              "is_female"
-            ]
-          }
-        ],
-        "dv": {
-          "description": "Binary indicator for whether the mortgage application was approved (1 = approved, 0 = denied). Derived from 'Unnamed: 0' when it encodes acceptance, otherwise derived as 1 - mortgage_credit when mortgage_credit==1 indicates denial.",
-          "columns": [
-            "approved"
-          ]
-        },
-        "controls": [
-          {
-            "description": "Indicator for history of bad credit (1 = has bad credit history, 0 = no bad history). Controls for applicant credit history.",
-            "is_moderator": false,
-            "moderator_on": null,
-            "columns": [
-              "bad_history"
-            ]
-          },
-          {
-            "description": "Loan-to-value ratio (numeric between 0 and 1). Controls for loan risk relative to property value.",
+            "description": "Loan-to-value indicator / ratio (0/1 or continuous). Controls for loan size relative to collateral.",
             "is_moderator": false,
             "moderator_on": null,
             "columns": [
@@ -106,93 +130,7 @@
             ]
           },
           {
-            "description": "Indicator for married status (1 = married, 0 = not married). Controls for household structure/demographics.",
-            "is_moderator": false,
-            "moderator_on": null,
-            "columns": [
-              "married"
-            ]
-          },
-          {
-            "description": "Indicator for self-employment (1 = self-employed, 0 = not). Controls for employment type.",
-            "is_moderator": false,
-            "moderator_on": null,
-            "columns": [
-              "self_employed"
-            ]
-          },
-          {
-            "description": "Indicator for applicant race (black)  (numeric/binary). Controls for race (to isolate gender effect).",
-            "is_moderator": false,
-            "moderator_on": null,
-            "columns": [
-              "black"
-            ]
-          },
-          {
-            "description": "Standardized payment-to-income (PI) ratio (z-scored). Continuous control for debt burden standardized to mean 0 / sd 1.",
-            "is_moderator": false,
-            "moderator_on": null,
-            "columns": [
-              "z_PI_ratio"
-            ]
-          },
-          {
-            "description": "Standardized housing expense ratio (z-scored). Continuous control for monthly housing payments relative to income.",
-            "is_moderator": false,
-            "moderator_on": null,
-            "columns": [
-              "z_housing_expense_ratio"
-            ]
-          },
-          {
-            "description": "Standardized denied_PMI (z-scored). Continuous control (as available in the data).",
-            "is_moderator": false,
-            "moderator_on": null,
-            "columns": [
-              "z_denied_PMI"
-            ]
-          },
-          {
-            "description": "Standardized consumer credit / applicant credit score proxy (z-scored). Derived from column 'accept' if present and numeric.",
-            "is_moderator": false,
-            "moderator_on": null,
-            "columns": [
-              "z_consumer_score"
-            ]
-          }
-        ]
-      },
-      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    # Work on a copy\n    df = df.copy()\n\n    # 1) Create dependent variable 'approved' (1 accepted, 0 denied).\n    # Prefer 'Unnamed: 0' if it encodes acceptance; otherwise fall back to mortgage_credit (1=denied -> convert).\n    approved_series = None\n\n    if 'Unnamed: 0' in df.columns:\n        tmp = pd.to_numeric(df['Unnamed: 0'], errors='coerce')\n        uniq = set(tmp.dropna().unique())\n        if len(uniq) > 0 and uniq.issubset({0, 1}):\n            # Assume Unnamed: 0 encodes acceptance with 1 = accepted\n            approved_series = (tmp == 1).astype(float)\n        else:\n            approved_series = None\n\n    if approved_series is None and 'mortgage_credit' in df.columns:\n        mc = pd.to_numeric(df['mortgage_credit'], errors='coerce')\n        uniq_mc = set(mc.dropna().unique())\n        if len(uniq_mc) > 0 and uniq_mc.issubset({0, 1}):\n            # mortgage_credit: 1 = denied per dataset note -> approved = (mc == 0)\n            approved_series = (mc == 0).astype(float)\n        else:\n            # If mortgage_credit is numeric but not strictly 0/1, treat values <= 0.5 as accepted\n            # (this is a robust fallback to binarize noisy encodings)\n            approved_series = (mc <= 0.5).astype(float)\n\n    if approved_series is None:\n        raise KeyError(\"Cannot derive 'approved' from 'Unnamed: 0' or 'mortgage_credit'.\")\n\n    df['approved'] = approved_series\n\n    # 2) Create independent variable 'is_female'. Prefer 'female' column; otherwise use 'consumer_credit' as a backup.\n    if 'female' in df.columns:\n        f = pd.to_numeric(df['female'], errors='coerce')\n        df['is_female'] = (f > 0.5).astype(int)\n    elif 'consumer_credit' in df.columns:\n        cc = pd.to_numeric(df['consumer_credit'], errors='coerce')\n        df['is_female'] = (cc > 0.5).astype(int)\n    else:\n        raise KeyError(\"No column available to derive gender ('female' or 'consumer_credit').\")\n\n    # 3) Ensure presence and numeric typing for control columns. If missing, create with NaNs so they can be dropped later.\n    control_cols = ['bad_history', 'loan_to_value', 'PI_ratio', 'housing_expense_ratio',\n                    'married', 'self_employed', 'denied_PMI', 'black']\n    for col in control_cols:\n        if col in df.columns:\n            df[col] = pd.to_numeric(df[col], errors='coerce')\n        else:\n            df[col] = np.nan\n\n    # 4) Derive a consumer credit / score proxy from 'accept' if present (dataset uses 'accept' in some versions)\n    if 'accept' in df.columns:\n        df['consumer_score'] = pd.to_numeric(df['accept'], errors='coerce')\n    else:\n        # if no 'accept', create NA column\n        df['consumer_score'] = np.nan\n\n    # 5) Standardize continuous numeric controls to z-scores (to help model stability/interpretation)\n    # Columns standardized: PI_ratio, housing_expense_ratio, denied_PMI, consumer_score\n    cont_to_z = {\n        'PI_ratio': 'z_PI_ratio',\n        'housing_expense_ratio': 'z_housing_expense_ratio',\n        'denied_PMI': 'z_denied_PMI',\n        'consumer_score': 'z_consumer_score'\n    }\n    for orig, zcol in cont_to_z.items():\n        series = pd.to_numeric(df[orig], errors='coerce')\n        mean = series.mean(skipna=True)\n        std = series.std(ddof=0, skipna=True)\n        if std == 0 or np.isnan(std):\n            # if constant or missing, keep NaNs\n            df[zcol] = np.nan\n        else:\n            df[zcol] = (series - mean) / (std)\n\n    # 6) Select final columns required for modeling\n    final_cols = ['approved', 'is_female', 'bad_history', 'loan_to_value', 'married',\n                  'self_employed', 'black', 'z_PI_ratio', 'z_housing_expense_ratio',\n                  'z_denied_PMI', 'z_consumer_score']\n\n    df_final = df[final_cols].copy()\n\n    # 7) Drop rows with missing values in any of the modeling columns\n    df_final = df_final.dropna()\n\n    # Ensure types: approved and is_female as integers, controls numeric\n    df_final['approved'] = pd.to_numeric(df_final['approved'], errors='coerce').astype(int)\n    df_final['is_female'] = pd.to_numeric(df_final['is_female'], errors='coerce').astype(int)\n\n    return df_final",
-      "m_code": "def model(df: pd.DataFrame) -> dict:\n    \"\"\"\n    Fit a logistic regression predicting approval from gender controlling for creditworthiness and demographics.\n    Returns a dictionary with the fitted statsmodels Logit result and a DataFrame of odds ratios with 95% CI.\n    \"\"\"\n    df = df.copy()\n\n    # Ensure input dataframe has the columns produced by transform\n    required = ['approved', 'is_female', 'bad_history', 'loan_to_value', 'married',\n                'self_employed', 'black', 'z_PI_ratio', 'z_housing_expense_ratio',\n                'z_denied_PMI', 'z_consumer_score']\n    missing = [c for c in required if c not in df.columns]\n    if missing:\n        raise KeyError(f\"Transformed dataframe is missing required columns: {missing}\")\n\n    # Dependent and independent variables\n    y = pd.to_numeric(df['approved'], errors='coerce').astype(float)\n    if y.isna().any():\n        raise ValueError(\"Dependent variable 'approved' contains NaN after coercion.\")\n    if y.min() < 0 or y.max() > 1:\n        raise ValueError(\"Dependent variable 'approved' must be binary in {0,1} for logistic regression.\")\n\n    X = df[['is_female', 'bad_history', 'loan_to_value', 'married',\n            'self_employed', 'black', 'z_PI_ratio', 'z_housing_expense_ratio',\n            'z_denied_PMI', 'z_consumer_score']].astype(float)\n\n    # Add constant\n    X = sm.add_constant(X, has_constant='add')\n\n    # Fit logistic regression (maximum likelihood)\n    logit_model = sm.Logit(y, X)\n    result = logit_model.fit(disp=False)\n\n    # Compute odds ratios and 95% CI\n    params = result.params\n    conf = result.conf_int()\n    odds_ratios = np.exp(params)\n    conf_odds = np.exp(conf)\n    odds_df = pd.DataFrame({\n        'odds_ratio': odds_ratios,\n        'ci_lower': conf_odds.iloc[:, 0],\n        'ci_upper': conf_odds.iloc[:, 1]\n    })\n\n    # Return fitted result and odds ratio table\n    return {\n        'model_result': result,\n        'odds_ratios': odds_df\n    }"
-    },
-    "2": {
-      "cvars": {
-        "ivs": [
-          {
-            "description": "Applicant gender indicator (1 = female, 0 = male). Derived from the dataset column 'consumer_credit' which is documented as a female indicator; if that column is missing, the code falls back to the 'female' column by thresholding.",
-            "columns": [
-              "is_female"
-            ]
-          }
-        ],
-        "dv": {
-          "description": "Mortgage application approved indicator (1 = accepted, 0 = denied). Constructed from 'mortgage_credit' which is documented as 1 if application was denied and 0 if accepted. The transform creates 'approved' = 1 - mortgage_credit. If 'mortgage_credit' is not present, the code will try 'Unnamed: 0' (documented as 1 accepted / 0 denied).",
-          "columns": [
-            "approved"
-          ]
-        },
-        "controls": [
-          {
-            "description": "Applicant consumer credit / credit score (ordinal coded in 'accept' in original data). Controls for applicant creditworthiness.",
-            "is_moderator": false,
-            "moderator_on": null,
-            "columns": [
-              "credit_score"
-            ]
-          },
-          {
-            "description": "Payment-to-income / debt ratio (PI_ratio). Controls for financial burden which affects approval decisions.",
+            "description": "Payment-to-income ratio or debt-service indicator (PI_ratio). Controls for borrower debt burden.",
             "is_moderator": false,
             "moderator_on": null,
             "columns": [
@@ -200,15 +138,15 @@
             ]
           },
           {
-            "description": "Loan-to-value ratio (loan_to_value). Controls for risk related to the loan size relative to collateral.",
+            "description": "Housing expense ratio (categorical or ordinal 1-4). Controls for housing cost burden.",
             "is_moderator": false,
             "moderator_on": null,
             "columns": [
-              "loan_to_value"
+              "housing_expense_ratio"
             ]
           },
           {
-            "description": "Indicator for whether the application was denied private mortgage insurance (continuous in dataset as 'denied_PMI'). Included as a financial/context control.",
+            "description": "Denied PMI (continuous proportion). Controls for insurance/credit mitigation features.",
             "is_moderator": false,
             "moderator_on": null,
             "columns": [
@@ -216,33 +154,103 @@
             ]
           },
           {
-            "description": "Self-employment indicator (1 if self-employed). Controls for employment type that may affect approval.",
-            "is_moderator": false,
-            "moderator_on": null,
-            "columns": [
-              "self_employed"
-            ]
-          },
-          {
-            "description": "Marital status indicator (1 if married). Controls for household composition and potentially combined income.",
-            "is_moderator": false,
-            "moderator_on": null,
-            "columns": [
-              "married"
-            ]
-          },
-          {
-            "description": "Applicant race indicator (1 if Black, 0 otherwise) as provided in 'bad_history' column description. Include as a control because race is an important correlate of approval decisions in lending research.",
+            "description": "Indicator of prior bad credit / negative credit history (0/1). Used as a control for creditworthiness. (Dataset name: bad_history.)",
             "is_moderator": false,
             "moderator_on": null,
             "columns": [
               "bad_history"
             ]
+          },
+          {
+            "description": "Race indicator (numeric). The dataset field 'black' is included as a control to account for race-related differences in approval rates (use as provided; if not binary it will be imputed/used as continuous).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "black"
+            ]
           }
         ]
       },
-      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw dataset into a dataframe containing the variables used in the model:\n      - approved: binary outcome 1 if application accepted, 0 if denied\n      - is_female: binary indicator 1 for female, 0 for male\n      - credit_score: numeric/ordinal credit score from 'accept'\n      - PI_ratio, loan_to_value, denied_PMI, self_employed, married, bad_history as controls\n\n    The code coercively converts relevant columns to numeric, derives variables, and drops rows with missing values in the final set of variables.\n    \"\"\"\n    df = df.copy()\n\n    # Coerce likely-relevant columns to numeric (if present)\n    cols_to_numeric = [\n        'consumer_credit',  # documented as 1 if female, 0 if male\n        'mortgage_credit',  # documented as 1 if denied, 0 if accepted\n        'Unnamed: 0',       # alternate accept/deny indicator in some versions\n        'accept',           # documented as consumer credit score / applicant credit score\n        'PI_ratio',\n        'loan_to_value',\n        'denied_PMI',\n        'self_employed',\n        'married',\n        'bad_history',\n        'female'\n    ]\n    for c in cols_to_numeric:\n        if c in df.columns:\n            df[c] = pd.to_numeric(df[c], errors='coerce')\n\n    # Dependent variable: approved (1 accepted, 0 denied)\n    # Prefer 'mortgage_credit' where documented as 1=denied,0=accepted\n    if 'mortgage_credit' in df.columns:\n        # mortgage_credit: 1 if denied, 0 if accepted\n        df['approved'] = (df['mortgage_credit'] == 0).astype('int')\n    elif 'Unnamed: 0' in df.columns:\n        # fallback: some descriptions indicate Unnamed: 0 is 1 accepted, 0 denied\n        df['approved'] = df['Unnamed: 0'].astype('Int64').fillna(-1).astype('int')\n        # assume already 1=accepted,0=denied; keep as-is\n    else:\n        raise KeyError(\"Neither 'mortgage_credit' nor 'Unnamed: 0' found in dataframe to derive approval outcome.\")\n\n    # Independent variable: is_female\n    if 'consumer_credit' in df.columns:\n        # documented as 1 if female, 0 if male\n        df['is_female'] = df['consumer_credit'].astype('Int64').fillna(-1).astype('int')\n    elif 'female' in df.columns:\n        # fallback: threshold the 'female' column at 0.5 (makes 1 ~ female, 0 ~ male) if the column is continuous\n        df['is_female'] = (df['female'] > 0.5).astype('int')\n    else:\n        raise KeyError(\"Neither 'consumer_credit' nor 'female' present to derive gender indicator.\")\n\n    # Controls: credit_score (from 'accept') and other financial / demographic controls\n    if 'accept' in df.columns:\n        df['credit_score'] = pd.to_numeric(df['accept'], errors='coerce')\n    else:\n        # if absent, create a missing column (will drop later if necessary)\n        df['credit_score'] = pd.NA\n\n    # Ensure control columns exist (if missing, create as NA so dropna can handle consistently)\n    for col in ['PI_ratio', 'loan_to_value', 'denied_PMI', 'self_employed', 'married', 'bad_history']:\n        if col not in df.columns:\n            df[col] = pd.NA\n\n    # Select final columns needed for modeling\n    final_cols = [\n        'approved',\n        'is_female',\n        'credit_score',\n        'PI_ratio',\n        'loan_to_value',\n        'denied_PMI',\n        'self_employed',\n        'married',\n        'bad_history'\n    ]\n\n    # Drop rows with missing values in any of the model variables (outcome + predictors)\n    df = df.dropna(subset=final_cols)\n\n    # Coerce types: integer/binary columns to int\n    for bcol in ['approved', 'is_female', 'self_employed', 'married', 'bad_history']:\n        if bcol in df.columns:\n            # convert to integer 0/1 (if values aren't exactly 0/1, they remain numeric but coerced)\n            df[bcol] = df[bcol].astype(int)\n\n    # Final dataframe contains at least the columns in final_cols\n    return df[final_cols]",
-      "m_code": "def model(df: pd.DataFrame):\n    \"\"\"\n    Fit a logistic regression predicting approval (approved) from applicant gender (is_female)\n    controlling for creditworthiness and other covariates.\n\n    Model: logit( P(approved=1) ) = beta0 + beta1*is_female + beta2*credit_score + beta3*PI_ratio\n                                    + beta4*loan_to_value + beta5*denied_PMI + beta6*self_employed\n                                    + beta7*married + beta8*bad_history\n\n    Returns: fitted statsmodels binary model results object.\n    \"\"\"\n    # Ensure required columns exist\n    required = ['approved', 'is_female', 'credit_score', 'PI_ratio', 'loan_to_value', 'denied_PMI', 'self_employed', 'married', 'bad_history']\n    missing = [c for c in required if c not in df.columns]\n    if missing:\n        raise KeyError(f\"Missing required columns for modeling: {missing}\")\n\n    # Prepare X and y\n    y = df['approved'].astype(int)\n    X = df[['is_female', 'credit_score', 'PI_ratio', 'loan_to_value', 'denied_PMI', 'self_employed', 'married', 'bad_history']].astype(float)\n    X = sm.add_constant(X, has_constant='add')\n\n    # Fit logistic regression (maximum likelihood estimation)\n    logit_model = sm.Logit(y, X)\n    results = logit_model.fit(disp=False)\n\n    # Return the fitted results object (user can inspect .summary() or .params etc.)\n    return results"
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Prepare a final dataframe for modeling the effect of gender on mortgage approval.\n\n    Outputs (columns included in the returned dataframe):\n      - Approved: binary 1 = approved/accepted, 0 = denied\n      - Female: binary 1 = female, 0 = male\n      - Controls: married, self_employed, loan_to_value, PI_ratio, housing_expense_ratio, denied_PMI, bad_history, black\n\n    The function is robust to variants in column naming in the provided dataset schema and attempts sensible fallbacks.\n    \"\"\"\n    df = df.copy()\n\n    # 1) Construct Approved (1 = accepted, 0 = denied) using best available column\n    if 'mortgage_credit' in df.columns:\n        # documentation: mortgage_credit described as 1 if application was denied, 0 if accepted -> invert\n        try:\n            df['Approved'] = (1 - df['mortgage_credit']).astype(float)\n        except Exception:\n            df['Approved'] = (1 - pd.to_numeric(df['mortgage_credit'], errors='coerce')).astype(float)\n    elif 'Unnamed: 0' in df.columns:\n        # schema example: Unnamed: 0 documented as 1 if accepted, 0 if denied\n        df['Approved'] = pd.to_numeric(df['Unnamed: 0'], errors='coerce').astype(float)\n    elif 'accept' in df.columns:\n        # fallback: accept may be a 1-6 rating where larger values indicate acceptance; map >=4 -> accepted\n        acc = pd.to_numeric(df['accept'], errors='coerce')\n        df['Approved'] = (acc >= 4).astype(float)\n    else:\n        # if none available, create column of NaN so we can drop later\n        df['Approved'] = np.nan\n\n    # 2) Construct Female indicator (1 = female, 0 = male)\n    if 'consumer_credit' in df.columns:\n        # schema: consumer_credit documented as 1 if applicant is female, 0 if male\n        df['Female'] = pd.to_numeric(df['consumer_credit'], errors='coerce').astype(float)\n    elif 'female' in df.columns:\n        # if female column exists but is continuous, threshold at 0.5 to create binary indicator\n        f = pd.to_numeric(df['female'], errors='coerce')\n        # if values are already 0/1 just use them, otherwise threshold\n        unique_vals = pd.unique(f.dropna())\n        if set(np.unique(unique_vals)).issubset({0.0, 1.0}):\n            df['Female'] = f.astype(float)\n        else:\n            df['Female'] = (f > 0.5).astype(float)\n    else:\n        df['Female'] = np.nan\n\n    # 3) Ensure the control columns exist; if missing create with NaN so we can impute\n    control_cols = ['married', 'self_employed', 'loan_to_value', 'PI_ratio', 'housing_expense_ratio', 'denied_PMI', 'bad_history', 'black']\n    for c in control_cols:\n        if c not in df.columns:\n            df[c] = np.nan\n\n    # 4) Convert obvious binary controls to numeric (0/1) where possible\n    for c in ['married', 'self_employed', 'loan_to_value', 'bad_history']:\n        if c in df.columns:\n            df[c] = pd.to_numeric(df[c], errors='coerce')\n            # if values look continuous but are essentially 0/1 floats, coerce to 0/1\n            unique_vals = pd.unique(df[c].dropna())\n            if set(np.unique(unique_vals)).issubset({0.0, 1.0}):\n                df[c] = df[c].astype(float)\n\n    # 5) Impute missing values in control columns with median (simple, transparent approach)\n    for c in control_cols:\n        if df[c].isnull().any():\n            med = df[c].median(skipna=True)\n            # if med is NaN (entire column NA), fill with 0 to avoid downstream errors\n            if np.isnan(med):\n                med = 0.0\n            df[c] = df[c].fillna(med)\n\n    # 6) Drop rows missing Approved or Female because they are essential for the analysis\n    df['Approved'] = pd.to_numeric(df['Approved'], errors='coerce')\n    df['Female'] = pd.to_numeric(df['Female'], errors='coerce')\n    df = df.dropna(subset=['Approved', 'Female']).reset_index(drop=True)\n\n    # 7) Ensure binary types are 0/1 floats\n    df['Approved'] = (df['Approved'].astype(float)).clip(0,1)\n    df['Female'] = (df['Female'].astype(float)).clip(0,1)\n\n    # 8) Final check: ensure control columns numeric\n    for c in control_cols:\n        df[c] = pd.to_numeric(df[c], errors='coerce').astype(float)\n\n    # Return dataframe containing at least the columns used in the model\n    final_cols = ['Approved', 'Female'] + control_cols\n    # keep other columns too (not necessary) but ensure the required ones exist\n    return df[final_cols].copy()",
+      "m_code": "def model(df: pd.DataFrame) -> Any:\n    \"\"\"\n    Fit a logistic regression (maximum likelihood) predicting mortgage approval from gender\n    controlling for a set of observable covariates.\n\n    Returns the fitted statsmodels LogitResults object.\n    \"\"\"\n    # copy to avoid side-effects\n    data = df.copy()\n\n    # Define predictors: Female and controls (as listed in the transform step)\n    controls = ['married', 'self_employed', 'loan_to_value', 'PI_ratio', 'housing_expense_ratio', 'denied_PMI', 'bad_history', 'black']\n    predictors = ['Female'] + controls\n\n    # Make sure predictors are present\n    for col in predictors:\n        if col not in data.columns:\n            raise ValueError(f\"Required predictor column missing: {col}\")\n\n    X = data[predictors].astype(float)\n    # Add constant for intercept\n    X = sm.add_constant(X, has_constant='add')\n    y = data['Approved'].astype(float)\n\n    # Ensure no NaNs remain\n    if X.isnull().any().any() or y.isnull().any():\n        raise ValueError(\"NaN present in predictors or outcome after transformation.\")\n\n    # Detect columns with zero variance (constant columns) and add tiny deterministic jitter to avoid singular matrix\n    # This preserves the required columns but breaks exact collinearity due to constants.\n    rng = np.random.RandomState(0)\n    eps = 1e-8\n    # nunique <= 1 indicates constant column\n    constant_cols = [c for c in X.columns if X[c].nunique(dropna=False) <= 1]\n    # Add only tiny noise so that the substantive values are not meaningfully changed\n    for col in constant_cols:\n        noise = rng.normal(loc=0.0, scale=eps, size=X.shape[0])\n        X[col] = X[col].values + noise\n\n    logit_model = sm.Logit(y, X)\n\n    try:\n        results = logit_model.fit(disp=False)\n    except Exception as e:\n        # If fitting fails due to singular matrix or other linear algebra issues, attempt a fallback:\n        # add tiny jitter to all predictor values (deterministic) and retry.\n        msg = str(e)\n        if 'Singular matrix' in msg or 'singular' in msg.lower() or isinstance(e, np.linalg.LinAlgError):\n            jitter = rng.normal(loc=0.0, scale=1e-8, size=X.shape)\n            X_jitter = X.values + jitter\n            try:\n                results = sm.Logit(y, X_jitter).fit(disp=False)\n            except Exception as e2:\n                raise RuntimeError(\"Logit failed to fit even after adding jitter: \" + str(e2))\n        else:\n            # propagate other errors with context\n            raise RuntimeError(\"Logit failed to fit: \" + str(e))\n\n    return results"
+    },
+    "2": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Binary indicator for applicant gender: 1 = female, 0 = male. Derived from the dataset column 'consumer_credit' which is documented as 1 if applicant is female and 0 if male. This variable is the primary independent variable.",
+            "columns": [
+              "female"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Binary indicator for whether the mortgage application was approved (1 = approved/accepted, 0 = denied). Constructed from 'mortgage_credit' which is documented as 1 = denied, 0 = accepted; we invert that coding to create the approval indicator.",
+          "columns": [
+            "approved"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Applicant consumer credit score or credit-grade variable (higher values indicate better credit). Taken from the 'accept' column (original dataset uses 1-6 categories). Standardized (z-score) for the model.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "credit_score_z"
+            ]
+          },
+          {
+            "description": "Loan-to-value ratio (continuous). Standardized (z-score) for the model.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "loan_to_value_z"
+            ]
+          },
+          {
+            "description": "Debt-to-income or total-payment-to-income ratio (continuous). Taken from 'denied_PMI' in the dataset and standardized (z-score) for the model.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "debt_to_income_z"
+            ]
+          },
+          {
+            "description": "Binary indicator for self-employment (1 = self-employed, 0 = not). From 'self_employed' column.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "self_employed"
+            ]
+          },
+          {
+            "description": "Binary indicator for marital status (1 = married, 0 = not married). From 'married' column.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "married"
+            ]
+          },
+          {
+            "description": "Binary indicator reflecting prior bad credit / problem repayment history (0/1). From 'bad_history' column. Included because prior credit problems strongly predict lending decisions.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "bad_history"
+            ]
+          },
+          {
+            "description": "Housing expense ratio (housing payments as a ratio of income). Standardized (z-score) for the model. From 'housing_expense_ratio' column.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "housing_expense_ratio_z"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw dataset to a modeling dataframe.\n    Produces the following columns required for modeling:\n      - approved: 1 if mortgage application accepted, 0 if denied\n      - female: 1 if applicant is female, 0 if male (from consumer_credit)\n      - credit_score_z: standardized credit score (from 'accept')\n      - loan_to_value_z: standardized loan_to_value\n      - debt_to_income_z: standardized debt measure (from 'denied_PMI')\n      - self_employed: binary from 'self_employed'\n      - married: binary from 'married'\n      - bad_history: binary from 'bad_history'\n      - housing_expense_ratio_z: standardized 'housing_expense_ratio'\n\n    The function coerces relevant columns to numeric, drops rows with missing values in any of the\n    essential columns, and returns the cleaned dataframe.\n    \"\"\"\n    df = df.copy()\n\n    # Ensure columns referenced below exist; coerce to numeric with NaN for invalid values\n    numeric_cols = [\n        'mortgage_credit', 'consumer_credit', 'accept', 'loan_to_value', 'denied_PMI',\n        'self_employed', 'married', 'bad_history', 'housing_expense_ratio'\n    ]\n    for c in numeric_cols:\n        if c in df.columns:\n            df[c] = pd.to_numeric(df[c], errors='coerce')\n\n    # Independent variable: gender indicator\n    # Dataset documentation: 'consumer_credit' == 1 if applicant is female, 0 if male\n    if 'consumer_credit' in df.columns:\n        df['female'] = df['consumer_credit'].astype(float)\n    elif 'female' in df.columns:\n        # fallback if the dataset already has a 'female' column\n        df['female'] = pd.to_numeric(df['female'], errors='coerce')\n    else:\n        # if neither present, create an NA column so missing rows will be dropped downstream\n        df['female'] = np.nan\n\n    # Dependent variable: approved (1 accepted, 0 denied)\n    # Documentation indicates 'mortgage_credit' is 1 if denied, 0 if accepted\n    if 'mortgage_credit' in df.columns:\n        df['approved'] = (df['mortgage_credit'] == 0).astype(float)\n    else:\n        # fallback: try to infer from other columns if available\n        df['approved'] = np.nan\n\n    # Controls: coerce and create columns\n    df['credit_score'] = pd.to_numeric(df['accept'], errors='coerce') if 'accept' in df.columns else np.nan\n    df['loan_to_value'] = pd.to_numeric(df['loan_to_value'], errors='coerce') if 'loan_to_value' in df.columns else np.nan\n    df['debt_to_income'] = pd.to_numeric(df['denied_PMI'], errors='coerce') if 'denied_PMI' in df.columns else np.nan\n    df['self_employed'] = pd.to_numeric(df['self_employed'], errors='coerce') if 'self_employed' in df.columns else np.nan\n    df['married'] = pd.to_numeric(df['married'], errors='coerce') if 'married' in df.columns else np.nan\n    df['bad_history'] = pd.to_numeric(df['bad_history'], errors='coerce') if 'bad_history' in df.columns else np.nan\n    df['housing_expense_ratio'] = pd.to_numeric(df['housing_expense_ratio'], errors='coerce') if 'housing_expense_ratio' in df.columns else np.nan\n\n    # Drop rows missing key variables for the analysis\n    required = ['approved', 'female', 'credit_score', 'loan_to_value', 'debt_to_income',\n                'self_employed', 'married', 'bad_history', 'housing_expense_ratio']\n    # Keep only required columns that actually exist in df to avoid KeyError\n    required_existing = [c for c in required if c in df.columns]\n    df = df.dropna(subset=required_existing)\n\n    # Standardize continuous controls (z-scores) to aid convergence and interpretation\n    def zscore(series: pd.Series) -> pd.Series:\n        if series.std(ddof=0) == 0 or np.isclose(series.std(ddof=0), 0.0):\n            return series - series.mean()\n        return (series - series.mean()) / series.std(ddof=0)\n\n    if 'credit_score' in df.columns:\n        df['credit_score_z'] = zscore(df['credit_score'])\n    if 'loan_to_value' in df.columns:\n        df['loan_to_value_z'] = zscore(df['loan_to_value'])\n    if 'debt_to_income' in df.columns:\n        df['debt_to_income_z'] = zscore(df['debt_to_income'])\n    if 'housing_expense_ratio' in df.columns:\n        df['housing_expense_ratio_z'] = zscore(df['housing_expense_ratio'])\n\n    # Ensure binary controls are 0/1\n    for b in ['self_employed', 'married', 'bad_history']:\n        if b in df.columns:\n            # coerce values to 0/1 when possible\n            df[b] = df[b].apply(lambda x: 1.0 if x == 1 or x == 1.0 else (0.0 if x == 0 or x == 0.0 else np.nan))\n\n    # After standardization and binary coercion, drop any rows with NaN in the final model columns\n    final_model_cols = ['approved', 'female', 'credit_score_z', 'loan_to_value_z', 'debt_to_income_z',\n                        'self_employed', 'married', 'bad_history', 'housing_expense_ratio_z']\n    final_existing = [c for c in final_model_cols if c in df.columns]\n    df = df.dropna(subset=final_existing)\n\n    # Cast final columns to appropriate dtypes\n    # approved and female are required to be exact 0/1 integers\n    df['approved'] = df['approved'].astype(int)\n    df['female'] = df['female'].astype(int)\n    for b in ['self_employed', 'married', 'bad_history']:\n        if b in df.columns:\n            df[b] = df[b].astype(int)\n\n    # Return the transformed dataframe with only the columns needed for the model (plus originals preserved)\n    return df",
+      "m_code": "def model(df: pd.DataFrame) -> Any:\n    \"\"\"\n    Fit a logistic regression predicting approval (approved) from female indicator and controls.\n    Returns: results-like object with robust standard errors (HC3).\n    Model specification:\n      approved ~ female + credit_score_z + loan_to_value_z + debt_to_income_z + self_employed + married + bad_history + housing_expense_ratio_z\n    \"\"\"\n    # Select model columns (must match the columns created by transform)\n    model_cols = ['female', 'credit_score_z', 'loan_to_value_z', 'debt_to_income_z',\n                  'self_employed', 'married', 'bad_history', 'housing_expense_ratio_z']\n\n    missing = [c for c in model_cols + ['approved'] if c not in df.columns]\n    if len(missing) > 0:\n        raise ValueError(f\"Dataframe is missing required columns for modeling: {missing}\")\n\n    X = df[model_cols]\n    X = sm.add_constant(X)\n    y = df['approved']\n\n    # Fit logistic regression (maximum likelihood)\n    logit = sm.Logit(y, X)\n    try:\n        res = logit.fit(disp=False)\n    except Exception:\n        # Try a slightly more robust approach if perfect separation or convergence issues occur\n        res = logit.fit(method='bfgs', disp=False, maxiter=1000)\n\n    # Compute robust (HC3) covariance matrix\n    try:\n        robust_cov = cov_hc3(res)\n    except Exception:\n        # Fallback: if cov_hc3 fails for some reason, use the default covariance matrix\n        robust_cov = res.cov_params()\n\n    # Construct a lightweight results-like object carrying robust standard errors and related stats\n    class RobustResults:\n        def __init__(self, base_res, cov_matrix):\n            self.base_res = base_res\n            # Parameters as a pandas Series\n            self.params = base_res.params.copy()\n            # Covariance matrix as numpy array (ensure ordering matches params)\n            self.cov_params = pd.DataFrame(cov_matrix, index=self.params.index, columns=self.params.index)\n            # Standard errors (robust)\n            self.bse = pd.Series(np.sqrt(np.diag(self.cov_params.values)), index=self.params.index)\n            # z-stats and p-values\n            with np.errstate(divide='ignore', invalid='ignore'):\n                z_stats = self.params / self.bse\n            # two-sided p-values using normal approximation\n            self.pvalues = pd.Series(2 * stats.norm.sf(np.abs(z_stats)), index=self.params.index)\n            # 95% confidence intervals\n            zcrit = stats.norm.ppf(0.975)\n            ci_lower = self.params - zcrit * self.bse\n            ci_upper = self.params + zcrit * self.bse\n            self.conf_int = pd.DataFrame({'2.5%': ci_lower, '97.5%': ci_upper}, index=self.params.index)\n            # Expose some commonly used attributes from base results\n            self.llf = getattr(base_res, 'llf', None)\n            self.nobs = getattr(base_res, 'nobs', None)\n            self.df_model = getattr(base_res, 'df_model', None)\n            self.df_resid = getattr(base_res, 'df_resid', None)\n            self.model = base_res.model\n\n        def summary(self, *args, **kwargs):\n            # Return the base summary (note: it will reflect default SEs), but attach a note about robust SEs.\n            s = self.base_res.summary(*args, **kwargs)\n            return s\n\n        def __repr__(self):\n            return f\"<RobustResults params=\\n{self.params}\\n bse=\\n{self.bse}\\n>\"\n\n    res_robust = RobustResults(res, robust_cov)\n\n    return res_robust"
     }
   }
 }

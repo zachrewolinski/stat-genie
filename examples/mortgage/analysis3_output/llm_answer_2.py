@@ -1,108 +1,227 @@
+import numpy as np
+from scipy import stats
+
+
 def extract_final_answer(model_output):
     """
-    Extracts statistics about the 'is_female' coefficient from a fitted statsmodels Logit result
-    (BinaryResultsWrapper). Returns a dictionary with:
-      - "object": a dict of numeric results (coefficient, se, z, p, CI, odds ratio, marginal effect if available)
-      - "description": short plain-language interpretation and how to draw a yes/no conclusion.
-
-    Expected input: a statsmodels.discrete.discrete_model.BinaryResultsWrapper (the object returned by sm.Logit(...).fit()).
+    Extract statistics for the 'female' coefficient from the provided model_output (e.g., a statsmodels RobustResults).
+    Returns a dict with:
+      - "object": dict of numeric results (coef, se, z, p, ci, odds_ratio, or_ci)
+      - "description": plain-language interpretation of the result and caveats.
+    The function is defensive about whether attributes are stored as callables (methods) or attributes,
+    and about various possible formats for confidence intervals.
     """
-    import numpy as np
 
-    res = model_output
+    def _maybe_call(x):
+        """If x is callable, call it and return the result; otherwise return x."""
+        try:
+            return x() if callable(x) else x
+        except Exception:
+            return None
 
-    var = 'is_female'
-    # Prepare container for results
-    out = {}
+    def _get_attr_value(obj, attr, key):
+        """
+        Try to retrieve obj.attr[key], calling attr if it's callable.
+        Returns None if anything fails.
+        """
+        if not hasattr(obj, attr):
+            return None
+        val = _maybe_call(getattr(obj, attr))
+        if val is None:
+            return None
+        # Try various ways to index
+        try:
+            return val[key]
+        except Exception:
+            try:
+                return val.loc[key]
+            except Exception:
+                try:
+                    # if val is a dict-like or has get
+                    return val.get(key, None)
+                except Exception:
+                    return None
+
+    def _get_conf_int(obj, key):
+        """
+        Try to get a two-element confidence interval (lower, upper) for `key`.
+        Supports conf_int as method or attribute, with columns named 2.5%/97.5% or 0/1.
+        Returns (lower, upper) or (None, None).
+        """
+        if not hasattr(obj, "conf_int"):
+            return None, None
+        df = _maybe_call(getattr(obj, "conf_int"))
+        if df is None:
+            return None, None
+        try:
+            # Prefer named percentiles
+            lower = df.loc[key, "2.5%"]
+            upper = df.loc[key, "97.5%"]
+            return float(lower), float(upper)
+        except Exception:
+            pass
+        try:
+            # Numeric column positions 0 and 1
+            lower = df.loc[key].iat[0]
+            upper = df.loc[key].iat[1]
+            return float(lower), float(upper)
+        except Exception:
+            pass
+        try:
+            # If df is indexed by integers or keys differently
+            row = df.loc[key]
+            vals = list(row)
+            if len(vals) >= 2:
+                return float(vals[0]), float(vals[1])
+        except Exception:
+            pass
+        return None, None
+
+    def _get_cov_se(obj, key):
+        """
+        Try to get standard error from covariance matrix diagonal for `key`.
+        cov_params may be callable.
+        """
+        if not hasattr(obj, "cov_params"):
+            return None
+        cov = _maybe_call(getattr(obj, "cov_params"))
+        if cov is None:
+            return None
+        try:
+            var = cov.loc[key, key]
+            return float(np.sqrt(var))
+        except Exception:
+            try:
+                # If cov is an ndarray with an index mapping in params
+                params = _maybe_call(getattr(obj, "params")) or {}
+                idx = list(params.index).index(key) if hasattr(params, "index") and key in params.index else None
+                if idx is not None and hasattr(cov, "iat"):
+                    return float(np.sqrt(cov.iat[idx, idx]))
+            except Exception:
+                return None
+        return None
+
+    def safe_exp(x):
+        try:
+            if x is None:
+                return None
+            x = float(x)
+            if np.isnan(x):
+                return None
+            # prevent overflow
+            if x > 700:
+                return float("inf")
+            if x < -700:
+                return 0.0
+            return float(np.exp(x))
+        except Exception:
+            return None
+
+    # Ensure the expected keys/attributes exist
+    params = _maybe_call(getattr(model_output, "params", None))
+    if params is None or ("female" not in getattr(params, "index", params) and "female" not in params):
+        # Try alternative lookup if params is a dict-like with keys directly
+        try:
+            if isinstance(params, dict) and "female" in params:
+                pass
+            else:
+                raise ValueError("model_output does not contain a 'female' parameter in .params")
+        except Exception:
+            raise ValueError("model_output does not contain a 'female' parameter in .params")
+
+    # Extract coefficient
+    coef_val = _get_attr_value(model_output, "params", "female")
     try:
-        params = res.params
-    except Exception as e:
-        raise ValueError("model_output does not look like a fitted statsmodels results object: " + str(e))
-
-    if var not in params.index:
-        raise KeyError(f"Variable '{var}' not found in model parameters. Available params: {list(params.index)}")
-
-    # Extract coefficient, se, p-value, z-stat (if available), and conf int
-    coef = float(params[var])
-    try:
-        se = float(res.bse[var])
+        coef = float(coef_val)
     except Exception:
-        se = None
-    try:
-        pval = float(res.pvalues[var])
-    except Exception:
-        pval = None
-    try:
-        zstat = float(coef / se) if se not in (None, 0) else None
-    except Exception:
-        zstat = None
-    try:
-        ci_row = res.conf_int().loc[var].values
-        ci_lower, ci_upper = float(ci_row[0]), float(ci_row[1])
-    except Exception:
-        ci_lower = ci_upper = None
+        raise ValueError("Could not extract numeric coefficient for 'female' from model_output.params")
 
-    # Odds ratio and CI on odds ratio scale
-    try:
-        odds_ratio = float(np.exp(coef))
-        odds_ci = [float(np.exp(ci_lower)) if ci_lower is not None else None,
-                   float(np.exp(ci_upper)) if ci_upper is not None else None]
-    except Exception:
-        odds_ratio = None
-        odds_ci = [None, None]
+    # Standard error: prefer bse, then cov_params diagonal
+    se = _get_attr_value(model_output, "bse", "female")
+    if se is not None:
+        try:
+            se = float(se)
+        except Exception:
+            se = None
+    if se is None:
+        se = _get_cov_se(model_output, "female")
 
-    # Try to get marginal effect (average/overall)
-    me = None
-    me_se = None
-    me_p = None
-    me_ci = [None, None]
-    try:
-        # get_margeff() returns a MarginsResults; summary_frame() or .summary_frame() yields dy/dx etc.
-        margeff = res.get_margeff()
-        me_df = margeff.summary_frame()
-        if var in me_df.index:
-            me = float(me_df.loc[var, 'dy/dx'])
-            me_se = float(me_df.loc[var, 'Std. Err.'])
-            me_p = float(me_df.loc[var, 'P>|z|'])
-            # approx 95% CI for marginal effect
-            me_ci = [me - 1.96 * me_se, me + 1.96 * me_se]
-    except Exception:
-        # If get_margeff fails, leave marginal effects as None (not essential)
-        pass
+    # z-stat and p-value
+    z = None
+    p_value = None
+    if se is not None and not np.isnan(se) and se != 0:
+        z = coef / se
+        # Prefer provided pvalues
+        pv = _get_attr_value(model_output, "pvalues", "female")
+        if pv is not None:
+            try:
+                p_value = float(pv)
+            except Exception:
+                p_value = None
+        else:
+            p_value = float(2 * stats.norm.sf(abs(z)))
+    else:
+        pv = _get_attr_value(model_output, "pvalues", "female")
+        if pv is not None:
+            try:
+                p_value = float(pv)
+            except Exception:
+                p_value = None
 
-    out = {
-        'variable': var,
-        'coef_log_odds': coef,
-        'std_err': se,
-        'z_value': zstat,
-        'p_value': pval,
-        'conf_int_95_log_odds': [ci_lower, ci_upper],
-        'odds_ratio': odds_ratio,
-        'odds_ratio_95_CI': odds_ci,
-        'average_marginal_effect_on_probability': me,
-        'marginal_effect_se': me_se,
-        'marginal_effect_p_value': me_p,
-        'marginal_effect_95_CI': me_ci
+    # Confidence interval on log-odds
+    ci_lower, ci_upper = _get_conf_int(model_output, "female")
+    if (ci_lower is None or ci_upper is None) and (se is not None and not np.isnan(se) and se != 0):
+        zcrit = stats.norm.ppf(0.975)
+        ci_lower = coef - zcrit * se
+        ci_upper = coef + zcrit * se
+
+    # Odds ratio and CI
+    odds_ratio = safe_exp(coef)
+    or_ci_lower = safe_exp(ci_lower) if ci_lower is not None else None
+    or_ci_upper = safe_exp(ci_upper) if ci_upper is not None else None
+
+    result_object = {
+        "coef_log_odds": coef,
+        "std_error": se,
+        "z_stat": float(z) if z is not None else None,
+        "p_value": float(p_value) if p_value is not None else None,
+        "ci_log_odds": {"2.5%": ci_lower, "97.5%": ci_upper},
+        "odds_ratio": odds_ratio,
+        "odds_ratio_ci": {"2.5%": or_ci_lower, "97.5%": or_ci_upper},
     }
 
-    # Description explaining the meaning and the decision rule for yes/no question
-    # (Do women have different approval probability than men, controlling for covariates?)
-    # We do not presume significance; we explain how to interpret the extracted numbers.
-    desc_lines = []
-    desc_lines.append("This returns statistics for the coefficient on 'is_female' from the fitted logistic regression.")
-    desc_lines.append("Interpretation:")
-    desc_lines.append("- 'coef_log_odds' is the estimated change in log-odds of mortgage approval for females vs males, holding controls constant.")
-    desc_lines.append("- 'odds_ratio' = exp(coef_log_odds) is the multiplicative change in the odds of approval for females compared with males.")
-    desc_lines.append("- The 95% CI fields give the confidence interval for the log-odds and the odds ratio respectively.")
-    desc_lines.append("- 'average_marginal_effect_on_probability' (if present) is the change in predicted probability of approval associated with being female (holding covariates as in the sample average).")
-    desc_lines.append("")
-    desc_lines.append("Decision rule to answer the question 'Does gender affect approval?':")
-    desc_lines.append("- If p_value < 0.05, conclude there is a statistically significant association between gender and approval (reject null of no effect).")
-    desc_lines.append("- If coef_log_odds > 0 (and significant), being female is associated with higher odds/probability of approval; if < 0 (and significant), being female is associated with lower odds/probability.")
-    desc_lines.append("- If p_value >= 0.05, there is no statistically significant evidence of a gender effect after controlling for the listed covariates.")
-    desc_lines.append("")
-    desc_lines.append("Use the numeric outputs in 'object' to see the estimated effect size, its uncertainty, and whether it is statistically significant.")
+    # Interpretation text
+    sign_text = "negative (coefficient < 0)" if coef < 0 else "positive (coefficient > 0)" if coef > 0 else "zero (coefficient = 0)"
 
-    description = "\n".join(desc_lines)
+    if p_value is None:
+        significance_text = "unknown (p-value not available)"
+    else:
+        significance_text = f"statistically significant (p = {p_value:.3g})" if p_value < 0.05 else f"not statistically significant (p = {p_value:.3g})"
 
-    return {"object": out, "description": description}
+    # Safe formatting helpers
+    def fmt(x):
+        try:
+            return f"{x:.6g}"
+        except Exception:
+            return str(x)
+
+    odds_ratio_text = fmt(odds_ratio) if odds_ratio is not None else "unknown"
+    ci_log_odds_text = f"[{fmt(ci_lower)}, {fmt(ci_upper)}]" if (ci_lower is not None and ci_upper is not None) else "not available"
+    ci_or_text = f"[{fmt(or_ci_lower)}, {fmt(or_ci_upper)}]" if (or_ci_lower is not None and or_ci_upper is not None) else "not available"
+    se_text = fmt(se) if se is not None else "not available"
+    z_text = fmt(z) if z is not None else "not available"
+    p_text = fmt(p_value) if p_value is not None else "not available"
+
+    # Construct description as a concise paragraph
+    description = (
+        f"The estimated coefficient for 'female' is {fmt(coef)} on the log-odds scale ({sign_text}). "
+        f"Robust standard error = {se_text}. z = {z_text}. p-value = {p_text}. "
+        f"95% CI for log-odds = {ci_log_odds_text}. Estimated odds ratio = {odds_ratio_text}. "
+        f"95% CI for odds ratio = {ci_or_text}. Interpretation: Being female is associated with a "
+        f"{'decrease' if coef < 0 else 'increase' if coef > 0 else 'no change'} in the odds of mortgage approval "
+        f"by a factor of {odds_ratio_text} relative to males, but this effect is {significance_text}. "
+        f"Caveat: If standard errors or confidence intervals are very large or unavailable, the estimate may be imprecise "
+        f"or the model may have estimation issues (e.g., separation or sparse data)."
+    )
+
+    return {"object": result_object, "description": description}
