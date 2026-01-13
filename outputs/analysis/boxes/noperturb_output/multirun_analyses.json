@@ -1,0 +1,250 @@
+{
+  "dataset_name": "boxes",
+  "n": 5,
+  "analyses": {
+    "0": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Child age (centered) and its (quadratic) term. Primary independent variable representing developmental growth in years. We model both a linear and quadratic effect and how the linear effect interacts with culture.",
+            "columns": [
+              "age_c",
+              "age2",
+              "age_c_x_culture_2",
+              "age_c_x_culture_3",
+              "age_c_x_culture_4",
+              "age_c_x_culture_5",
+              "age_c_x_culture_6",
+              "age_c_x_culture_7",
+              "age_c_x_culture_8"
+            ]
+          },
+          {
+            "description": "Cultural context (site). Coded as dummy variables with culture_1 as the reference category. These variables capture differences in baseline propensity to choose the majority option across sites and allow moderation (interaction) with age.",
+            "columns": [
+              "culture_2",
+              "culture_3",
+              "culture_4",
+              "culture_5",
+              "culture_6",
+              "culture_7",
+              "culture_8"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Binary indicator of choosing the majority option in the task (1 = chose majority option, 0 = chose minority or undemonstrated option). This focuses the analysis on majority preference.",
+          "columns": [
+            "y_majority"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Child sex (control). Original coding: 1 = girl, 2 = boy. Converted to a binary indicator is_boy (1 = boy, 0 = girl).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "is_boy"
+            ]
+          },
+          {
+            "description": "Whether the majority option was demonstrated first (control). Binary indicator (0/1) taken from majority_first.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "majority_first"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw dataset into a dataframe ready for modeling.\n\n    Steps:\n    - Drop rows with missing values in variables needed for the model.\n    - Create binary outcome y_majority (1 if y==2, else 0).\n    - Center age (age_c) and create quadratic term age2 to capture nonlinearity.\n    - Create is_boy indicator from gender (1=girl, 2=boy in raw data).\n    - Ensure majority_first is binary (0/1).\n    - Create culture dummy variables (culture_2 ... culture_8) with culture_1 as reference.\n    - Create interaction terms between centered age and each culture dummy.\n    - Add an Intercept column for explicit design matrix use.\n\n    The returned dataframe will contain at minimum the columns referenced in the conceptual variables and model code.\n    \"\"\"\n    # Required columns for modeling\n    required_cols = ['y', 'age', 'culture', 'gender', 'majority_first']\n    df = df.copy()\n\n    # Drop rows with missing values in any required column\n    df = df.dropna(subset=required_cols)\n\n    # Create binary dependent variable: 1 if majority option selected (y == 2), else 0\n    df['y_majority'] = (df['y'] == 2).astype(int)\n\n    # Center age and create quadratic term\n    df['age_c'] = df['age'] - df['age'].mean()\n    df['age2'] = df['age_c'] ** 2\n\n    # Convert gender to is_boy indicator: gender==2 -> 1, else 0\n    df['is_boy'] = (df['gender'] == 2).astype(int)\n\n    # Ensure majority_first is 0/1 integer\n    df['majority_first'] = df['majority_first'].astype(int)\n\n    # Create culture dummies; drop_first=True uses culture_1 as reference\n    # Cast culture to string to get deterministic column names like 'culture_2'\n    culture_dummies = pd.get_dummies(df['culture'].astype(int).astype(str), prefix='culture', drop_first=True)\n    # Ensure consistent ordering of dummy columns (culture_2 ... culture_8 if present)\n    culture_dummies = culture_dummies.reindex(sorted(culture_dummies.columns, key=lambda x: int(x.split('_')[1])), axis=1).fillna(0).astype(int)\n\n    # Attach culture dummies to df\n    for col in culture_dummies.columns:\n        df[col] = culture_dummies[col].values\n\n    # Create interactions between centered age and each culture dummy\n    interaction_cols = []\n    for col in culture_dummies.columns:\n        inter_name = 'age_c_x_' + col\n        df[inter_name] = df['age_c'] * df[col]\n        interaction_cols.append(inter_name)\n\n    # Add explicit intercept column for modeling\n    df['Intercept'] = 1.0\n\n    # Optionally, build a list of model columns to keep for downstream modeling\n    model_cols = ['Intercept', 'age_c', 'age2', 'is_boy', 'majority_first'] + list(culture_dummies.columns) + interaction_cols\n    # We keep these columns (plus the outcome) in the returned dataframe to make subsequent modeling explicit\n    cols_to_return = ['y_majority'] + model_cols + ['y', 'age', 'culture', 'gender', 'majority_first']\n\n    # Return df with at least the columns we need (keeping other columns as well is fine)\n    return df[cols_to_return].copy()",
+      "m_code": "def model(df: pd.DataFrame) -> Any:\n    \"\"\"\n    Fit a binomial (logistic) regression predicting the probability of choosing the majority option.\n\n    Model specification (GLM, binomial logit link):\n      y_majority ~ age_c + age2 + is_boy + majority_first + culture dummies + (age_c x culture dummies)\n\n    Interpretation focus: the age_c x culture interaction terms test whether the developmental slope for majority preference differs across cultural sites.\n\n    Returns the fitted statsmodels GLM results object.\n    \"\"\"\n    # Ensure necessary model columns exist\n    # Base columns\n    base_cols = ['Intercept', 'age_c', 'age2', 'is_boy', 'majority_first']\n    # Culture dummy columns expected (culture_2 ... culture_8). Keep only those present in df.\n    culture_cols = [c for c in df.columns if c.startswith('culture_')]\n    # Interaction columns: age_c_x_culture_*\n    interaction_cols = [c for c in df.columns if c.startswith('age_c_x_culture_')]\n\n    model_cols = base_cols + sorted(culture_cols) + sorted(interaction_cols)\n\n    # Subset to rows without missing values in model columns or the outcome\n    model_df = df.dropna(subset=['y_majority'] + model_cols)\n\n    # Design matrix X and outcome y\n    X = model_df[model_cols].astype(float)\n    y = model_df['y_majority'].astype(int)\n\n    # Fit GLM with binomial family (logit link)\n    model = sm.GLM(y, X, family=sm.families.Binomial())\n    results = model.fit()\n\n    # Optionally compute clustered robust SEs by culture (uncomment if desired):\n    # results_robust = results.get_robustcov_results(cov_type='cluster', groups=model_df['culture'])\n    # return results_robust\n\n    return results"
+    },
+    "1": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Child's age in years, mean-centered to aid interpretability; includes a quadratic term to capture non-linear developmental trajectories",
+            "columns": [
+              "age_c",
+              "age_sq"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Binary indicator whether the child chose the majority-demonstrated option (1 = chose majority, 0 = chose something else)",
+          "columns": [
+            "MajorityChoice"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Cultural site / context (categorical). Treated as a moderator of age to test whether developmental trajectories differ across cultures.",
+            "is_moderator": true,
+            "moderator_on": "age_c",
+            "columns": [
+              "culture"
+            ]
+          },
+          {
+            "description": "Child's gender (1 = girl, 2 = boy). Included as a control covariate.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "IsGirl"
+            ]
+          },
+          {
+            "description": "Whether the majority option was demonstrated first (0/1). Included as a control for order effects.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "majority_first"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw dataset into the analysis dataframe. The returned dataframe contains the\n    columns used in the model: MajorityChoice (binary DV), age_c (centered age), age_sq (quadratic),\n    IsGirl (gender binary), majority_first (order), and culture (categorical moderator).\n    \"\"\"\n    # Keep a copy of the input DataFrame\n    df = df.copy()\n\n    # Drop rows missing the core variables needed for analysis\n    df = df.dropna(subset=['y', 'age', 'culture'])\n\n    # Create binary dependent variable: 1 if child chose the majority option (y == 2), else 0\n    df['MajorityChoice'] = (df['y'] == 2).astype(int)\n\n    # Center age to improve interpretability and reduce collinearity with age_sq\n    df['age_c'] = df['age'] - df['age'].mean()\n    # Quadratic term to capture non-linear developmental change\n    df['age_sq'] = df['age_c'] ** 2\n\n    # Gender: create binary indicator for girl (1 if girl, 0 if boy or other)\n    # According to the schema: 1 = girl, 2 = boy\n    df['IsGirl'] = (df['gender'] == 1).astype(int)\n\n    # Ensure majority_first is binary integer (if missing, keep as NA and downstream model will drop)\n    # If majority_first is not present for some rows, this will raise; the dataset schema includes it.\n    df['majority_first'] = df['majority_first'].astype(int)\n\n    # Ensure culture is categorical (keeps original numeric codes but marks as category for modeling)\n    df['culture'] = df['culture'].astype('category')\n\n    # Drop any rows that still have NA in columns we will use in the model\n    df = df.dropna(subset=['MajorityChoice', 'age_c', 'age_sq', 'IsGirl', 'majority_first', 'culture'])\n\n    # Return the transformed dataframe ready for modeling\n    return df",
+      "m_code": "def model(df: pd.DataFrame):\n    \"\"\"\n    Fit a binomial (logistic) regression predicting the probability of choosing the majority option.\n    The model includes: main effect of age (centered), quadratic age (age_sq), interaction between age and culture\n    to test whether developmental slopes differ across cultures, and controls for gender and order (majority_first).\n\n    Returns a fitted model object with cluster-robust standard errors by culture.\n    \"\"\"\n    import statsmodels.formula.api as smf\n    import statsmodels.api as sm\n\n    # Formula: allow age slope to vary by culture via interaction; include quadratic age as a global effect;\n    # control for gender and demonstration order. C(culture) treats culture as categorical.\n    formula = 'MajorityChoice ~ age_c * C(culture) + age_sq + IsGirl + majority_first'\n\n    # Fit a binomial GLM (logistic regression)\n    glm_binom = smf.glm(formula=formula, data=df, family=sm.families.Binomial()).fit()\n\n    # Compute cluster-robust covariance (clustered on culture) to account for within-site dependence\n    try:\n        results_cluster = glm_binom.get_robustcov_results(cov_type='cluster', groups=df['culture'])\n    except Exception:\n        # If clustered covariance fails for any reason, return the original fitted model\n        results_cluster = glm_binom\n\n    # Return the model results object (with robust clustered SEs when available)\n    return results_cluster"
+    },
+    "2": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Child's age (developmental predictor). Centered age is used to improve interpretability and numerical stability; a quadratic term (age_c2) is included to capture nonlinear development.",
+            "columns": [
+              "age_c",
+              "age_c2"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Whether the child chose the majority-demonstrated option (1 = chose majority, 0 = chose other option). This operationalizes reliance on majority preference.",
+          "columns": [
+            "IsMajority"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Cultural context / study site. Treated as a categorical variable and specified as a moderator for the effect of age (i.e., testing whether age slopes differ across cultures).",
+            "is_moderator": true,
+            "moderator_on": "Child's age",
+            "columns": [
+              "Culture"
+            ]
+          },
+          {
+            "description": "Child's gender (binary): 1 = boy, 0 = girl. Controls for gender differences in social learning.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "GenderBoy"
+            ]
+          },
+          {
+            "description": "Whether the majority option was demonstrated first in the video (1 = majority shown first, 0 = not). Controls for order effects in demonstration.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "majority_first"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw dataset into a dataframe suitable for modeling.\n\n    Produces the following columns required by the model:\n      - IsMajority: binary outcome (1 if y == 2, else 0)\n      - age_c: centered age (age - mean(age))\n      - age_c2: squared centered age (to capture nonlinear age effects)\n      - Culture: categorical culture/site identifier\n      - GenderBoy: binary indicator 1 if boy (gender == 2), 0 if girl (gender == 1)\n      - majority_first: ensures integer 0/1 for the demonstration order variable\n\n    Drops rows with missing values in the key columns.\n    \"\"\"\n    df = df.copy()\n\n    # Drop rows missing the main variables needed for the analysis\n    df = df.dropna(subset=['y', 'age', 'culture', 'gender', 'majority_first'])\n\n    # Dependent variable: did the child choose the majority option? (y == 2)\n    df['IsMajority'] = (df['y'] == 2).astype(int)\n\n    # Center age and add a quadratic term to allow nonlinear (e.g., accelerated) development\n    df['age_c'] = df['age'] - df['age'].mean()\n    df['age_c2'] = df['age_c'] ** 2\n\n    # Gender: convert to a binary indicator where 1 = boy, 0 = girl\n    # Original coding: 1 = girl, 2 = boy\n    df['GenderBoy'] = (df['gender'] == 2).astype(int)\n\n    # Ensure majority_first is 0/1 integer\n    df['majority_first'] = df['majority_first'].astype(int)\n\n    # Culture as categorical factor (keeps original IDs but as category for modeling)\n    df['Culture'] = df['culture'].astype('category')\n\n    # Return the transformed dataframe (keeps other columns too if needed for further checks)\n    return df",
+      "m_code": "def model(df: pd.DataFrame):\n    \"\"\"\n    Fit a binomial (logistic) regression to predict choosing the majority option.\n\n    Model specification:\n      IsMajority ~ age_c + age_c2 + C(Culture) + age_c:C(Culture) + GenderBoy + majority_first\n\n    - age_c and age_c2 model linear and quadratic age effects.\n    - C(Culture) includes culture fixed effects to capture baseline differences across sites.\n    - age_c:C(Culture) allows the age slope to vary by culture (i.e., tests whether developmental trajectories differ across cultural contexts).\n    - GenderBoy and majority_first are included as controls.\n\n    Returns the fitted results object with cluster-robust standard errors clustered by Culture (if available).\n    \"\"\"\n    import statsmodels.api as sm\n    import statsmodels.formula.api as smf\n\n    # Ensure required columns are present\n    required_cols = ['IsMajority', 'age_c', 'age_c2', 'Culture', 'GenderBoy', 'majority_first']\n    missing = [c for c in required_cols if c not in df.columns]\n    if len(missing) > 0:\n        raise ValueError(f\"Missing required columns in dataframe: {missing}\")\n\n    # Formula with culture fixed effects and age-by-culture interactions\n    formula = 'IsMajority ~ age_c + age_c2 + C(Culture) + age_c:C(Culture) + GenderBoy + majority_first'\n\n    # Fit GLM (logistic regression)\n    glm_res = smf.glm(formula=formula, data=df, family=sm.families.Binomial()).fit()\n\n    # Attempt to produce cluster-robust SEs clustered by Culture\n    # If clustering fails for any reason, fall back to the original glm results.\n    try:\n        clustered = glm_res.get_robustcov_results(cov_type='cluster', groups=df['Culture'])\n    except Exception:\n        clustered = glm_res\n\n    # Return the results object (clustered if possible)\n    return clustered"
+    },
+    "3": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Child's age centered around the sample mean. Primary independent variable capturing developmental change in years.",
+            "columns": [
+              "age_c"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Binary indicator whether the child chose the majority option in the trial (1 = chose majority, 0 = chose minority or unchosen option).",
+          "columns": [
+            "MajorityChoice"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Cultural site / population. Included as a categorical control and treated as a moderator of age (tests whether the effect of age on majority-choice differs across cultures).",
+            "is_moderator": true,
+            "moderator_on": "Child's age centered around the sample mean. Primary independent variable capturing developmental change in years.",
+            "columns": [
+              "culture"
+            ]
+          },
+          {
+            "description": "Child's sex coded as a binary control (1 = male, 0 = female).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "is_male"
+            ]
+          },
+          {
+            "description": "Indicator whether the majority demonstration was presented first (0/1). Control for order effects in the demonstration.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "majority_first"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw dataset into the analysis-ready dataframe containing the columns used in the model.\n\n    Produces the following new/cleaned columns used in modeling:\n      - MajorityChoice : binary DV (1 if y == 2 (majority), else 0)\n      - age_c          : age centered around the sample mean\n      - is_male        : 1 if gender == 2 (boy), 0 if gender == 1 (girl)\n      - culture        : kept as-is (will be treated as categorical in the model)\n      - majority_first : ensured numeric 0/1\n\n    Drops rows with missing values in the essential variables (y, age, culture).\n    \"\"\"\n    # Ensure we operate on a copy\n    df = df.copy()\n\n    # Keep only rows with the essential columns non-missing\n    df = df.dropna(subset=['y', 'age', 'culture'])\n\n    # Create dependent variable: 1 if child chose the majority option (y == 2), else 0\n    # According to the dataset: y: 1 = unchosen option, 2 = majority option, 3 = minority option\n    df['MajorityChoice'] = (df['y'] == 2).astype(int)\n\n    # Create a binary sex variable: is_male (1 if boy (gender==2), 0 if girl (gender==1))\n    # If gender has other codings or missing, we coerce to numeric and set missing to NaN then drop above\n    df['is_male'] = (df['gender'] == 2).astype(int)\n\n    # Ensure majority_first is numeric 0/1\n    # If majority_first is already 0/1 this is a no-op; coerce to integer where possible\n    df['majority_first'] = pd.to_numeric(df['majority_first'], errors='coerce').fillna(0).astype(int)\n\n    # Center age around the sample mean to improve interpretability of main effects and interactions\n    df['age_c'] = df['age'].astype(float) - df['age'].astype(float).mean()\n\n    # Ensure culture is kept (will be treated as categorical in the model). Cast to integer category if possible\n    # but keep the column name 'culture' (the model will use C(culture) in the formula)\n    df['culture'] = df['culture'].astype(int)\n\n    # Final check: drop any rows that became NA after coercion in columns used by the model\n    df = df.dropna(subset=['MajorityChoice', 'age_c', 'is_male', 'majority_first', 'culture'])\n\n    return df",
+      "m_code": "def model(df: pd.DataFrame):\n    \"\"\"\n    Fit a logistic regression (GLM, binomial family) predicting the probability of choosing the majority option.\n\n    The model tests whether age predicts majority choice, and whether that developmental effect differs across cultural sites\n    by including an interaction between centered age and culture.\n\n    Formula used:\n      MajorityChoice ~ age_c * C(culture) + is_male + majority_first\n\n    - age_c * C(culture) fits main effect of age and culture plus their interaction (age-by-culture), which addresses the\n      research question about how reliance on majority preference develops over age across different cultural contexts.\n\n    Returns the fitted results object (statsmodels GLMResults).\n    \"\"\"\n    import statsmodels.formula.api as smf\n    # Fit a logistic regression (binomial family)\n    formula = 'MajorityChoice ~ age_c * C(culture) + is_male + majority_first'\n    model = smf.glm(formula=formula, data=df, family=sm.families.Binomial())\n    results = model.fit()\n\n    # Return the fitted results object for inspection (summary, coefficients, confidence intervals, predicted probabilities, etc.)\n    return results"
+    },
+    "4": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Child's age (centered). Continuous independent variable representing the child's age in years, mean-centered to aid interpretation of interactions.",
+            "columns": [
+              "age_centered"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Whether the child selected the majority-demonstrated option (1 = chose the majority option, 0 = chose minority or unchosen option). Binary dependent variable capturing reliance on majority preference.",
+          "columns": [
+            "majority_choice"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Cultural context (study site). Treated as a categorical moderator of the age effect to test whether age-related change in majority reliance differs across cultures.",
+            "is_moderator": true,
+            "moderator_on": "age_centered",
+            "columns": [
+              "culture"
+            ]
+          },
+          {
+            "description": "Child's gender (0 = girl, 1 = boy). Control covariate; included because gender differences might relate to social learning strategies.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "gender_f"
+            ]
+          },
+          {
+            "description": "Whether the majority option was demonstrated first in the video (0 = no, 1 = yes). Control for order effects in demonstration.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "majority_first"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw dataset into the analysis dataframe.\n    Produces the following columns required for modeling:\n      - majority_choice : binary DV (1 if y==2 else 0)\n      - age_centered    : centered age (continuous IV)\n      - culture         : categorical site ID (used as moderator)\n      - gender_f        : gender coded 0 (girl) / 1 (boy)\n      - majority_first  : binary indicator (0/1) for demonstration order\n\n    Rows with missing values in the required fields are dropped.\n    \"\"\"\n    # Work on a copy\n    df = df.copy()\n\n    # Required columns: 'y', 'age', 'culture', 'gender', 'majority_first'\n    required = ['y', 'age', 'culture', 'gender', 'majority_first']\n    df = df.dropna(subset=required)\n\n    # Dependent variable: majority_choice (1 if chose majority option coded as y==2)\n    df['majority_choice'] = (df['y'] == 2).astype(int)\n\n    # Independent variable: age (centered)\n    # Keep original age column but create a mean-centered version for modeling\n    df['age_centered'] = df['age'] - df['age'].mean()\n\n    # Culture: ensure categorical type for modeling (C(culture) will be used)\n    # Keep numeric codes but convert dtype to 'category' to make intentions explicit\n    df['culture'] = df['culture'].astype('category')\n\n    # Gender: map to 0/1 with clear naming (0 = girl, 1 = boy)\n    # Original coding: 1 = girl, 2 = boy\n    df['gender_f'] = df['gender'].map({1: 0, 2: 1})\n    # If any unexpected gender codes remain, drop them\n    df = df.dropna(subset=['gender_f'])\n    df['gender_f'] = df['gender_f'].astype(int)\n\n    # majority_first: ensure binary integer 0/1\n    df['majority_first'] = df['majority_first'].astype(int)\n\n    # Final check: keep only rows with finite values in columns used for model\n    model_cols = ['majority_choice', 'age_centered', 'culture', 'gender_f', 'majority_first']\n    df = df.dropna(subset=model_cols)\n\n    # Reset index for cleanliness\n    df = df.reset_index(drop=True)\n\n    return df",
+      "m_code": "def model(df: pd.DataFrame):\n    \"\"\"\n    Fit a binomial logistic regression predicting majority_choice from age,\n    with culture as a moderator (age x culture interaction). Controls: gender_f, majority_first.\n\n    The model formula is:\n      majority_choice ~ age_centered * C(culture) + gender_f + majority_first\n\n    We fit a logistic regression using statsmodels' formula interface and then\n    compute cluster-robust standard errors clustered by culture.\n\n    Returns the statsmodels results object with cluster-robust covariances applied.\n    \"\"\"\n    import statsmodels.formula.api as smf\n\n    # Ensure culture is available for clustering as group labels (use the original category codes)\n    # If culture is categorical dtype, convert groups to its codes for clustering\n    if hasattr(df['culture'].dtype, 'categories'):\n        cluster_groups = df['culture'].cat.codes\n    else:\n        cluster_groups = df['culture']\n\n    # Define formula including interaction\n    formula = 'majority_choice ~ age_centered * C(culture) + gender_f + majority_first'\n\n    # Fit logistic regression (maximum likelihood)\n    model_fit = smf.logit(formula=formula, data=df).fit(disp=False)\n\n    # Convert to cluster-robust covariance (cluster by culture)\n    try:\n        results_clustered = model_fit.get_robustcov_results(cov_type='cluster', groups=cluster_groups)\n    except Exception:\n        # Fallback: return the original model_fit if robust cov can't be computed\n        results_clustered = model_fit\n\n    return results_clustered"
+    }
+  }
+}
