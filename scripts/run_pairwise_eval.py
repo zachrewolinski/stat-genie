@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 import os
 import json
 import sys
@@ -37,9 +35,12 @@ def run_pairwise_eval():
     else:
         base_dir = project_root / "outputs" / "analysis"
     
+    perturbations = ["add_features", "anonymize", "noperturb",
+                     "replace_with_rvs", "shuffle_names"]
+    
     analysis_result_paths = [
-        str(base_dir / dataset_name / f"analysis{i}_output")
-        for i in range(1, num_multiruns + 1)
+        str(base_dir / dataset_name / f"{perturbation}_output")
+        for perturbation in perturbations
     ]
     analysis_result_paths = [os.path.abspath(p) for p in analysis_result_paths]
     

@@ -2,15 +2,15 @@
 #SBATCH --job-name=analysis
 #SBATCH -o ./out/analysis_%j.log  
 #SBATCH -e ./out/analysis_%j.err
-#
-#SBATCH --mail-user=austin.zane@berkeley.edu
 #SBATCH --mail-type=FAIL,TIME_LIMIT
-#
-#SBATCH -p yugroup
-#SBATCH --cpus-per-task=30
-#SBATCH --mem=64G
+#SBATCH --mail-user=zachrewolinski@berkeley.edu
+#SBATCH --cpus-per-task=5
 #SBATCH --ntasks=1
-#SBATCH -t 1:00:00
+
+# Mail user is provided at submission time so different users can set their
+# OWN email in a .env file and use the provided `scripts/submit_run_analysis.sh`
+# wrapper which passes `--mail-user` to `sbatch`.
+
 
 mkdir -p out
 
@@ -32,15 +32,29 @@ if [ ! -f "pyproject.toml" ]; then
     exit 1
 fi
 
+# load .env from project root (if present) and export its variables
+if [ -f ".env" ]; then
+    set -o allexport
+    # shellcheck source=/dev/null
+    source ".env"
+    set +o allexport
+fi
+
 if [ -z "$OPENAI_API_KEY" ]; then
     echo "Error: OPENAI_API_KEY not set"
     exit 1
 fi
 
-DATASET="caschools"
+# accept dataset as first positional arg (sbatch run_analysis.sh <dataset>)
+# or from exported DATASET env var; default to "caschools" if neither provided.
+if [ -n "$1" ]; then
+    DATASET="$1"
+elif [ -z "$DATASET" ]; then
+    DATASET="caschools"
+fi
 LLM_PROVIDER="openai"
 LLM_MODEL="gpt-5-mini"
-NUM_RUNS=1
+NUM_RUNS=5
 
 echo "Job ID: ${SLURM_JOB_ID}"
 
@@ -102,6 +116,46 @@ HOURS=$((DURATION / 3600))
 MINUTES=$(((DURATION % 3600) / 60))
 SECONDS=$((DURATION % 60))
 echo "Analysis 3 done in ${HOURS}h ${MINUTES}m ${SECONDS}s (exit: $EXIT_CODE)"
+if [ $EXIT_CODE -ne 0 ]; then
+    exit $EXIT_CODE
+fi
+
+echo "Running analysis 4 (add_features)..."
+START_TIME=$(date +%s)
+poetry run python scripts/run_analysis.py \
+    --dataset "$DATASET" \
+    --analysis-num 4 \
+    --perturbation-type add_features \
+    --llm-provider "$LLM_PROVIDER" \
+    --llm-model "$LLM_MODEL" \
+    --num-runs "$NUM_RUNS"
+EXIT_CODE=$?
+END_TIME=$(date +%s)
+DURATION=$((END_TIME - START_TIME))
+HOURS=$((DURATION / 3600))
+MINUTES=$(((DURATION % 3600) / 60))
+SECONDS=$((DURATION % 60))
+echo "Analysis 4 done in ${HOURS}h ${MINUTES}m ${SECONDS}s (exit: $EXIT_CODE)"
+if [ $EXIT_CODE -ne 0 ]; then
+    exit $EXIT_CODE
+fi
+
+echo "Running analysis 5 (replace_with_rvs)..."
+START_TIME=$(date +%s)
+poetry run python scripts/run_analysis.py \
+    --dataset "$DATASET" \
+    --analysis-num 5 \
+    --perturbation-type replace_with_rvs \
+    --llm-provider "$LLM_PROVIDER" \
+    --llm-model "$LLM_MODEL" \
+    --num-runs "$NUM_RUNS"
+EXIT_CODE=$?
+END_TIME=$(date +%s)
+DURATION=$((END_TIME - START_TIME))
+HOURS=$((DURATION / 3600))
+MINUTES=$(((DURATION % 3600) / 60))
+SECONDS=$((DURATION % 60))
+echo "Analysis 5 done in ${HOURS}h ${MINUTES}m ${SECONDS}s (exit: $EXIT_CODE)"
 if [ $EXIT_CODE -ne 0 ]; then
     exit $EXIT_CODE
 fi

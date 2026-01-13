@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 import os
 import json
 import sys
@@ -14,6 +12,7 @@ sys.path.insert(0, str(project_root))
 from stat_genie.blade_pipeline.baselines.config import MultiRunConfig
 from stat_genie.blade_pipeline.baselines.multirun import multirun_llm
 from stat_genie.blade_pipeline.additions.perturbations.features import FeaturePerturbation
+from stat_genie.blade_pipeline.additions.perturbations.data import DataPerturbation
 
 
 def run_analysis():
@@ -21,7 +20,7 @@ def run_analysis():
     parser.add_argument("--dataset", required=True, help="Dataset name")
     parser.add_argument("--analysis-num", type=int, required=True, help="Analysis number (1, 2, 3, etc.)")
     parser.add_argument("--perturbation-type", required=True, 
-                       choices=["noperturb", "anonymize", "shuffle_names"],
+                       choices=["noperturb", "anonymize", "shuffle_names", "add_features", "replace_with_rvs"],
                        help="Type of feature perturbation")
     parser.add_argument("--llm-provider", default="openai", help="LLM provider")
     parser.add_argument("--llm-model", default="gpt-5-mini", help="LLM model")
@@ -56,7 +55,7 @@ def run_analysis():
     }
     llm_eval_config = llm_config.copy()
     
-    output_dir = project_root / "outputs" / "analysis" / dataset_name / f"analysis{analysis_num}_output"
+    output_dir = project_root / "outputs" / "analysis" / dataset_name / f"{perturbation_type}_output"
     output_dir.mkdir(parents=True, exist_ok=True)
     
     llm_config["log_file"] = str(output_dir / "llm.log")
@@ -80,13 +79,22 @@ def run_analysis():
     
     if perturbation_type == "noperturb":
         feature_perturbation = FeaturePerturbation()
+        data_perturbation = DataPerturbation()
     elif perturbation_type == "anonymize":
         feature_perturbation = FeaturePerturbation(anonymize=True)
+        data_perturbation = DataPerturbation()
     elif perturbation_type == "shuffle_names":
         feature_perturbation = FeaturePerturbation(
             shuffle_names=True,
             shuffle_names_seed=args.shuffle_names_seed
         )
+        data_perturbation = DataPerturbation()
+    elif perturbation_type == "add_features":
+        feature_perturbation = FeaturePerturbation(add_random_features=10)
+        data_perturbation = DataPerturbation()
+    elif perturbation_type == "replace_with_rvs":
+        feature_perturbation = FeaturePerturbation()
+        data_perturbation = DataPerturbation(replace_features=True)
     
     slurm_job_id = os.environ.get("SLURM_JOB_ID", None)
     
@@ -118,7 +126,7 @@ def run_analysis():
     print(f"Output: {output_dir}")
     print(f"Running analysis {analysis_num}: {dataset_name}, {perturbation_type}, {llm_provider}/{llm_model}")
     
-    multirun_llm(single_run_config, feature_perturbation=feature_perturbation)
+    multirun_llm(single_run_config, feature_perturbation=feature_perturbation, data_perturbation=data_perturbation)
     
     print(f"Analysis {analysis_num} completed")
     

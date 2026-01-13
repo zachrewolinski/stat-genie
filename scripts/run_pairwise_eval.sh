@@ -3,14 +3,13 @@
 #SBATCH -o ./out/pairwise_eval_%j.log  
 #SBATCH -e ./out/pairwise_eval_%j.err
 #
-#SBATCH --mail-user=austin.zane@berkeley.edu
+#SBATCH --mail-user=zachrewolinski@berkeley.edu
 #SBATCH --mail-type=FAIL,TIME_LIMIT
 #
 #SBATCH -p yugroup
-#SBATCH --cpus-per-task=30
+#SBATCH --cpus-per-task=10
 #SBATCH --mem=64G
 #SBATCH --ntasks=1
-#SBATCH -t 0:30:00
 
 mkdir -p out
 
@@ -32,16 +31,24 @@ if [ ! -f "pyproject.toml" ]; then
     exit 1
 fi
 
+# load .env from project root (if present) and export its variables
+if [ -f ".env" ]; then
+    set -o allexport
+    # shellcheck source=/dev/null
+    source ".env"
+    set +o allexport
+fi
+
 if [ -z "$OPENAI_API_KEY" ]; then
     echo "Error: OPENAI_API_KEY not set"
     exit 1
 fi
 
-DATASET="caschools"
-NUM_MULTIRUNS=3
+DATASET="mortgage"
+NUM_MULTIRUNS=5
 LLM_PROVIDER="openai"
 LLM_MODEL="gpt-5-mini"
-# ANALYSIS_BASE_DIR=""
+ANALYSIS_BASE_DIR="outputs/analysis"
 
 echo "Job ID: ${SLURM_JOB_ID}"
 
