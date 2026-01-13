@@ -44,7 +44,7 @@ if [ -z "$OPENAI_API_KEY" ]; then
     exit 1
 fi
 
-DATASET="caschools"
+DATASET="fish"
 NUM_MULTIRUNS=5
 LLM_PROVIDER="openai"
 LLM_MODEL="gpt-5-mini"
