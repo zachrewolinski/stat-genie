@@ -225,6 +225,9 @@ class RunLLMMultiRun(SingleRunExperiment):
             data = pd.read_csv(data_path)
             transformed_data = module.transform(data)
             model_output = module.model(transformed_data)
+            if model_output is None:
+                # if the model outputs 'None', we need to override it with a string consisting of "None" to avoid errors in the next steps
+                model_output = "None"
             write_final_answer_code(
                 llm_provider=self.config.llm.provider,
                 llm_model=self.config.llm.model,
