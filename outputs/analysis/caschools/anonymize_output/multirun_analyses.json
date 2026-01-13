@@ -1,0 +1,405 @@
+{
+  "dataset_name": "caschools",
+  "n": 5,
+  "analyses": {
+    "0": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Student-teacher ratio (number of students per one full-time-equivalent teacher). Lower values indicate fewer students per teacher.",
+            "columns": [
+              "StudentTeacherRatio"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Average academic performance of the district computed as the mean of the district average reading and math scores (Stanford 9).",
+          "columns": [
+            "AvgTestScore"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Percent of students qualifying for reduced-price lunch (proxy for socioeconomic disadvantage).",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "PercentReducedLunch"
+            ]
+          },
+          {
+            "description": "Percent of students who are English learners (language-related challenge to learning).",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "PercentEnglishLearners"
+            ]
+          },
+          {
+            "description": "Expenditure per student (district-level spending per pupil).",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "ExpenditurePerStudent"
+            ]
+          },
+          {
+            "description": "Average district income (in same units as feature12; used as a socioeconomic control).",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "AvgDistrictIncome"
+            ]
+          },
+          {
+            "description": "Number of computers per student (computing resources available per pupil).",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "ComputersPerStudent"
+            ]
+          },
+          {
+            "description": "Grade-span indicator (district type). Dummy(s) created from feature5; only non-reference dummy(s) are included (e.g., GradeSpan_KK-08 if present).",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "GradeSpan_KK-08"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw dataset into a dataframe with the variables required for modeling.\n\n    Final columns produced/used by the model (important exact names):\n      - StudentTeacherRatio: Enrollment / TeacherFTE\n      - AvgTestScore: mean of feature14 (avg reading) and feature15 (avg math)\n      - PercentReducedLunch: feature9\n      - PercentEnglishLearners: feature13\n      - ExpenditurePerStudent: feature11\n      - AvgDistrictIncome: feature12\n      - ComputersPerStudent: feature10 / Enrollment\n      - GradeSpan_* : dummy(s) created from feature5 (prefix 'GradeSpan_', drop_first=True)\n\n    Notes:\n      - Drops rows with missing enrollment, teacher FTE, or average scores.\n      - Removes rows with TeacherFTE <= 0 to avoid division by zero.\n    \"\"\"\n    df = df.copy()\n\n    # Ensure numeric conversion for numeric fields (coerce invalid to NaN)\n    numeric_cols = [\n        'feature6',  # Enrollment\n        'feature7',  # Number of teachers (FTE)\n        'feature9',  # Percent reduced-price lunch\n        'feature10', # Number of computers\n        'feature11', # Expenditure per student\n        'feature12', # Avg district income\n        'feature13', # Percent English learners\n        'feature14', # Avg reading score\n        'feature15'  # Avg math score\n    ]\n    for c in numeric_cols:\n        df[c] = pd.to_numeric(df[c], errors='coerce')\n\n    # Drop rows missing essential variables\n    df = df.dropna(subset=['feature6', 'feature7', 'feature14', 'feature15'])\n\n    # Remove impossible teacher counts (avoid division by zero)\n    df = df[df['feature7'] > 0]\n\n    # Create clear variable names used in modeling\n    df['Enrollment'] = df['feature6']\n    df['TeacherFTE'] = df['feature7']\n    df['StudentTeacherRatio'] = df['Enrollment'] / df['TeacherFTE']\n\n    df['AvgReading'] = df['feature14']\n    df['AvgMath'] = df['feature15']\n    df['AvgTestScore'] = df[['AvgReading', 'AvgMath']].mean(axis=1)\n\n    df['PercentReducedLunch'] = df['feature9']\n    df['PercentEnglishLearners'] = df['feature13']\n    df['ExpenditurePerStudent'] = df['feature11']\n    df['AvgDistrictIncome'] = df['feature12']\n\n    # Computers per student; guard against division errors\n    df['ComputersPerStudent'] = df['feature10'] / df['Enrollment']\n    df['ComputersPerStudent'].replace([np.inf, -np.inf], np.nan, inplace=True)\n\n    # Create grade-span dummies from feature5; drop first to avoid multicollinearity\n    # This will create e.g. GradeSpan_KK-08 if KK-08 is present and KK-06 is reference\n    if 'feature5' in df.columns:\n        df['feature5'] = df['feature5'].astype('category')\n        dummies = pd.get_dummies(df['feature5'], prefix='GradeSpan', drop_first=True)\n        # Ensure consistent column naming when only a single non-reference level exists\n        df = pd.concat([df, dummies], axis=1)\n\n    # Return transformed dataframe with the new columns (keep original columns too)\n    return df\n",
+      "m_code": "def model(df: pd.DataFrame):\n    \"\"\"\n    Fit an OLS regression of AvgTestScore on StudentTeacherRatio and controls.\n\n    The function expects that `transform` has already been applied to df so that the\n    columns listed in the conceptual variables exist. Returns the fitted statsmodels results\n    object (with robust heteroskedasticity-consistent standard errors, HC3).\n    \"\"\"\n    df = df.copy()\n\n    # Identify grade-span dummy columns (any column that starts with 'GradeSpan_')\n    grade_span_cols = [c for c in df.columns if c.startswith('GradeSpan_')]\n\n    # Define model covariates\n    base_controls = [\n        'PercentReducedLunch',\n        'PercentEnglishLearners',\n        'ExpenditurePerStudent',\n        'AvgDistrictIncome',\n        'ComputersPerStudent'\n    ]\n\n    model_vars = ['StudentTeacherRatio'] + base_controls + grade_span_cols\n\n    # Drop rows with missing values in model variables or dependent variable\n    required = model_vars + ['AvgTestScore']\n    df_model = df.dropna(subset=required)\n\n    # Prepare X and y\n    y = df_model['AvgTestScore']\n    X = df_model[model_vars]\n    X = sm.add_constant(X)\n\n    # Fit OLS with robust standard errors (HC3)\n    results = sm.OLS(y, X).fit(cov_type='HC3')\n\n    return results\n"
+    },
+    "1": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Student-teacher ratio (natural log). Constructed as enrollment / number_of_teachers and log-transformed to reduce skew. This is the main independent variable of interest.",
+            "columns": [
+              "STR_log"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "District-level academic performance: average of 5th-grade reading and math Stanford-9 scores (mean of feature14 and feature15).",
+          "columns": [
+            "AvgScore"
+          ]
+        },
+        "controls": [
+          {
+            "description": "District expenditure per student (controls for funding differences).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "ExpenditurePerStudent"
+            ]
+          },
+          {
+            "description": "Number of computers (used as computers per classroom proxy / resource availability).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "ComputersPerClassroom"
+            ]
+          },
+          {
+            "description": "Percent of students qualifying for CalWorks (poverty proxy).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "PercentCalWorks"
+            ]
+          },
+          {
+            "description": "Percent of students qualifying for reduced-price lunch (poverty proxy).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "PercentReducedLunch"
+            ]
+          },
+          {
+            "description": "Percent of English learners (language-background control).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "PercentEnglishLearners"
+            ]
+          },
+          {
+            "description": "District average income (in thousands of USD) to control for community SES.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "AvgIncome"
+            ]
+          },
+          {
+            "description": "Grade span indicator: 1 if district covers KK-08, 0 if KK-06 (controls for structural differences across districts).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "GradeSpan_KK08"
+            ]
+          },
+          {
+            "description": "County fixed effects to control for county-level unobserved heterogeneity. These are expanded into dummy columns with prefix 'County_'.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "County_*"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the original dataframe into the analysis dataframe.\n\n    Creates the following columns (all used in the model):\n      - AvgScore: mean of feature14 (reading) and feature15 (math)\n      - StudentTeacherRatio: feature6 / feature7\n      - STR_log: natural log of StudentTeacherRatio\n      - ExpenditurePerStudent: feature11\n      - ComputersPerClassroom: feature10\n      - PercentCalWorks: feature8\n      - PercentReducedLunch: feature9\n      - PercentEnglishLearners: feature13\n      - AvgIncome: feature12\n      - GradeSpan_KK08: binary indicator from feature5\n      - County_*: dummy columns generated from feature4 (drop_first=True)\n\n    Drops rows with missing key variables required for the regression.\n    \"\"\"\n    df = df.copy()\n\n    # Create dependent variable: average of reading and math scores\n    df['AvgScore'] = df[['feature14', 'feature15']].mean(axis=1)\n\n    # Create student-teacher ratio, guard against division by zero\n    df['Enrollment'] = df['feature6']\n    df['NumTeachers'] = df['feature7']\n    # If NumTeachers is zero or missing, ratio will be set to NaN\n    df['StudentTeacherRatio'] = df['Enrollment'] / df['NumTeachers']\n    df.loc[~np.isfinite(df['StudentTeacherRatio']), 'StudentTeacherRatio'] = np.nan\n\n    # Log-transform the ratio for more symmetric distribution\n    # Add a small positive offset only if ratio is non-positive (should not be, but guard anyway)\n    df.loc[df['StudentTeacherRatio'] <= 0, 'StudentTeacherRatio'] = np.nan\n    df['STR_log'] = np.log(df['StudentTeacherRatio'])\n\n    # Map control variables to clearer column names\n    df['ExpenditurePerStudent'] = df['feature11']\n    df['ComputersPerClassroom'] = df['feature10']\n    df['PercentCalWorks'] = df['feature8']\n    df['PercentReducedLunch'] = df['feature9']\n    df['PercentEnglishLearners'] = df['feature13']\n    df['AvgIncome'] = df['feature12']\n\n    # Binary indicator for grade span; treat unknowns as 0\n    df['GradeSpan_KK08'] = df['feature5'].apply(lambda x: 1 if str(x).strip() == 'KK-08' else 0)\n\n    # County dummies (drop first to avoid perfect multicollinearity)\n    # Keep original county column for traceability\n    df['County'] = df['feature4']\n    county_dummies = pd.get_dummies(df['County'], prefix='County', dummy_na=False, drop_first=True)\n    df = pd.concat([df, county_dummies], axis=1)\n\n    # Drop rows missing dependent variable, independent variable, or core controls.\n    required_cols = [\n        'AvgScore',\n        'STR_log',\n        'ExpenditurePerStudent',\n        'ComputersPerClassroom',\n        'PercentCalWorks',\n        'PercentReducedLunch',\n        'PercentEnglishLearners',\n        'AvgIncome',\n        'GradeSpan_KK08'\n    ]\n    df = df.dropna(subset=required_cols)\n\n    # Optionally, you may want to inspect distribution and winsorize extreme values.\n    # For reproducibility we do not modify values further here.\n\n    return df\n",
+      "m_code": "def model(df: pd.DataFrame) -> Any:\n    \"\"\"\n    Fit an OLS regression of AvgScore on STR_log and controls.\n\n    Model specification:\n        AvgScore = beta0 + beta1 * STR_log + beta2 * ExpenditurePerStudent + ... + county fixed effects + error\n\n    Uses robust (HC3) standard errors.\n    Returns the fitted statsmodels regression results object.\n    \"\"\"\n    # Identify county dummy columns (those created in transform)\n    county_cols = [col for col in df.columns if col.startswith('County_')]\n\n    # Define regressors\n    X_cols = [\n        'STR_log',\n        'ExpenditurePerStudent',\n        'ComputersPerClassroom',\n        'PercentCalWorks',\n        'PercentReducedLunch',\n        'PercentEnglishLearners',\n        'AvgIncome',\n        'GradeSpan_KK08'\n    ] + county_cols\n\n    X = df[X_cols]\n    # Add constant\n    X = sm.add_constant(X)\n    y = df['AvgScore']\n\n    # Fit OLS with heteroskedasticity-robust standard errors\n    model_res = sm.OLS(y, X).fit(cov_type='HC3')\n\n    # Return the fitted model object (contains params, summary, etc.)\n    return model_res\n"
+    },
+    "2": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Student-teacher ratio (number of students per full-time-equivalent teacher). Lower values indicate fewer students per teacher (i.e., smaller class sizes) and are the primary independent variable.",
+            "columns": [
+              "StuTeacherRatio"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Average academic performance: the district average of 5th-grade reading and math scores (mean of feature14 and feature15).",
+          "columns": [
+            "AvgScore"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Percent of students qualifying for reduced-price lunch (proxy for socioeconomic disadvantage).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "PctReducedLunch"
+            ]
+          },
+          {
+            "description": "Percent of English learners in the district (language-related educational challenges).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "PctEnglishLearners"
+            ]
+          },
+          {
+            "description": "Expenditure per student (district spending; controls for resource level).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "ExpPerStudent"
+            ]
+          },
+          {
+            "description": "District average (median) household income (in thousands).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "AvgIncome"
+            ]
+          },
+          {
+            "description": "Computers per student in the district (computers divided by total enrollment) as a proxy for technology resources.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "ComputersPerStudent"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw dataset into the dataframe used for modeling.\n\n    Produces the following REQUIRED final columns (must not be renamed):\n      - StuTeacherRatio\n      - AvgScore\n      - PctReducedLunch\n      - PctEnglishLearners\n      - ExpPerStudent\n      - AvgIncome\n      - ComputersPerStudent\n\n    This function is robust to a variety of input column names: it will attempt\n    to locate the needed source columns (e.g., enrollment, teachers, reading,\n    math, etc.) using a set of candidate keywords. If the required source\n    variables cannot be found, it raises a clear error describing missing\n    inputs.\n    \"\"\"\n    df = df.copy()\n\n    # Define the conceptual source variables we need and candidate keywords\n    source_requirements = {\n        \"feature6\": [\"feature6\", \"enroll\", \"student\", \"students\", \"total_enrollment\", \"totalenrollment\", \"enrollment\", \"student_count\"],\n        \"feature7\": [\"feature7\", \"teacher\", \"teachers\", \"num_teachers\", \"fte_teachers\", \"staff_teachers\"],\n        \"feature14\": [\"feature14\", \"reading\", \"read\", \"reading_score\", \"avg_reading\"],\n        \"feature15\": [\"feature15\", \"math\", \"mathematics\", \"math_score\", \"avg_math\"],\n        \"feature9\": [\"feature9\", \"reduced\", \"reduced_lunch\", \"free_reduced\", \"pct_reduced\", \"percent_reduced\", \"free_lunch\", \"lunch\"],\n        \"feature13\": [\"feature13\", \"english\", \"el\", \"english_learners\", \"pct_english\", \"percent_english\"],\n        \"feature11\": [\"feature11\", \"expend\", \"expenditure\", \"exp_per\", \"exp_per_student\", \"spending_per_student\", \"spending\"],\n        \"feature12\": [\"feature12\", \"income\", \"avg_income\", \"median_income\", \"household_income\"],\n        \"feature10\": [\"feature10\", \"computer\", \"computers\", \"num_computers\", \"computers_total\", \"devices\"]\n    }\n\n    def _normalize(s: str) -> str:\n        s = s.lower()\n        s = re.sub(r\"[^a-z0-9]+\", \"_\", s)\n        return s.strip(\"_\")\n\n    normalized_cols = {col: _normalize(col) for col in df.columns}\n\n    def find_column(candidates: List[str]) -> Optional[str]:\n        # 1) exact normalized match\n        cand_norms = [_normalize(c) for c in candidates]\n        for col, ncol in normalized_cols.items():\n            if ncol in cand_norms:\n                return col\n        # 2) substring match of keywords in normalized column names\n        for col, ncol in normalized_cols.items():\n            for keyword in cand_norms:\n                if keyword and keyword in ncol:\n                    return col\n        # 3) try matching by digits if candidate contains only 'featureNN' format\n        for col in df.columns:\n            for cand in candidates:\n                m1 = re.fullmatch(r\"feature[_\\- ]?(\\d+)\", cand, flags=re.IGNORECASE)\n                m2 = re.fullmatch(r\"feature[_\\- ]?(\\d+)\", col, flags=re.IGNORECASE)\n                if m1 and m2 and m1.group(1) == m2.group(1):\n                    return col\n        return None\n\n    # Build mapping from expected source names to actual dataframe columns\n    mapping = {}\n    missing_expected = []\n    for src, candidates in source_requirements.items():\n        found = find_column(candidates)\n        if found is None:\n            missing_expected.append(src)\n        else:\n            mapping[src] = found\n\n    if missing_expected:\n        # If none of the expected source columns were found, provide detailed message listing attempted candidates.\n        attempted = {k: source_requirements[k] for k in missing_expected}\n        raise ValueError(f\"Missing expected source columns in input dataframe for items: {missing_expected}. \"\n                         f\"Attempted candidate names: {attempted}. Available columns: {list(df.columns)}\")\n\n    # Coerce the mapped source columns to numeric (bad values -> NaN)\n    for src, col in mapping.items():\n        df[col] = pd.to_numeric(df[col], errors=\"coerce\")\n\n    # Safe series references\n    s6 = df[mapping[\"feature6\"]]\n    s7 = df[mapping[\"feature7\"]]\n    s10 = df[mapping[\"feature10\"]]\n\n    # Compute student-teacher ratio (students per teacher), guard against nonpositive teachers\n    df[\"StuTeacherRatio\"] = np.where(s7 > 0, s6 / s7, np.nan)\n\n    # Compute AvgScore as mean of reading (feature14) and math (feature15)\n    df[\"AvgScore\"] = df[[mapping[\"feature14\"], mapping[\"feature15\"]]].mean(axis=1)\n\n    # Controls: map source columns into the required final column names\n    df[\"PctReducedLunch\"] = df[mapping[\"feature9\"]]\n    df[\"PctEnglishLearners\"] = df[mapping[\"feature13\"]]\n    df[\"ExpPerStudent\"] = df[mapping[\"feature11\"]]\n    df[\"AvgIncome\"] = df[mapping[\"feature12\"]]\n\n    # Computers per student (avoid division by zero)\n    df[\"ComputersPerStudent\"] = np.where(s6 > 0, s10 / s6, np.nan)\n\n    # Keep only rows with the variables needed for modeling\n    model_cols = [\n        \"AvgScore\",\n        \"StuTeacherRatio\",\n        \"PctReducedLunch\",\n        \"PctEnglishLearners\",\n        \"ExpPerStudent\",\n        \"AvgIncome\",\n        \"ComputersPerStudent\",\n    ]\n    df = df.dropna(subset=model_cols)\n\n    # Light winsorization to reduce influence of extreme outliers on ratios/resources\n    def winsorize_series(s: pd.Series) -> pd.Series:\n        if s.empty:\n            return s\n        lower = s.quantile(0.01)\n        upper = s.quantile(0.99)\n        return s.clip(lower=lower, upper=upper)\n\n    df[\"StuTeacherRatio\"] = winsorize_series(df[\"StuTeacherRatio\"])\n    df[\"ComputersPerStudent\"] = winsorize_series(df[\"ComputersPerStudent\"])\n    df[\"ExpPerStudent\"] = winsorize_series(df[\"ExpPerStudent\"])\n    df[\"AvgIncome\"] = winsorize_series(df[\"AvgIncome\"])\n\n    # Final returned dataframe contains all original columns plus the derived variables\n    return df",
+      "m_code": "def model(df: pd.DataFrame) -> Any:\n    \"\"\"\n    Fit a linear regression to estimate the association between student-teacher ratio and average test scores,\n    controlling for socioeconomic and resource variables. Returns the fitted statsmodels regression results object.\n\n    Model specification:\n      AvgScore ~ StuTeacherRatio + PctReducedLunch + PctEnglishLearners + ExpPerStudent + AvgIncome + ComputersPerStudent\n\n    Heteroskedasticity-robust standard errors (HC3) are used.\n    \"\"\"\n    required = [\n        \"AvgScore\",\n        \"StuTeacherRatio\",\n        \"PctReducedLunch\",\n        \"PctEnglishLearners\",\n        \"ExpPerStudent\",\n        \"AvgIncome\",\n        \"ComputersPerStudent\",\n    ]\n    missing = [c for c in required if c not in df.columns]\n    if missing:\n        raise ValueError(f\"Transformed dataframe is missing required columns for modeling: {missing}\")\n\n    X = df[[\"StuTeacherRatio\", \"PctReducedLunch\", \"PctEnglishLearners\", \"ExpPerStudent\", \"AvgIncome\", \"ComputersPerStudent\"]].copy()\n    X = sm.add_constant(X)\n    y = df[\"AvgScore\"]\n\n    ols_model = sm.OLS(y, X)\n    results = ols_model.fit()\n    robust_results = results.get_robustcov_results(cov_type=\"HC3\")\n\n    return robust_results"
+    },
+    "3": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Student-teacher ratio measured as number of enrolled students per full-time-equivalent (FTE) teacher. Lower values indicate fewer students per teacher (smaller class sizes).",
+            "columns": [
+              "StudentTeacherRatio"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Mean academic performance constructed as the average of the district average reading and math scores (5th grade Stanford-9).",
+          "columns": [
+            "AvgTestScore"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Percent of students qualifying for CalWorks (income assistance) in the district; socioeconomic control.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "PctCalWorks"
+            ]
+          },
+          {
+            "description": "Percent of students qualifying for reduced-price lunch; socioeconomic control.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "PctReducedLunch"
+            ]
+          },
+          {
+            "description": "Number of computers per enrolled student in the district (computers per student); proxy for technology resources.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "ComputersPerStudent"
+            ]
+          },
+          {
+            "description": "Expenditure per student (original variable in dataset); controls for district spending.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "ExpenditurePerStudent"
+            ]
+          },
+          {
+            "description": "District average income in thousands of USD (original variable); controls for district wealth.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "DistrictIncomeK"
+            ]
+          },
+          {
+            "description": "Percent of English learners in the district; controls for language composition.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "PctEnglishLearners"
+            ]
+          },
+          {
+            "description": "Total district enrollment (number of students); included as log-enrollment to control for district size.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "Enrollment",
+              "LogEnrollment"
+            ]
+          },
+          {
+            "description": "County fixed effects (categorical) to control for region-level unobserved heterogeneity.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "County"
+            ]
+          },
+          {
+            "description": "Grade span (KK-06 vs KK-08) as a categorical control.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "GradeSpan"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw dataset to create analysis-ready columns.\n\n    Assumed raw columns (from schema):\n      - feature6: Enrollment (total students)\n      - feature7: Number of teachers (FTE)\n      - feature8: Percent qualifying for CalWorks\n      - feature9: Percent qualifying for reduced-price lunch\n      - feature10: Number of computers\n      - feature11: Expenditure per student\n      - feature12: District average income (in USD 1,000)\n      - feature13: Percent English learners\n      - feature14: Average reading score\n      - feature15: Average math score\n      - feature4: County (categorical)\n      - feature5: Grade span (categorical)\n\n    Returns dataframe with the exact columns used in the model.\n    \"\"\"\n    df = df.copy()\n\n    # Rename raw columns to clearer names (keep originals too) for clarity\n    # but create new columns required by the analysis.\n    df['Enrollment'] = df['feature6']\n    df['NumTeachers'] = df['feature7']\n    df['PctCalWorks'] = df['feature8']\n    df['PctReducedLunch'] = df['feature9']\n    df['NumComputers'] = df['feature10']\n    df['ExpenditurePerStudent'] = df['feature11']\n    df['DistrictIncomeK'] = df['feature12']\n    df['PctEnglishLearners'] = df['feature13']\n    df['ReadingScore'] = df['feature14']\n    df['MathScore'] = df['feature15']\n    df['County'] = df['feature4']\n    df['GradeSpan'] = df['feature5']\n\n    # Drop rows missing the essential variables used to compute IV and DV\n    df = df.dropna(subset=['Enrollment', 'NumTeachers', 'ReadingScore', 'MathScore'])\n\n    # Avoid division by zero and create StudentTeacherRatio (students per teacher)\n    df.loc[df['NumTeachers'] <= 0, 'NumTeachers'] = np.nan\n    df['StudentTeacherRatio'] = df['Enrollment'] / df['NumTeachers']\n\n    # Create dependent variable: average of reading and math scores\n    df['AvgTestScore'] = df[['ReadingScore', 'MathScore']].mean(axis=1)\n\n    # Create computers per student (handle division by zero)\n    df.loc[df['Enrollment'] <= 0, 'Enrollment'] = np.nan\n    df['ComputersPerStudent'] = df['NumComputers'] / df['Enrollment']\n\n    # Log transformations for skewed controls (use log1p to handle zeros)\n    df['LogEnrollment'] = np.log1p(df['Enrollment'])\n    df['LogExpenditurePerStudent'] = np.log1p(df['ExpenditurePerStudent'].astype(float))\n    df['LogComputersPerStudent'] = np.log1p(df['ComputersPerStudent'].fillna(0))\n\n    # Keep only rows without missing values in model columns\n    model_cols = [\n        'AvgTestScore', 'StudentTeacherRatio', 'PctCalWorks', 'PctReducedLunch',\n        'ComputersPerStudent', 'ExpenditurePerStudent', 'DistrictIncomeK',\n        'PctEnglishLearners', 'Enrollment', 'LogEnrollment', 'County', 'GradeSpan'\n    ]\n    df = df.dropna(subset=model_cols)\n\n    # Ensure categorical columns are typed properly\n    df['County'] = df['County'].astype('category')\n    df['GradeSpan'] = df['GradeSpan'].astype('category')\n\n    # Final dataframe returned contains all required columns for modeling\n    return df\n",
+      "m_code": "def model(df: pd.DataFrame) -> Any:\n    \"\"\"\n    Runs an OLS regression of AvgTestScore on StudentTeacherRatio controlling for\n    socioeconomic and resource variables and including county and grade-span fixed effects.\n\n    Returns the fitted regression results object (with robust SEs).\n    \"\"\"\n    # import formula API locally\n    import statsmodels.formula.api as smf\n\n    # Ensure required columns exist\n    required = [\n        'AvgTestScore', 'StudentTeacherRatio', 'PctCalWorks', 'PctReducedLunch',\n        'ComputersPerStudent', 'ExpenditurePerStudent', 'DistrictIncomeK',\n        'PctEnglishLearners', 'LogEnrollment', 'County', 'GradeSpan'\n    ]\n    missing = [c for c in required if c not in df.columns]\n    if missing:\n        raise ValueError(f\"Missing required columns for modeling: {missing}\")\n\n    # Specify formula. County and GradeSpan are categorical fixed effects.\n    formula = (\n        'AvgTestScore ~ StudentTeacherRatio + PctCalWorks + PctReducedLunch + '\n        'ComputersPerStudent + ExpenditurePerStudent + DistrictIncomeK + '\n        'PctEnglishLearners + LogEnrollment + C(County) + C(GradeSpan)'\n    )\n\n    # Fit OLS with heteroskedasticity-robust standard errors (HC3)\n    model = smf.ols(formula=formula, data=df).fit(cov_type='HC3')\n\n    # Return the fitted results object\n    return model\n"
+    },
+    "4": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "District-level student-to-teacher ratio (number of enrolled students divided by number of full-time-equivalent teachers). This is the main independent variable of interest: lower values indicate fewer students per teacher.",
+            "columns": [
+              "StudentTeacherRatio"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "District-level average academic performance: mean of the district average 5th-grade reading and math scores.",
+          "columns": [
+            "AvgScore"
+          ]
+        },
+        "controls": [
+          {
+            "description": "District total enrollment (log-transformed to reduce skew). Controls for district size.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "LogEnrollment"
+            ]
+          },
+          {
+            "description": "District expenditure per student (real dollars). Controls for school funding.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "ExpenditurePerStudent"
+            ]
+          },
+          {
+            "description": "District average income in thousands of dollars. Controls for local socioeconomic status.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "DistrictIncomeK"
+            ]
+          },
+          {
+            "description": "Percent of students qualifying for reduced-price lunch. Proxy for poverty; controls for socioeconomic composition.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "PctReducedLunch"
+            ]
+          },
+          {
+            "description": "Percent of students who are English learners. Controls for language composition which can affect test scores.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "PctEnglishLearners"
+            ]
+          },
+          {
+            "description": "Computers per student (total computers divided by enrollment). Controls for access to technology.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "ComputersPerStudent"
+            ]
+          },
+          {
+            "description": "Percent qualifying for CalWorks (income assistance). Additional socioeconomic control.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "PctCalWorks"
+            ]
+          },
+          {
+            "description": "Grade-span of the district (categorical: e.g. 'KK-06', 'KK-08'). Included as a categorical control (fixed effects).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "GradeSpan"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw dataset into a dataframe suitable for modeling.\n\n    Produces the following new columns used in the model:\n      - Enrollment: feature6 (float)\n      - NumTeachers: feature7 (float), NaN if <= 0\n      - StudentTeacherRatio: Enrollment / NumTeachers (winsorized at 1st/99th pct)\n      - ReadingScore: feature14 (float)\n      - MathScore: feature15 (float)\n      - AvgScore: mean of ReadingScore and MathScore\n      - PctCalWorks: feature8 (float)\n      - PctReducedLunch: feature9 (float)\n      - Computers: feature10 (float)\n      - ComputersPerStudent: Computers / Enrollment\n      - ExpenditurePerStudent: feature11 (float)\n      - DistrictIncomeK: feature12 (float)\n      - PctEnglishLearners: feature13 (float)\n      - GradeSpan: feature5 (string)\n      - County: feature4 (string)\n      - LogEnrollment: log1p(Enrollment)\n\n    Drops rows with missing values in core variables.\n    \"\"\"\n    df = df.copy()\n\n    # Required raw columns\n    required = [\n        'feature6',  # enrollment\n        'feature7',  # num teachers (FTE)\n        'feature14', # reading score\n        'feature15', # math score\n        'feature8',  # pct CalWorks\n        'feature9',  # pct reduced lunch\n        'feature10', # num computers\n        'feature11', # expenditure per student\n        'feature12', # district income (k)\n        'feature13', # pct english learners\n        'feature5',  # grade span\n        'feature4'   # county\n    ]\n\n    # Drop rows missing critical raw values\n    df = df.dropna(subset=required)\n\n    # Copy / coerce types\n    df['Enrollment'] = pd.to_numeric(df['feature6'], errors='coerce')\n    df['NumTeachers'] = pd.to_numeric(df['feature7'], errors='coerce')\n\n    # Remove invalid teacher counts (<= 0) because ratio would be infinite/invalid\n    df.loc[df['NumTeachers'] <= 0, 'NumTeachers'] = np.nan\n    df = df.dropna(subset=['Enrollment', 'NumTeachers'])\n\n    # Student-teacher ratio\n    df['StudentTeacherRatio'] = df['Enrollment'] / df['NumTeachers']\n\n    # Winsorize student-teacher ratio at 1st and 99th percentiles to reduce influence of extreme outliers\n    lower = df['StudentTeacherRatio'].quantile(0.01)\n    upper = df['StudentTeacherRatio'].quantile(0.99)\n    df['StudentTeacherRatio'] = df['StudentTeacherRatio'].clip(lower, upper)\n\n    # Scores\n    df['ReadingScore'] = pd.to_numeric(df['feature14'], errors='coerce')\n    df['MathScore'] = pd.to_numeric(df['feature15'], errors='coerce')\n    df['AvgScore'] = df[['ReadingScore', 'MathScore']].mean(axis=1)\n\n    # Controls\n    df['PctCalWorks'] = pd.to_numeric(df['feature8'], errors='coerce')\n    df['PctReducedLunch'] = pd.to_numeric(df['feature9'], errors='coerce')\n    df['Computers'] = pd.to_numeric(df['feature10'], errors='coerce')\n    df['ComputersPerStudent'] = df['Computers'] / df['Enrollment']\n    df['ExpenditurePerStudent'] = pd.to_numeric(df['feature11'], errors='coerce')\n    df['DistrictIncomeK'] = pd.to_numeric(df['feature12'], errors='coerce')\n    df['PctEnglishLearners'] = pd.to_numeric(df['feature13'], errors='coerce')\n\n    # Categorical controls\n    df['GradeSpan'] = df['feature5'].astype(str)\n    df['County'] = df['feature4'].astype(str)\n\n    # Log-transform of enrollment to reduce skew\n    df['LogEnrollment'] = np.log1p(df['Enrollment'])\n\n    # Drop rows still missing any key modeling variables\n    model_vars = [\n        'StudentTeacherRatio', 'AvgScore', 'PctReducedLunch', 'PctEnglishLearners',\n        'ExpenditurePerStudent', 'ComputersPerStudent', 'PctCalWorks', 'LogEnrollment'\n    ]\n    df = df.dropna(subset=model_vars)\n\n    # Reset index and return\n    df = df.reset_index(drop=True)\n    return df\n",
+      "m_code": "def model(df: pd.DataFrame):\n    \"\"\"\n    Fit an OLS regression to estimate the association between student-teacher ratio and average test score.\n\n    Model specification:\n      AvgScore ~ StudentTeacherRatio + LogEnrollment + ExpenditurePerStudent + DistrictIncomeK\n                 + PctReducedLunch + PctEnglishLearners + ComputersPerStudent + PctCalWorks\n                 + C(GradeSpan)\n\n    Uses robust (HC1) standard errors to guard against heteroskedasticity. Returns the fitted results object.\n    \"\"\"\n    import statsmodels.formula.api as smf\n\n    # Ensure a copy so we don't modify caller frame\n    df_model = df.copy()\n\n    formula = (\n        'AvgScore ~ StudentTeacherRatio + LogEnrollment + ExpenditurePerStudent + DistrictIncomeK '\n        '+ PctReducedLunch + PctEnglishLearners + ComputersPerStudent + PctCalWorks + C(GradeSpan)'\n    )\n\n    fit = smf.ols(formula=formula, data=df_model).fit(cov_type='HC1')\n\n    # Return the fitted results object (has .summary(), .params, .bse, etc.)\n    return fit\n"
+    }
+  }
+}
