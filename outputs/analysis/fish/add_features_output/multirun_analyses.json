@@ -1,0 +1,353 @@
+{
+  "dataset_name": "fish",
+  "n": 5,
+  "analyses": {
+    "0": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Use of live bait during the visit (binary: 1 = used live bait, 0 = did not). Derived from input column 'livebait'.",
+            "columns": [
+              "livebait"
+            ]
+          },
+          {
+            "description": "Whether the group had a camper (binary: 1 = camper present, 0 = no camper). Derived from input column 'camper'.",
+            "columns": [
+              "camper"
+            ]
+          },
+          {
+            "description": "Total group size (number of adults + number of children). Derived column computed as persons + child.",
+            "columns": [
+              "group_size"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Count of fish caught during the visit (non-negative integer). Column 'fish_caught' is modeled as the dependent variable (count outcome).",
+          "columns": [
+            "fish_caught"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Exposure time: total hours the group spent in the park (used as offset/exposure in the rate model). We include both the original hours and the natural log used as the GLM offset.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "hours",
+              "log_hours"
+            ]
+          },
+          {
+            "description": "Group-level religiosity measure (numeric ordinal). Included as a control covariate to adjust for possible behavioral differences correlated with catch rate.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "religiousness"
+            ]
+          },
+          {
+            "description": "Age of respondent / group contact (numeric). Included as a demographic control.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "age"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the original dataframe into the analysis-ready dataframe.\n\n    Produces the following additional/clean columns used in modeling:\n      - group_size: persons + child (both numeric, missing -> 0 before sum)\n      - fish_per_hour: descriptive rate = fish_caught / hours\n      - log_hours: natural log of hours (used as offset in GLM)\n\n    Drops rows with missing or invalid critical values (fish_caught, hours) and\n    ensures numeric types for covariates used in the model.\n    \"\"\"\n    df = df.copy()\n\n    # Ensure critical columns exist\n    required = ['fish_caught', 'hours']\n    for c in required:\n        if c not in df.columns:\n            raise ValueError(f\"Required column '{c}' not found in dataframe\")\n\n    # Convert columns that should be numeric to numeric (coerce errors to NaN)\n    numeric_cols = ['fish_caught', 'livebait', 'camper', 'persons', 'child', 'hours', 'religiousness', 'age']\n    for col in numeric_cols:\n        if col in df.columns:\n            df[col] = pd.to_numeric(df[col], errors='coerce')\n\n    # Drop rows missing fish_caught or hours\n    df = df.dropna(subset=['fish_caught', 'hours'])\n\n    # Remove non-positive hours (cannot model exposure <= 0)\n    df = df[df['hours'] > 0]\n\n    # Create group_size as persons + child (treat missing person/child as 0 for the sum)\n    # If persons/child entirely missing in dataset, this will produce NaNs and be handled below\n    if 'persons' in df.columns and 'child' in df.columns:\n        df['group_size'] = df['persons'].fillna(0) + df['child'].fillna(0)\n    elif 'persons' in df.columns:\n        df['group_size'] = df['persons'].fillna(0)\n    elif 'child' in df.columns:\n        df['group_size'] = df['child'].fillna(0)\n    else:\n        # If neither persons nor child present, create group_size = 1 as fallback (but note in modeling we will drop if missing)\n        df['group_size'] = 1\n\n    # Descriptive rate variable\n    df['fish_per_hour'] = df['fish_caught'] / df['hours']\n\n    # Offset for GLM: log of hours\n    # hours > 0 guaranteed above, so log defined\n    df['log_hours'] = np.log(df['hours'])\n\n    # Ensure binary variables are integers (0/1) when present\n    for b in ['livebait', 'camper']:\n        if b in df.columns:\n            # Coerce any non-missing values to 0/1 integers where possible\n            df[b] = df[b].fillna(0).astype(int)\n\n    # Keep only rows that have the covariates we plan to use in the main model\n    model_cols_required = ['fish_caught', 'log_hours', 'livebait', 'camper', 'group_size', 'religiousness', 'age']\n    # If some optional covariates are not present in the dataset, drop them from required list\n    model_cols_required = [c for c in model_cols_required if c in df.columns]\n    df = df.dropna(subset=model_cols_required)\n\n    # Final copy and return\n    return df",
+      "m_code": "def model(df: pd.DataFrame) -> Any:\n    \"\"\"\n    Fit a count regression model for fish_caught using exposure (hours) as an offset.\n\n    Primary modeling approach: Negative Binomial GLM with log-link and offset = log_hours.\n    This models the rate (fish per hour) while adjusting for covariates.\n\n    Returns the fitted statsmodels results object.\n    \"\"\"\n    # Ensure transform has been run and required columns exist\n    required = ['fish_caught', 'log_hours']\n    for c in required:\n        if c not in df.columns:\n            raise ValueError(f\"Required column '{c}' not found in dataframe. Run transform() first.\")\n\n    # Define modeling features (use only those present in df)\n    candidate_features = ['livebait', 'camper', 'group_size', 'religiousness', 'age']\n    features = [f for f in candidate_features if f in df.columns]\n\n    if len(features) == 0:\n        raise ValueError('No model features available in dataframe')\n\n    df_model = df.dropna(subset=features + ['fish_caught', 'log_hours']).copy()\n\n    # Design matrices\n    X = sm.add_constant(df_model[features], has_constant='add')\n    y = df_model['fish_caught']\n    offset = df_model['log_hours']\n\n    # Fit Negative Binomial GLM (models counts with exposure offset)\n    try:\n        model_nb = sm.GLM(y, X, family=sm.families.NegativeBinomial(), offset=offset)\n        results = model_nb.fit()\n    except Exception as e:\n        # Fallback to Poisson with robust SEs if NB fails\n        model_p = sm.GLM(y, X, family=sm.families.Poisson(), offset=offset)\n        results = model_p.fit(cov_type='HC0')\n\n    # Print and return results\n    print(results.summary())\n    return results"
+    },
+    "1": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Use of live bait during the visit (binary: 1 = used live bait, 0 = did not). Expected to increase catch rate if effective.",
+            "columns": [
+              "livebait"
+            ]
+          },
+          {
+            "description": "Whether the group had a camper (binary: 1 = camper present, 0 = no camper). May proxy for experience/equipment and influence catch rate.",
+            "columns": [
+              "camper"
+            ]
+          },
+          {
+            "description": "Total number of people in the group (adults + children). Larger groups may catch more fish in total but may affect rate per person or competition for spots.",
+            "columns": [
+              "group_size"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Number of fish caught during the visit (count outcome). Modeled as counts with park-hours as exposure; additionally a derived catch rate (fish per hour) is provided for descriptive summaries.",
+          "columns": [
+            "fish_caught",
+            "fish_per_hour"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Amount of time the group spent fishing in the park. This is treated as the exposure (offset) in the count model (log(hours) is used as offset).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "hours",
+              "offset"
+            ]
+          },
+          {
+            "description": "County where the visit occurred (categorical control). Included as dummy variables to account for spatial / site differences in catch rates.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "county"
+            ]
+          },
+          {
+            "description": "Year of the visit (numeric control) to account for temporal trends or year-specific effects on catch rates.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "year"
+            ]
+          },
+          {
+            "description": "Age of the respondent (numeric control) as a proxy for experience or physical ability that might influence catches.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "age"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    # Work on a copy\n    df = df.copy()\n\n    # Required columns for analysis\n    required_cols = ['fish_caught', 'hours', 'livebait', 'camper', 'persons', 'child']\n\n    # Drop rows missing core variables\n    df = df.dropna(subset=[c for c in required_cols if c in df.columns])\n\n    # Remove non-positive hours (can't compute a rate/exposure)\n    if 'hours' in df.columns:\n        df = df[df['hours'] > 0].copy()\n\n    # Derive group_size (adults + children)\n    if ('persons' in df.columns) and ('child' in df.columns):\n        df['group_size'] = df['persons'] + df['child']\n    else:\n        # if persons or child missing, try to create group_size from available columns\n        if 'persons' in df.columns:\n            df['group_size'] = df['persons']\n        elif 'child' in df.columns:\n            df['group_size'] = df['child']\n\n    # Derive fish per hour for descriptive summaries\n    df['fish_per_hour'] = df['fish_caught'] / df['hours']\n\n    # Create log-hours offset for count model (exposure)\n    df['offset'] = np.log(df['hours'])\n\n    # Clean county text (trim whitespace) and preserve missing as NaN\n    if 'county' in df.columns:\n        df['county'] = df['county'].astype(str).str.strip()\n        df.loc[df['county'].isin(['nan', 'None', '']), 'county'] = np.nan\n\n    # Ensure binary indicators are numeric 0/1\n    for col in ['livebait', 'camper']:\n        if col in df.columns:\n            df[col] = pd.to_numeric(df[col], errors='coerce')\n\n    # Ensure numeric columns are numeric\n    for col in ['fish_caught', 'hours', 'group_size', 'year', 'age']:\n        if col in df.columns:\n            df[col] = pd.to_numeric(df[col], errors='coerce')\n\n    # Drop rows that lost required numeric values after coercion\n    keep_cols = ['fish_caught', 'offset', 'livebait', 'camper', 'group_size']\n    df = df.dropna(subset=[c for c in keep_cols if c in df.columns])\n\n    # Final: reset index for downstream modeling convenience\n    df = df.reset_index(drop=True)\n\n    return df",
+      "m_code": "def model(df: pd.DataFrame):\n    df = df.copy()\n\n    # Select predictors we will include if present\n    base_predictors = [p for p in ['livebait', 'camper', 'group_size', 'year', 'age'] if p in df.columns]\n\n    # Build county dummies if county is available\n    if 'county' in df.columns:\n        county_dummies = pd.get_dummies(df['county'], prefix='county', drop_first=True)\n        X = pd.concat([df[base_predictors].reset_index(drop=True), county_dummies.reset_index(drop=True)], axis=1)\n    else:\n        X = df[base_predictors].copy()\n\n    # Add constant\n    X = sm.add_constant(X, has_constant='add')\n\n    # Response and offset\n    y = df['fish_caught']\n    offset = df['offset'] if 'offset' in df.columns else np.log(df['hours'])\n\n    # Fit a negative binomial GLM with log link and exposure offset to model counts with differing hours\n    # This models E[fish_caught] = exp(X beta + log(hours)) => rate per hour modeled by predictors\n    try:\n        model_nb = sm.GLM(y, X, family=sm.families.NegativeBinomial(), offset=offset)\n        results = model_nb.fit()\n    except Exception:\n        # Fallback to Poisson if NegativeBinomial fails to converge\n        model_pois = sm.GLM(y, X, family=sm.families.Poisson(), offset=offset)\n        results = model_pois.fit()\n\n    # Return the fitted results object (has summary(), params, conf_int(), etc.)\n    return results"
+    },
+    "2": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Use of live bait during the visit (binary: 1 = used live bait, 0 = did not). Expectation: live bait increases catch rate.",
+            "columns": [
+              "livebait"
+            ]
+          },
+          {
+            "description": "Whether the group had a camper (binary: 1 = camper present, 0 = none). Could influence fishing behavior and catch rate.",
+            "columns": [
+              "camper"
+            ]
+          },
+          {
+            "description": "Total group size (adults + children). Larger groups may catch more fish in total but per-hour rate may vary.",
+            "columns": [
+              "group_size"
+            ]
+          },
+          {
+            "description": "Number of children in the group (count). Used both directly and as a binary indicator for presence of children.",
+            "columns": [
+              "child"
+            ]
+          },
+          {
+            "description": "Binary indicator for presence of children in the group (1 = at least one child, 0 = none).",
+            "columns": [
+              "children_binary"
+            ]
+          },
+          {
+            "description": "Self-reported religiousness (1-5). Included as a possible socio-demographic control (may proxy for other unobserved traits).",
+            "columns": [
+              "religiousness"
+            ]
+          },
+          {
+            "description": "Age (if present). Included as a control for experience/ability to fish.",
+            "columns": [
+              "age"
+            ]
+          },
+          {
+            "description": "County where the visit took place (categorical). Included as a control for spatial / site-specific heterogeneity (entered as categorical fixed effects in the model).",
+            "columns": [
+              "county"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Number of fish caught during the visit (count outcome). Modeled as a count with an exposure equal to hours spent in the park; this lets us estimate rate (fish per hour).",
+          "columns": [
+            "fish_caught"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Total hours the group spent in the park (continuous, positive). Treated as the exposure for the count model (entered as offset = log(hours)).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "hours",
+              "exposure_log"
+            ]
+          },
+          {
+            "description": "Log of hours used as the offset in the GLM (exposure).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "exposure_log"
+            ]
+          },
+          {
+            "description": "County fixed effects (categorical control to absorb site-specific differences). Represented in the dataframe by the 'county' column and included via C(county) in the formula.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "county"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    # Defensive copy\n    df = df.copy()\n\n    # Required columns for analysis\n    required_cols = ['fish_caught', 'hours', 'livebait', 'camper', 'persons', 'child']\n\n    # Drop rows missing the required core variables\n    df = df.dropna(subset=required_cols)\n\n    # Ensure numeric types for binary indicators\n    for col in ['livebait', 'camper', 'persons', 'child', 'fish_caught', 'hours']:\n        if col in df.columns:\n            df[col] = pd.to_numeric(df[col], errors='coerce')\n\n    # After coercion, drop any newly-NA required rows\n    df = df.dropna(subset=required_cols)\n\n    # Remove or fix rows with nonpositive hours (can't take log of nonpositive exposure)\n    # If hours are extremely small but >0 that's OK. Remove zeros or negative values.\n    df = df[df['hours'] > 0]\n\n    # Create derived variables\n    # group_size: total people in the visiting group (adults 'persons' + children 'child')\n    df['group_size'] = df['persons'] + df['child']\n\n    # children_binary: indicator for presence of >=1 child\n    df['children_binary'] = (df['child'] > 0).astype(int)\n\n    # Create rate variable as a descriptive column (fish per hour)\n    df['rate_fish_per_hour'] = df['fish_caught'] / df['hours']\n\n    # Exposure log for use as an offset in count models\n    # Use natural log; safe because we have filtered hours > 0\n    df['exposure_log'] = np.log(df['hours'])\n\n    # Ensure categorical columns are of appropriate type\n    if 'county' in df.columns:\n        df['county'] = df['county'].astype('category')\n\n    # Keep only columns necessary for subsequent modelling and reporting\n    keep_cols = [\n        'fish_caught', 'hours', 'exposure_log', 'rate_fish_per_hour',\n        'livebait', 'camper', 'persons', 'child', 'group_size', 'children_binary',\n        'religiousness', 'age', 'county'\n    ]\n    # Some of these may be missing in input; keep those that exist\n    keep_cols = [c for c in keep_cols if c in df.columns]\n\n    df = df[keep_cols].reset_index(drop=True)\n\n    return df",
+      "m_code": "def model(df: pd.DataFrame) -> Any:\n    \"\"\"\n    Fit a count model for fish_caught with hours as exposure (offset = log(hours)).\n    Strategy:\n      1. Fit Poisson GLM with offset.\n      2. Compute Pearson dispersion statistic. If dispersion > 1.5 (substantial overdispersion) fit Negative Binomial.\n      3. Return the chosen fitted model (statsmodels result object). Also print summaries for diagnostics.\n\n    Model formula (main specification):\n      fish_caught ~ livebait + camper + group_size + children_binary + religiousness + age + C(county)\n    Only terms available in df are included. 'C(county)' will add county fixed effects if county exists.\n    \"\"\"\n    # Build formula using columns present in the dataframe\n    predictors = []\n    if 'livebait' in df.columns:\n        predictors.append('livebait')\n    if 'camper' in df.columns:\n        predictors.append('camper')\n    if 'group_size' in df.columns:\n        predictors.append('group_size')\n    if 'children_binary' in df.columns:\n        predictors.append('children_binary')\n    if 'religiousness' in df.columns:\n        predictors.append('religiousness')\n    if 'age' in df.columns:\n        predictors.append('age')\n    # include county fixed effects if available\n    if 'county' in df.columns:\n        predictors.append('C(county)')\n\n    if len(predictors) == 0:\n        raise ValueError('No predictors available in the dataframe to fit the model.')\n\n    formula = 'fish_caught ~ ' + ' + '.join(predictors)\n\n    # Ensure exposure_log exists\n    if 'exposure_log' not in df.columns:\n        raise ValueError(\"exposure_log column required for offset (log(hours)). Run the transform function first.)\")\n\n    # Fit Poisson GLM\n    poisson_model = sm.GLM.from_formula(formula, data=df, family=sm.families.Poisson(),\n                                        offset=df['exposure_log']).fit()\n\n    # Compute Pearson chi2 dispersion (measure of overdispersion)\n    mu = poisson_model.fittedvalues\n    y = poisson_model.model.endog\n    # Avoid division by zero in Pearson calculation (mu should be >0 for Poisson predictions)\n    eps = 1e-8\n    pearson_chi2 = np.sum(((y - mu) ** 2) / np.maximum(mu, eps))\n    df_resid = poisson_model.df_resid if hasattr(poisson_model, 'df_resid') else max(len(y) - poisson_model.df_model - 1, 1)\n    dispersion = pearson_chi2 / df_resid\n\n    print('Poisson model fitted. Pearson chi2 = {:.2f}, df_resid = {:.0f}, dispersion = {:.2f}'.format(\n        pearson_chi2, df_resid, dispersion))\n\n    # Choose Negative Binomial if overdispersion is substantial\n    chosen_model = poisson_model\n    if dispersion > 1.5:\n        print('Overdispersion detected (dispersion > 1.5). Fitting Negative Binomial GLM.')\n        try:\n            nb_model = sm.GLM.from_formula(formula, data=df, family=sm.families.NegativeBinomial(),\n                                           offset=df['exposure_log']).fit()\n            chosen_model = nb_model\n            print('Negative Binomial model fitted.')\n        except Exception as e:\n            print('Negative Binomial model failed to converge; returning Poisson model. Error:', e)\n            chosen_model = poisson_model\n    else:\n        print('No strong overdispersion detected; retaining Poisson model.')\n\n    # Print chosen model summary\n    try:\n        print(chosen_model.summary())\n    except Exception:\n        # summary may raise if model object is not standard; ignore\n        pass\n\n    # Return the chosen fitted model object so caller can inspect results programmatically\n    results = chosen_model\n    return results"
+    },
+    "3": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Whether the group used live bait (binary indicator). Hypothesized to increase catch rate.",
+            "columns": [
+              "livebait"
+            ]
+          },
+          {
+            "description": "Whether the group included a camper (binary indicator). May indicate different gear/experience and affect catch rate.",
+            "columns": [
+              "camper"
+            ]
+          },
+          {
+            "description": "Number of adults in the group. Larger adult counts may increase total catches (more fishers) and so influence catch rate per hour.",
+            "columns": [
+              "persons"
+            ]
+          },
+          {
+            "description": "Number of children in the group. Children may fish less effectively; included to control for group composition.",
+            "columns": [
+              "child"
+            ]
+          },
+          {
+            "description": "Total group size (adults + children). Controls for total number of fishers in the group and helps interpret per-hour rate conditional on group size.",
+            "columns": [
+              "group_size"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Number of fish caught during the visit (count outcome). Modeled as a count with an offset equal to the log of hours spent in the park so the model estimates fish caught per hour (rate).",
+          "columns": [
+            "fish_caught"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Exposure: log of hours spent in the park. Used as an offset in the count regression to model catch-rate per hour.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "log_hours"
+            ]
+          },
+          {
+            "description": "County (categorical). Controls for spatial heterogeneity in fishing conditions and effort by including county fixed effects.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "county"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Prepare the dataset for rate (fish per hour) modeling.\n\n    Produces the following columns (used in modeling):\n      - fish_caught (int/float): count outcome (keeps original values)\n      - hours (float): hours spent in park (original column, validated)\n      - log_hours (float): natural log of hours (offset)\n      - livebait (int 0/1): binary predictor\n      - camper (int 0/1): binary predictor\n      - persons (int): number of adults\n      - child (int): number of children\n      - group_size (int): persons + child\n      - county (category): categorical control\n\n    Rows with missing or invalid essential values (fish_caught, hours, livebait,\n    camper, persons, child, county) are dropped. Hours <= 0 are dropped (cannot\n    take log). Extremely small positive hours are clipped for numerical stability\n    when computing log_hours; the original hours column is preserved.\n    \"\"\"\n    df = df.copy()\n\n    # Ensure essential columns exist\n    required_cols = ['fish_caught', 'hours', 'livebait', 'camper', 'persons', 'child', 'county']\n    missing = [c for c in required_cols if c not in df.columns]\n    if len(missing) > 0:\n        raise ValueError(f\"Missing required columns for transform: {missing}\")\n\n    # Coerce numeric columns\n    for col in ['fish_caught', 'hours', 'livebait', 'camper', 'persons', 'child']:\n        df[col] = pd.to_numeric(df[col], errors='coerce')\n\n    # Drop rows with missing essential values (including county)\n    df = df.dropna(subset=['fish_caught', 'hours', 'livebait', 'camper', 'persons', 'child', 'county'])\n\n    # Remove nonpositive hours (cannot take log); these rows cannot be used to estimate rate\n    df = df[df['hours'] > 0]\n\n    # Make binary indicators integer 0/1 (clip any unexpected values)\n    # Coerce to numeric first to avoid weird category types\n    df['livebait'] = pd.to_numeric(df['livebait'], errors='coerce').fillna(0).astype(int).clip(0, 1)\n    df['camper'] = pd.to_numeric(df['camper'], errors='coerce').fillna(0).astype(int).clip(0, 1)\n\n    # Ensure persons and child are integer counts (round if necessary)\n    df['persons'] = pd.to_numeric(df['persons'], errors='coerce').round().fillna(0).astype(int)\n    df['child'] = pd.to_numeric(df['child'], errors='coerce').round().fillna(0).astype(int)\n\n    # Derived columns\n    df['group_size'] = df['persons'] + df['child']\n\n    # Compute log_hours for offset.\n    # For numerical stability in GLM fitting, clip hours used to compute the log to a small positive epsilon.\n    # Keep the original 'hours' column (unmodified) but compute log_hours from a clipped version.\n    eps = 1e-3  # 0.001 hours ~ 3.6 seconds; conservative lower bound for numerical stability\n    hours_for_log = df['hours'].astype(float).replace([np.inf, -np.inf], np.nan)\n    # Any NaNs here indicate problematic rows; drop them\n    hours_for_log = hours_for_log.dropna()\n    # Align df to hours_for_log (shouldn't drop anything because of earlier dropna and hours>0)\n    df = df.loc[hours_for_log.index].copy()\n    # Clip to epsilon to avoid extremely large negative logs that can cause underflow in exp()\n    hours_clipped = hours_for_log.clip(lower=eps)\n    df['log_hours'] = np.log(hours_clipped)\n\n    # Ensure no non-finite values remain in log_hours\n    finite_mask = np.isfinite(df['log_hours'])\n    if not finite_mask.all():\n        df = df.loc[finite_mask].copy()\n\n    # County as categorical (keeps original labels). Modeling code will use C(county) to include fixed effects.\n    df['county'] = df['county'].astype('category')\n\n    # Drop negative counts in fish_caught (shouldn't exist). Keep large counts.\n    df = df[df['fish_caught'] >= 0]\n\n    # Reset index\n    df = df.reset_index(drop=True)\n\n    return df",
+      "m_code": "def model(df: pd.DataFrame) -> Any:\n    \"\"\"\n    Fit a count regression for fish_caught with an offset for log_hours to estimate fish-per-hour rates.\n\n    Steps:\n      1) Fit a Poisson GLM with offset = log_hours and predictors: livebait, camper, persons, child, group_size, and county fixed effects.\n      2) Compute a simple overdispersion statistic (Pearson chi-square / df). If that ratio > 1.5, fit a Negative Binomial GLM (NB2) as a robustness check.\n\n    Returns a dict with keys:\n      - 'poisson_result': fitted Poisson result object\n      - 'overdispersion': pearson_chi2 / df_resid (float)\n      - 'nb_result': fitted NB result object if fitted else None\n    \"\"\"\n    import patsy\n    from statsmodels.discrete.discrete_model import NegativeBinomial as DiscreteNegativeBinomial\n\n    # Validate required columns present\n    required_cols = ['fish_caught', 'log_hours', 'livebait', 'camper', 'persons', 'child', 'group_size', 'county']\n    missing = [c for c in required_cols if c not in df.columns]\n    if len(missing) > 0:\n        raise ValueError(f\"Missing required columns for model: {missing}\")\n\n    # Ensure no missing or non-finite values in critical columns used by the model\n    critical = df[required_cols].copy()\n    # Coerce numeric where expected\n    for col in ['fish_caught', 'log_hours', 'livebait', 'camper', 'persons', 'child', 'group_size']:\n        critical[col] = pd.to_numeric(critical[col], errors='coerce')\n    # Drop rows with any non-finite values in critical columns\n    is_finite = np.ones(len(critical), dtype=bool)\n    for col in ['fish_caught', 'log_hours', 'livebait', 'camper', 'persons', 'child', 'group_size']:\n        is_finite &= np.isfinite(critical[col].values)\n    # Also ensure fish_caught is non-negative\n    is_finite &= (critical['fish_caught'].values >= 0)\n    if not is_finite.all():\n        df = df.loc[is_finite].reset_index(drop=True)\n\n    # Formula: include county fixed effects via C(county)\n    formula = 'fish_caught ~ livebait + camper + persons + child + group_size + C(county)'\n\n    # Prepare offset as a finite numpy array\n    offset_array = np.asarray(df['log_hours'].astype(float))\n    if not np.isfinite(offset_array).all():\n        raise ValueError(\"Non-finite values found in log_hours offset after cleaning.\")\n\n    # To improve numerical stability in IRLS (avoid initial mu values of exactly 0 or extremely large),\n    # center the offset by subtracting its mean. This shifts the intercept but leaves other coefficients unchanged.\n    offset_centered = offset_array - np.mean(offset_array)\n\n    # Fit Poisson with offset (centered)\n    poisson_model = smf.glm(formula=formula, data=df, family=sm.families.Poisson(), offset=offset_centered)\n    # Increase maxiter to give IRLS a better chance to converge in edge cases\n    poisson_res = poisson_model.fit(maxiter=100, disp=False)\n\n    # Compute Pearson chi-square / df_resid as a simple overdispersion diagnostic\n    resid_pearson = poisson_res.resid_pearson\n    pearson_chi2 = np.sum(resid_pearson**2)\n    df_resid = poisson_res.df_resid if hasattr(poisson_res, 'df_resid') else max(len(df) - getattr(poisson_res, 'df_model', 0) - 1, 1)\n    overdispersion = pearson_chi2 / df_resid if df_resid > 0 else np.nan\n\n    nb_res = None\n    # If substantial overdispersion present, fit Negative Binomial (NB2)\n    if not np.isnan(overdispersion) and overdispersion > 1.5:\n        try:\n            # Try family-based NegativeBinomial first (use same centered offset)\n            nb_model = smf.glm(formula=formula, data=df, family=sm.families.NegativeBinomial(), offset=offset_centered)\n            nb_res = nb_model.fit(maxiter=100, disp=False)\n        except Exception:\n            # If the family-based NB fails, fall back to discrete NegativeBinomial from statsmodels.discrete\n            try:\n                # Build design matrices using patsy via formula API (this will include the intercept)\n                y, X = patsy.dmatrices(formula, data=df, return_type='dataframe')\n                # Convert y to 1d array\n                y = np.asarray(y).ravel()\n                # Ensure X has a constant\n                if 'Intercept' not in X.columns and 'const' not in X.columns:\n                    X = sm.add_constant(X, prepend=True)\n                # Fit discrete NB2 (loglike_method='nb2')\n                nb_disc = DiscreteNegativeBinomial(y, X, loglike_method='nb2')\n                nb_res = nb_disc.fit(disp=False, maxiter=100)\n            except Exception:\n                nb_res = None\n\n    # Return results and diagnostic\n    return {\n        'poisson_result': poisson_res,\n        'overdispersion': overdispersion,\n        'nb_result': nb_res\n    }"
+    },
+    "4": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Use of live bait during the trip (binary: 1 = used live bait, 0 = did not). Hypothesized to increase catch rate per hour.",
+            "columns": [
+              "livebait"
+            ]
+          },
+          {
+            "description": "Whether the group had a camper (binary: 1 = had camper, 0 = no camper). Included as an independent predictor of catch rate.",
+            "columns": [
+              "camper"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Number of fish caught during the visit (count). Modeled with an offset for hours to estimate rate per hour.",
+          "columns": [
+            "fish_caught"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Total number of people in the group (adults + children). Controls for effort/party size which affects total catch.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "group_size"
+            ]
+          },
+          {
+            "description": "Number of adults in the group (original column retained for transparency).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "persons"
+            ]
+          },
+          {
+            "description": "Number of children in the group (original column retained for transparency).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "child"
+            ]
+          },
+          {
+            "description": "Time spent in the park for the trip (hours). Used as the exposure/offset for modeling rate per hour (log(hours)).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "hours",
+              "log_hours"
+            ]
+          },
+          {
+            "description": "Observed fish per hour (derived descriptive variable = fish_caught / hours). Useful for summaries and plotting but not used as the GLM dependent variable.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "fish_per_hour"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Prepare the dataset for modeling fish caught per hour.\n    Produces/keeps the following columns required by the model and analysis:\n      - fish_caught (int)\n      - livebait (int, 0/1)\n      - camper (int, 0/1)\n      - persons (int, original adults count)\n      - child (int, original children count)\n      - group_size (persons + child)\n      - hours (float, clipped to a small positive lower bound)\n      - log_hours (float, natural log of hours) used as offset in GLM\n      - fish_per_hour (float, descriptive: fish_caught / hours)\n\n    Drops rows with missing essential values.\n    \"\"\"\n    # work on a copy\n    df = df.copy()\n\n    # Drop rows with missing critical fields\n    df = df.dropna(subset=[\"fish_caught\", \"hours\"])\n\n    # Ensure numeric types for key columns\n    df[\"fish_caught\"] = pd.to_numeric(df[\"fish_caught\"], errors=\"coerce\")\n    df[\"hours\"] = pd.to_numeric(df[\"hours\"], errors=\"coerce\")\n    df[\"persons\"] = pd.to_numeric(df.get(\"persons\", pd.Series(dtype=float)), errors=\"coerce\")\n    df[\"child\"] = pd.to_numeric(df.get(\"child\", pd.Series(dtype=float)), errors=\"coerce\")\n\n    # Drop rows that became NA after coercion\n    df = df.dropna(subset=[\"fish_caught\", \"hours\"]) \n\n    # Some very small or zero hours can cause problems with log(offset). Clip to a small positive value.\n    min_hours = 1e-3\n    df.loc[:, \"hours\"] = df[\"hours\"].clip(lower=min_hours)\n\n    # Create log_hours for offset\n    df[\"log_hours\"] = np.log(df[\"hours\"])\n\n    # Ensure binary predictors are integers 0/1\n    if \"livebait\" in df.columns:\n        df[\"livebait\"] = pd.to_numeric(df[\"livebait\"], errors=\"coerce\").fillna(0).astype(int)\n    else:\n        df[\"livebait\"] = 0\n\n    if \"camper\" in df.columns:\n        df[\"camper\"] = pd.to_numeric(df[\"camper\"], errors=\"coerce\").fillna(0).astype(int)\n    else:\n        df[\"camper\"] = 0\n\n    # Fill persons/child missing values with 0 where appropriate (conservative) and make integer\n    df[\"persons\"] = df[\"persons\"].fillna(0).astype(int)\n    df[\"child\"] = df[\"child\"].fillna(0).astype(int)\n\n    # Group size: total people in the party\n    df[\"group_size\"] = (df[\"persons\"] + df[\"child\"]).astype(int)\n\n    # Descriptive rate per hour (useful for summaries and plotting)\n    df[\"fish_per_hour\"] = df[\"fish_caught\"] / df[\"hours\"]\n\n    # Make fish_caught integer (count)\n    df[\"fish_caught\"] = df[\"fish_caught\"].round().astype(int)\n\n    # Keep only columns necessary for modeling and inspection\n    cols_to_keep = [\n        \"fish_caught\",\n        \"livebait\",\n        \"camper\",\n        \"persons\",\n        \"child\",\n        \"group_size\",\n        \"hours\",\n        \"log_hours\",\n        \"fish_per_hour\"\n    ]\n\n    # Some of these may not exist in edge cases, so intersect with available cols\n    cols_to_keep = [c for c in cols_to_keep if c in df.columns]\n    df = df[cols_to_keep]\n\n    return df",
+      "m_code": "def model(df: pd.DataFrame) -> any:\n    \"\"\"\n    Fits a generalized linear model for count data using a log link and an offset for log(hours).\n    Primary model: Negative Binomial GLM to allow for overdispersion relative to Poisson.\n\n    Formula (in matrix form):\n      E[fish_caught] = hours * exp(beta0 + beta1*livebait + beta2*camper + beta3*group_size)\n    which is implemented as GLM with offset = log_hours and family = NegativeBinomial.\n\n    Returns a dict with:\n      - 'glm_results': the fitted statsmodels GLMResults object\n      - 'predicted_count': the model's predicted expected counts per row\n      - 'predicted_rate_per_hour': predicted_count / hours -> expected fish per hour per group\n    \"\"\"\n    # Required columns for the model\n    required = [\"fish_caught\", \"livebait\", \"camper\", \"group_size\", \"hours\", \"log_hours\"]\n    missing = [c for c in required if c not in df.columns]\n    if len(missing) > 0:\n        raise ValueError(f\"Dataframe is missing required columns for modeling: {missing}\")\n\n    # Build design matrix (exogenous variables)\n    exog_vars = [\"livebait\", \"camper\", \"group_size\"]\n    exog = df[exog_vars].copy()\n    exog = sm.add_constant(exog, has_constant='add')\n\n    # Endogenous\n    endog = df[\"fish_caught\"]\n\n    # Fit Negative Binomial GLM with offset = log_hours\n    try:\n        model_glm = sm.GLM(endog, exog, family=sm.families.NegativeBinomial(), offset=df[\"log_hours\"])\n        results = model_glm.fit()\n    except Exception:\n        # Fallback to Poisson if NegativeBinomial fails\n        model_glm = sm.GLM(endog, exog, family=sm.families.Poisson(), offset=df[\"log_hours\"])\n        results = model_glm.fit()\n\n    # Predictions: expected count (mu) and convert to rate per hour\n    predicted_count = results.predict(exog, offset=df[\"log_hours\"])  # expected fish count for the trip\n    predicted_rate_per_hour = predicted_count / df[\"hours\"]\n\n    # Attach predictions to a small dataframe for return/inspection\n    preds = df[[\"hours\"]].copy()\n    preds[\"predicted_count\"] = predicted_count\n    preds[\"predicted_rate_per_hour\"] = predicted_rate_per_hour\n\n    return {\n        \"glm_results\": results,\n        \"predictions\": preds\n    }"
+    }
+  }
+}
