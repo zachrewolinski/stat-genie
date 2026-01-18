@@ -2,6 +2,7 @@
 import os
 import random
 import pandas as pd
+import numpy as np
 from copy import deepcopy
 
 from stat_genie.blade_pipeline.additions.perturbations.utils import read_json
@@ -39,20 +40,29 @@ class FeaturePerturbation:
         self.shuffle_names_seed = shuffle_names_seed
         self.random_features_seed = random_features_seed
         
-    def anonymize_variable_names(self, json_metadata: dict) -> None:
+    def anonymize_variable_names(self,
+                                 json_metadata: dict,
+                                 df: pd.DataFrame) -> None:
         """
         Takes a JSON (in dictionary format) and replaces variable names 
         with non-descriptive names like "feature1", "feature2", etc.
         
         Args:
             json_metadata: Dictionary containing the JSON metadata
+            dataset_name: Name of the current dataset to avoid selecting its
+                          features.
+            df: The current dataset as a pandas DataFrame
             
         Returns:
-            Nothing, modifies self.json_metadata in place
+            json_metadata: The perturbed JSON metadata as a dictionary
+            df: The perturbed dataframe with anonymized feature names as a pandas DataFrame
         """
         
         # create a copy of the metadata to work with
         json_metadata = deepcopy(json_metadata)
+        
+        # copy the dataframe
+        df = deepcopy(df)
         
         # get all unique variable names from fields
         if "data_desc" in json_metadata and "fields" in json_metadata["data_desc"]:
@@ -77,52 +87,76 @@ class FeaturePerturbation:
                 for old_name in json_metadata["data_desc"]["field_names"]
             ]
             
-        return json_metadata
+        # replace column names in the dataframe
+        df.rename(columns=name_mapping, inplace=True)
+            
+        return json_metadata, df
 
-    def shuffle_feature_order(self, json_metadata: dict) -> None:
+    def shuffle_feature_order(self,
+                              json_metadata: dict,
+                              df: pd.DataFrame) -> None:
         """
         Shuffles the order of features in the JSON metadata.
         
         Args:
             json_metadata: Dictionary containing the JSON metadata
+            df: The current dataset as a pandas DataFrame
         
         Returns:
-            Nothing, modifies self.json_metadata in place
+            json_metadata: The perturbed JSON metadata as a dictionary
+            df: The dataframe (unchanged) as a pandas DataFrame
         """
         
         # create a copy of the metadata to work with
         json_metadata = deepcopy(json_metadata)
         
-        # set random seed for reproducibility
-        random.seed(self.shuffle_order_seed)
+        # copy the dataframe
+        df = deepcopy(df)
+        
+        # use numpy RNG for a single consistent permutation
+        rng = np.random.default_rng(self.shuffle_order_seed)
+        idxs = rng.permutation(df.shape[1])
+                
+        has_fields = "data_desc" in json_metadata and "fields" in json_metadata["data_desc"]
+        has_field_names = "data_desc" in json_metadata and "field_names" in json_metadata["data_desc"]
         
         # shuffle the fields array if it exists
-        if "data_desc" in json_metadata and "fields" in json_metadata["data_desc"]:
+        if has_fields:
             fields = json_metadata["data_desc"]["fields"]
-            random.shuffle(fields)
+            fields = [fields[i] for i in idxs]
             json_metadata["data_desc"]["fields"] = fields
         
         # shuffle the field_names array if it exists
-        if "data_desc" in json_metadata and "field_names" in json_metadata["data_desc"]:
+        if has_field_names:
             field_names = json_metadata["data_desc"]["field_names"]
-            random.shuffle(field_names)
+            field_names = [field_names[i] for i in idxs]
             json_metadata["data_desc"]["field_names"] = field_names
             
-        return json_metadata
+        # shuffle the columns in the dataframe to match the new order of field_names if it exists
+        df = df.iloc[:, idxs]
+            
+        return json_metadata, df
 
-    def shuffle_feature_names(self, json_metadata: dict) -> None:
+    def shuffle_feature_names(self,
+                              json_metadata: dict,
+                              df: pd.DataFrame) -> None:
         """
         Randomly shuffles the feature names in the JSON metadata.
         
         Args:
             json_metadata: Dictionary containing the JSON metadata
+            df: The current dataset as a pandas DataFrame
         
         Returns:
-            Nothing, modifies self.json_metadata in place
+            json_metadata: The perturbed JSON metadata as a dictionary
+            df: The dataframe (unchanged) as a pandas DataFrame
         """
         
         # create a copy of the metadata to work with
         json_metadata = deepcopy(json_metadata)
+        
+        # copy the dataframe
+        df = deepcopy(df)
         
         # set random seed for reproducibility
         random.seed(self.shuffle_names_seed)
@@ -153,10 +187,16 @@ class FeaturePerturbation:
                 name_mapping.get(old_name, old_name) 
                 for old_name in json_metadata["data_desc"]["field_names"]
             ]
+            
+        # replace column names in the dataframe to match the new shuffled names
+        df.rename(columns=name_mapping, inplace=True)
         
-        return json_metadata
+        return json_metadata, df
 
-    def add_random_features(self, json_metadata: dict, dataset_name: str) -> dict:
+    def add_random_features(self,
+                            json_metadata: dict,
+                            dataset_name: str,
+                            df: pd.DataFrame) -> dict:
         """
         Adds randomly selected feature(s) from a different randomly selected
         BLADE dataset to the JSON metadata.
@@ -165,17 +205,17 @@ class FeaturePerturbation:
             json_metadata: Dictionary containing the JSON metadata
             dataset_name: Name of the current dataset to avoid selecting its
                           features.
-            
+            df: The current dataset as a pandas DataFrame
         Returns:
             The perturbed JSON metadata as a dictionary
+            The perturbed dataframe with added features as a pandas DataFrame
         """
         
         # create a copy of the metadata to work with
         json_metadata = deepcopy(json_metadata)
         
-        # read in the dataframe
-        df_path = get_dataset_csv_path(dataset_name)
-        df = pd.read_csv(df_path)
+        # copy dataframe
+        df = deepcopy(df)
         
         # set random seed for reproducibility
         random.seed(self.random_features_seed)
@@ -253,19 +293,23 @@ class FeaturePerturbation:
         # get name of dataset from path
         dataset_name = os.path.basename(os.path.dirname(json_path))
         
+        # read in dataset
+        df_path = get_dataset_csv_path(dataset_name)
+        df = pd.read_csv(df_path)
+        
         if self.add_num_features > 0:
             json_metadata, df = self.add_random_features(json_metadata,
-                                                         dataset_name)
-        else:
-            df = None
+                                                         dataset_name,
+                                                         df)
         
         if self.anonymize:
-            json_metadata = self.anonymize_variable_names(json_metadata)
+            json_metadata, df = self.anonymize_variable_names(json_metadata,
+                                                              df)
         
         if self.shuffle_order:
-            json_metadata = self.shuffle_feature_order(json_metadata)
+            json_metadata, df = self.shuffle_feature_order(json_metadata, df)
         
         if self.shuffle_names:
-            json_metadata = self.shuffle_feature_names(json_metadata)
+            json_metadata, df = self.shuffle_feature_names(json_metadata, df)
         
         return json_metadata, df
