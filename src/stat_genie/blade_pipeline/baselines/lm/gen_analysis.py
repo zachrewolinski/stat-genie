@@ -52,6 +52,16 @@ import scipy
 import statsmodels.api as sm
 import matplotlib.pyplot as plt
 
+You are also allowed to use common machine learning libraries, including but not limited to:
+- xgboost
+- lightgbm
+- catboost
+- tensorflow / keras
+- torch (PyTorch)
+- pytorch-lightning
+- sklearn.experimental modules
+- imbalanced-learn (imblearn)
+
 Here is the code template for the transform function:
 ```python
 def transform(df: pd.DataFrame) -> pd.DataFrame:
