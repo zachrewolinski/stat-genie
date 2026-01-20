@@ -44,12 +44,11 @@ if [ -z "$OPENAI_API_KEY" ]; then
     exit 1
 fi
 
-DATASET="reading"
+DATASET="$1"
 NUM_MULTIRUNS=5
 LLM_PROVIDER="openai"
 LLM_MODEL="gpt-5-mini"
-ANALYSIS_BASE_DIR="outputs/analysis"
-
+ANALYSIS_BASE_DIR="corrected_outputs/analysis"
 echo "Job ID: ${SLURM_JOB_ID}"
 
 START_TIME=$(date +%s)

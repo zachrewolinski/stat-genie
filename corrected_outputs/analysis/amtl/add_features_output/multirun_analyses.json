@@ -1,0 +1,268 @@
+{
+  "dataset_name": "amtl",
+  "n": 5,
+  "analyses": {
+    "0": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Primary independent variable: whether the specimen is a modern human (Homo sapiens) vs non-human primate. Binary indicator coded 1 = Homo sapiens, 0 = non-human primate (Pan, Pongo, Papio, etc.). This tests whether humans have higher AMTL after covariate adjustment.",
+            "columns": [
+              "is_human"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Dependent variable: antemortem tooth loss (AMTL) modeled as a binomial outcome (number of missing teeth out of observable sockets). We include both raw counts and the proportion (for GLM with Binomial family using weights).",
+          "columns": [
+            "num_amtl",
+            "sockets",
+            "amtl_prop"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Estimated age at death (centered). Age strongly predicts tooth loss; we center to improve interpretability and numerical stability.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "age_c"
+            ]
+          },
+          {
+            "description": "Estimate of sex coded as probability of being male (0-1). This accounts for sex differences in AMTL when sex is uncertain.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "prob_male"
+            ]
+          },
+          {
+            "description": "Tooth class (categorical: Anterior, Posterior, Premolar). Different tooth classes have different baseline risks of AMTL; included as a categorical factor.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "tooth_class"
+            ]
+          },
+          {
+            "description": "Specimen identifier. Used for clustered (robust) standard errors to account for non-independence when multiple tooth-class observations come from the same specimen.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "specimen"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw AMTL dataset into a dataframe ready for binomial GLM.\n\n    Adds/returns columns used in the model:\n      - is_human: binary indicator for genus == 'Homo sapiens'\n      - amtl_prop: proportion missing = num_amtl / sockets (for use as response with Binomial family and weights=sockets)\n      - age_c: centered age (age - mean(age))\n\n    Also filters out invalid rows (missing critical fields, sockets <= 0, num_amtl > sockets).\n    \"\"\"\n    # work on a copy\n    df = df.copy()\n\n    # Ensure required columns exist\n    required = ['num_amtl', 'sockets', 'age', 'prob_male', 'genus', 'tooth_class', 'specimen']\n    missing_cols = [c for c in required if c not in df.columns]\n    if len(missing_cols) > 0:\n        raise ValueError(f\"Missing required columns: {missing_cols}\")\n\n    # Coerce numeric columns\n    df['num_amtl'] = pd.to_numeric(df['num_amtl'], errors='coerce')\n    df['sockets'] = pd.to_numeric(df['sockets'], errors='coerce')\n    df['age'] = pd.to_numeric(df['age'], errors='coerce')\n    df['prob_male'] = pd.to_numeric(df['prob_male'], errors='coerce')\n\n    # Standard cleaning: remove rows with missing critical data\n    df = df.dropna(subset=['num_amtl', 'sockets', 'age', 'prob_male', 'genus', 'tooth_class', 'specimen'])\n\n    # Remove rows with invalid socket counts\n    df = df[df['sockets'] > 0]\n\n    # Ensure num_amtl does not exceed sockets; drop implausible rows\n    df = df[df['num_amtl'] <= df['sockets']]\n\n    # Create proportion outcome for GLM (response must be in [0,1] when using weights)\n    df['amtl_prop'] = df['num_amtl'] / df['sockets']\n\n    # Create binary Homo indicator\n    # Use exact match 'Homo sapiens' (as described in schema). If other Homo labels appear, adjust accordingly.\n    df['is_human'] = (df['genus'] == 'Homo sapiens').astype(int)\n\n    # Center age for numerical stability\n    df['age_c'] = df['age'] - df['age'].mean()\n\n    # Ensure tooth_class is categorical with sensible categories\n    df['tooth_class'] = df['tooth_class'].astype('category')\n\n    # Reset index for clean downstream usage\n    df = df.reset_index(drop=True)\n\n    return df",
+      "m_code": "def model(df: pd.DataFrame) -> Any:\n    \"\"\"\n    Fit a binomial GLM to test whether modern humans have higher AMTL than non-human primates,\n    adjusting for age, sex (prob_male), and tooth class. Uses proportion response with weights=sockets.\n\n    Returns the fitted model results with cluster-robust standard errors clustered by specimen.\n    \"\"\"\n    import statsmodels.formula.api as smf\n    import statsmodels.api as sm\n\n    # Check that transform has been applied (required columns present)\n    required = ['amtl_prop', 'sockets', 'is_human', 'age_c', 'prob_male', 'tooth_class', 'specimen', 'num_amtl']\n    missing = [c for c in required if c not in df.columns]\n    if missing:\n        raise ValueError(f\"Dataframe missing required columns for modeling: {missing}\")\n\n    # Formula: proportion outcome modeled with Binomial family; tooth_class as categorical factor\n    formula = 'amtl_prop ~ is_human + age_c + prob_male + C(tooth_class)'\n\n    # Fit GLM with Binomial family, using sockets as weights (proportion response with varying trials)\n    model = smf.glm(formula=formula, data=df, family=sm.families.Binomial(), weights=df['sockets'])\n    results = model.fit()\n\n    # Compute cluster-robust SE by specimen to account for non-independence of observations from the same individual\n    try:\n        results_cluster = results.get_robustcov_results(cov_type='cluster', groups=df['specimen'])\n    except Exception:\n        # Fallback: if clustering fails, return the original results\n        results_cluster = results\n\n    # Print a brief summary (users can inspect returned results object for full detail)\n    print(results_cluster.summary())\n\n    # Return the cluster-robust results object\n    return results_cluster"
+    },
+    "1": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Indicator for whether the specimen is a modern human (Homo sapiens). Primary independent variable testing whether humans show higher AMTL rates than non-human primates.",
+            "columns": [
+              "IsHomo"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Antemortem tooth loss (AMTL) frequency for the scored tooth class: modeled as the proportion of missing teeth (num_amtl / sockets) with the number of trials given by 'sockets'.",
+          "columns": [
+            "num_amtl",
+            "sockets",
+            "prop_amtl"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Estimated age at death, centered around the sample mean. Controls for the effect of age on AMTL.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "age_c"
+            ]
+          },
+          {
+            "description": "Estimate of sex coded as probability of being male (0-1). Controls for sex differences in AMTL.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "prob_male"
+            ]
+          },
+          {
+            "description": "Tooth class (Anterior, Premolar, Posterior). Included as a categorical control because AMTL frequency differs by tooth type.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "tooth_class"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    # Work on a copy\n    df = df.copy()\n\n    # Keep only rows with required fields present\n    required = ['num_amtl', 'sockets', 'age', 'prob_male', 'genus', 'tooth_class']\n    df = df.dropna(subset=required)\n\n    # Ensure sockets is positive integer > 0\n    df = df[df['sockets'] > 0]\n\n    # Ensure num_amtl is non-negative and does not exceed sockets\n    # If any num_amtl > sockets, cap to sockets (more conservative than drop)\n    df['num_amtl'] = df['num_amtl'].astype(float)\n    df['sockets'] = df['sockets'].astype(float)\n    df['num_amtl'] = np.minimum(df['num_amtl'], df['sockets'])\n    df['num_amtl'] = np.maximum(df['num_amtl'], 0.0)\n\n    # Proportion missing within the tooth class (dependent variable)\n    df['prop_amtl'] = df['num_amtl'] / df['sockets']\n\n    # Create binary indicator variable for modern humans (Homo sapiens)\n    # Strip whitespace and compare case-insensitively\n    df['genus'] = df['genus'].astype(str).str.strip()\n    df['IsHomo'] = (df['genus'].str.lower() == 'homo sapiens').astype(int)\n\n    # Center age to improve interpretability and reduce collinearity\n    df['age'] = pd.to_numeric(df['age'], errors='coerce')\n    df['age_c'] = df['age'] - df['age'].mean()\n\n    # Ensure prob_male is numeric and in [0,1]\n    df['prob_male'] = pd.to_numeric(df['prob_male'], errors='coerce')\n    df.loc[df['prob_male'] < 0, 'prob_male'] = 0.0\n    df.loc[df['prob_male'] > 1, 'prob_male'] = 1.0\n\n    # Make tooth_class a categorical variable with consistent categories\n    df['tooth_class'] = df['tooth_class'].astype(str).str.strip().astype('category')\n\n    # Keep only rows where proportion is defined (safeguard)\n    df = df.dropna(subset=['prop_amtl', 'IsHomo', 'age_c', 'prob_male', 'tooth_class'])\n\n    # Return transformed dataframe containing all columns needed for the model\n    # (we keep original columns too for traceability)\n    return df",
+      "m_code": "def model(df: pd.DataFrame) -> Any:\n    \"\"\"\n    Fit a binomial (logistic) GLM for AMTL frequency.\n\n    Model specification:\n      prop_amtl ~ IsHomo + age_c + prob_male + C(tooth_class)\n\n    The binomial family is used with the number of trials given by 'sockets'.\n    The coefficient on IsHomo tests whether modern humans have higher AMTL rates\n    controlling for age, sex (prob_male), and tooth class.\n    \"\"\"\n    df = df.copy()\n\n    # Build and fit GLM: model proportion with Binomial family and use sockets as weights\n    # (weights indicate number of trials for the proportion)\n    formula = 'prop_amtl ~ IsHomo + age_c + prob_male + C(tooth_class)'\n    model = sm.GLM.from_formula(formula, data=df, family=sm.families.Binomial(), weights=df['sockets'])\n\n    # Fit the model; use robust covariance (HC3) for heteroskedasticity-robust SEs\n    results = model.fit(cov_type='HC3')\n\n    # Return the fitted results object (user can inspect summary, params, conf_int, etc.)\n    return results"
+    },
+    "2": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Binary indicator for whether the specimen is a modern human (Homo sapiens). This is the primary predictor testing whether humans have different AMTL rates than non-human primates.",
+            "columns": [
+              "IsHuman"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Antemortem tooth loss (AMTL) measured as counts and proportion. AMTL_successes is the number of missing teeth in the scored tooth class; sockets is the number of observable sockets (the binomial denominator); AMTL_prop is the proportion missing (AMTL_successes / sockets). The binomial GLM uses AMTL_prop with var_weights = sockets (or equivalently the successes/failures columns) to model probability of AMTL.",
+          "columns": [
+            "AMTL_successes",
+            "sockets",
+            "AMTL_prop"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Estimated age at death (continuous). Older individuals are expected to have higher AMTL rates; included as a numeric covariate.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "age"
+            ]
+          },
+          {
+            "description": "Estimate of the probability the specimen is male (continuous 0-1). Sex affects dental attrition and life-history patterns; included as a covariate.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "ProbMale"
+            ]
+          },
+          {
+            "description": "Tooth class (categorical: Anterior, Posterior, Premolar). Tooth type strongly affects rates of loss; included as a categorical control (modeled with indicator variables).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "tooth_class"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw dataset into a dataframe ready for binomial modeling of AMTL.\n\n    Produces the following important columns used in the model:\n      - AMTL_successes: integer count of missing teeth for the given tooth class (num_amtl)\n      - sockets: integer count of observable sockets for the given tooth class (sockets)\n      - AMTL_failures: sockets - AMTL_successes (for diagnostics)\n      - AMTL_prop: AMTL_successes / sockets (proportion missing)\n      - IsHuman: 1 if genus indicates Homo sapiens, 0 otherwise\n      - age: numeric age at death (converted)\n      - ProbMale: numeric probability of male sex (converted)\n      - tooth_class: standardized categorical tooth class\n\n    Rows with missing essential fields or invalid sockets are removed.\n    \"\"\"\n    df = df.copy()\n\n    # Keep only rows with the essential fields\n    required = ['num_amtl', 'sockets', 'genus', 'age', 'prob_male', 'tooth_class']\n    df = df.dropna(subset=required)\n\n    # Convert numeric fields to numeric types\n    df['num_amtl'] = pd.to_numeric(df['num_amtl'], errors='coerce')\n    df['sockets'] = pd.to_numeric(df['sockets'], errors='coerce')\n    df['age'] = pd.to_numeric(df['age'], errors='coerce')\n    df['ProbMale'] = pd.to_numeric(df['prob_male'], errors='coerce')\n\n    # Drop rows that became NaN from coercion\n    df = df.dropna(subset=['num_amtl', 'sockets', 'age', 'ProbMale'])\n\n    # Sockets must be a positive integer and num_amtl must be between 0 and sockets\n    # Force integer rounding for counts (but only after validation)\n    df['sockets'] = df['sockets'].astype(int)\n    # Negative or zero sockets cannot be modeled; remove\n    df = df[df['sockets'] > 0]\n\n    # Round num_amtl to integer and clamp to valid range\n    df['num_amtl'] = df['num_amtl'].round().astype(int)\n    df = df[(df['num_amtl'] >= 0) & (df['num_amtl'] <= df['sockets'])]\n\n    # Create AMTL columns used for modeling\n    df['AMTL_successes'] = df['num_amtl'].astype(int)\n    df['AMTL_failures'] = (df['sockets'] - df['AMTL_successes']).astype(int)\n    df['AMTL_prop'] = df['AMTL_successes'] / df['sockets']\n\n    # Binary indicator for modern human specimens\n    # Use case-insensitive matching; handle possible variants like 'Homo sapiens', 'Homo', etc.\n    df['genus_str'] = df['genus'].astype(str).str.strip().str.lower()\n    df['IsHuman'] = df['genus_str'].apply(lambda x: 1 if ('homo sapiens' in x or x == 'homo' or x.startswith('homo')) else 0)\n    df = df.drop(columns=['genus_str'])\n\n    # Standardize tooth_class categories to a consistent set (Title case expected values)\n    df['tooth_class'] = df['tooth_class'].astype(str).str.strip().str.title()\n\n    # Keep only well-known tooth_class values (if other values exist, they will remain but C() in formula will handle them)\n    # Final columns to return: include specimen identifier if present for diagnostics\n    keep_cols = [c for c in ['specimen', 'tooth_class', 'AMTL_successes', 'AMTL_failures', 'sockets', 'AMTL_prop', 'IsHuman', 'age', 'ProbMale'] if c in df.columns]\n\n    return df[keep_cols]",
+      "m_code": "def model(df: pd.DataFrame) -> Any:\n    \"\"\"\n    Fit a binomial (logit link) GLM to model probability of AMTL while controlling for age, sex, and tooth class.\n\n    Model formula (proportion with var_weights = sockets):\n      AMTL_prop ~ IsHuman + age + ProbMale + C(tooth_class)\n\n    We use the proportion (AMTL_prop) as the dependent variable and pass the number of sockets as variance weights\n    so that the model treats each row as a binomial observation with different denominators.\n\n    Returns the fitted GLMResults object from statsmodels.\n    \"\"\"\n    import statsmodels.formula.api as smf\n    import statsmodels.api as sm\n\n    df = df.copy()\n\n    # Ensure required columns are present\n    required = ['AMTL_prop', 'sockets', 'IsHuman', 'age', 'ProbMale', 'tooth_class']\n    missing = [c for c in required if c not in df.columns]\n    if len(missing) > 0:\n        raise ValueError(f\"Missing required columns for modeling: {missing}\")\n\n    # Fit GLM using proportion outcome with var_weights = sockets to model a binomial process\n    formula = 'AMTL_prop ~ IsHuman + age + ProbMale + C(tooth_class)'\n\n    # Use the formula API; supply var_weights to indicate binomial denominators\n    glm_model = smf.glm(formula=formula, data=df, family=sm.families.Binomial(), var_weights=df['sockets'])\n    results = glm_model.fit()\n\n    # It's often useful to see robust (clustered) SEs if specimens are not independent across rows,\n    # but that requires a cluster variable (e.g., specimen) and is optional. For now return the standard results.\n    return results"
+    },
+    "3": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Indicator for whether a specimen is modern human (Homo sapiens). Primary independent variable testing whether humans have higher AMTL than non-human primates.",
+            "columns": [
+              "GenusHuman"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Antemortem tooth loss (AMTL) expressed as counts of missing teeth out of the number of observable sockets for the given tooth class. Modeled as binomial counts (successes = num_amtl, trials = sockets).",
+          "columns": [
+            "num_amtl",
+            "sockets"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Centered estimated age at death (continuous). Controls for the effect of age on probability of AMTL.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "age_c"
+            ]
+          },
+          {
+            "description": "Estimated probability the specimen is male (continuous from 0 to 1). Controls for sex effects while retaining uncertainty in sex estimation.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "prob_male"
+            ]
+          },
+          {
+            "description": "Tooth class (categorical): anterior, premolar, posterior. Controls for differing baseline AMTL probabilities by tooth class.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "tooth_class"
+            ]
+          },
+          {
+            "description": "Specimen identifier used for clustering standard errors to account for non-independence of multiple tooth-class observations from the same individual.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "specimen"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    # Work on a copy\n    df = df.copy()\n\n    # Keep only rows with the necessary fields\n    required_cols = ['num_amtl', 'sockets', 'genus', 'age', 'prob_male', 'tooth_class', 'specimen']\n    df = df.dropna(subset=required_cols)\n\n    # Ensure sockets > 0 (cannot model binomial with zero trials)\n    df = df[df['sockets'] > 0].copy()\n\n    # Make sure numeric columns are numeric\n    df['num_amtl'] = pd.to_numeric(df['num_amtl'], errors='coerce')\n    df['sockets'] = pd.to_numeric(df['sockets'], errors='coerce')\n    df['age'] = pd.to_numeric(df['age'], errors='coerce')\n    df['prob_male'] = pd.to_numeric(df['prob_male'], errors='coerce')\n\n    # Drop rows that became NA after coercion\n    df = df.dropna(subset=['num_amtl', 'sockets', 'age', 'prob_male'])\n\n    # Cap num_amtl to be within [0, sockets] to avoid impossible counts\n    df['num_amtl'] = df['num_amtl'].clip(lower=0)\n    # Ensure integer counts (if floats present due to import), but keep as numeric\n    # Use floor for safety if floats are near integers\n    df['num_amtl'] = df['num_amtl'].round().astype(int)\n    df['sockets'] = df['sockets'].round().astype(int)\n    df.loc[df['num_amtl'] > df['sockets'], 'num_amtl'] = df.loc[df['num_amtl'] > df['sockets'], 'sockets']\n\n    # Compute AMTL rate column (useful for diagnostics/plots)\n    df['AMTL_rate'] = df['num_amtl'] / df['sockets']\n\n    # Create main independent variable: indicator for Homo sapiens\n    # Be robust to whitespace/capitalization\n    df['GenusHuman'] = (df['genus'].astype(str).str.strip().str.lower() == 'homo sapiens').astype(int)\n\n    # Center age to improve interpretability/stability\n    df['age_c'] = df['age'] - df['age'].mean()\n\n    # Ensure tooth_class and specimen are categorical\n    df['tooth_class'] = df['tooth_class'].astype('category')\n    df['specimen'] = df['specimen'].astype('category')\n\n    # Return dataframe containing the variables used in modeling (plus some extras useful for diagnostics)\n    keep_cols = list(df.columns)  # return full df but transform ensures necessary columns exist\n    return df",
+      "m_code": "def model(df: pd.DataFrame):\n    import statsmodels.formula.api as smf\n    import statsmodels.api as sm\n\n    # Formula: model AMTL as binomial counts (num_amtl successes out of sockets trials)\n    # Primary predictor: GenusHuman. Controls: centered age, estimated male probability, tooth class.\n    # Cluster standard errors by specimen to account for multiple tooth-class rows per individual.\n\n    # Fit binomial GLM using proportion (num_amtl / sockets) with frequency/observation weights = sockets\n    formula = 'I(num_amtl / sockets) ~ GenusHuman + age_c + prob_male + C(tooth_class)'\n\n    # Use statsmodels formula-based GLM. We pass weights=sockets so that the binomial model uses sockets as number of trials.\n    model = smf.glm(formula=formula, data=df, family=sm.families.Binomial(), weights=df['sockets'])\n\n    # Fit with cluster-robust standard errors clustered on specimen\n    # Note: some statsmodels versions accept cov_type in fit(); this uses that interface.\n    try:\n        results = model.fit(cov_type='cluster', cov_kwds={'groups': df['specimen']})\n    except Exception:\n        # Fallback: fit normally then get clustered robust covariance via get_robustcov_results\n        res = model.fit()\n        results = res.get_robustcov_results(cov_type='cluster', groups=df['specimen'])\n\n    # The fitted object 'results' contains regression coefficients on logit scale.\n    # Return the full results object so the caller can inspect params, pvalues, confidence intervals, etc.\n    return results"
+    },
+    "4": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Specimen genus (categorical). Primary independent variable of interest. Values include 'Homo sapiens', 'Pan', 'Pongo', 'Papio'. Modeled as a factor so that the effect of Homo sapiens (modern humans) can be compared to non-human primates.",
+            "columns": [
+              "genus"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Proportion of teeth missing for the given tooth class on a specimen: num_amtl / sockets. This is modeled as a binomial outcome (proportion) with the number of trials given by 'sockets'.",
+          "columns": [
+            "prop_amtl",
+            "sockets"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Estimated age at death, standardized (mean 0, sd 1). Older individuals are expected to have more antemortem tooth loss; we adjust for age by using the standardized variable age_scaled.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "age_scaled"
+            ]
+          },
+          {
+            "description": "Estimated probability of the specimen being male (continuous 0-1). This variable captures sex differences in AMTL and is included as a control.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "prob_male"
+            ]
+          },
+          {
+            "description": "Tooth class (categorical): Anterior, Posterior, or Premolar. Different tooth types have different baseline probabilities of AMTL; modeled as a factor.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "tooth_class"
+            ]
+          },
+          {
+            "description": "Specimen identifier. Included so that we can cluster robust standard errors by specimen to account for within-specimen correlation (multiple tooth classes measured per specimen).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "specimen"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw dataset for binomial modeling of antemortem tooth loss (AMTL).\n\n    Produces the following columns required by the model:\n      - prop_amtl: proportion of missing teeth within the observed sockets (num_amtl / sockets)\n      - sockets: number of observable sockets (trials for binomial model)\n      - num_amtl: number of missing teeth (successes)\n      - genus: cleaned genus factor\n      - tooth_class: cleaned tooth class factor\n      - age_scaled: standardized age (mean 0, sd 1)\n      - prob_male: probability specimen is male (kept as-is, 0-1)\n      - specimen: specimen identifier (for clustering)\n\n    Rows with insufficient data (e.g., missing sockets or zero sockets) are removed.\n    \"\"\"\n    # Work on a copy\n    df = df.copy()\n\n    # Keep necessary columns and drop rows missing required fields\n    required = ['num_amtl', 'sockets', 'age', 'prob_male', 'genus', 'tooth_class', 'specimen']\n    df = df.dropna(subset=required)\n\n    # Ensure sockets are integer and positive\n    # Some datasets might have floats for sockets; coerce to int when it's near-integer\n    df['sockets'] = pd.to_numeric(df['sockets'], errors='coerce')\n    df = df.dropna(subset=['sockets'])\n    # Remove rows with zero or negative sockets (can't model binomial trials = 0)\n    df = df[df['sockets'] >= 1]\n    # Ensure num_amtl numeric and bounded between 0 and sockets\n    df['num_amtl'] = pd.to_numeric(df['num_amtl'], errors='coerce').fillna(0).astype(int)\n    # Clip improbable values\n    df['num_amtl'] = df['num_amtl'].clip(lower=0, upper=df['sockets'])\n\n    # Create proportion outcome (successes / trials)\n    df['prop_amtl'] = df['num_amtl'] / df['sockets']\n\n    # Clean genus and tooth_class strings and convert to categorical\n    df['genus'] = df['genus'].astype(str).str.strip()\n    df['tooth_class'] = df['tooth_class'].astype(str).str.strip()\n\n    # Standardize age for modeling (mean 0, sd 1). Keep numeric coercion.\n    df['age'] = pd.to_numeric(df['age'], errors='coerce')\n    # Drop rows where age became missing after coercion\n    df = df.dropna(subset=['age'])\n    age_mean = df['age'].mean()\n    age_std = df['age'].std(ddof=0) if df['age'].std(ddof=0) != 0 else 1.0\n    df['age_scaled'] = (df['age'] - age_mean) / age_std\n\n    # Ensure prob_male is numeric and clipped to [0,1]\n    df['prob_male'] = pd.to_numeric(df['prob_male'], errors='coerce')\n    df['prob_male'] = df['prob_male'].clip(lower=0.0, upper=1.0)\n    df = df.dropna(subset=['prob_male'])\n\n    # Ensure specimen id is string (for clustering later)\n    df['specimen'] = df['specimen'].astype(str)\n\n    # Final housekeeping: cast tooth_class and genus to category dtype\n    df['tooth_class'] = df['tooth_class'].astype('category')\n    df['genus'] = df['genus'].astype('category')\n\n    # Return only columns needed for modeling + a few helpful originals\n    keep_cols = [\n        'specimen', 'genus', 'tooth_class', 'num_amtl', 'sockets', 'prop_amtl',\n        'age', 'age_scaled', 'prob_male'\n    ]\n    # Some columns may not exist if input missing; filter\n    keep_cols = [c for c in keep_cols if c in df.columns]\n    return df[keep_cols]",
+      "m_code": "def model(df: pd.DataFrame) -> any:\n    \"\"\"\n    Fit a binomial (logistic) model for AMTL proportion with clustering by specimen.\n\n    The model estimates how genus (particularly Homo sapiens) relates to the probability\n    of a tooth being missing in its class, controlling for age, sex (prob_male), and tooth class.\n\n    Modeling approach:\n      - Use the proportion prop_amtl as the response and provide the number of trials via var_weights\n        in statsmodels' GLM to represent grouped binomial data (successes/trials).\n      - Include genus and tooth_class as categorical predictors with explicit treatment contrasts.\n      - Obtain cluster-robust standard errors clustered on specimen to account for multiple rows per specimen.\n\n    Returns the fitted results object with cluster-robust covariances applied.\n    \"\"\"\n    import patsy\n    import statsmodels.api as sm\n\n    # Ensure required columns are present\n    required = ['prop_amtl', 'sockets', 'genus', 'age_scaled', 'prob_male', 'tooth_class', 'specimen']\n    missing = [c for c in required if c not in df.columns]\n    if missing:\n        raise ValueError(f\"Missing required columns for modeling: {missing}\")\n\n    # Define formula: compare genus levels (reference = 'Pan' (chimpanzees))\n    # and use Posterior tooth class as reference for tooth_class\n    formula = (\n        \"prop_amtl ~ C(genus, Treatment(reference='Pan')) + age_scaled + prob_male + \"\n        \"C(tooth_class, Treatment(reference='Posterior'))\"\n    )\n\n    # Build design matrices using patsy (keeps categorical encoding consistent)\n    y, X = patsy.dmatrices(formula, data=df, return_type='dataframe')\n\n    # y is the proportion; pass number of trials as var_weights to GLM\n    model_glm = sm.GLM(y, X, family=sm.families.Binomial(), var_weights=df['sockets'].values)\n    res = model_glm.fit()\n\n    # Obtain cluster-robust standard errors by specimen to account for within-specimen correlation\n    # (multiple tooth classes recorded per specimen)\n    try:\n        res_cluster = res.get_robustcov_results(cov_type='cluster', groups=df['specimen'])\n    except Exception:\n        # Fallback: if clustering fails, return the original fit but warn the user\n        import warnings\n        warnings.warn('Clustered SE calculation failed; returning non-clustered GLM results.')\n        res_cluster = res\n\n    # Print concise summary and return the robust-results object\n    print(res_cluster.summary())\n    return res_cluster"
+    }
+  }
+}

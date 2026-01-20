@@ -55,7 +55,7 @@ def run_analysis():
     }
     llm_eval_config = llm_config.copy()
     
-    output_dir = project_root / "outputs" / "analysis" / dataset_name / f"{perturbation_type}_output"
+    output_dir = project_root / "corrected_outputs" / "analysis" / dataset_name / f"{perturbation_type}_output"
     output_dir.mkdir(parents=True, exist_ok=True)
     
     llm_config["log_file"] = str(output_dir / "llm.log")

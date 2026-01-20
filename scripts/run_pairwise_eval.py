@@ -33,7 +33,7 @@ def run_pairwise_eval():
         if not base_dir.is_absolute():
             base_dir = project_root / base_dir
     else:
-        base_dir = project_root / "outputs" / "analysis"
+        base_dir = project_root / "corrected_outputs" / "analysis"
     
     perturbations = ["add_features", "anonymize", "noperturb",
                      "replace_with_rvs", "shuffle_names"]
@@ -58,7 +58,7 @@ def run_pairwise_eval():
     else:
         run_id = f"timestamp_{timestamp}"
     
-    output_dir = project_root / "outputs" / "pairwise_eval" / dataset_name / run_id
+    output_dir = project_root / "corrected_outputs" / "pairwise_eval" / dataset_name / run_id
     output_dir.mkdir(parents=True, exist_ok=True)
     
     analysis_result_paths_relative = [

@@ -1,0 +1,493 @@
+{
+  "dataset_name": "reading",
+  "n": 5,
+  "analyses": {
+    "0": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Whether the Reader View (modified web page layout) was activated for the trial (1 = Reader View ON, 0 = OFF). This is the primary manipulated independent variable.",
+            "columns": [
+              "ReaderView"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Log-transformed reading speed measured in words per minute (wpm). Calculated as (WordCount * 60000 / ReadingTime_ms) and log-transformed to stabilize skew.",
+          "columns": [
+            "log_wpm"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Binary indicator whether the reader has dyslexia (1) or not (0). Treated as a control and as the moderator of interest: we test the ReaderView * Dyslexia interaction to see if Reader View benefits readers with dyslexia more.",
+            "is_moderator": true,
+            "moderator_on": "ReaderView",
+            "columns": [
+              "Dyslexia"
+            ]
+          },
+          {
+            "description": "Participant age in years (numeric).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "Age"
+            ]
+          },
+          {
+            "description": "Device used for the trial (categorical: smartphone / tablet / desktop / ...). Included as categorical control (will be used with C(Device) in the model).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "Device"
+            ]
+          },
+          {
+            "description": "Education level of the reader (categorical). Included as categorical control (C(Education)).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "Education"
+            ]
+          },
+          {
+            "description": "Native English speaker indicator (1 = 'Y' native, 0 = 'N' not native).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "NativeEnglish"
+            ]
+          },
+          {
+            "description": "Comprehension accuracy (proportion / rate of correct answers on comprehension questions). Controls for speed-accuracy tradeoffs.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "Comprehension"
+            ]
+          },
+          {
+            "description": "Flesch-Kincaid readability score of the text (numeric). Controls for text difficulty.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "Flesch"
+            ]
+          },
+          {
+            "description": "Number of words on the page (used to compute wpm and also entered as a control to adjust for text length).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "WordCount"
+            ]
+          },
+          {
+            "description": "Indicator whether the trial was a retake (1) or not (0).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "Retake"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw dataset into an analysis-ready dataframe.\n\n    Produces these final columns used in the model:\n      - ReaderView: binary 0/1 from feature3\n      - ReadingTime_ms: numeric reading time excluding scrolling from feature5 (ms)\n      - WordCount: number of words on the page from feature7\n      - wpm: words per minute (derived)\n      - log_wpm: natural log of wpm (dependent variable)\n      - Dyslexia: binary 0/1 from feature17\n      - Age, Device, Education, NativeEnglish, Comprehension, Flesch, Retake\n\n    Filters unrealistic or missing observations.\n    \"\"\"\n    df = df.copy()\n\n    # Rename columns to meaningful names used downstream\n    rename_map = {\n        'feature3': 'ReaderView',         # 0/1\n        'feature5': 'ReadingTime_ms',     # reading time excluding scrolling (ms)\n        'feature7': 'WordCount',          # number of words on the page\n        'feature8': 'Comprehension',      # comprehension accuracy (proportion)\n        'feature10': 'Age',               # age in years\n        'feature11': 'Device',            # device categorical\n        'feature12': 'DyslexiaSeverity',  # optional severity (0/1/2)\n        'feature13': 'Education',         # education categorical\n        'feature16': 'Retake',            # 0/1\n        'feature17': 'Dyslexia',          # binary 0/1 (has dyslexia)\n        'feature18': 'NativeEnglish',     # 'Y'/'N'\n        'feature19': 'Flesch'             # readability score\n    }\n    df = df.rename(columns=rename_map)\n\n    # Required columns for initial processing\n    required = ['ReaderView', 'ReadingTime_ms', 'WordCount', 'Dyslexia']\n\n    # Coerce the required columns to numeric (may introduce NaN for non-numeric entries)\n    for col in required:\n        if col in df.columns:\n            df[col] = pd.to_numeric(df[col], errors='coerce')\n\n    # Drop rows missing any required variable after coercion\n    df = df.dropna(subset=[c for c in required if c in df.columns])\n\n    # Now convert binary integer columns to plain numpy integer dtype (not pandas nullable Int64)\n    if 'ReaderView' in df.columns:\n        # safe because we dropped NA rows above\n        df['ReaderView'] = df['ReaderView'].astype(np.int64)\n    if 'Dyslexia' in df.columns:\n        df['Dyslexia'] = df['Dyslexia'].astype(np.int64)\n\n    # Ensure numeric types for the continuous required columns\n    if 'ReadingTime_ms' in df.columns:\n        df['ReadingTime_ms'] = pd.to_numeric(df['ReadingTime_ms'], errors='coerce')\n    if 'WordCount' in df.columns:\n        df['WordCount'] = pd.to_numeric(df['WordCount'], errors='coerce')\n\n    # Drop rows that became NA after coercion\n    df = df.dropna(subset=[c for c in required if c in df.columns])\n\n    # Remove implausible reading times or word counts (likely logging/measurement errors)\n    if 'ReadingTime_ms' in df.columns:\n        df = df[df['ReadingTime_ms'] > 200]   # exclude extremely short times (<200 ms)\n    if 'WordCount' in df.columns:\n        df = df[df['WordCount'] > 0]\n\n    # Compute words per minute and log-transform the DV\n    # Only compute if WordCount and ReadingTime_ms exist\n    if ('WordCount' in df.columns) and ('ReadingTime_ms' in df.columns):\n        df['wpm'] = df['WordCount'] * 60000.0 / df['ReadingTime_ms']\n    else:\n        df['wpm'] = np.nan\n\n    # Remove extreme wpm values (implausible reading speed) to avoid undue influence\n    if 'wpm' in df.columns:\n        df = df[(df['wpm'] > 5) & (df['wpm'] < 1000)]\n\n    # Log transform (natural log) to reduce skew and approximate normality for OLS\n    df['log_wpm'] = np.log(df['wpm'])\n\n    # Map NativeEnglish from 'Y'/'N' to 1/0; if not present leave as NA\n    if 'NativeEnglish' in df.columns:\n        df['NativeEnglish'] = df['NativeEnglish'].map({'Y': 1, 'N': 0})\n        # ensure numeric type if mapping succeeded\n        df['NativeEnglish'] = pd.to_numeric(df['NativeEnglish'], errors='coerce')\n\n    # Ensure other controls are numeric / appropriate dtype if they exist\n    for col in ['Comprehension', 'Age', 'Flesch', 'Retake']:\n        if col in df.columns:\n            df[col] = pd.to_numeric(df[col], errors='coerce')\n\n    # Convert categorical controls to category dtype for use with C(...) in formulas\n    if 'Device' in df.columns:\n        df['Device'] = df['Device'].astype('category')\n    if 'Education' in df.columns:\n        df['Education'] = df['Education'].astype('category')\n\n    # Drop rows missing the DV or primary IV/moderator after transformations\n    df = df.dropna(subset=[c for c in ['log_wpm', 'ReaderView', 'Dyslexia'] if c in df.columns])\n\n    # Keep only columns required for modeling (but preserve them as columns in final DF)\n    final_cols = [\n        'ReaderView', 'Dyslexia', 'log_wpm', 'wpm', 'ReadingTime_ms', 'WordCount',\n        'Age', 'Device', 'Education', 'NativeEnglish', 'Comprehension', 'Flesch', 'Retake'\n    ]\n    # Keep whichever of these exist in df; this makes function robust if some optional controls are missing\n    final_cols = [c for c in final_cols if c in df.columns]\n    df = df[final_cols].reset_index(drop=True)\n\n    return df",
+      "m_code": "def model(df: pd.DataFrame) -> Any:\n    \"\"\"\n    Fit an OLS regression testing whether ReaderView improves reading speed and whether that effect\n    differs for readers with dyslexia (interaction ReaderView * Dyslexia).\n\n    Model specification (primary):\n      log_wpm ~ ReaderView * Dyslexia + Age + C(Device) + C(Education) + NativeEnglish + Comprehension + Flesch + WordCount + Retake\n\n    Uses heteroskedasticity-robust standard errors (HC3).\n    Returns the fitted statsmodels results object.\n    \"\"\"\n    import statsmodels.formula.api as smf\n\n    # Ensure required columns are present\n    required = ['log_wpm', 'ReaderView', 'Dyslexia']\n    for c in required:\n        if c not in df.columns:\n            raise ValueError(f\"Required column '{c}' not found in dataframe passed to model().\")\n\n    # Build formula; include categorical controls only if they exist in the dataframe\n    formula_terms = ['ReaderView * Dyslexia']\n    if 'Age' in df.columns:\n        formula_terms.append('Age')\n    if 'Device' in df.columns:\n        formula_terms.append('C(Device)')\n    if 'Education' in df.columns:\n        formula_terms.append('C(Education)')\n    if 'NativeEnglish' in df.columns:\n        formula_terms.append('NativeEnglish')\n    if 'Comprehension' in df.columns:\n        formula_terms.append('Comprehension')\n    if 'Flesch' in df.columns:\n        formula_terms.append('Flesch')\n    if 'WordCount' in df.columns:\n        formula_terms.append('WordCount')\n    if 'Retake' in df.columns:\n        formula_terms.append('Retake')\n\n    formula = 'log_wpm ~ ' + ' + '.join(formula_terms)\n\n    # Fit OLS with robust standard errors\n    results = smf.ols(formula=formula, data=df).fit(cov_type='HC3')\n\n    # Print a brief summary (user can inspect results object for full access)\n    print(results.summary())\n\n    return results"
+    },
+    "1": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Whether Reader View was activated for the trial (treatment). Binary indicator: 1 = Reader View ON, 0 = Reader View OFF.",
+            "columns": [
+              "ReaderView"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Log-transformed reading speed in words per second (log of words / reading_time_seconds). Log transform used to stabilize skew and interpret proportional changes.",
+          "columns": [
+            "log_reading_speed"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Whether the participant has dyslexia. Treated as a moderator of the ReaderView effect (research question asks about ReaderView effectiveness for individuals with dyslexia). Binary: 1 = dyslexia, 0 = no dyslexia.",
+            "is_moderator": true,
+            "moderator_on": "ReaderView",
+            "columns": [
+              "Dyslexia"
+            ]
+          },
+          {
+            "description": "Comprehension accuracy on the comprehension questions after reading (proportion correct). Controls for any speed-accuracy tradeoff.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "Comprehension"
+            ]
+          },
+          {
+            "description": "Age of the reader (years).",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "Age"
+            ]
+          },
+          {
+            "description": "Device used in the trial (categorical). Controls for reading speed differences across device types (e.g., smartphone, tablet, desktop).",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "Device"
+            ]
+          },
+          {
+            "description": "Language of the text (categorical). Controls for language-driven differences in reading speed.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "Language"
+            ]
+          },
+          {
+            "description": "Flesch-Kincaid readability score of the text (continuous). Controls for text difficulty.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "Readability"
+            ]
+          },
+          {
+            "description": "Indicator whether the trial was a retake (1) or not (0).",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "Retake"
+            ]
+          },
+          {
+            "description": "Native English speaker indicator (1 = native / 'Y', 0 = non-native / 'N'). Controls for language familiarity.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "NativeEnglish"
+            ]
+          },
+          {
+            "description": "Number of words on the page (used to compute speed; also included as a control to account for length effects).",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "WordCount"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform raw dataset into analysis-ready dataframe.\n\n    Produces the following columns required for modeling:\n      - ReaderView: binary (0/1) from feature3\n      - Dyslexia: binary (0/1) from feature17 (1 indicates dyslexia)\n      - reading_time_ms: numeric reading time excluding scrolling (feature5)\n      - WordCount: number of words on page (feature7)\n      - reading_speed_wps: words per second = WordCount / (reading_time_ms / 1000)\n      - log_reading_speed: natural log of reading_speed_wps\n      - Comprehension: feature8 (proportion correct)\n      - Age: feature10\n      - Device: feature11 (kept as categorical)\n      - Language: feature15 (kept as categorical)\n      - Readability: feature19\n      - Retake: feature16 (0/1)\n      - NativeEnglish: binary 1 if feature18 == 'Y', 0 if 'N'\n\n    Rows with missing or invalid values for the above necessary fields are dropped.\n    \"\"\"\n    df = df.copy()\n\n    # Basic renaming for clarity\n    # Original columns used: feature3 (ReaderView ON/OFF), feature5 (reading time excluding scroll, ms),\n    # feature7 (word count), feature8 (comprehension), feature10 (age), feature11 (device),\n    # feature15 (language), feature16 (retake), feature17 (dyslexia indicator), feature18 (native english),\n    # feature19 (readability)\n\n    # Ensure required columns exist\n    required_cols = [\n        'feature3', 'feature5', 'feature7', 'feature8', 'feature10', 'feature11',\n        'feature15', 'feature16', 'feature17', 'feature18', 'feature19'\n    ]\n    missing = [c for c in required_cols if c not in df.columns]\n    if missing:\n        raise ValueError(f\"Input dataframe is missing required columns: {missing}\")\n\n    # Coerce numeric columns\n    df['ReaderView'] = pd.to_numeric(df['feature3'], errors='coerce').astype('Float64')\n    df['reading_time_ms'] = pd.to_numeric(df['feature5'], errors='coerce').astype('Float64')\n    df['WordCount'] = pd.to_numeric(df['feature7'], errors='coerce').astype('Float64')\n    df['Comprehension'] = pd.to_numeric(df['feature8'], errors='coerce').astype('Float64')\n    df['Age'] = pd.to_numeric(df['feature10'], errors='coerce').astype('Float64')\n    df['Readability'] = pd.to_numeric(df['feature19'], errors='coerce').astype('Float64')\n\n    # Binary and categorical conversions\n    # Dyslexia: use feature17 (explicit binary indicator: 1 = dyslexia, 0 = not)\n    df['Dyslexia'] = pd.to_numeric(df['feature17'], errors='coerce')\n    # Retake is 0/1 in feature16\n    df['Retake'] = pd.to_numeric(df['feature16'], errors='coerce')\n\n    # Device and Language keep as original categorical values (strings)\n    df['Device'] = df['feature11'].astype('category')\n    df['Language'] = df['feature15'].astype('category')\n\n    # Native English mapping: feature18 expected 'Y'/'N'\n    df['NativeEnglish'] = df['feature18'].map({'Y': 1, 'N': 0})\n\n    # Filter out rows with missing or invalid numeric values required for computing speed\n    df = df.dropna(subset=['ReaderView', 'reading_time_ms', 'WordCount', 'Dyslexia', 'Comprehension'])\n\n    # Remove rows with non-positive reading time or wordcount to avoid divide-by-zero\n    df = df[df['reading_time_ms'] > 0]\n    df = df[df['WordCount'] > 0]\n\n    # Compute reading speed in words per second and log-transform\n    df['reading_speed_wps'] = df['WordCount'] / (df['reading_time_ms'] / 1000.0)\n\n    # Drop any rows with non-positive speed (shouldn't occur after filters, but safe)\n    df = df[df['reading_speed_wps'] > 0]\n\n    # Natural log transform to reduce skew\n    df['log_reading_speed'] = np.log(df['reading_speed_wps'])\n\n    # Make sure binary columns are integer type (0/1)\n    df['ReaderView'] = df['ReaderView'].astype(int)\n    df['Dyslexia'] = df['Dyslexia'].astype(int)\n    df['Retake'] = df['Retake'].fillna(0).astype(int)\n    # NativeEnglish may have NaNs where language isn't Y/N; keep as float with NaN preserved\n\n    # Final selection: keep only columns used in modeling\n    keep_cols = [\n        'ReaderView', 'Dyslexia', 'reading_time_ms', 'WordCount', 'reading_speed_wps', 'log_reading_speed',\n        'Comprehension', 'Age', 'Device', 'Language', 'Readability', 'Retake', 'NativeEnglish'\n    ]\n    df = df[keep_cols]\n\n    # Reset index for cleanliness\n    df = df.reset_index(drop=True)\n\n    return df\n",
+      "m_code": "def model(df: pd.DataFrame) -> any:\n    \"\"\"\n    Fit an OLS regression testing whether ReaderView improves reading speed and whether that effect\n    differs for participants with dyslexia (interaction test).\n\n    Model (on transformed dataframe produced by transform):\n      log_reading_speed ~ ReaderView * Dyslexia + Comprehension + Age + Retake + NativeEnglish + Readability + WordCount + C(Device) + C(Language)\n\n    Returns the fitted statsmodels regression results object (with robust standard errors).\n    \"\"\"\n    import statsmodels.formula.api as smf\n\n    # Ensure needed columns exist\n    required = ['log_reading_speed', 'ReaderView', 'Dyslexia', 'Comprehension', 'Age', 'Retake', 'NativeEnglish', 'Readability', 'WordCount', 'Device', 'Language']\n    missing = [c for c in required if c not in df.columns]\n    if missing:\n        raise ValueError(f\"Transformed dataframe is missing required columns for modeling: {missing}\")\n\n    # Build formula. Use categorical encoding for Device and Language via C(...).\n    formula = (\n        'log_reading_speed ~ ReaderView * Dyslexia + Comprehension + Age + Retake + NativeEnglish + Readability + WordCount '\n        '+ C(Device) + C(Language)'\n    )\n\n    model = smf.ols(formula=formula, data=df)\n    # Fit with heteroskedasticity-robust standard errors (HC3)\n    results = model.fit(cov_type='HC3')\n\n    # Return the fitted results object for inspection (contains params, summary(), etc.)\n    return results\n"
+    },
+    "2": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Whether the user activated Reader View for the page (1 = Reader View ON, 0 = Reader View OFF). This is the primary independent variable whose causal effect on reading speed we want to estimate.",
+            "columns": [
+              "ReaderView"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Reading speed measured in words per minute (WPM). Also include the natural-log of WPM to reduce skew and make residuals more Gaussian for linear modeling.",
+          "columns": [
+            "ReadingSpeed_wpm",
+            "LogReadingSpeed"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Whether the reader has dyslexia (binary). This is treated as a moderator of the ReaderView effect: we will estimate the ReaderView * Dyslexia interaction to test whether Reader View helps dyslexic readers more.",
+            "is_moderator": true,
+            "moderator_on": "ReaderView",
+            "columns": [
+              "Dyslexia"
+            ]
+          },
+          {
+            "description": "Age of the reader in years (numeric). Controls for differences in reading speed by age.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "Age"
+            ]
+          },
+          {
+            "description": "Device type used by the reader (categorical; e.g., 'smartphone', 'tablet', 'desktop'). Included as a categorical control because device influences reading time.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "Device"
+            ]
+          },
+          {
+            "description": "Number of words on the page (numeric). More words typically require more time; controlling for this normalizes speed.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "Words"
+            ]
+          },
+          {
+            "description": "Flesch-Kincaid readability score of the text (numeric). Controls for text difficulty.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "Flesch"
+            ]
+          },
+          {
+            "description": "Whether the reader is a native English speaker (1 = 'Y' native, 0 = 'N' non-native). Language familiarity affects reading speed and comprehension.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "NativeEnglish"
+            ]
+          },
+          {
+            "description": "Whether the trial was a retake (1) or not (0). Retakes often change speed, so included as a control.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "Retake"
+            ]
+          },
+          {
+            "description": "Comprehension correctness rate after reading (proportion correct). Controls for speed-accuracy tradeoffs: faster reading at the cost of comprehension is undesirable.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "ComprehensionRate"
+            ]
+          },
+          {
+            "description": "Page identifier (categorical). Included as a fixed effect to control for page-to-page differences (length/format) beyond measured controls.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "PageID"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    # Work on a copy\n    df = df.copy()\n\n    # Original column mapping (for clarity):\n    # feature3 -> ReaderView (0/1)\n    # feature5 -> ReadingTime_ms (time on page minus scrolling) (ms)\n    # feature4 -> TotalTime_ms (total time on page) (ms)\n    # feature6 -> ScrollTime_ms (ms)\n    # feature7 -> Words (number of words)\n    # feature8 -> ComprehensionRate (proportion correct)\n    # feature10 -> Age\n    # feature11 -> Device\n    # feature12 -> DyslexiaSeverity (0/1/2)\n    # feature17 -> Dyslexia (0/1)\n    # feature16 -> Retake (0/1)\n    # feature18 -> NativeEnglish ('Y'/'N')\n    # feature19 -> Flesch (readability)\n    # feature2 -> PageID (page identifier)\n\n    # Rename columns to meaningful names used in modeling\n    rename_map = {\n        'feature3': 'ReaderView',\n        'feature5': 'ReadingTime_ms',\n        'feature4': 'TotalTime_ms',\n        'feature6': 'ScrollTime_ms',\n        'feature7': 'Words',\n        'feature8': 'ComprehensionRate',\n        'feature10': 'Age',\n        'feature11': 'Device',\n        'feature12': 'DyslexiaSeverity',\n        'feature17': 'Dyslexia',\n        'feature16': 'Retake',\n        'feature18': 'NativeEnglish',\n        'feature19': 'Flesch',\n        'feature2': 'PageID',\n        'feature1': 'RecordID'\n    }\n    df = df.rename(columns=rename_map)\n\n    # Cast types\n    # ReaderView should be binary 0/1\n    df['ReaderView'] = pd.to_numeric(df['ReaderView'], errors='coerce').astype('float')\n    # Dyslexia present (0/1)\n    df['Dyslexia'] = pd.to_numeric(df['Dyslexia'], errors='coerce').astype('float')\n    # Reading time and words\n    df['ReadingTime_ms'] = pd.to_numeric(df['ReadingTime_ms'], errors='coerce')\n    df['Words'] = pd.to_numeric(df['Words'], errors='coerce')\n    df['ComprehensionRate'] = pd.to_numeric(df['ComprehensionRate'], errors='coerce')\n    df['Age'] = pd.to_numeric(df['Age'], errors='coerce')\n    df['Flesch'] = pd.to_numeric(df['Flesch'], errors='coerce')\n    df['Retake'] = pd.to_numeric(df['Retake'], errors='coerce').astype('float')\n\n    # NativeEnglish -> binary (1 if 'Y', 0 otherwise)\n    df['NativeEnglish'] = df['NativeEnglish'].astype(str).str.upper().map(lambda x: 1 if x == 'Y' else 0)\n\n    # Device and PageID as categorical\n    df['Device'] = df['Device'].astype('category')\n    df['PageID'] = df['PageID'].astype('category')\n\n    # Calculate reading speed in words per minute (WPM)\n    # Use ReadingTime_ms (time on page minus scrolling) as the best available proxy for reading time.\n    # Avoid division by zero or implausibly small reading times by filtering below.\n    df['ReadingSpeed_wpm'] = np.nan\n    valid_time_mask = (df['ReadingTime_ms'].notnull()) & (df['ReadingTime_ms'] > 300) & (df['Words'].notnull()) & (df['Words'] > 0)\n    df.loc[valid_time_mask, 'ReadingSpeed_wpm'] = (df.loc[valid_time_mask, 'Words'] * 60000.0) / df.loc[valid_time_mask, 'ReadingTime_ms']\n\n    # Remove infinite/zero/negative or extremely large speeds (likely artifacts)\n    df.loc[~np.isfinite(df['ReadingSpeed_wpm']), 'ReadingSpeed_wpm'] = np.nan\n    # Optionally, drop extreme outliers beyond the 99.9th percentile to stabilize estimation\n    if df['ReadingSpeed_wpm'].notnull().sum() > 0:\n        upper = df['ReadingSpeed_wpm'].quantile(0.999)\n        lower = df['ReadingSpeed_wpm'].quantile(0.001)\n        df.loc[(df['ReadingSpeed_wpm'] > upper) | (df['ReadingSpeed_wpm'] < lower), 'ReadingSpeed_wpm'] = np.nan\n\n    # Log transform to reduce skew. Keep both raw WPM and log-WPM for reporting.\n    df['LogReadingSpeed'] = np.nan\n    mask_log = df['ReadingSpeed_wpm'].notnull() & (df['ReadingSpeed_wpm'] > 0)\n    df.loc[mask_log, 'LogReadingSpeed'] = np.log(df.loc[mask_log, 'ReadingSpeed_wpm'])\n\n    # Drop rows with missing key variables for the primary analysis\n    df = df.dropna(subset=['ReaderView', 'Dyslexia', 'ReadingSpeed_wpm', 'LogReadingSpeed'])\n\n    # Ensure binary columns are integer 0/1\n    df['ReaderView'] = df['ReaderView'].astype(int)\n    df['Dyslexia'] = df['Dyslexia'].astype(int)\n    df['Retake'] = df['Retake'].fillna(0).astype(int)\n    df['NativeEnglish'] = df['NativeEnglish'].fillna(0).astype(int)\n\n    # For interpretability, create an interaction-ready categorical Moderator column (optional)\n    # (We keep Dyslexia numeric 0/1 for modeling interaction.)\n\n    # Final columns required for modeling are:\n    # ['RecordID','ReaderView','ReadingTime_ms','TotalTime_ms','ScrollTime_ms','Words','ReadingSpeed_wpm','LogReadingSpeed',\n    #  'Dyslexia','Age','Device','NativeEnglish','Flesch','Retake','ComprehensionRate','PageID']\n\n    return df",
+      "m_code": "def model(df: pd.DataFrame) -> Any:\n    # We'll run an OLS regression on log(WPM) to estimate relative percent changes in reading speed.\n    # The key term of interest is the interaction ReaderView:Dyslexia.\n\n    import statsmodels.formula.api as smf\n\n    # Make a local copy to avoid modifying the caller's DF\n    data = df.copy()\n\n    # Formula: LogReadingSpeed ~ ReaderView * Dyslexia + controls + categorical device + page fixed effects\n    # Using C(Device) and C(PageID) includes dummy variables for device types and page fixed effects.\n    formula = (\n        'LogReadingSpeed ~ ReaderView * Dyslexia '\n        '+ Age + Words + Flesch + NativeEnglish + Retake + ComprehensionRate '\n        '+ C(Device) + C(PageID)'\n    )\n\n    # Fit OLS. Use cluster-robust standard errors clustered by PageID (page-level clustering) to account for page-level correlation.\n    # If clustering by PageID is not appropriate in a dataset with singletons, fallback to HC3 robust errors.\n    model = smf.ols(formula, data=data)\n\n    try:\n        results = model.fit(cov_type='cluster', cov_kwds={'groups': data['PageID']})\n    except Exception:\n        # fallback to HC3 robust covariance if clustering fails\n        results = model.fit(cov_type='HC3')\n\n    # Return the fitted results object so the caller can inspect coefficients, p-values, and diagnostics.\n    return results"
+    },
+    "3": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Whether Reader View (the modified layout) was activated for the trial (1 = activated, 0 = not). This is the experimental manipulation whose effect on reading speed we test.",
+            "columns": [
+              "ReaderView"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Observed reading speed measured as words per second on the page (words / reading_time_seconds). Higher values indicate faster reading.",
+          "columns": [
+            "ReadingSpeed_wps"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Whether the reader has dyslexia (binary). This variable is treated as a moderator of the ReaderView effect (we ask whether ReaderView helps dyslexic readers more). Constructed from feature12 (0=no, 1=dyslexia, 2=severe) with fallback to feature17 if feature12 is missing.",
+            "is_moderator": true,
+            "moderator_on": "ReaderView",
+            "columns": [
+              "Dyslexia"
+            ]
+          },
+          {
+            "description": "Age of the reader in years (continuous). Included as a control because reading speed varies with age.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "Age"
+            ]
+          },
+          {
+            "description": "Device used by the reader (categorical: e.g. 'smartphone', 'tablet', 'desktop'). Included as a control and will be modeled as categorical (dummy) variables.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "Device"
+            ]
+          },
+          {
+            "description": "Whether the reader is a native English speaker (1 = yes, 0 = no). Controls for language familiarity.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "NativeEnglish"
+            ]
+          },
+          {
+            "description": "Whether the trial was a retake (1) or not (0). Controls for practice/familiarity effects.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "Retake"
+            ]
+          },
+          {
+            "description": "Flesch-Kincaid readability score of the text (continuous). Controls for text difficulty.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "Flesch"
+            ]
+          },
+          {
+            "description": "Comprehension accuracy on the comprehension questions after reading (proportion or rate between 0 and 1). Included to account for speed-accuracy trade-offs.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "Comprehension"
+            ]
+          },
+          {
+            "description": "Number of words on the page (continuous). Included as a control because reading speed estimates can vary with passage length even when expressed as words/sec.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "Words"
+            ]
+          },
+          {
+            "description": "Raw reading time on the page excluding scrolling, in milliseconds. Kept for diagnostics and possible alternative specifications (e.g., ms/word).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "ReadingTime_ms"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform raw dataset into analysis-ready dataframe.\n\n    Produces these columns used in the model (exact names must match the contract):\n      - ReaderView (0/1)\n      - Dyslexia (0/1)\n      - ReadingTime_ms (feature5)\n      - Words (feature7)\n      - ReadingSpeed_wps (Words per second)\n      - Comprehension (feature8)\n      - Age (feature10)\n      - Device (feature11)\n      - NativeEnglish (1 if feature18 == 'Y', else 0)\n      - Retake (feature16)\n      - Flesch (feature19)\n\n    Filters out invalid/zero reading times or zero words and extreme outliers in ReadingSpeed_wps.\n    \"\"\"\n    df = df.copy()\n\n    # Numeric conversions for source features (coerce errors to NaN)\n    df['ReaderView'] = pd.to_numeric(df.get('feature3'), errors='coerce')  # will be converted to int after NA removal\n    df['ReadingTime_ms'] = pd.to_numeric(df.get('feature5'), errors='coerce')\n    df['Words'] = pd.to_numeric(df.get('feature7'), errors='coerce')\n    df['Comprehension'] = pd.to_numeric(df.get('feature8'), errors='coerce')\n    df['Age'] = pd.to_numeric(df.get('feature10'), errors='coerce')\n    # Device as categorical (keep original labels)\n    if 'feature11' in df.columns:\n        df['Device'] = df['feature11'].astype('category')\n    else:\n        df['Device'] = pd.Categorical([None] * len(df))\n    df['Retake'] = pd.to_numeric(df.get('feature16'), errors='coerce')\n    df['Flesch'] = pd.to_numeric(df.get('feature19'), errors='coerce')\n\n    # Native English: map 'Y'/'N' to 1/0\n    if 'feature18' in df.columns:\n        native_map = df['feature18'].astype(str).str.upper().map({'Y': 1, 'N': 0})\n        df['NativeEnglish'] = pd.to_numeric(native_map, errors='coerce')\n    else:\n        df['NativeEnglish'] = np.nan\n\n    # Dyslexia: prefer feature12 (0=no,1=dyslexia,2=severe). If missing, fall back to feature17 (0/1)\n    df['Dyslexia'] = np.nan\n    if 'feature12' in df.columns:\n        feat12 = pd.to_numeric(df['feature12'], errors='coerce')\n        mask12 = feat12.notna()\n        # binary: any value >=1 indicates dyslexia/severe\n        df.loc[mask12, 'Dyslexia'] = (feat12[mask12] >= 1).astype(float)\n    if 'feature17' in df.columns:\n        # Only use feature17 where Dyslexia is still missing\n        missing_mask = df['Dyslexia'].isna()\n        feat17 = pd.to_numeric(df.loc[missing_mask, 'feature17'], errors='coerce')\n        mask17 = feat17.notna()\n        df.loc[missing_mask & mask17, 'Dyslexia'] = (feat17[mask17] == 1).astype(float)\n\n    # Compute reading speed (words per second). Exclude non-positive times/words.\n    df['ReadingSpeed_wps'] = np.nan\n    valid_time_words = (\n        df['ReadingTime_ms'].notna()\n        & df['Words'].notna()\n        & (df['ReadingTime_ms'] > 0)\n        & (df['Words'] > 0)\n    )\n    df.loc[valid_time_words, 'ReadingSpeed_wps'] = (\n        df.loc[valid_time_words, 'Words'] * 1000.0 / df.loc[valid_time_words, 'ReadingTime_ms']\n    )\n\n    # Drop rows with missing values in the core analysis columns\n    keep_cols = [\n        'ReaderView',\n        'Dyslexia',\n        'ReadingTime_ms',\n        'Words',\n        'ReadingSpeed_wps',\n        'Comprehension',\n        'Age',\n        'Device',\n        'NativeEnglish',\n        'Retake',\n        'Flesch',\n    ]\n    # Ensure all keep_cols exist in df before calling dropna\n    missing_keep = [c for c in keep_cols if c not in df.columns]\n    if missing_keep:\n        raise ValueError(f\"Missing required source columns for transform: {missing_keep}\")\n\n    df = df.dropna(subset=keep_cols)\n\n    # Convert dtypes to numpy-backed dtypes that statsmodels/patsy can handle\n    # Integer indicators: ReaderView, Dyslexia, NativeEnglish, Retake\n    for col in ['ReaderView', 'Dyslexia', 'NativeEnglish', 'Retake']:\n        # Values should be 0/1; cast to int64\n        df[col] = df[col].astype(int)\n\n    # Continuous variables to float64\n    for col in ['ReadingTime_ms', 'Words', 'ReadingSpeed_wps', 'Comprehension', 'Age', 'Flesch']:\n        df[col] = df[col].astype(float)\n\n    # Ensure Device is a categorical or object type acceptable to patsy\n    if not pd.api.types.is_categorical_dtype(df['Device']):\n        df['Device'] = df['Device'].astype('category')\n\n    # Remove extreme outliers in ReadingSpeed_wps to reduce influence of measurement errors\n    # Keep observations between the 0.5th and 99.5th percentiles\n    lower = df['ReadingSpeed_wps'].quantile(0.005)\n    upper = df['ReadingSpeed_wps'].quantile(0.995)\n    df = df[(df['ReadingSpeed_wps'] >= lower) & (df['ReadingSpeed_wps'] <= upper)]\n\n    # Reset index and return only the columns needed for the model (plus ReadingTime_ms for diagnostics)\n    result_cols = [\n        'ReaderView',\n        'Dyslexia',\n        'ReadingTime_ms',\n        'Words',\n        'ReadingSpeed_wps',\n        'Comprehension',\n        'Age',\n        'Device',\n        'NativeEnglish',\n        'Retake',\n        'Flesch',\n    ]\n    df = df.loc[:, result_cols].reset_index(drop=True)\n\n    return df",
+      "m_code": "def model(df: pd.DataFrame) -> Any:\n    \"\"\"\n    Fit an OLS model testing whether ReaderView improves reading speed, and whether that effect is moderated by dyslexia.\n\n    Model specification:\n      ReadingSpeed_wps ~ ReaderView * Dyslexia + Age + C(Device) + NativeEnglish + Retake + Flesch + Comprehension + Words\n\n    Returns the fitted statsmodels regression results object with robust (HC3) standard errors.\n    \"\"\"\n    # Ensure required columns are present\n    required = [\n        'ReadingSpeed_wps',\n        'ReaderView',\n        'Dyslexia',\n        'Age',\n        'Device',\n        'NativeEnglish',\n        'Retake',\n        'Flesch',\n        'Comprehension',\n        'Words',\n    ]\n    missing = [c for c in required if c not in df.columns]\n    if missing:\n        raise ValueError(f\"Missing required columns for modeling: {missing}\")\n\n    # Drop any remaining NAs in model variables\n    model_df = df.dropna(subset=required).copy()\n\n    # Ensure dtypes are appropriate for patsy/statsmodels (numpy dtypes or pandas categorical)\n    # Convert indicator columns to plain int64, continuous to float64\n    for col in ['ReaderView', 'Dyslexia', 'NativeEnglish', 'Retake']:\n        model_df[col] = model_df[col].astype(int)\n    for col in ['ReadingSpeed_wps', 'Age', 'Flesch', 'Comprehension', 'Words', 'ReadingTime_ms']:\n        if col in model_df.columns:\n            model_df[col] = model_df[col].astype(float)\n    if not pd.api.types.is_categorical_dtype(model_df['Device']):\n        model_df['Device'] = model_df['Device'].astype('category')\n\n    # Build formula. Device is treated as categorical using C(Device).\n    formula = 'ReadingSpeed_wps ~ ReaderView * Dyslexia + Age + C(Device) + NativeEnglish + Retake + Flesch + Comprehension + Words'\n\n    # Fit OLS\n    fit = smf.ols(formula=formula, data=model_df).fit()\n\n    # Also compute robust (HC3) covariance\n    fit_robust = fit.get_robustcov_results(cov_type='HC3')\n\n    # Return the robust-fit object (has .summary(), .params, etc.)\n    return fit_robust"
+    },
+    "4": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Whether Reader View (modified page layout) was activated for the trial (binary: 1 = Reader View ON, 0 = Reader View OFF). This is the primary independent variable whose effect on reading speed we want to estimate.",
+            "columns": [
+              "ReaderView"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Participant reading speed measured in words per second (computed as number of words on page divided by reading time excluding scrolling). Continuous outcome.",
+          "columns": [
+            "ReadingSpeed_wps"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Whether the reader has dyslexia (binary 0/1). Treated as a moderator of the ReaderView effect (we test ReaderView * Dyslexia interaction).",
+            "is_moderator": true,
+            "moderator_on": "ReaderView",
+            "columns": [
+              "Dyslexia"
+            ]
+          },
+          {
+            "description": "Ordinal measure of dyslexia severity (0 = no dyslexia, 1 = dyslexia, 2 = severe dyslexia). Additional characterization of dyslexia; not used as the primary moderator but available as a control.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "DyslexiaSeverity"
+            ]
+          },
+          {
+            "description": "Number of words on the page (controls for text length).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "NumWords"
+            ]
+          },
+          {
+            "description": "Comprehension accuracy after reading (fraction correct). Controls for possible speed-accuracy tradeoffs.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "Comprehension"
+            ]
+          },
+          {
+            "description": "Age of the reader in years (continuous).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "Age"
+            ]
+          },
+          {
+            "description": "Device used by the reader (categorical: smartphone/tablet/desktop/etc.). Included as categorical control (C(Device)).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "Device"
+            ]
+          },
+          {
+            "description": "Whether the reader is a native English speaker (1 = Y, 0 = N).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "IsNativeEnglish"
+            ]
+          },
+          {
+            "description": "Education level of the reader (categorical).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "Education"
+            ]
+          },
+          {
+            "description": "Gender (coded numeric in original data). Included as a categorical control.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "Gender"
+            ]
+          },
+          {
+            "description": "Flesch-Kincaid readability score of the text (continuous).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "FKScore"
+            ]
+          },
+          {
+            "description": "Indicator whether the trial was a retake (1) or not (0).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "IsRetake"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform raw dataset to analytic dataframe with the exact columns used in the statistical model.\n\n    Final columns created (and used later in the model):\n      - ReaderView (0/1)\n      - ReadingTime_ms, ReadingTime_s (intermediate)\n      - NumWords\n      - ReadingSpeed_wps (DV)\n      - Dyslexia (0/1)\n      - DyslexiaSeverity (0/1/2)\n      - Age, Device, Comprehension, IsNativeEnglish, Education, Gender, FKScore, IsRetake\n\n    The function performs type conversion, basic sanity filtering (remove zero/very small reading times and extreme outliers), and drops rows with missing values in required variables.\n    \"\"\"\n    df = df.copy()\n\n    # Create clear column names used in modeling\n    df['ReaderView'] = pd.to_numeric(df.get('feature3'), errors='coerce')\n    df['ReadingTime_ms'] = pd.to_numeric(df.get('feature5'), errors='coerce')\n    df['NumWords'] = pd.to_numeric(df.get('feature7'), errors='coerce')\n    df['Comprehension'] = pd.to_numeric(df.get('feature8'), errors='coerce')\n\n    # compute reading time in seconds and reading speed (words per second)\n    df['ReadingTime_s'] = df['ReadingTime_ms'] / 1000.0\n    # Avoid division by zero / invalid values\n    df['ReadingSpeed_wps'] = np.where(df['ReadingTime_s'] > 0, df['NumWords'] / df['ReadingTime_s'], np.nan)\n\n    # Dyslexia indicators\n    # feature17 is a binary indicator (0/1) for dyslexia according to the schema\n    df['Dyslexia'] = pd.to_numeric(df.get('feature17'), errors='coerce').fillna(0)\n    # feature12 contains 0/1/2 dyslexia severity\n    df['DyslexiaSeverity'] = pd.to_numeric(df.get('feature12'), errors='coerce')\n\n    # Other covariates\n    df['Age'] = pd.to_numeric(df.get('feature10'), errors='coerce')\n    # keep Device as string (will be converted to categorical in model)\n    df['Device'] = df.get('feature11').astype(str)\n    # Map native English: feature18 'Y'/'N'\n    df['IsNativeEnglish'] = df.get('feature18').map({'Y': 1, 'N': 0})\n    df['IsNativeEnglish'] = pd.to_numeric(df['IsNativeEnglish'], errors='coerce')\n    df['Education'] = df.get('feature13').astype(str)\n    df['Gender'] = pd.to_numeric(df.get('feature14'), errors='coerce')\n    df['FKScore'] = pd.to_numeric(df.get('feature19'), errors='coerce')\n    df['IsRetake'] = pd.to_numeric(df.get('feature16'), errors='coerce')\n\n    # Basic sanity filtering for reading time: remove impossible/implausible values\n    # Remove non-positive or extremely small reading times (<= 0.05 s) and extremely large times (> 5 min = 300s)\n    df.loc[df['ReadingTime_s'] <= 0.05, 'ReadingSpeed_wps'] = np.nan\n    df.loc[df['ReadingTime_s'] > 300, 'ReadingSpeed_wps'] = np.nan\n\n    # Remove entries with missing critical variables\n    required_cols = [\n        'ReadingSpeed_wps', 'ReaderView', 'Dyslexia', 'NumWords', 'ReadingTime_ms'\n    ]\n    df = df.dropna(subset=required_cols)\n\n    # Remove extreme outliers in ReadingSpeed_wps (e.g., > 20 words/sec is very likely erroneous)\n    # and extremely slow values (< 0.01 wps)\n    df = df[(df['ReadingSpeed_wps'] > 0.01) & (df['ReadingSpeed_wps'] <= 20)]\n\n    # Reset index for downstream modeling\n    df = df.reset_index(drop=True)\n\n    # Keep only columns necessary for modeling + a few intermediates for diagnostics\n    keep_cols = [\n        'ReaderView', 'ReadingTime_ms', 'ReadingTime_s', 'NumWords', 'ReadingSpeed_wps',\n        'Dyslexia', 'DyslexiaSeverity', 'Comprehension', 'Age', 'Device', 'IsNativeEnglish',\n        'Education', 'Gender', 'FKScore', 'IsRetake'\n    ]\n    # Ensure any columns that might be missing are created (safe-guards)\n    for c in keep_cols:\n        if c not in df.columns:\n            df[c] = pd.NA\n\n    return df[keep_cols]",
+      "m_code": "def model(df: pd.DataFrame) -> Any:\n    \"\"\"\n    Fit a linear model (OLS) to estimate the effect of ReaderView on reading speed and test whether that effect\n    differs for readers with dyslexia (interaction: ReaderView * Dyslexia).\n\n    Returns the fitted statsmodels regression results object.\n    \"\"\"\n    # Ensure we have the required variables; drop rows with missing values in predictors/controls used in formula\n    formula = (\n        'ReadingSpeed_wps ~ ReaderView * Dyslexia '\n        '+ Age + NumWords + Comprehension + IsNativeEnglish + FKScore + IsRetake '\n        '+ C(Device) + C(Education) + C(Gender)'\n    )\n\n    # Drop rows with NA in any variable appearing in the model\n    model_vars = [\n        'ReadingSpeed_wps', 'ReaderView', 'Dyslexia', 'Age', 'NumWords', 'Comprehension',\n        'IsNativeEnglish', 'FKScore', 'IsRetake', 'Device', 'Education', 'Gender'\n    ]\n    df_model = df.dropna(subset=model_vars).copy()\n\n    # Convert integer-like nullable dtypes to numpy-backed integer types for patsy compatibility\n    # Only convert columns we know should be integer and are used in the model\n    int_cols = ['ReaderView', 'Dyslexia', 'IsNativeEnglish', 'IsRetake']\n    for col in int_cols:\n        if col in df_model.columns:\n            # safe convert since we dropped NA for model variables\n            df_model[col] = df_model[col].astype('int64')\n\n    # Ensure numeric continuous vars are numeric numpy dtypes\n    num_cols = ['ReadingSpeed_wps', 'Age', 'NumWords', 'Comprehension', 'FKScore']\n    for col in num_cols:\n        if col in df_model.columns:\n            df_model[col] = pd.to_numeric(df_model[col], errors='coerce')\n\n    # Convert categorical columns to type 'category' so statsmodels/formula handles them properly\n    if 'Device' in df_model.columns:\n        df_model['Device'] = df_model['Device'].astype('category')\n    if 'Education' in df_model.columns:\n        df_model['Education'] = df_model['Education'].astype('category')\n    if 'Gender' in df_model.columns:\n        # Gender is treated as categorical in the formula\n        df_model['Gender'] = df_model['Gender'].astype('category')\n\n    # Fit OLS with robust (HC3) standard errors to reduce sensitivity to heteroskedasticity\n    ols_model = smf.ols(formula, data=df_model).fit(cov_type='HC3')\n\n    # Return the fitted model object (caller can inspect ols_model.summary(), params, pvalues, etc.)\n    return ols_model"
+    }
+  }
+}
