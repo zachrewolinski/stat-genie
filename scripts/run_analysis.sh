@@ -160,6 +160,66 @@ if [ $EXIT_CODE -ne 0 ]; then
     exit $EXIT_CODE
 fi
 
+echo "Running analysis 6 (positive_leading_statement)..."
+START_TIME=$(date +%s)
+poetry run python scripts/run_analysis.py \
+    --dataset "$DATASET" \
+    --analysis-num 6 \
+    --perturbation-type positive_leading_statement \
+    --llm-provider "$LLM_PROVIDER" \
+    --llm-model "$LLM_MODEL" \
+    --num-runs "$NUM_RUNS"
+EXIT_CODE=$?
+END_TIME=$(date +%s)
+DURATION=$((END_TIME - START_TIME))
+HOURS=$((DURATION / 3600))
+MINUTES=$(((DURATION % 3600) / 60))
+SECONDS=$((DURATION % 60))
+echo "Analysis 6 done in ${HOURS}h ${MINUTES}m ${SECONDS}s (exit: $EXIT_CODE)"
+if [ $EXIT_CODE -ne 0 ]; then
+    exit $EXIT_CODE
+fi
+
+echo "Running analysis 7 (negative_leading_statement)..."
+START_TIME=$(date +%s)
+poetry run python scripts/run_analysis.py \
+    --dataset "$DATASET" \
+    --analysis-num 7 \
+    --perturbation-type negative_leading_statement \
+    --llm-provider "$LLM_PROVIDER" \
+    --llm-model "$LLM_MODEL" \
+    --num-runs "$NUM_RUNS"
+EXIT_CODE=$?
+END_TIME=$(date +%s)
+DURATION=$((END_TIME - START_TIME))
+HOURS=$((DURATION / 3600))
+MINUTES=$(((DURATION % 3600) / 60))
+SECONDS=$((DURATION % 60))
+echo "Analysis 7 done in ${HOURS}h ${MINUTES}m ${SECONDS}s (exit: $EXIT_CODE)"
+if [ $EXIT_CODE -ne 0 ]; then
+    exit $EXIT_CODE
+fi
+
+echo "Running analysis 8 (replace_and_positive_statement)..."
+START_TIME=$(date +%s)
+poetry run python scripts/run_analysis.py \
+    --dataset "$DATASET" \
+    --analysis-num 8 \
+    --perturbation-type replace_and_positive_statement \
+    --llm-provider "$LLM_PROVIDER" \
+    --llm-model "$LLM_MODEL" \
+    --num-runs "$NUM_RUNS"
+EXIT_CODE=$?
+END_TIME=$(date +%s)
+DURATION=$((END_TIME - START_TIME))
+HOURS=$((DURATION / 3600))
+MINUTES=$(((DURATION % 3600) / 60))
+SECONDS=$((DURATION % 60))
+echo "Analysis 8 done in ${HOURS}h ${MINUTES}m ${SECONDS}s (exit: $EXIT_CODE)"
+if [ $EXIT_CODE -ne 0 ]; then
+    exit $EXIT_CODE
+fi
+
 TOTAL_END=$(date +%s)
 TOTAL_DURATION=$((TOTAL_END - TOTAL_START))
 TOTAL_HOURS=$((TOTAL_DURATION / 3600))

@@ -70,7 +70,7 @@ class TaskPerturbation:
             
         return json_metadata
     
-    def perturb(self, json_path: str) -> dict:
+    def perturb(self, json_metadata: dict) -> dict:
         """
         Applies the selected perturbations to the data in the following order:
         1. Add a leading statement to the research question.
@@ -78,9 +78,6 @@ class TaskPerturbation:
         Returns:
             The perturbed JSON metadata as a dictionary
         """
-        
-        # read in json metadata
-        json_metadata = read_json(json_path)
         
         if self.positive_leading_statement:
             json_metadata = self.add_leading_statement(json_metadata,
