@@ -29,7 +29,7 @@ class DataPerturbation:
         self.replace_features = replace_features
         self.replace_features_seed = replace_features_seed
 
-    def replace_with_rvs(self, df: pd.DataFrame) -> dict:
+    def replace_with_rvs(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         Replaces the features of the dataset with independent random variables.
         Importantly, the changes are not reflected in the JSON metadata, to make
@@ -81,7 +81,7 @@ class DataPerturbation:
 
         return df
     
-    def perturb(self, df: pd.DataFrame) -> dict:
+    def perturb(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         Applies the selected perturbations to the data in the following order:
         1. Replace the dataset's features with independent random variables.

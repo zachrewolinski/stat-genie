@@ -12,6 +12,9 @@ from stat_genie.blade_pipeline.additions.perturbations.features import (
 from stat_genie.blade_pipeline.additions.perturbations.data import (
     DataPerturbation,
 )
+from stat_genie.blade_pipeline.additions.perturbations.task import (
+    TaskPerturbation,
+)
 from stat_genie.blade_pipeline.data.annotation import (
     get_annotation_data_from_df,
 )
@@ -67,6 +70,7 @@ class DatasetInfo(BaseModel):
 
 def load_dataset_info(dataset: str, feature_perturbation: FeaturePerturbation,
                       data_perturbation: DataPerturbation,
+                      task_perturbation: TaskPerturbation,
                       edited_df_path: str,
                       load_df=False) -> DatasetInfo:
     data_info_path = get_dataset_info_path(dataset)
@@ -74,6 +78,11 @@ def load_dataset_info(dataset: str, feature_perturbation: FeaturePerturbation,
         raise FileNotFoundError(f"Dataset info file not found: {data_info_path}")
     # NOTE: THIS IS WHERE WE APPLY THE FEATURE PERTURBATION.
     dataset_info, df = feature_perturbation.perturb(data_info_path)
+    # apply task perturbation to research question(s)
+    dataset_info = task_perturbation.perturb(dataset_info)
+    # write `dataset_info` to the edited_df_path for eval purposes
+    with open(osp.join(edited_df_path, "info.json"), "w") as f:
+        json.dump(dataset_info, f, indent=4)
     dinfo = DatasetInfo(**dataset_info)
     # if the feature perturbation modified the data, we need to apply the
     # same perturbation to the dataframe for consistency with the metadata

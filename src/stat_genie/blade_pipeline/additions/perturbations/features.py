@@ -41,7 +41,7 @@ class FeaturePerturbation:
         
     def anonymize_variable_names(self,
                                  json_metadata: dict,
-                                 df: pd.DataFrame) -> None:
+                                 df: pd.DataFrame) -> tuple[dict, pd.DataFrame]:
         """
         Takes a JSON (in dictionary format) and replaces variable names 
         with non-descriptive names like "feature1", "feature2", etc.
@@ -93,7 +93,7 @@ class FeaturePerturbation:
 
     def shuffle_feature_order(self,
                               json_metadata: dict,
-                              df: pd.DataFrame) -> None:
+                              df: pd.DataFrame) -> tuple[dict, pd.DataFrame]:
         """
         Shuffles the order of features in the JSON metadata.
         
@@ -138,7 +138,7 @@ class FeaturePerturbation:
 
     def shuffle_feature_names(self,
                               json_metadata: dict,
-                              df: pd.DataFrame) -> None:
+                              df: pd.DataFrame) -> tuple[dict, pd.DataFrame]:
         """
         Randomly shuffles the feature names in the JSON metadata.
         
@@ -195,7 +195,7 @@ class FeaturePerturbation:
     def add_random_features(self,
                             json_metadata: dict,
                             dataset_name: str,
-                            df: pd.DataFrame) -> dict:
+                            df: pd.DataFrame) -> tuple[dict, pd.DataFrame]:
         """
         Adds randomly selected feature(s) from a different randomly selected
         BLADE dataset to the JSON metadata.
@@ -271,7 +271,7 @@ class FeaturePerturbation:
                 
         return json_metadata, df
     
-    def perturb(self, json_path: str) -> dict:
+    def perturb(self, json_path: str) -> tuple[dict, pd.DataFrame]:
         """
         Applies the selected perturbations to the JSON metadata in the
         following order:
