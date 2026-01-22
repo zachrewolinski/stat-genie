@@ -1,285 +1,178 @@
-from typing import Any, Dict, List
-import warnings
-import re
-
+from typing import Dict, FrozenSet, List, Literal, Optional, Set, Tuple, Any
 import numpy as np
 import pandas as pd
+import sklearn
+import scipy
 import statsmodels.api as sm
+import statsmodels.formula.api as smf
+import matplotlib.pyplot as plt
+import pickle
+  
+df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/analysis/hurricane/anonymize_output/hurricane.csv')
 
-
-def _find_and_rename(df: pd.DataFrame, target: str, candidate_keywords: List[List[str]]) -> None:
-    """
-    If target column not present in df, search for columns whose lowercased names
-    match any of the candidate keyword lists (all keywords in a sublist must be present).
-    If found, rename the first matching column to target in-place.
-
-    Matching is done on a normalized version of the column name (lowercased,
-    with non-alphanumeric characters removed) as well as the original lowercase
-    name to handle variants like "min_pressure", "MinPressure", "pressure_mb", etc.
-    """
-    if target in df.columns:
-        return
-
-    cols_lower = {col: col.lower() for col in df.columns}
-    cols_normalized = {col: re.sub(r'[^a-z0-9]', '', col.lower()) for col in df.columns}
-
-    for keywords in candidate_keywords:
-        # ensure keywords are lowercased and stripped
-        kws = [kw.strip().lower() for kw in keywords if isinstance(kw, str) and kw.strip()]
-        if not kws:
-            continue
-        for col in df.columns:
-            col_low = cols_lower[col]
-            col_norm = cols_normalized[col]
-            # match if all keywords appear either in the raw lower name or in the normalized name
-            if all((kw in col_low) or (kw in col_norm) for kw in kws):
-                df.rename(columns={col: target}, inplace=True)
-                return
-
-
-def _coerce_isfemale(series: pd.Series) -> pd.Series:
-    """
-    Ensure IsFemale is numeric 0/1 where possible.
-    Accepts numeric values, booleans, and common string encodings like 'female', 'F', 'male'.
-    Returns a numeric Series (float) with NaN where mapping impossible.
-    """
-    # If already numeric-ish, coerce directly
-    coerced = pd.to_numeric(series, errors='coerce')
-    # If many non-NaN after coercion, trust numeric coercion
-    if coerced.notna().sum() >= (len(series) / 2):
-        return coerced.astype(float)
-
-    # Otherwise try to interpret strings
-    mapping = {}
-    for val in series.dropna().unique():
-        if isinstance(val, str):
-            v = val.strip().lower()
-            if v in {'female', 'f', 'woman', 'w', '1', 'true', 't', 'yes', 'y'}:
-                mapping[val] = 1.0
-            elif v in {'male', 'm', 'man', '0', 'false', 'no', 'n'}:
-                mapping[val] = 0.0
-            else:
-                # heuristic: if contains 'fem' -> female; if contains 'mal' or 'male' -> male
-                if 'fem' in v:
-                    mapping[val] = 1.0
-                elif 'mal' in v or 'male' in v:
-                    mapping[val] = 0.0
-                elif v in {'m', 'f'}:
-                    mapping[val] = 1.0 if v == 'f' else 0.0
-                else:
-                    mapping[val] = np.nan
-        elif isinstance(val, (bool, np.bool_)):
-            mapping[val] = 1.0 if bool(val) else 0.0
-        else:
-            # numeric-like but not captured earlier
-            try:
-                num = float(val)
-                if num in (0.0, 1.0):
-                    mapping[val] = num
-                else:
-                    mapping[val] = np.nan
-            except Exception:
-                mapping[val] = np.nan
-
-    return series.map(mapping).astype(float)
-
-
+# ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Transform raw dataset into a cleaned dataframe with columns used in the models.
+    Transform raw Simonsohn hurricane dataset into analysis-ready dataframe.
 
-    Renames feature columns to meaningful names, coerces types, drops rows missing critical fields,
-    standardizes continuous predictors, and creates log outcomes for robustness analyses.
+    Produces standardized predictors and logged outcomes used by the model function.
+    Important final columns returned (names must match those referenced in the model):
+      - storm_id, year, name, masfem, female_name, max_wind, min_pressure, category, deaths,
+        damage_2015, log_deaths, log_damage_z, masfem_z, max_wind_z, min_pressure_z,
+        year_centered, source
     """
     df = df.copy()
 
-    # Primary explicit rename map (common anonymized names -> target final names)
+    # Rename the generic feature columns to meaningful variable names
     rename_map = {
-        'feature1': 'StormID',
-        'feature2': 'Year',
-        'feature3': 'Name',
-        'feature4': 'MasFem',        # masculinity-femininity index (higher = more feminine)
-        'feature5': 'MinPressure',   # minimum pressure at landfall
-        'feature6': 'IsFemale',      # binary name gender (0 male, 1 female)
-        'feature7': 'Category',      # Saffir-Simpson category
-        'feature8': 'Deaths',        # total number of deaths
-        'feature9': 'Damage2013',
-        'feature10': 'YearsSince',
-        'feature11': 'Source',
-        'feature12': 'MTurkMasFem',
-        'feature13': 'MaxWind',      # max wind speed
-        'feature14': 'Damage2015'
+        'feature1': 'storm_id',
+        'feature2': 'year',
+        'feature3': 'name',
+        'feature4': 'masfem',            # continuous masfem index from independent coders
+        'feature5': 'min_pressure',      # minimum pressure at landfall
+        'feature6': 'female_name',       # binary indicator: 0 male, 1 female name
+        'feature7': 'category',          # Saffir-Simpson category
+        'feature8': 'deaths',            # total deaths
+        'feature9': 'damage_unadj',      # unadjusted damage (various columns exist)
+        'feature10': 'years_since',      # years since storm
+        'feature11': 'source',           # data source
+        'feature12': 'mturk_masfem',     # MTurk masfem rating
+        'feature13': 'max_wind',         # maximum wind speed at landfall
+        'feature14': 'damage_2015'       # damage adjusted to 2015 values (preferred damage measure)
     }
-    # Apply explicit renames for any matching keys
-    existing_renames = {k: v for k, v in rename_map.items() if k in df.columns}
-    if existing_renames:
-        df = df.rename(columns=existing_renames)
+    df.rename(columns=rename_map, inplace=True)
 
-    # If some required conceptual columns are still missing, attempt to detect likely columns by keywords
-    # Define candidate keyword lists for each required target column
-    candidate_searches = {
-        'MasFem': [['mas', 'fem'], ['masculin', 'femin'], ['mas'], ['fem'], ['masfem'], ['mas_fem'], ['masfem_mturk']],
-        'IsFemale': [['is', 'female'], ['isfemale'], ['female'], ['gender'], ['sex'], ['sex_label']],
-        'Deaths': [['death'], ['fatalit'], ['fatal'], ['deaths'], ['numdeaths'], ['fatalities']],
-        'MaxWind': [['max', 'wind'], ['wind', 'speed'], ['wind'], ['maxwind'], ['windmph'], ['windspeed']],
-        'MinPressure': [['min', 'press'], ['min', 'pressure'], ['pressure'], ['press'], ['minpressure'], ['pressuremb'], ['pressure_mb'], ['min']],
-        'Year': [['year'], ['yr'], ['season']],
-        'Category': [['category'], ['cat'], ['saffir'], ['saffir-simpson'], ['saffir_simpson']],
-        'Source': [['source'], ['src'], ['data', 'source']]
-    }
+    # Keep only rows with key variables present (deaths and masfem and max_wind are essential)
+    df = df.dropna(subset=['deaths', 'masfem', 'max_wind'])
 
-    for target, keywords in candidate_searches.items():
-        if target not in df.columns:
-            _find_and_rename(df, target, keywords)
+    # Ensure numeric columns are numeric
+    numeric_cols = ['masfem', 'min_pressure', 'female_name', 'category', 'deaths', 'damage_2015', 'max_wind', 'year']
+    for c in numeric_cols:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors='coerce')
 
-    # After attempts, check that at least the required columns exist (as columns in final dataframe)
-    required = ['MasFem', 'IsFemale', 'Deaths', 'MaxWind', 'MinPressure', 'Year']
-    missing_cols = [col for col in required if col not in df.columns]
-    if missing_cols:
-        # Provide a more informative hint by listing available columns
-        raise ValueError(
-            f"transform: missing required columns after renaming/searching: {missing_cols}. "
-            f"Available columns: {list(df.columns)}"
-        )
+    # After coercion, drop any rows that became NA for the essential numeric fields
+    df = df.dropna(subset=['deaths', 'masfem', 'max_wind', 'year'])
 
-    # Coerce numeric columns and basic cleaning
-    numeric_cols = ['Year', 'MasFem', 'MinPressure', 'IsFemale', 'Category', 'Deaths', 'MaxWind', 'Damage2015']
-    for col in numeric_cols:
-        if col in df.columns and col != 'IsFemale':
-            df[col] = pd.to_numeric(df[col], errors='coerce')
+    # Outcome transforms
+    df['log_deaths'] = np.log1p(df['deaths'].astype(float))
 
-    # Special handling for IsFemale: try to coerce to numeric 0/1 using heuristics
-    if 'IsFemale' in df.columns:
-        df['IsFemale'] = _coerce_isfemale(df['IsFemale'])
-
-    # Standardize column name casing for optional categorical/source fields if present
-    # Ensure Category and Source have exact final names
-    # (They may have been detected/renamed above, but handle common lowercased versions)
-    if 'category' in df.columns and 'Category' not in df.columns:
-        df = df.rename(columns={'category': 'Category'})
-    if 'source' in df.columns and 'Source' not in df.columns:
-        df = df.rename(columns={'source': 'Source'})
-
-    # Keep only rows with the essential variables present
-    df = df.dropna(subset=required)
-
-    # Standardize continuous predictors used as controls and the masculinity-femininity index
-    # Use population std (ddof=0) as before, avoid division by zero
-    def _zscore(series: pd.Series) -> pd.Series:
-        mean = series.mean()
-        std = series.std(ddof=0)
-        if pd.isna(std) or std == 0:
-            return series - mean
-        return (series - mean) / std
-
-    df['MasFem_z'] = _zscore(df['MasFem'].astype(float))
-    df['MinPressure_z'] = _zscore(df['MinPressure'].astype(float))
-    df['MaxWind_z'] = _zscore(df['MaxWind'].astype(float))
-
-    # Center year to improve interpretability
-    df['year_cent'] = df['Year'].astype(float) - df['Year'].astype(float).mean()
-
-    # Log-transformed outcomes for robustness checks (log(1 + x))
-    df['log_deaths'] = np.log1p(df['Deaths'].fillna(0))
-    if 'Damage2015' in df.columns:
-        df['log_damage2015'] = np.log1p(pd.to_numeric(df['Damage2015'], errors='coerce').fillna(0))
+    # Damage: prefer damage_2015 if present, otherwise fall back to damage_unadj
+    if 'damage_2015' in df.columns and df['damage_2015'].notna().any():
+        df['damage_for_model'] = df['damage_2015']
     else:
-        df['log_damage2015'] = np.nan
+        df['damage_for_model'] = df.get('damage_unadj', np.nan)
 
-    # Ensure categorical fields are categorical dtype (if present)
-    if 'Category' in df.columns:
-        df['Category'] = df['Category'].astype('category')
-    if 'Source' in df.columns:
-        df['Source'] = df['Source'].astype('category')
+    df['log_damage'] = np.log1p(pd.to_numeric(df['damage_for_model'].fillna(0).astype(float)))
 
-    # Final dataframe returned contains the columns described in cvars plus convenient transformations
+    # Standardize continuous predictors (z-scores). Use population std (ddof=0) for stability on small samples.
+    def z(x):
+        x = pd.to_numeric(x, errors='coerce')
+        return (x - x.mean()) / x.std(ddof=0)
+
+    df['masfem_z'] = z(df['masfem'])
+    df['max_wind_z'] = z(df['max_wind'])
+    df['min_pressure_z'] = z(df['min_pressure'])
+    df['log_damage_z'] = z(df['log_damage'])
+
+    # Ensure female_name is integer 0/1
+    df['female_name'] = df['female_name'].astype(int)
+
+    # Center year to aid interpretability
+    df['year_centered'] = df['year'] - df['year'].mean()
+
+    # Keep only columns needed for modeling (and a few originals for reference)
+    keep_cols = [
+        'storm_id', 'year', 'year_centered', 'name', 'masfem', 'masfem_z', 'female_name',
+        'max_wind', 'max_wind_z', 'min_pressure', 'min_pressure_z', 'category', 'deaths', 'log_deaths',
+        'damage_for_model', 'log_damage', 'log_damage_z', 'source'
+    ]
+    # Some columns may not exist in every variant; filter to existing
+    keep_cols = [c for c in keep_cols if c in df.columns]
+    df = df[keep_cols].reset_index(drop=True)
+
     return df
 
 
-def model(df: pd.DataFrame) -> Any:
+# ======== MODEL CODE ========
+def model(df: pd.DataFrame) -> dict:
     """
-    Fit the primary statistical models to test whether feminine hurricane names are associated
-    with differences in fatalities after controlling for storm intensity and year.
+    Fit primary and robustness models to test whether more-feminine hurricane names are associated
+    with fewer fatalities (a proxy for lower precaution/underestimation of risk).
 
-    Primary model: Negative Binomial regression of raw death counts on femininity measures and controls.
-    Robustness: OLS on log(1 + deaths).
+    Primary specification: Negative Binomial regression of raw death counts on standardized masfem
+    controlling for storm intensity and damage and year trends. Negative binomial is used because
+    deaths are count data with overdispersion.
 
-    Returns a dictionary with fitted model results objects (or robustified equivalents).
+    Robustness: OLS on log(1 + deaths) with heteroskedasticity-robust standard errors, and a model
+    that uses the binary female_name indicator.
+
+    Returns a dict with fitted model objects and summary text.
     """
-    # Work on a copy to avoid modifying input
-    df = df.copy()
+    import statsmodels.api as sm
+    import statsmodels.formula.api as smf
 
-    # Predictor columns to include
-    base_cols = ['MasFem_z', 'IsFemale', 'MinPressure_z', 'MaxWind_z', 'year_cent']
+    results = {}
+    dfm = df.copy()
 
-    # Verify required model input columns are present
-    missing = [col for col in base_cols + ['Deaths', 'log_deaths'] if col not in df.columns]
-    if missing:
-        raise ValueError(f"model: missing required columns in input dataframe: {missing}")
-
-    # Build category dummies for the Saffir-Simpson Category (if present)
-    if 'Category' in df.columns:
-        cat_dummies = pd.get_dummies(df['Category'], prefix='cat', drop_first=True)
+    # Create categorical dummies for Saffir-Simpson category (drop first to avoid multicollinearity)
+    if 'category' in dfm.columns:
+        cat_dummies = pd.get_dummies(dfm['category'].astype('category'), prefix='cat', drop_first=True)
+        dfm = pd.concat([dfm, cat_dummies], axis=1)
     else:
-        cat_dummies = pd.DataFrame(index=df.index)
+        cat_dummies = pd.DataFrame(index=dfm.index)
 
-    # Build source dummies to control for reporting differences across sources
-    if 'Source' in df.columns:
-        source_dummies = pd.get_dummies(df['Source'], prefix='src', drop_first=True)
-    else:
-        source_dummies = pd.DataFrame(index=df.index)
+    # Build predictor list
+    base_predictors = ['masfem_z', 'max_wind_z', 'min_pressure_z', 'log_damage_z', 'year_centered']
+    # Add category dummies if present
+    predictors = [p for p in base_predictors if p in dfm.columns] + list(cat_dummies.columns)
 
-    # Concatenate design matrix (only the conceptual variables and their dummies)
-    X = pd.concat([df[base_cols], cat_dummies, source_dummies], axis=1)
+    # Ensure there are no NA values in model variables
+    model_df = dfm.dropna(subset=predictors + ['deaths', 'log_deaths'])
 
-    # Drop any rows with missing values in the design matrix or outcome
-    model_df = pd.concat([df[['Deaths', 'log_deaths']], X], axis=1).dropna()
-    if model_df.shape[0] == 0:
-        raise ValueError("model: no rows available after dropping missing values; cannot fit models.")
+    X = model_df[predictors]
+    X = sm.add_constant(X)
+    y_counts = model_df['deaths'].astype(float)
+    y_log = model_df['log_deaths'].astype(float)
 
-    X_clean = model_df[X.columns]
-    y_deaths = model_df['Deaths']
-    y_log_deaths = model_df['log_deaths']
-
-    # Add constant
-    X_design = sm.add_constant(X_clean, has_constant='add')
-
-    results: Dict[str, Any] = {}
-
-    # 1) Negative Binomial regression for count outcome (Deaths)
+    # 1) Negative binomial (counts model) - primary
     try:
-        nb_model = sm.GLM(y_deaths, X_design, family=sm.families.NegativeBinomial()).fit()
-        results['nb_model'] = nb_model
+        nb = sm.GLM(y_counts, X, family=sm.families.NegativeBinomial()).fit()
+        results['nb_model'] = nb
+        results['nb_summary'] = nb.summary().as_text()
     except Exception as e:
-        # If NegativeBinomial fails, fall back to Poisson with robust SEs
-        warnings.warn(f"NegativeBinomial failed ({e}); falling back to Poisson with robust SEs.")
-        poisson_res = sm.GLM(y_deaths, X_design, family=sm.families.Poisson()).fit()
-        poisson_robust = poisson_res.get_robustcov_results(cov_type='HC0')
-        results['nb_model'] = poisson_robust
-        results['nb_model_warning'] = f'NegativeBinomial failed, used Poisson instead: {str(e)}'
+        results['nb_error'] = str(e)
 
-    # 2) OLS on log(1 + deaths) as robustness
-    ols_res = sm.OLS(y_log_deaths, X_design).fit()
-    ols_robust = ols_res.get_robustcov_results(cov_type='HC3')
-    results['ols_log_deaths'] = ols_robust
+    # 2) OLS on log(1 + deaths) with robust SEs - robustness
+    try:
+        ols = sm.OLS(y_log, X).fit(cov_type='HC3')
+        results['ols_model'] = ols
+        results['ols_summary'] = ols.summary().as_text()
+    except Exception as e:
+        results['ols_error'] = str(e)
 
-    # Return the fitted statsmodels results objects for downstream inspection
+    # 3) Alternate specification using the binary female_name indicator (NB)
+    if 'female_name' in model_df.columns:
+        alt_predictors = [p for p in ['female_name', 'max_wind_z', 'min_pressure_z', 'log_damage_z', 'year_centered'] if p in model_df.columns] + list(cat_dummies.columns)
+        X2 = sm.add_constant(model_df[alt_predictors])
+        try:
+            nb_alt = sm.GLM(model_df['deaths'].astype(float), X2, family=sm.families.NegativeBinomial()).fit()
+            results['nb_alt_model'] = nb_alt
+            results['nb_alt_summary'] = nb_alt.summary().as_text()
+        except Exception as e:
+            results['nb_alt_error'] = str(e)
+
+        try:
+            ols_alt = sm.OLS(model_df['log_deaths'].astype(float), X2).fit(cov_type='HC3')
+            results['ols_alt_model'] = ols_alt
+            results['ols_alt_summary'] = ols_alt.summary().as_text()
+        except Exception as e:
+            results['ols_alt_error'] = str(e)
+
+    # Add a short diagnostic: mean and variance of deaths to check overdispersion
+    results['deaths_mean'] = float(y_counts.mean())
+    results['deaths_var'] = float(y_counts.var())
+
     return results
 
 
-# If this file is run directly, provide a small sanity check (won't run during import)
-if __name__ == "__main__":
-    # Minimal test to ensure functions run (with synthetic data)
-    test_df = pd.DataFrame({
-        'feature4': [0.2, 0.8, 0.5],
-        'feature6': [0, 1, 1],
-        'feature8': [10, 0, 3],
-        'feature13': [80, 120, 60],
-        'feature5': [950, 940, 960],
-        'feature2': [2000, 2005, 2010],
-        'feature7': ['1', '2', '1'],
-        'feature11': ['A', 'B', 'A']
-    })
-    tr = transform(test_df)
-    res = model(tr)
-    print("Sanity check completed. Models keys:", list(res.keys()))

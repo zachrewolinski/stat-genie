@@ -1,136 +1,181 @@
 def extract_final_answer(model_output):
     """
-    Extract coefficients, standard errors, p-values, 95% CIs, and odds-ratios
-    for predictors relevant to the question:
-      - relative_size_ratio (primary predictor)
-      - adv_home (continuous location / home-range advantage)
-      - size_adv_interaction (interaction, if present)
-      - Location_FocalHome (dummy)
-      - Location_OtherHome (dummy)
-    Returns a dictionary with:
-      - "object": dict mapping each variable -> extracted stats (or None if missing)
-      - "description": short interpretation of the results and how to read them
+    Extract coefficients, p-values, confidence intervals, and compute location-specific
+    marginal effects of relative group size (RelSizeDiff_c) from a clustered
+    statsmodels results object (the output of get_robustcov_results).
+
+    Returns:
+      {
+        "object": {
+            "params": {param_name: coef, ...},
+            "pvalues": {param_name: pval, ...},
+            "conf_int": {param_name: [ci_low, ci_high], ...},
+            "marginal_effects_by_location": {
+                location_name: {
+                    "interaction_term": interaction_name_or_None,
+                    "interaction_coef": ...,
+                    "interaction_p": ...,
+                    "marginal_effect": coef_main + coef_interaction,
+                    "marginal_se": ...,
+                    "marginal_p": ...,
+                    "marginal_ci": [ci_low, ci_high]
+                }, ...
+            },
+            "summary_flags": {
+                "RelSizeDiff_c_significant": True/False/None,
+                "any_interaction_significant": True/False/None
+            }
+        },
+        "description": "Short interpretation string..."
+      }
     """
     import numpy as np
+    from scipy import stats
 
     res = model_output
 
-    # Try common attribute access patterns for statsmodels results (robust or not)
+    # Prepare containers
+    out = {}
     try:
-        params = res.params
-        bse = res.bse
-        pvalues = res.pvalues
-    except Exception:
-        # If not present, try underlying results attribute
-        try:
-            params = res._results.params
-            bse = res._results.bse
-            pvalues = res._results.pvalues
-        except Exception:
-            raise ValueError("Could not find params/bse/pvalues on the provided model_output object.")
+        params = res.params.copy()
+        pvalues = res.pvalues.copy()
+        ci = res.conf_int().copy()
+        cov = res.cov_params().copy()
+    except Exception as e:
+        # If the object doesn't have the expected attributes, return that error
+        return {
+            "object": None,
+            "description": f"Provided model_output does not expose expected attributes (params, pvalues, conf_int, cov_params). Error: {e}"
+        }
 
-    # Try to get confidence intervals; if not available compute approx using normal approx
-    try:
-        ci = res.conf_int()
-        # conf_int returns array-like with two columns [lower, upper]
-    except Exception:
-        # compute approximate 95% CI: param +/- 1.96 * se
-        lower = params - 1.96 * bse
-        upper = params + 1.96 * bse
-        ci = np.column_stack([lower, upper])
+    # Convert basic results to plain dicts
+    out['params'] = params.to_dict()
+    out['pvalues'] = pvalues.to_dict()
+    # conf_int returns DataFrame with two columns 0 (low), 1 (high)
+    conf_int_dict = {name: [float(ci.loc[name, 0]), float(ci.loc[name, 1])] for name in ci.index}
+    out['conf_int'] = conf_int_dict
 
-    # Ensure we can index arrays by parameter names
-    # Convert params, bse, pvalues to pandas Series-like if they are numpy arrays with index in res.model.exog_names
-    try:
-        param_index = params.index
-    except Exception:
-        # attempt to get names from model
-        try:
-            param_index = res.model.exog_names
-            # convert to Series for easier indexing
-            import pandas as pd
-            params = pd.Series(params, index=param_index)
-            bse = pd.Series(bse, index=param_index)
-            pvalues = pd.Series(pvalues, index=param_index)
-            ci = pd.DataFrame(ci, index=param_index, columns=["2.5%", "97.5%"])
-        except Exception:
-            # fallback: treat as unnamed numeric arrays
-            param_index = None
+    # Identify main relative size term and interaction terms
+    main_name = 'RelSizeDiff_c'
+    interaction_suffix = ':RelSizeDiff_c'
+    interactions = [n for n in params.index if n.endswith(interaction_suffix)]
+    # Also consider the reversed order if colon naming differs (unlikely given code, but safe)
+    if not interactions:
+        interactions = [n for n in params.index if n.startswith('RelSizeDiff_c:')]
 
-    # If ci is a numpy array without index, try to align using param_index
-    import pandas as pd
-    if not isinstance(ci, (pd.DataFrame, pd.Series)):
-        try:
-            ci = pd.DataFrame(ci, index=param_index, columns=["2.5%", "97.5%"])
-        except Exception:
-            # if all else fails, create DataFrame with numeric indices
-            ci = pd.DataFrame(ci, columns=["2.5%", "97.5%"])
+    marginal_effects_by_location = {}
 
-    # Variables of interest
-    vars_of_interest = [
-        'relative_size_ratio',
-        'adv_home',
-        'size_adv_interaction',
-        'Location_FocalHome',
-        'Location_OtherHome'
-    ]
+    # Gather main effect if present
+    main_present = main_name in params.index
+    coef_main = float(params[main_name]) if main_present else None
+    p_main = float(pvalues[main_name]) if main_present else None
 
-    extracted = {}
-    for v in vars_of_interest:
-        if (param_index is not None and v in param_index) or (hasattr(params, "__contains__") and v in params):
-            coef = float(params[v])
-            se = float(bse[v])
-            pval = float(pvalues[v])
-            ci_low = float(ci.loc[v].iloc[0]) if v in ci.index else float(ci.iloc[params.index.get_loc(v), 0])
-            ci_high = float(ci.loc[v].iloc[1]) if v in ci.index else float(ci.iloc[params.index.get_loc(v), 1])
-            odds_ratio = float(np.exp(coef))
-            or_ci_low = float(np.exp(ci_low))
-            or_ci_high = float(np.exp(ci_high))
-
-            extracted[v] = {
-                "coef": coef,
-                "std_err": se,
-                "p_value": pval,
-                "ci_2.5%": ci_low,
-                "ci_97.5%": ci_high,
-                "odds_ratio": odds_ratio,
-                "odds_ratio_ci_2.5%": or_ci_low,
-                "odds_ratio_ci_97.5%": or_ci_high
-            }
+    # For each interaction, compute marginal effect = main + interaction.
+    # Compute standard error of the linear combination using covariance matrix.
+    for inter in interactions:
+        # Derive location name (the prefix before the colon)
+        if inter.endswith(interaction_suffix):
+            loc = inter[:-len(interaction_suffix)]
+        elif inter.startswith('RelSizeDiff_c:'):
+            loc = inter[len('RelSizeDiff_c:'):]
         else:
-            extracted[v] = None
+            loc = inter.replace(':RelSizeDiff_c', '')
 
-    # Optionally extract some model-level summaries if available
-    model_info = {}
-    try:
-        model_info['n_obs'] = int(res.nobs)
-    except Exception:
-        try:
-            model_info['n_obs'] = int(res.model.endog.shape[0])
-        except Exception:
-            model_info['n_obs'] = None
-    try:
-        model_info['pseudo_R2'] = float(res.prsquared)
-    except Exception:
-        model_info['pseudo_R2'] = None
-    try:
-        model_info['llf'] = float(res.llf)
-        model_info['llnull'] = float(res.llnull)
-    except Exception:
-        pass
+        coef_inter = float(params[inter])
+        p_inter = float(pvalues[inter])
+        interaction_term = inter
 
-    result_obj = {
-        "predictor_stats": extracted,
-        "model_info": model_info
+        if main_present:
+            # var(m) = var(main) + var(inter) + 2*cov(main,inter)
+            var_main = float(cov.loc[main_name, main_name])
+            var_inter = float(cov.loc[inter, inter])
+            cov_main_inter = float(cov.loc[main_name, inter])
+            var_margin = var_main + var_inter + 2.0 * cov_main_inter
+            # numerical safeguard
+            var_margin = max(var_margin, 0.0)
+            se_margin = float(np.sqrt(var_margin))
+            margin = coef_main + coef_inter
+            # compute z and p
+            if se_margin > 0:
+                z = margin / se_margin
+                p_margin = float(2 * (1 - stats.norm.cdf(abs(z))))
+            else:
+                z = None
+                p_margin = None
+            # CI
+            zcrit = stats.norm.ppf(0.975)
+            ci_low = margin - zcrit * se_margin
+            ci_high = margin + zcrit * se_margin
+        else:
+            # If main absent, the interaction is the effect for that location only (depending on coding)
+            margin = coef_inter
+            se_margin = float(np.sqrt(float(cov.loc[inter, inter])))
+            if se_margin > 0:
+                z = margin / se_margin
+                p_margin = float(2 * (1 - stats.norm.cdf(abs(z))))
+            else:
+                z = None
+                p_margin = None
+            zcrit = stats.norm.ppf(0.975)
+            ci_low = margin - zcrit * se_margin
+            ci_high = margin + zcrit * se_margin
+
+        marginal_effects_by_location[loc] = {
+            "interaction_term": interaction_term,
+            "interaction_coef": coef_inter,
+            "interaction_p": p_inter,
+            "marginal_effect": float(margin),
+            "marginal_se": float(se_margin),
+            "marginal_z": float(z) if z is not None else None,
+            "marginal_p": p_margin,
+            "marginal_ci": [float(ci_low), float(ci_high)]
+        }
+
+    # If there are location dummy terms themselves, include them in summary (optional)
+    location_dummies = [n for n in params.index if n.startswith('Location_')]
+    # Summarize significance
+    relsize_significant = None
+    if main_present:
+        relsize_significant = (p_main < 0.05)
+
+    any_inter_significant = None
+    if interactions:
+        any_inter_significant = any(float(pvalues.get(inter, 1.0)) < 0.05 for inter in interactions)
+
+    out['marginal_effects_by_location'] = marginal_effects_by_location
+    out['location_dummies'] = {n: float(params[n]) for n in location_dummies} if location_dummies else {}
+    out['summary_flags'] = {
+        "RelSizeDiff_c_significant": relsize_significant,
+        "any_interaction_significant": any_inter_significant
     }
 
-    description_lines = [
-        "For each predictor, 'coef' is the logistic regression coefficient (change in log-odds of the focal group winning per unit increase in the predictor).",
-        "'odds_ratio' = exp(coef) gives the multiplicative change in the odds of the focal group winning per unit increase.",
-        "'ci_2.5%' and 'ci_97.5%' are the 95% confidence interval bounds on the coefficient (log-odds scale); the exponentiated CI bounds show the 95% CI for the odds ratio.",
-        "A positive coef (odds_ratio > 1) means the predictor increases the probability that the focal group wins; a negative coef (odds_ratio < 1) means it decreases that probability.",
-        "Pay particular attention to the p_value and whether the 95% CI for the coefficient excludes 0 (or for the odds ratio excludes 1) to assess statistical evidence."
-    ]
-    description = " ".join(description_lines)
+    # Compose a concise human-readable description
+    desc_lines = []
+    if main_present:
+        desc_lines.append(
+            f"Main effect RelSizeDiff_c: coef={coef_main:.3f}, p={p_main:.3g}, 95%CI=[{conf_int_dict.get(main_name, ['NA','NA'])[0]:.3f}, {conf_int_dict.get(main_name, ['NA','NA'])[1]:.3f}]."
+        )
+        if relsize_significant:
+            desc_lines.append("Overall, relative group size (RelSizeDiff) has a statistically significant association with winning (p < 0.05).")
+        else:
+            desc_lines.append("Overall, relative group size (RelSizeDiff) is not statistically significant (p >= 0.05).")
+    else:
+        desc_lines.append("No main RelSizeDiff_c term found in the model results; interpret interactions if present.")
 
-    return {"object": result_obj, "description": description}
+    if marginal_effects_by_location:
+        for loc, info in marginal_effects_by_location.items():
+            sig_str = "significant" if (info["marginal_p"] is not None and info["marginal_p"] < 0.05) else "not significant"
+            desc_lines.append(
+                f"Location '{loc}': marginal effect of RelSizeDiff = {info['marginal_effect']:.3f} (SE={info['marginal_se']:.3f}, p={info['marginal_p']:.3g}) -> {sig_str}."
+            )
+    else:
+        desc_lines.append("No location-specific interactions with RelSizeDiff_c were found in the model.")
+
+    if any_inter_significant:
+        desc_lines.append("There is evidence that the effect of relative group size differs by contest location (significant interaction(s)).")
+    else:
+        desc_lines.append("No evidence that the effect of relative group size differs by contest location (interaction terms not significant).")
+
+    description = " ".join(desc_lines)
+
+    return {"object": out, "description": description}

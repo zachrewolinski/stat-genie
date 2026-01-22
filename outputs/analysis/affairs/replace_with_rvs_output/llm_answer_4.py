@@ -1,243 +1,151 @@
 def extract_final_answer(model_output):
     """
-    Extract statistics for the HasChildren variable from a fitted count model (ZINB or NB GLM).
-    Returns a dictionary with keys:
-      - "object": a dict with extracted numeric results (coefficients, p-values, CIs, IRR)
-      - "description": a short interpretation of whether having children decreases extramarital affairs
+    Extracts statistics about the effect of 'HasChildren' on 'affairs_count'
+    from the provided model_output dictionary (must contain keys
+    'negative_binomial', 'ols', 'overdispersion_stat', 'n_obs').
 
-    The function is defensive and attempts to handle:
-      - statsmodels ZeroInflatedNegativeBinomialResultsWrapper (inflate_ prefix for inflation params)
-      - statsmodels GLM/GLMResults (Negative Binomial fallback)
+    Returns a dict with:
+      - "object": a dict of numeric results (coefficients, SEs, p-values,
+                  95% CIs, IRR and IRR CI, overdispersion, n_obs)
+      - "description": a short text interpretation answering whether having
+                       children decreases engagement in extramarital affairs.
     """
     import numpy as np
-    import pandas as pd
 
-    res = model_output
+    # Names
+    param = 'HasChildren'
 
-    # Helper to get a pandas Series of params, bse, pvalues and a DataFrame of conf_int
-    def get_series(attr_name):
-        attr = getattr(res, attr_name, None)
-        if attr is None:
-            return None
-        # If it's already a Series with index, return as-is
-        if isinstance(attr, pd.Series):
-            return attr
-        # If it's a numpy array but model has names, attempt to attach names
+    nb_res = model_output.get('negative_binomial', None)
+    ols_res = model_output.get('ols', None)
+    overdisp = model_output.get('overdispersion_stat', None)
+    n_obs = model_output.get('n_obs', None)
+
+    if nb_res is None or ols_res is None:
+        raise ValueError("model_output must contain 'negative_binomial' and 'ols' results.")
+
+    # Helper to safely get param, se, pvalue, ci
+    def get_param_info(res, name):
+        # coefficient
         try:
-            arr = np.asarray(attr)
-            names = None
-            if hasattr(res, "params") and isinstance(res.params, pd.Series):
-                names = res.params.index
-            elif hasattr(res, "model") and hasattr(res.model, "exog_names"):
-                # Try to build names for params; for ZINB these may not include inflation/alpha,
-                # but it's a best-effort fallback.
-                names = list(res.model.exog_names)
-                if hasattr(res.model, "exog_infl_names"):
-                    names += ['inflate_' + n for n in res.model.exog_infl_names]
-            if names is not None and len(names) == len(arr):
-                return pd.Series(arr, index=names)
+            coef = float(res.params[name])
         except Exception:
-            pass
-        # Last resort: return as a Series with integer index
+            raise KeyError(f"Parameter '{name}' not found in model results.")
+        # standard error
         try:
-            return pd.Series(attr)
+            se = float(res.bse[name])
         except Exception:
-            return None
-
-    params = get_series("params")
-    bse = get_series("bse")
-    pvalues = get_series("pvalues")
-
-    # conf_int may be a DataFrame or array
-    conf = None
-    if hasattr(res, "conf_int"):
+            se = np.nan
+        # p-value
         try:
-            conf_raw = res.conf_int()
-            if isinstance(conf_raw, pd.DataFrame):
-                conf = conf_raw
+            pval = float(res.pvalues[name])
+        except Exception:
+            pval = np.nan
+        # 95% CI: try conf_int with label; fallback to coef +/- 1.96*se
+        try:
+            ci_table = res.conf_int()
+            # conf_int() may return DataFrame (with .loc) or ndarray
+            if hasattr(ci_table, 'loc'):
+                ci_vals = ci_table.loc[name].values.astype(float)
             else:
-                # try create DataFrame if we can get names
-                conf = pd.DataFrame(conf_raw, index=(params.index if params is not None else None))
+                # assume ordering of params aligns with params index
+                # find index of the parameter
+                idx = list(res.params.index).index(name)
+                ci_vals = np.asarray(ci_table[idx], dtype=float)
         except Exception:
-            conf = None
+            if not np.isnan(se):
+                ci_vals = np.array([coef - 1.96 * se, coef + 1.96 * se], dtype=float)
+            else:
+                ci_vals = np.array([np.nan, np.nan], dtype=float)
 
-    # Find parameter names for HasChildren in count and inflation parts
-    count_name = None
-    infl_name = None
-    if params is not None:
-        names = list(params.index.astype(str))
-        # count param: contains HasChildren but not 'inflate' in name
-        for n in names:
-            if "HasChildren" in n and "inflate" not in n.lower():
-                count_name = n
-                break
-        # inflation param: contains HasChildren and 'inflate' in name (common convention: 'inflate_HasChildren')
-        for n in names:
-            if "HasChildren" in n and "inflate" in n.lower():
-                infl_name = n
-                break
+        return coef, se, pval, float(ci_vals[0]), float(ci_vals[1])
 
-    # If no explicit inflation param found, still check for names like 'HasChildren_infl' or similar
-    if infl_name is None and params is not None:
-        for n in names:
-            if "HasChildren" in n and ("_infl" in n.lower() or ".infl" in n.lower() or "infl" in n.lower() and n != count_name):
-                infl_name = n
-                break
+    # Extract NB statistics (primary)
+    nb_coef, nb_se, nb_p, nb_ci_low, nb_ci_high = get_param_info(nb_res, param)
+    # IRR and its CI (exponentiate NB log-coef and CI)
+    try:
+        nb_irr = float(np.exp(nb_coef))
+        nb_irr_ci_low = float(np.exp(nb_ci_low))
+        nb_irr_ci_high = float(np.exp(nb_ci_high))
+    except Exception:
+        nb_irr = nb_irr_ci_low = nb_irr_ci_high = np.nan
 
-    result_obj = {}
-    messages = []
+    # Extract OLS statistics (robustness check)
+    ols_coef, ols_se, ols_p, ols_ci_low, ols_ci_high = get_param_info(ols_res, param)
 
-    # Extract count-model statistics if present
-    if count_name is not None and params is not None:
-        coef = float(params[count_name])
-        pv = float(pvalues[count_name]) if (pvalues is not None and count_name in pvalues.index) else None
-        se = float(bse[count_name]) if (bse is not None and count_name in bse.index) else None
-        ci_lower, ci_upper = (None, None)
-        if conf is not None and count_name in conf.index:
-            try:
-                ci_lower, ci_upper = float(conf.loc[count_name].iloc[0]), float(conf.loc[count_name].iloc[1])
-            except Exception:
-                ci_lower, ci_upper = None, None
-        # Incidence Rate Ratio (IRR) for the count model: exp(coef)
-        irr = float(np.exp(coef))
-        irr_ci = (np.exp(ci_lower) if ci_lower is not None else None, np.exp(ci_upper) if ci_upper is not None else None)
-
-        result_obj['count'] = {
-            'param_name': count_name,
-            'coef (log count)': coef,
-            'std_err': se,
-            'p_value': pv,
-            'conf_int_95': (ci_lower, ci_upper),
-            'IRR': irr,
-            'IRR_95_conf_int': irr_ci
+    # Build numeric result object
+    result_object = {
+        'n_obs': int(n_obs) if n_obs is not None else None,
+        'overdispersion_stat': float(overdisp) if overdisp is not None else None,
+        'negative_binomial': {
+            'coef_log_count': round(nb_coef, 4),
+            'se': round(nb_se, 4) if not np.isnan(nb_se) else None,
+            'p_value': round(nb_p, 4) if not np.isnan(nb_p) else None,
+            'ci_95_log_count': (round(nb_ci_low, 4), round(nb_ci_high, 4)),
+            'incidence_rate_ratio_IRR': round(nb_irr, 4) if not np.isnan(nb_irr) else None,
+            'ci_95_IRR': (round(nb_irr_ci_low, 4), round(nb_irr_ci_high, 4)) if not np.isnan(nb_irr) else (None, None)
+        },
+        'ols_robustness': {
+            'coef_count_difference': round(ols_coef, 4),
+            'se': round(ols_se, 4) if not np.isnan(ols_se) else None,
+            'p_value': round(ols_p, 4) if not np.isnan(ols_p) else None,
+            'ci_95': (round(ols_ci_low, 4), round(ols_ci_high, 4))
         }
+    }
 
-        # Interpretation based on IRR and p-value
-        if pv is not None and pv < 0.05:
-            if irr < 1:
-                messages.append(
-                    f"In the count part, HasChildren has a negative association with the expected number of affairs "
-                    f"(coef = {coef:.4f}, IRR = {irr:.3f}, 95% CI IRR = [{irr_ci[0]:.3f}, {irr_ci[1]:.3f}], p = {pv:.3g}). "
-                    "This indicates a statistically significant decrease in the expected count of extramarital affairs for respondents with children."
-                )
-            else:
-                messages.append(
-                    f"In the count part, HasChildren is associated with a higher expected number of affairs "
-                    f"(coef = {coef:.4f}, IRR = {irr:.3f}, p = {pv:.3g})."
-                )
+    # Interpretation logic for final descriptive sentence
+    # Use NB as primary.
+    direction = 'decrease' if nb_coef < 0 else 'increase' if nb_coef > 0 else 'no change'
+    # significance levels
+    if not np.isnan(nb_p):
+        if nb_p < 0.01:
+            sig_text = 'highly statistically significant (p < 0.01)'
+        elif nb_p < 0.05:
+            sig_text = 'statistically significant (p < 0.05)'
+        elif nb_p < 0.1:
+            sig_text = 'marginally statistically significant (0.05 <= p < 0.1)'
         else:
-            messages.append(
-                f"In the count part, HasChildren coefficient = {coef:.4f} (IRR = {irr:.3f}), p = {pv if pv is not None else 'NA'}. "
-                "This is not statistically significant at the 0.05 level, so we do not have strong evidence of an effect on the expected number of affairs."
-            )
+            sig_text = 'not statistically significant (p >= 0.1)'
     else:
-        messages.append("Could not find a count-model parameter for 'HasChildren' in the fitted model output.")
+        sig_text = 'p-value not available'
 
-    # Extract inflation-model statistics (if present)
-    if infl_name is not None and params is not None:
-        icoef = float(params[infl_name])
-        ipv = float(pvalues[infl_name]) if (pvalues is not None and infl_name in pvalues.index) else None
-        ise = float(bse[infl_name]) if (bse is not None and infl_name in bse.index) else None
-        ici_lower, ici_upper = (None, None)
-        if conf is not None and infl_name in conf.index:
-            try:
-                ici_lower, ici_upper = float(conf.loc[infl_name].iloc[0]), float(conf.loc[infl_name].iloc[1])
-            except Exception:
-                ici_lower, ici_upper = None, None
-
-        # For the inflation (logit) part, coef >0 means higher log-odds of being in the always-zero group
-        # so a positive and significant inflation coef suggests children increase the probability of being always-zero (i.e., no affairs)
-        infl_odds_ratio = float(np.exp(icoef))
-        infl_or_ci = (np.exp(ici_lower) if ici_lower is not None else None, np.exp(ici_upper) if ici_upper is not None else None)
-
-        result_obj['inflation'] = {
-            'param_name': infl_name,
-            'coef (logit inflation)': icoef,
-            'std_err': ise,
-            'p_value': ipv,
-            'conf_int_95': (ici_lower, ici_upper),
-            'odds_ratio': infl_odds_ratio,
-            'odds_ratio_95_conf_int': infl_or_ci
-        }
-
-        if ipv is not None and ipv < 0.05:
-            if icoef > 0:
-                messages.append(
-                    f"In the inflation part, HasChildren has a positive coefficient (coef = {icoef:.4f}, OR = {infl_odds_ratio:.3f}, p = {ipv:.3g}), "
-                    "indicating that having children is associated with higher odds of being in the always-zero group (i.e., more likely to have zero affairs). "
-                    "This supports the conclusion that children decrease the likelihood of any extramarital affairs."
-                )
-            else:
-                messages.append(
-                    f"In the inflation part, HasChildren has a negative coefficient (coef = {icoef:.4f}, OR = {infl_odds_ratio:.3f}, p = {ipv:.3g}), "
-                    "indicating lower odds of being in the always-zero group (i.e., more likely to have any affairs)."
-                )
-        else:
-            messages.append(
-                f"In the inflation part, HasChildren coef = {icoef:.4f} (OR = {infl_odds_ratio:.3f}), p = {ipv if ipv is not None else 'NA'}. "
-                "This is not statistically significant at the 0.05 level."
-            )
-    else:
-        messages.append("No inflation-model parameter for 'HasChildren' was found (model may be a non-zero-inflated NB GLM).")
-
-    # Summarize final conclusion combining count and inflation evidence
-    conclusion = ""
-    # Use available significance info to draw overall conclusion
-    count_info = result_obj.get('count')
-    infl_info = result_obj.get('inflation')
-
-    sig_decrease_count = False
-    sig_inflation_support = False
-    sig_increase_count = False
-    sig_inflation_against = False
-
-    if count_info is not None and count_info['p_value'] is not None and count_info['p_value'] < 0.05:
-        if count_info['IRR'] < 1:
-            sig_decrease_count = True
-        else:
-            sig_increase_count = True
-
-    if infl_info is not None and infl_info['p_value'] is not None and infl_info['p_value'] < 0.05:
-        if infl_info['coef (logit inflation)'] > 0:
-            sig_inflation_support = True
-        else:
-            sig_inflation_against = True
-
-    if sig_decrease_count or sig_inflation_support:
-        conclusion = "Overall: Evidence suggests that having children decreases engagement in extramarital affairs."
-        # If both present, note both
-        details = []
-        if sig_decrease_count:
-            details.append("significant negative association in the count model (lower expected number of affairs).")
-        if sig_inflation_support:
-            details.append("significant positive inflation effect (higher odds of being always-zero = no affairs).")
-        if details:
-            conclusion += " " + " Also: " + " ".join(details)
-    elif sig_increase_count or sig_inflation_against:
-        conclusion = "Overall: Evidence suggests having children is associated with higher engagement in affairs (contrary to the hypothesis)."
-    else:
-        conclusion = "Overall: No statistically significant evidence that having children decreases engagement in extramarital affairs (insufficient evidence)."
-
-    # Attach model type name if possible
-    model_type = type(res).__name__ if res is not None else "Unknown"
-    result_obj['model_type'] = model_type
-    result_obj['conclusion'] = conclusion
-    result_obj['notes'] = messages
-
-    # Provide a human-readable description summarizing key numbers and the conclusion
-    description_lines = []
-    if count_info is not None:
-        description_lines.append(
-            f"Count part: param '{count_info['param_name']}', coef (log count) = {count_info['coef (log count)']:.4f}, "
-            f"IRR = {count_info['IRR']:.3f}, p = {count_info['p_value'] if count_info['p_value'] is not None else 'NA'}."
+    # Build descriptive interpretation
+    descr_lines = []
+    descr_lines.append(
+        f"Primary (Negative Binomial) estimate for 'HasChildren': log-count coef = {round(nb_coef,4)}, "
+        f"SE = {round(nb_se,4) if not np.isnan(nb_se) else 'NA'}, p = {round(nb_p,4) if not np.isnan(nb_p) else 'NA'}; "
+        f"95% CI (log scale) = [{round(nb_ci_low,4)}, {round(nb_ci_high,4)}]."
+    )
+    descr_lines.append(
+        f"Exponentiated (IRR): {round(nb_irr,4) if not np.isnan(nb_irr) else 'NA'} "
+        f"with 95% CI = [{round(nb_irr_ci_low,4) if not np.isnan(nb_irr) else 'NA'}, "
+        f"{round(nb_irr_ci_high,4) if not np.isnan(nb_irr) else 'NA'}]."
+    )
+    descr_lines.append(
+        f"Interpretation: an IRR < 1 means having children is associated with fewer expected affairs; "
+        f"IRR > 1 means more expected affairs. Here the IRR = {round(nb_irr,4) if not np.isnan(nb_irr) else 'NA'} "
+        f"which corresponds to a {round((nb_irr-1)*100,2) if not np.isnan(nb_irr) else 'NA'}% "
+        f"change in expected number of affairs when comparing those with children to those without."
+    )
+    descr_lines.append(
+        f"Statistical evidence: the NB effect is {sig_text}. Based on this, "
+        + (
+            f"there is evidence that having children is associated with a {direction} in engagement in extramarital affairs."
+            if ('not' not in sig_text)
+            else f"there is no statistically significant evidence that having children changes engagement in extramarital affairs."
         )
-    if infl_info is not None:
-        description_lines.append(
-            f"Inflation part: param '{infl_info['param_name']}', coef (logit) = {infl_info['coef (logit inflation)']:.4f}, "
-            f"OR = {infl_info['odds_ratio']:.3f}, p = {infl_info['p_value'] if infl_info['p_value'] is not None else 'NA'}."
-        )
-    description_lines.append(conclusion)
+    )
+    descr_lines.append(
+        f"OLS robustness check: coef = {round(ols_coef,4)}, p = {round(ols_p,4) if not np.isnan(ols_p) else 'NA'} "
+        f"(95% CI = [{round(ols_ci_low,4)}, {round(ols_ci_high,4)}])."
+    )
+    descr_lines.append(
+        f"Model context: n = {result_object['n_obs']}, overdispersion (var/mean) = {round(result_object['overdispersion_stat'],4) if result_object['overdispersion_stat'] is not None else 'NA'} "
+        "(value > 1 supports use of Negative Binomial over Poisson)."
+    )
 
-    description = " ".join(description_lines)
+    description = " ".join(descr_lines)
 
-    return {"object": result_obj, "description": description}
+    return {
+        "object": result_object,
+        "description": description
+    }

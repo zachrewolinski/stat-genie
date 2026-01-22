@@ -13,104 +13,96 @@ df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/anal
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Transform the original dataset to the analysis dataframe.
+    Transform the raw dataset to create analytic columns required for modeling.
 
-    Produces the following columns used in the model:
-      - MajorityChoice: binary (1 = chose majority option, 0 = otherwise)
-      - Age_centered: age (years) mean-centered
-      - culture: categorical/site indicator as string (e.g., 'c1', 'c2', ...)
-      - Female: binary female indicator (1 = girl, 0 = boy/other)
-      - majority_first: coerced to integer 0/1 indicating whether majority was shown first
+    Created columns (all names used later in modeling):
+    - Age_c: mean-centered age (age - mean(age)).
+    - is_girl: 1 if gender == 1 (girl), 0 otherwise.
+    - SocialFollow: binary indicator whether child followed any social information (majority or minority) -> y in {2,3}.
+    - MajorityChoice: binary indicator whether child chose the majority option (y == 2).
+    - culture: cast to categorical (keeps original numeric IDs but is categorical for modeling).
 
-    Drops rows with missing values in variables required for the model.
+    Removes rows with missing values in any variables needed for primary analyses.
     """
+
     df = df.copy()
 
-    # Ensure required columns exist
-    required = ['y', 'age', 'culture', 'gender', 'majority_first']
-    for col in required:
-        if col not in df.columns:
-            raise KeyError(f"Required column '{col}' not found in dataframe")
+    # Required columns for our analysis
+    required_cols = ['y', 'age', 'gender', 'culture', 'majority_first', 'religiousness', 'calworks']
+    # Drop rows missing any of the required analytic columns
+    df = df.dropna(subset=required_cols)
 
-    # Drop rows with missing outcome or key predictors
-    df = df.dropna(subset=['y', 'age', 'culture'])
+    # Create mean-centered age (Age_c)
+    df['Age_c'] = df['age'] - df['age'].mean()
 
-    # Dependent variable: majority choice (y == 2 indicates majority)
+    # Binary gender indicator: 1 = girl (gender == 1), 0 = boy (gender == 2 or other)
+    df['is_girl'] = (df['gender'] == 1).astype(int)
+
+    # Cast culture to categorical for formula-based modeling
+    df['culture'] = df['culture'].astype('category')
+
+    # Derived dependent variables for targeted analyses
+    # SocialFollow: followed social information (majority or minority)
+    df['SocialFollow'] = df['y'].isin([2, 3]).astype(int)
+
+    # MajorityChoice: chose the majority option (y == 2)
     df['MajorityChoice'] = (df['y'] == 2).astype(int)
 
-    # Create Female indicator (original coding: 1=girl, 2=boy)
-    df['Female'] = (df['gender'] == 1).astype(int)
-
-    # Ensure majority_first is 0/1 integer (if missing, keep as NaN so earlier dropna would have removed)
-    # Some datasets encode it as booleans or ints; coerce safely
-    df['majority_first'] = df['majority_first'].astype(float).astype('Int64')
-    # If there are NA after coercion, leave them (already dropped if necessary)
-    # Convert to plain int 0/1 where possible
-    df['majority_first'] = df['majority_first'].astype(float).fillna(0).astype(int)
-
-    # Convert culture to categorical string labels (prefix 'c' to avoid numeric interpretation)
-    # Ensure culture is integer-like first
-    df['culture'] = df['culture'].astype(int).astype(str)
-    df['culture'] = 'c' + df['culture']
-
-    # Center age to improve interpretability and numerical stability
-    df['Age_centered'] = df['age'] - df['age'].mean()
-
-    # Keep only columns necessary for modeling (but return full df to preserve other info)
-    # Required columns for model: ['MajorityChoice', 'Age_centered', 'culture', 'Female', 'majority_first']
+    # Keep columns that will be used in modeling and return full frame for flexibility
+    # (We keep original columns plus derived ones.)
     return df
 
 
 # ======== MODEL CODE ========
-def model(df: pd.DataFrame):
+def model(df: pd.DataFrame) -> dict:
     """
-    Fit a binomial logistic regression testing how reliance on majority choices develops with age
-    across cultural contexts. We include an Age x Culture interaction to allow developmental
-    trajectories to vary by culture, and control for child gender and order (majority_first).
+    Run two complementary statistical analyses addressing the research question:
+    1) Logistic regression predicting whether a child relied on social information at all (SocialFollow: chose majority or minority vs. undemonstrated option).
+    2) Among children who followed social information, logistic regression predicting preference for the majority (MajorityChoice: majority vs. minority).
 
-    Model: MajorityChoice ~ Age_centered * C(culture) + Female + majority_first
+    Both models test the Age_c * C(culture) interaction to evaluate whether developmental change differs across cultures. Both include the same set of covariates: is_girl, majority_first, religiousness, calworks.
 
-    Returns the fitted GLM results object (statsmodels GLMResults) and prints a brief summary.
+    Returns a dict with fitted model objects (statsmodels results).
     """
-    import statsmodels.api as sm
+
     import statsmodels.formula.api as smf
+    results = {}
 
-    # Check that required columns exist
-    required_cols = ['MajorityChoice', 'Age_centered', 'culture', 'Female', 'majority_first']
-    for col in required_cols:
-        if col not in df.columns:
-            raise KeyError(f"Required column '{col}' not found in dataframe passed to model()")
+    # Ensure transformed columns exist
+    needed = ['SocialFollow', 'MajorityChoice', 'Age_c', 'culture', 'is_girl', 'majority_first', 'religiousness', 'calworks']
+    missing = [c for c in needed if c not in df.columns]
+    if missing:
+        raise ValueError(f"Dataframe is missing required columns for modeling: {missing}")
 
-    formula = 'MajorityChoice ~ Age_centered * C(culture) + Female + majority_first'
+    # Model 1: Social follow (any social information) ~ Age * Culture + covariates
+    # Use interaction Age_c * C(culture) to allow age effect to vary by culture
+    formula1 = 'SocialFollow ~ Age_c * C(culture) + is_girl + majority_first + religiousness + calworks'
+    model1 = smf.logit(formula1, data=df).fit(disp=False)
+    results['social_follow_model'] = model1
 
-    # Fit binomial GLM (logistic regression)
-    glm_model = smf.glm(formula=formula, data=df, family=sm.families.Binomial())
-    results = glm_model.fit()
+    # Model 2: Among children who followed social information, predict majority vs minority
+    df_social = df[df['SocialFollow'] == 1].copy()
+    if df_social.shape[0] < 20:
+        # Small-sample safeguard: still attempt to fit but warn the user (returned object may be unreliable)
+        import warnings
+        warnings.warn('Fewer than 20 observations follow social information; majority-choice model may be unstable.')
 
-    # Print summary (coefficients, p-values, etc.) and return results object
-    print(results.summary())
+    formula2 = 'MajorityChoice ~ Age_c * C(culture) + is_girl + majority_first + religiousness + calworks'
+    model2 = smf.logit(formula2, data=df_social).fit(disp=False)
+    results['majority_choice_model'] = model2
 
-    # Optional: compute and attach marginal predicted probabilities by culture across ages
+    # Optional: also fit a multinomial check (as robustness): predicted 3-category y using MNLogit
     try:
-        ages = np.arange(int(df['age'].min()), int(df['age'].max()) + 1)
-        pred_list = []
-        cultures = sorted(df['culture'].unique())
-        for c in cultures:
-            for a in ages:
-                row = {
-                    'Age_centered': a - df['age'].mean(),
-                    'culture': c,
-                    'Female': df['Female'].mode()[0],
-                    'majority_first': 0
-                }
-                pred_list.append(row)
-        pred_df = pd.DataFrame(pred_list)
-        pred_df['pred_prob'] = results.predict(pred_df)
-        # Attach to results for downstream use
-        results.predicted_by_age_culture = pred_df
+        import statsmodels.api as sm
+        # Prepare exogenous matrix with dummies for culture (drop one), add constant
+        exog = pd.get_dummies(df[['Age_c', 'is_girl', 'majority_first', 'religiousness', 'calworks', 'culture']], drop_first=True)
+        exog = sm.add_constant(exog, has_constant='add')
+        endog = df['y']
+        mn_model = sm.MNLogit(endog, exog).fit(disp=False)
+        results['mnlogit_full_y'] = mn_model
     except Exception:
-        # If prediction grid fails for any reason, continue without attaching
-        pass
+        # If MNLogit fails (e.g., separability or dimensionality), skip gracefully
+        results['mnlogit_full_y'] = None
 
     return results
 

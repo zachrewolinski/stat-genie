@@ -13,82 +13,107 @@ df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/anal
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Transform the raw dataset into a dataframe suitable for modeling.
+    Transform the original dataframe to produce the columns required for modeling.
 
-    Produces the following columns required by the model:
-      - IsMajority: binary outcome (1 if y == 2, else 0)
-      - age_c: centered age (age - mean(age))
-      - age_c2: squared centered age (to capture nonlinear age effects)
-      - Culture: categorical culture/site identifier
-      - GenderBoy: binary indicator 1 if boy (gender == 2), 0 if girl (gender == 1)
-      - majority_first: ensures integer 0/1 for the demonstration order variable
+    Outputs (columns guaranteed to exist for modeling):
+      - y: outcome (1=unchosen,2=majority,3=minority) (kept as provided)
+      - age: original age in years (kept)
+      - age_c: age centered at the sample mean (numeric)
+      - age_group: categorical age bins (strings): '4-6','7-9','10-12','13-14'
+      - culture: original culture/site id (kept, converted to categorical dtype)
+      - is_male: recoded gender where 1=boy (original gender: 1=girl, 2=boy)
+      - majority_first: kept as-is (0/1)
 
-    Drops rows with missing values in the key columns.
+    The function drops rows with missing values on the necessary columns.
     """
+    import numpy as np
+    import pandas as pd
+
+    # Work on a copy to avoid mutating the input dataframe in-place
     df = df.copy()
 
-    # Drop rows missing the main variables needed for the analysis
-    df = df.dropna(subset=['y', 'age', 'culture', 'gender', 'majority_first'])
+    # Required input columns (based on provided schema)
+    required_cols = ['y', 'age', 'gender', 'majority_first', 'culture']
+    # Drop rows missing any required column
+    df = df.dropna(subset=required_cols)
 
-    # Dependent variable: did the child choose the majority option? (y == 2)
-    df['IsMajority'] = (df['y'] == 2).astype(int)
+    # Ensure correct dtypes
+    # y should be integer categories 1,2,3
+    df['y'] = df['y'].astype(int)
 
-    # Center age and add a quadratic term to allow nonlinear (e.g., accelerated) development
+    # gender: original coding 1=girl, 2=boy. Create is_male: 1 if boy else 0.
+    df['is_male'] = df['gender'].apply(lambda g: 1 if int(g) == 2 else 0)
+
+    # age: keep original, but create centered version for modeling stability
+    df['age'] = df['age'].astype(float)
     df['age_c'] = df['age'] - df['age'].mean()
-    df['age_c2'] = df['age_c'] ** 2
 
-    # Gender: convert to a binary indicator where 1 = boy, 0 = girl
-    # Original coding: 1 = girl, 2 = boy
-    df['GenderBoy'] = (df['gender'] == 2).astype(int)
+    # Create age bins (developmental stages) for description/stratified summaries
+    bins = [3.5, 6.5, 9.5, 12.5, 14.5]  # cut points giving 4-6,7-9,10-12,13-14
+    labels = ['4-6', '7-9', '10-12', '13-14']
+    df['age_group'] = pd.cut(df['age'], bins=bins, labels=labels, include_lowest=True)
 
-    # Ensure majority_first is 0/1 integer
+    # Culture: keep as provided but make categorical for modeling
+    # Some toolchains treat numeric categories as continuous; keep dtype categorical so formula-based design matrices treat it as factor
+    df['culture'] = df['culture'].astype('category')
+
+    # majority_first should be binary 0/1; enforce integer dtype
     df['majority_first'] = df['majority_first'].astype(int)
 
-    # Culture as categorical factor (keeps original IDs but as category for modeling)
-    df['Culture'] = df['culture'].astype('category')
+    # Optionally, drop rows with categories outside expected ranges (defensive)
+    df = df[df['y'].isin([1, 2, 3])]
 
-    # Return the transformed dataframe (keeps other columns too if needed for further checks)
+    # Reset index before returning
+    df = df.reset_index(drop=True)
+
     return df
 
 
 # ======== MODEL CODE ========
 def model(df: pd.DataFrame):
     """
-    Fit a binomial (logistic) regression to predict choosing the majority option.
+    Fit a multinomial logistic regression (multinomial logit) predicting the 3-way outcome `y` from:
+      - main effects: centered age (age_c) and culture (categorical)
+      - interaction: age_c * culture  (tests whether developmental change differs across cultures)
+      - controls: is_male and majority_first
 
-    Model specification:
-      IsMajority ~ age_c + age_c2 + C(Culture) + age_c:C(Culture) + GenderBoy + majority_first
-
-    - age_c and age_c2 model linear and quadratic age effects.
-    - C(Culture) includes culture fixed effects to capture baseline differences across sites.
-    - age_c:C(Culture) allows the age slope to vary by culture (i.e., tests whether developmental trajectories differ across cultural contexts).
-    - GenderBoy and majority_first are included as controls.
-
-    Returns the fitted results object with cluster-robust standard errors clustered by Culture (if available).
+    Returns the fitted statsmodels MNLogit results object.
     """
+    import numpy as np
+    import pandas as pd
     import statsmodels.api as sm
-    import statsmodels.formula.api as smf
+    from patsy import dmatrix
 
-    # Ensure required columns are present
-    required_cols = ['IsMajority', 'age_c', 'age_c2', 'Culture', 'GenderBoy', 'majority_first']
-    missing = [c for c in required_cols if c not in df.columns]
-    if len(missing) > 0:
-        raise ValueError(f"Missing required columns in dataframe: {missing}")
+    # Ensure required columns exist
+    required = ['y', 'age_c', 'culture', 'is_male', 'majority_first']
+    for c in required:
+        if c not in df.columns:
+            raise ValueError(f"Required column {c} not found in dataframe")
 
-    # Formula with culture fixed effects and age-by-culture interactions
-    formula = 'IsMajority ~ age_c + age_c2 + C(Culture) + age_c:C(Culture) + GenderBoy + majority_first'
+    # Endogenous variable: integer-coded categories 1,2,3
+    endog = df['y'].astype(int)
 
-    # Fit GLM (logistic regression)
-    glm_res = smf.glm(formula=formula, data=df, family=sm.families.Binomial()).fit()
+    # Design matrix (exogenous). Use patsy to create dummy variables for culture and the interaction.
+    # The formula below creates an intercept automatically.
+    exog = dmatrix('age_c * C(culture) + is_male + majority_first', df, return_type='dataframe')
 
-    # Attempt to produce cluster-robust SEs clustered by Culture
-    # If clustering fails for any reason, fall back to the original glm results.
+    # Convert to plain numpy arrays for statsmodels MNLogit
+    # MNLogit expects exog shape (nobs, k) and endog as a 1d array of integers labeling the choice
+    X = np.asarray(exog)
+    y = np.asarray(endog)
+
+    # Fit the multinomial logistic regression using statsmodels MNLogit
+    # Note: MNLogit treats the lowest integer label in endog as the reference category by default.
+    model_mn = sm.MNLogit(y, X)
+
+    # Use a robust fitting procedure; suppress iteration output
     try:
-        clustered = glm_res.get_robustcov_results(cov_type='cluster', groups=df['Culture'])
+        fit = model_mn.fit(method='newton', maxiter=200, disp=False)
     except Exception:
-        clustered = glm_res
+        # Fallback to default settings if newton fails
+        fit = model_mn.fit(disp=False)
 
-    # Return the results object (clustered if possible)
-    return clustered
+    # Return the fitted result object (user can call .summary(), .params, .predict(), etc.)
+    return fit
 
 

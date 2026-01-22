@@ -1,331 +1,212 @@
 def extract_final_answer(model_output):
     """
-    Extract statistics relevant to the effect of Reader View on reading speed
-    for dyslexic readers from a fitted statsmodels OLS results object.
+    Extracts statistics relevant to the effect of Reader View on log_speed,
+    and specifically the interaction with dyslexia status.
 
-    Returns a dictionary with keys:
-      - "object": nested dict with coefficients, SEs, CIs, p-values, percent changes,
-                  and a computed marginal effect of Reader View for dyslexic readers.
-      - "description": brief natural-language summary interpreting the results
-                       (whether Reader View improves reading speed for dyslexic readers).
+    Returns a dict with keys:
+      - "object": dict of extracted numeric results:
+          * main_reader_view: effect of reader_view for non-dyslexic (coef, se, p, CI, pct_change)
+          * interaction: coefficient for reader_view:dyslexia (coef, se, p, CI)
+          * reader_view_for_dyslexic: combined effect for dyslexic = main + interaction
+                                   (coef, se, p, CI, pct_change)
+          * raw_params: full params Series (for reference)
+      - "description": human-readable interpretation of the above.
 
-    Notes:
-      - Expects model_output to be a statsmodels RegressionResults (possibly
-        from get_robustcov_results). The model formula should include the terms
-        "reader_view" and the interaction between reader_view and dyslexia_bin
-        (something containing both "reader_view" and "dyslexia_bin" in its name).
-      - The dependent variable is log_reading_speed, so reported effect sizes
-        are converted to percent change: (exp(beta)-1)*100.
+    The function is defensive about parameter name variants (e.g. categorical coding
+    names like "dyslexia_bin[T.1]" or "reader_view:dyslexia_bin[T.1]").
     """
     import numpy as np
-    from math import exp
-    from scipy import stats
+    import math
 
-    res = model_output
-
-    # Try to obtain primary result components; allow for numpy arrays or pandas objects
+    # Get fixed-effect parameters and covariance
     try:
-        raw_params = getattr(res, 'params', None)
-        raw_pvalues = getattr(res, 'pvalues', None)
-        raw_bse = getattr(res, 'bse', None)
-        raw_conf = None
-        try:
-            raw_conf = res.conf_int()
-        except Exception:
-            raw_conf = None
-        raw_cov = None
-        try:
-            raw_cov = res.cov_params()
-        except Exception:
-            raw_cov = None
+        params = model_output.params  # pandas Series
     except Exception as e:
-        raise ValueError("Provided model_output does not look like a statsmodels results object: " + str(e))
+        raise ValueError("Could not extract params from model_output: " + str(e))
 
-    if raw_params is None:
-        raise ValueError("model_output has no 'params' attribute")
-
-    # Determine parameter names robustly
-    param_names = None
-    # If params is a pandas Series-like with index
     try:
-        if hasattr(raw_params, 'index'):
-            param_names = [str(x) for x in raw_params.index]
-    except Exception:
-        param_names = None
+        cov = model_output.cov_params()
+    except Exception as e:
+        cov = None  # we'll avoid computing combined SE if not available
 
-    # other fallbacks
-    if param_names is None:
-        if hasattr(res, 'param_names'):
-            try:
-                param_names = list(res.param_names)
-            except Exception:
-                param_names = None
-
-    if param_names is None and hasattr(res, 'model') and hasattr(res.model, 'exog_names'):
-        try:
-            param_names = list(res.model.exog_names)
-        except Exception:
-            param_names = None
-
-    # Final fallback: if params is array-like, create generic names
-    if param_names is None:
-        try:
-            arr = np.asarray(raw_params)
-            param_names = [f'param_{i}' for i in range(arr.shape[0])]
-        except Exception:
-            raise ValueError("Could not determine parameter names from model_output")
-
-    # Build mapping name -> index for lookups
-    name_to_index = {name: idx for idx, name in enumerate(param_names)}
-
-    # Helper to extract scalar arrays/dicts into name->value maps
-    def build_map(raw_obj):
-        if raw_obj is None:
-            return {}
-        # If object has index (pandas Series)
-        try:
-            if hasattr(raw_obj, 'index'):
-                return {str(k): float(v) for k, v in zip(raw_obj.index, raw_obj.values)}
-        except Exception:
-            pass
-        # If it's dict-like
-        try:
-            if isinstance(raw_obj, dict):
-                return {str(k): float(v) for k, v in raw_obj.items()}
-        except Exception:
-            pass
-        # If it's array-like, map by position using param_names
-        try:
-            arr = np.asarray(raw_obj)
-            if arr.ndim == 1 and arr.shape[0] == len(param_names):
-                return {name: float(arr[idx]) for idx, name in enumerate(param_names)}
-        except Exception:
-            pass
-        # otherwise return empty
-        return {}
-
-    params_map = build_map(raw_params)
-    pvalues_map = build_map(raw_pvalues)
-    bse_map = build_map(raw_bse)
-
-    # Handle confidence intervals: could be DataFrame/array with shape (n_params, 2)
-    conf_map = {}
-    if raw_conf is not None:
-        try:
-            # pandas DataFrame with index
-            if hasattr(raw_conf, 'index'):
-                for idx, row in zip(raw_conf.index, raw_conf.values):
-                    conf_map[str(idx)] = (float(row[0]), float(row[1]))
-            else:
-                arr = np.asarray(raw_conf)
-                if arr.ndim == 2 and arr.shape[0] == len(param_names) and arr.shape[1] >= 2:
-                    for i, name in enumerate(param_names):
-                        conf_map[name] = (float(arr[i, 0]), float(arr[i, 1]))
-        except Exception:
-            conf_map = {}
-
-    # Covariance: handle DataFrame or ndarray
-    cov_matrix = raw_cov  # could be None
-    # find main reader term and interaction robustly
-    def find_main_reader_term():
-        if 'reader_view' in param_names:
-            return 'reader_view'
-        for nm in param_names:
-            if 'reader_view' in nm and not (':' in nm or '*' in nm):
-                return nm
+    # Helper to find parameter name that contains all include_substrings and none of exclude_substrings
+    def find_param_name(include_substrings, exclude_substrings=None):
+        exclude_substrings = exclude_substrings or []
+        for name in params.index:
+            name_str = str(name)
+            if all(sub in name_str for sub in include_substrings) and not any(sub in name_str for sub in exclude_substrings):
+                return name_str
         return None
 
-    def find_interaction_term():
-        for nm in param_names:
-            if ('reader_view' in nm) and ('dyslexia_bin' in nm):
-                return nm
-        return None
+    # Find main reader_view parameter (prefer exact 'reader_view' otherwise a name containing reader_view but not dyslexia)
+    main_name = None
+    if 'reader_view' in params.index:
+        main_name = 'reader_view'
+    else:
+        main_name = find_param_name(['reader_view'], ['dyslexia', 'dyslexia_bin', ':'])
+        # allow fallback to any name containing 'reader_view' if still None
+        if main_name is None:
+            main_name = find_param_name(['reader_view'], [])
 
-    rname = find_main_reader_term()
-    iname = find_interaction_term()
-    # find dyslexia main effect name if present (prefer non-interaction)
-    dname = None
-    for nm in param_names:
-        if 'dyslexia_bin' in nm and nm != iname:
-            # exclude interactions with reader_view
-            if not (('reader_view' in nm) and ('dyslexia_bin' in nm)):
-                dname = nm
+    # Find interaction term name: something that contains both reader_view and dyslexia (or dyslexia_bin)
+    interaction_name = find_param_name(['reader_view', 'dyslexia']) or find_param_name(['reader_view', 'dyslexia_bin'])
+    # Also consider common categorical naming
+    if interaction_name is None:
+        # try detecting patterns like 'reader_view:dyslexia_bin[T.1]' or 'reader_view:C(dyslexia_bin)[T.1]'
+        for name in params.index:
+            s = str(name)
+            if 'reader_view' in s and ('dyslexia' in s or 'dyslexia_bin' in s):
+                interaction_name = s
                 break
-    if dname is None and 'dyslexia_bin' in param_names:
-        dname = 'dyslexia_bin'
 
-    # Helper to get conf row
-    def get_conf(name):
-        if name is None:
-            return (np.nan, np.nan)
-        if name in conf_map:
-            return conf_map[name]
-        # fallback: if cov or other structures exist but conf_map missing, try to call conf_int again per-param
-        return (np.nan, np.nan)
+    # Validate found names
+    if main_name is None:
+        raise ValueError("Could not locate a parameter corresponding to the main effect of 'reader_view' in model params: "
+                         + ", ".join(map(str, params.index)))
 
-    # Helper to get term stats
-    def get_term_stats(name):
-        if name is None or name not in param_names:
-            return None
-        coef = float(params_map.get(name, np.nan))
-        se = float(bse_map.get(name, np.nan)) if name in bse_map else float(np.nan)
-        p = float(pvalues_map.get(name, np.nan)) if name in pvalues_map else float(np.nan)
-        ci_low, ci_high = get_conf(name)
-        # If conf_map lacked entries but raw_conf is ndarray, try index access
-        if np.isnan(ci_low) or np.isnan(ci_high):
+    # Extract main effect estimates
+    main_coef = float(params[main_name])
+    main_se = float(model_output.bse[main_name]) if hasattr(model_output, 'bse') and main_name in model_output.bse.index else (float(np.sqrt(cov.loc[main_name, main_name])) if cov is not None and main_name in cov.index else None)
+
+    # p-value for main effect
+    main_p = None
+    if hasattr(model_output, 'pvalues') and main_name in model_output.pvalues.index:
+        main_p = float(model_output.pvalues[main_name])
+    elif main_se is not None and main_se > 0:
+        z = main_coef / main_se
+        try:
+            from scipy.stats import norm
+            main_p = float(2 * norm.sf(abs(z)))
+        except Exception:
+            main_p = float(math.erfc(abs(z) / math.sqrt(2)))
+    # CI approx (normal)
+    if main_se is not None:
+        ci_lower_main = main_coef - 1.96 * main_se
+        ci_upper_main = main_coef + 1.96 * main_se
+    else:
+        ci_lower_main = ci_upper_main = None
+
+    # Interaction estimates (if present)
+    interaction_coef = interaction_se = interaction_p = ci_lower_int = ci_upper_int = None
+    if interaction_name is not None:
+        interaction_coef = float(params[interaction_name])
+        interaction_se = float(model_output.bse[interaction_name]) if hasattr(model_output, 'bse') and interaction_name in model_output.bse.index else (float(np.sqrt(cov.loc[interaction_name, interaction_name])) if cov is not None and interaction_name in cov.index else None)
+        if hasattr(model_output, 'pvalues') and interaction_name in model_output.pvalues.index:
+            interaction_p = float(model_output.pvalues[interaction_name])
+        elif interaction_se is not None and interaction_se > 0:
+            z = interaction_coef / interaction_se
             try:
-                if raw_conf is not None:
-                    arr = np.asarray(raw_conf)
-                    idx = name_to_index[name]
-                    if arr.ndim == 2 and arr.shape[0] == len(param_names):
-                        ci_low = float(arr[idx, 0])
-                        ci_high = float(arr[idx, 1])
+                from scipy.stats import norm
+                interaction_p = float(2 * norm.sf(abs(z)))
             except Exception:
-                pass
-        pct = (np.exp(coef) - 1.0) * 100.0 if not np.isnan(coef) else np.nan
-        pct_ci_low = (np.exp(ci_low) - 1.0) * 100.0 if not np.isnan(ci_low) else np.nan
-        pct_ci_high = (np.exp(ci_high) - 1.0) * 100.0 if not np.isnan(ci_high) else np.nan
+                interaction_p = float(math.erfc(abs(z) / math.sqrt(2)))
+        if interaction_se is not None:
+            ci_lower_int = interaction_coef - 1.96 * interaction_se
+            ci_upper_int = interaction_coef + 1.96 * interaction_se
 
-        return {
-            'term': name,
-            'coef_log': coef,
-            'se': se,
-            'p_value': p,
-            '95%_CI_log': [ci_low, ci_high],
-            'pct_change': pct,
-            '95%_CI_pct': [pct_ci_low, pct_ci_high],
+    # Combined effect for dyslexic individuals = main_coef + interaction_coef (if interaction exists)
+    combined = None
+    if interaction_coef is not None and cov is not None and main_name in cov.index and interaction_name in cov.index:
+        comb_coef = main_coef + interaction_coef
+        # variance of sum = var(a)+var(b)+2cov(a,b)
+        var_sum = cov.loc[main_name, main_name] + cov.loc[interaction_name, interaction_name] + 2.0 * cov.loc[main_name, interaction_name]
+        comb_se = float(np.sqrt(var_sum)) if var_sum >= 0 else None
+        # p-value
+        if comb_se is not None and comb_se > 0:
+            z = comb_coef / comb_se
+            try:
+                from scipy.stats import norm
+                comb_p = float(2 * norm.sf(abs(z)))
+            except Exception:
+                comb_p = float(math.erfc(abs(z) / math.sqrt(2)))
+        else:
+            comb_p = None
+        comb_ci_lower = comb_coef - 1.96 * comb_se if comb_se is not None else None
+        comb_ci_upper = comb_coef + 1.96 * comb_se if comb_se is not None else None
+        combined = {
+            'coef': comb_coef,
+            'se': comb_se,
+            'p_value': comb_p,
+            'ci_95_lower': comb_ci_lower,
+            'ci_95_upper': comb_ci_upper,
+            # convert from log-scale to percent change in speed: (exp(coef)-1)*100
+            'pct_change': (np.exp(comb_coef) - 1.0) * 100 if comb_coef is not None else None
         }
-
-    reader_stats = get_term_stats(rname)
-    interaction_stats = get_term_stats(iname)
-    dyslexia_stats = get_term_stats(dname)
-
-    if reader_stats is None:
-        raise ValueError("Could not find a main 'reader_view' term in the model parameters. Check model formula/term names.")
-
-    # Compute marginal effect of Reader View for dyslexic readers:
-    beta_r = reader_stats['coef_log']
-    if interaction_stats is not None:
-        beta_int = interaction_stats['coef_log']
-        beta_comb = beta_r + beta_int
-
-        # compute variance of sum using covariance matrix if available
-        se_comb = np.nan
-        try:
-            if cov_matrix is not None:
-                # DataFrame-like
-                if hasattr(cov_matrix, 'loc'):
-                    var_r = float(cov_matrix.loc[rname, rname])
-                    var_int = float(cov_matrix.loc[iname, iname])
-                    cov_r_int = float(cov_matrix.loc[rname, iname])
-                else:
-                    arr = np.asarray(cov_matrix)
-                    idx_r = name_to_index[rname]
-                    idx_int = name_to_index[iname]
-                    var_r = float(arr[idx_r, idx_r])
-                    var_int = float(arr[idx_int, idx_int])
-                    cov_r_int = float(arr[idx_r, idx_int])
-                var_comb = var_r + var_int + 2.0 * cov_r_int
-                se_comb = float(np.sqrt(var_comb)) if var_comb >= 0 else np.nan
-        except Exception:
-            se_comb = np.nan
-
-        if np.isnan(se_comb):
-            # fallback: approximate using sqrt(se_r^2 + se_int^2)
-            se_r = reader_stats.get('se', np.nan)
-            se_int = interaction_stats.get('se', np.nan)
-            if not np.isnan(se_r) and not np.isnan(se_int):
-                se_comb = float(np.sqrt(se_r ** 2 + se_int ** 2))
-            else:
-                se_comb = np.nan
-
-        # CI on log scale
-        df_resid = getattr(res, 'df_resid', None)
-        try:
-            if df_resid is not None and np.isfinite(df_resid) and df_resid > 0:
-                tcrit = float(stats.t.ppf(0.975, df_resid))
-            else:
-                tcrit = float(stats.norm.ppf(0.975))
-        except Exception:
-            tcrit = float(stats.norm.ppf(0.975))
-
-        ci_low_log = beta_comb - tcrit * se_comb if not np.isnan(se_comb) else np.nan
-        ci_high_log = beta_comb + tcrit * se_comb if not np.isnan(se_comb) else np.nan
-        pct_comb = (np.exp(beta_comb) - 1.0) * 100.0 if not np.isnan(beta_comb) else np.nan
-        pct_ci_low = (np.exp(ci_low_log) - 1.0) * 100.0 if not np.isnan(ci_low_log) else np.nan
-        pct_ci_high = (np.exp(ci_high_log) - 1.0) * 100.0 if not np.isnan(ci_high_log) else np.nan
-
-        # p-value for combined effect
-        try:
-            t_stat = beta_comb / se_comb
-            if df_resid is not None and np.isfinite(df_resid) and df_resid > 0:
-                p_comb = 2.0 * float(stats.t.sf(abs(t_stat), df_resid))
-            else:
-                p_comb = 2.0 * float(stats.norm.sf(abs(t_stat)))
-        except Exception:
-            p_comb = float(np.nan)
-
-        combined_stats = {
-            'coef_log': beta_comb,
-            'se': se_comb,
-            't_or_z': (beta_comb / se_comb) if (se_comb not in (None, 0) and np.isfinite(se_comb)) else float(np.nan),
-            'p_value': p_comb,
-            '95%_CI_log': [ci_low_log, ci_high_log],
-            'pct_change': pct_comb,
-            '95%_CI_pct': [pct_ci_low, pct_ci_high],
-            'note': 'Effect of Reader View (reader_view) when dyslexia_bin = 1 (dyslexic readers).'
+    elif interaction_coef is None:
+        # If no interaction term present, the main effect applies to both groups
+        combined = {
+            'coef': main_coef,
+            'se': main_se,
+            'p_value': main_p,
+            'ci_95_lower': ci_lower_main,
+            'ci_95_upper': ci_upper_main,
+            'pct_change': (np.exp(main_coef) - 1.0) * 100 if main_coef is not None else None
         }
     else:
-        # No interaction term: marginal effect is same as main effect
-        se_r = reader_stats.get('se', np.nan)
-        t_or_z = (beta_r / se_r) if (se_r not in (None, 0) and np.isfinite(se_r)) else float(np.nan)
-        combined_stats = {
-            'coef_log': beta_r,
-            'se': se_r,
-            't_or_z': t_or_z,
-            'p_value': reader_stats.get('p_value', np.nan),
-            '95%_CI_log': reader_stats.get('95%_CI_log', [np.nan, np.nan]),
-            'pct_change': reader_stats.get('pct_change', np.nan),
-            '95%_CI_pct': reader_stats.get('95%_CI_pct', [np.nan, np.nan]),
-            'note': 'No reader_view:dyslexia interaction present; effect for dyslexic readers equals the main reader_view effect.'
+        # interaction exists but covariance not available; compute combined coef but not SE/p
+        comb_coef = main_coef + interaction_coef
+        combined = {
+            'coef': comb_coef,
+            'se': None,
+            'p_value': None,
+            'ci_95_lower': None,
+            'ci_95_upper': None,
+            'pct_change': (np.exp(comb_coef) - 1.0) * 100 if comb_coef is not None else None
         }
 
-    # Construct a concise conclusion about whether Reader View "improves" reading speed for dyslexic readers.
-    concl = {}
-    coef_for_dys = combined_stats.get('coef_log', np.nan)
-    p_for_dys = combined_stats.get('p_value', np.nan)
-    pct_for_dys = combined_stats.get('pct_change', np.nan)
-    ci_pct = combined_stats.get('95%_CI_pct', [np.nan, np.nan])
-    try:
-        if np.isnan(p_for_dys):
-            conclusion_text = ("Could not compute a p-value for the marginal Reader View effect in dyslexic readers. "
-                               "See extracted coefficients and CIs for inspection.")
-        else:
-            if (p_for_dys < 0.05) and (coef_for_dys > 0):
-                conclusion_text = (f"Yes — Reader View is associated with a statistically significant increase in reading speed "
-                                   f"for dyslexic readers (estimated change = {pct_for_dys:.1f}% ; 95% CI = [{ci_pct[0]:.1f}%, {ci_pct[1]:.1f}%], p = {p_for_dys:.3g}).")
-            elif (p_for_dys < 0.05) and (coef_for_dys < 0):
-                conclusion_text = (f"No — Reader View is associated with a statistically significant decrease in reading speed "
-                                   f"for dyslexic readers (estimated change = {pct_for_dys:.1f}% ; 95% CI = [{ci_pct[0]:.1f}%, {ci_pct[1]:.1f}%], p = {p_for_dys:.3g}).")
-            else:
-                conclusion_text = (f"No — there is no statistically significant effect of Reader View on reading speed for dyslexic readers "
-                                   f"(estimated change = {pct_for_dys:.1f}% ; 95% CI = [{ci_pct[0]:.1f}%, {ci_pct[1]:.1f}%], p = {p_for_dys:.3g}).")
-    except Exception:
-        conclusion_text = "Could not generate conclusion text due to missing statistics."
-
-    # Build the object to return
-    out = {
-        'reader_view_term': reader_stats,
-        'interaction_term': interaction_stats,
-        'dyslexia_term': dyslexia_stats,
-        'reader_view_effect_for_dyslexic': combined_stats,
-        'conclusion': conclusion_text
+    # Prepare output object
+    output_object = {
+        'main_reader_view': {
+            'param_name': main_name,
+            'coef': main_coef,
+            'se': main_se,
+            'p_value': main_p,
+            'ci_95_lower': ci_lower_main,
+            'ci_95_upper': ci_upper_main,
+            'pct_change': (np.exp(main_coef) - 1.0) * 100 if main_coef is not None else None,
+            'interpretation': (
+                "Effect of Reader View for the reference group (likely non-dyslexic if dyslexia_bin=0). "
+                "Dependent variable is log(speed + 1), so coef is approximately the log multiplicative change; "
+                "pct_change gives percent change in speed."
+            )
+        },
+        'interaction': {
+            'param_name': interaction_name,
+            'coef': interaction_coef,
+            'se': interaction_se,
+            'p_value': interaction_p,
+            'ci_95_lower': ci_lower_int,
+            'ci_95_upper': ci_upper_int,
+            'interpretation': (
+                "Interaction term: additional effect of Reader View when dyslexia_bin=1. "
+                "If positive, Reader View effect is larger for dyslexic participants by this amount (in log units)."
+            ) if interaction_name is not None else "No interaction term found in model parameters."
+        },
+        'reader_view_for_dyslexic': combined,
+        'raw_params': params.to_dict()
     }
 
-    description = ("This output gives coefficients, standard errors, p-values, and 95% confidence intervals "
-                   "for the reader_view main effect and the reader_view:dyslexia interaction (if present), "
-                   "and computes the marginal effect of Reader View for dyslexic readers (coef on log scale, "
-                   "converted to percent change). The 'conclusion' field states whether the effect is "
-                   "statistically significant at alpha = 0.05 and the direction/size of the effect.")
+    # Human readable description
+    if combined and combined.get('p_value') is not None:
+        if combined['p_value'] < 0.05:
+            conclusion = ("Reader View has a statistically significant effect on reading speed for dyslexic participants "
+                          f"(combined coef = {combined['coef']:.4f}, p = {combined['p_value']:.3g}). "
+                          f"This corresponds to an estimated {combined['pct_change']:.1f}% change in speed.")
+        else:
+            conclusion = ("Reader View does not show a statistically significant effect on reading speed for dyslexic participants "
+                          f"(combined coef = {combined['coef']:.4f}, p = {combined['p_value']:.3g}).")
+    else:
+        conclusion = ("Could not compute a p-value for the combined effect on dyslexic participants (missing SE/covariance). "
+                      "Returned coefficients and approximate percent-change; consider inspecting model summary and covariance matrix.")
 
-    return {'object': out, 'description': description}
+    description = (
+        "Extracted estimates for the Reader View main effect and its interaction with dyslexia. "
+        "Key objects:\n"
+        "- main_reader_view: effect of Reader View for the reference group (likely non-dyslexic).\n"
+        "- interaction: additional effect when dyslexia_bin=1.\n"
+        "- reader_view_for_dyslexic: combined effect (main + interaction) representing Reader View effect for dyslexic participants; "
+        "contains coef, SE, p-value (if covariance available), 95% CI, and percent change on original speed scale.\n\n"
+        "Conclusion summary: " + conclusion
+    )
+
+    return {"object": output_object, "description": description}

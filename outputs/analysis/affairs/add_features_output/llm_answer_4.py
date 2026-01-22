@@ -1,202 +1,217 @@
 def extract_final_answer(model_output):
     """
-    Extracts the effect of 'has_children' on the count of extramarital affairs from a
-    fitted statsmodels ZeroInflatedNegativeBinomialResultsWrapper.
+    Extract statistics about the effect of having children on extramarital affairs
+    from the provided model_output dict containing:
+      - 'neg_binom': fitted (robust) GLM NegativeBinomial results wrapper
+      - 'logit': fitted (robust) Logit results wrapper
 
-    Returns a dictionary with:
-      - "object": dict with numeric summaries for:
-          * female effect of has_children (count model)
-          * male effect of has_children (count model, using interaction children_x_male)
-          * inflation (logit) effect of has_children (if present)
-      - "description": short text interpretation of what the numbers mean.
+    Returns:
+      {
+        "object": {
+            "neg_binom": {
+                "coef_children": float,
+                "se_children": float,
+                "p_children": float,
+                "irr_children": float,
+                "irr_children_ci95": (lower, upper),
+                "coef_children_male": float,
+                "se_children_male": float,
+                "p_children_male": float,
+                "irr_children_male": float,
+                "irr_children_male_ci95": (lower, upper)
+            },
+            "logit": {
+                "coef_children": float,
+                "se_children": float,
+                "p_children": float,
+                "or_children": float,
+                "or_children_ci95": (lower, upper),
+                "coef_children_male": float,
+                "se_children_male": float,
+                "p_children_male": float,
+                "or_children_male": float,
+                "or_children_male_ci95": (lower, upper)
+            }
+        },
+        "description": str
+      }
+    The description gives a concise interpretation of whether having children decreases
+    engagement in extramarital affairs (overall / for females) and whether that effect
+    differs for males (based on the children_x_male interaction).
     """
     import numpy as np
+    from math import sqrt
     from scipy import stats
 
-    res = model_output
+    # Validate input
+    if not isinstance(model_output, dict):
+        raise ValueError("model_output must be a dict containing 'neg_binom' and 'logit' results.")
 
-    params = res.params
-    bse = res.bse
-    cov = None
+    if 'neg_binom' not in model_output or 'logit' not in model_output:
+        raise KeyError("model_output must contain keys 'neg_binom' and 'logit'")
+
+    neg = model_output['neg_binom']
+    logit = model_output['logit']
+
+    # convenience to extract named objects
+    def safe_get(series_like, name, label):
+        # handle pandas Series-like with index, or dict-like
+        try:
+            idx = list(series_like.index)
+        except Exception:
+            # fallback for dict-like
+            try:
+                idx = list(series_like.keys())
+            except Exception:
+                idx = []
+        if name not in idx and name not in getattr(series_like, '__dict__', {}):
+            raise KeyError(f"Variable '{name}' not found in model {label}. Available: {idx}")
+        # prefer Series/dict access
+        try:
+            return series_like[name]
+        except Exception:
+            # last resort: attribute access
+            return getattr(series_like, name)
+
+    results = {"neg_binom": {}, "logit": {}}
+
+    # --- NEGATIVE BINOMIAL (count outcome) ---
     try:
-        cov = res.cov_params()
-    except Exception:
-        cov = None
+        params_nb = neg.params
+        bse_nb = neg.bse
+        pvals_nb = neg.pvalues
+        ci_nb = neg.conf_int()
+        cov_nb = neg.cov_params()
+    except Exception as e:
+        raise RuntimeError("Failed to extract pieces from neg_binom results: " + str(e))
 
-    # Helper to find parameter names robustly
-    def find_param(name):
-        # exact match first
-        if name in params.index:
-            return name
-        # try variants
-        for idx in params.index:
-            if idx.endswith(name):
-                return idx
-            if name in idx:
-                return idx
-        return None
+    # required term names
+    term = 'children_binary'
+    interaction = 'children_x_male'
 
-    # Count-model parameter names
-    has_children_name = find_param('has_children')
-    interaction_name = find_param('children_x_male') or find_param('has_children:gender_male') or find_param('has_children:gender')  # try common variants
+    # extract main coef for children (female baseline when gender_male=0)
+    coef_ch = safe_get(params_nb, term, 'neg_binom')
+    se_ch = safe_get(bse_nb, term, 'neg_binom')
+    p_ch = safe_get(pvals_nb, term, 'neg_binom')
+    ci_ch = ci_nb.loc[term].tolist()  # [low, high]
+    irr_ch = float(np.exp(coef_ch))
+    irr_ch_ci = (float(np.exp(ci_ch[0])), float(np.exp(ci_ch[1])))
 
-    # Inflation-model parameter name (often prefixed 'inflate_')
-    inflate_has_children_name = None
-    for idx in params.index:
-        if 'inflate' in idx and 'has_children' in idx:
-            inflate_has_children_name = idx
-            break
-    # fallback: if there's a second block of params, try to detect inflation param by suffix/pattern
-    if inflate_has_children_name is None:
-        # sometimes inflation params are after count params and may be named like 'has_children' but with a suffix/prefix
-        for idx in params.index:
-            if idx != has_children_name and 'has_children' in idx:
-                inflate_has_children_name = idx
-                break
+    # extract interaction coef
+    coef_int = safe_get(params_nb, interaction, 'neg_binom')
+    # compute combined effect for males: children effect + interaction
+    coef_ch_male = coef_ch + coef_int
 
-    output = {}
+    # compute se for combined effect using covariance matrix
+    var_ch = cov_nb.loc[term, term]
+    var_int = cov_nb.loc[interaction, interaction]
+    cov_ch_int = cov_nb.loc[term, interaction]
+    se_ch_male = sqrt(var_ch + var_int + 2.0 * cov_ch_int)
+    # p-value for combined
+    z_ch_male = coef_ch_male / se_ch_male
+    p_ch_male = 2.0 * (1.0 - stats.norm.cdf(abs(z_ch_male)))
+    # IRR and CI for males
+    irr_ch_male = float(np.exp(coef_ch_male))
+    # CI for combined: use Wald CI from coef_ch_male +/- 1.96*se
+    ci_ch_male = (float(np.exp(coef_ch_male - 1.96 * se_ch_male)), float(np.exp(coef_ch_male + 1.96 * se_ch_male)))
 
-    # ----- Count model: female effect (gender_male = 0) -----
-    if has_children_name is None:
-        raise ValueError("Could not find a parameter named 'has_children' in model params.")
-    coef_f = float(params[has_children_name])
-    se_f = float(bse[has_children_name]) if has_children_name in bse.index else np.nan
-    z_f = coef_f / se_f if se_f and not np.isnan(se_f) else np.nan
-    p_f = 2.0 * (1.0 - stats.norm.cdf(abs(z_f))) if not np.isnan(z_f) else np.nan
-    irr_f = np.exp(coef_f)
-    ci_lower_f = np.exp(coef_f - 1.96 * se_f) if not np.isnan(se_f) else np.nan
-    ci_upper_f = np.exp(coef_f + 1.96 * se_f) if not np.isnan(se_f) else np.nan
-
-    output['female_effect_count'] = {
-        'param_name': has_children_name,
-        'coef': coef_f,
-        'se': se_f,
-        'z': z_f,
-        'p_value': p_f,
-        'IRR': irr_f,
-        'IRR_95CI': (ci_lower_f, ci_upper_f),
-        'interpretation': (
-            "This is the log count (log incidence rate) effect of having children for females "
-            "(gender_male=0). IRR < 1 implies fewer expected affairs when having children."
-        )
+    results['neg_binom'] = {
+        "coef_children": float(coef_ch),
+        "se_children": float(se_ch),
+        "p_children": float(p_ch),
+        "irr_children": irr_ch,
+        "irr_children_ci95": irr_ch_ci,
+        "coef_children_male": float(coef_ch_male),
+        "se_children_male": float(se_ch_male),
+        "p_children_male": float(p_ch_male),
+        "irr_children_male": irr_ch_male,
+        "irr_children_male_ci95": ci_ch_male
     }
 
-    # ----- Count model: male effect (gender_male = 1) -----
-    if interaction_name is None:
-        # No interaction found: male effect is same as female effect plus (if gender main effect)
-        # But since user specified an interaction, we try to handle gracefully.
-        coef_m = coef_f
-        # use same se (conservative)
-        se_m = se_f
-        z_m = z_f
-        p_m = p_f
-        irr_m = irr_f
-        ci_lower_m, ci_upper_m = ci_lower_f, ci_upper_f
-        note = "No children_x_male interaction found; male effect assumed equal to female effect."
-    else:
-        coef_int = float(params[interaction_name])
-        # combined coefficient = coef_f + coef_int
-        coef_m = coef_f + coef_int
-        # compute SE for sum using covariance if available
-        if cov is not None and has_children_name in cov.index and interaction_name in cov.index:
-            var_sum = cov.loc[has_children_name, has_children_name] + cov.loc[interaction_name, interaction_name] + 2.0 * cov.loc[has_children_name, interaction_name]
-            se_m = float(np.sqrt(max(var_sum, 0.0)))
+    # --- LOGIT (binary any_affair outcome) ---
+    try:
+        params_log = logit.params
+        bse_log = logit.bse
+        pvals_log = logit.pvalues
+        ci_log = logit.conf_int()
+        cov_log = logit.cov_params()
+    except Exception as e:
+        raise RuntimeError("Failed to extract pieces from logit results: " + str(e))
+
+    # main effect
+    coef_ch_l = safe_get(params_log, term, 'logit')
+    se_ch_l = safe_get(bse_log, term, 'logit')
+    p_ch_l = safe_get(pvals_log, term, 'logit')
+    ci_ch_l = ci_log.loc[term].tolist()
+    or_ch = float(np.exp(coef_ch_l))
+    or_ch_ci = (float(np.exp(ci_ch_l[0])), float(np.exp(ci_ch_l[1])))
+
+    # interaction
+    coef_int_l = safe_get(params_log, interaction, 'logit')
+    coef_ch_male_l = coef_ch_l + coef_int_l
+    # se for combined (male)
+    var_ch_l = cov_log.loc[term, term]
+    var_int_l = cov_log.loc[interaction, interaction]
+    cov_ch_int_l = cov_log.loc[term, interaction]
+    se_ch_male_l = sqrt(var_ch_l + var_int_l + 2.0 * cov_ch_int_l)
+    z_ch_male_l = coef_ch_male_l / se_ch_male_l
+    p_ch_male_l = 2.0 * (1.0 - stats.norm.cdf(abs(z_ch_male_l)))
+    or_ch_male = float(np.exp(coef_ch_male_l))
+    or_ch_male_ci = (float(np.exp(coef_ch_male_l - 1.96 * se_ch_male_l)), float(np.exp(coef_ch_male_l + 1.96 * se_ch_male_l)))
+
+    results['logit'] = {
+        "coef_children": float(coef_ch_l),
+        "se_children": float(se_ch_l),
+        "p_children": float(p_ch_l),
+        "or_children": or_ch,
+        "or_children_ci95": or_ch_ci,
+        "coef_children_male": float(coef_ch_male_l),
+        "se_children_male": float(se_ch_male_l),
+        "p_children_male": float(p_ch_male_l),
+        "or_children_male": or_ch_male,
+        "or_children_male_ci95": or_ch_male_ci
+    }
+
+    # Short interpretation text based on significance/direction
+    def interpret_count(coef, pval, irr):
+        if pval < 0.05:
+            if irr < 1.0:
+                return "Significant decrease in expected count (IRR<1)."
+            else:
+                return "Significant increase in expected count (IRR>1)."
         else:
-            # fallback: approximate by sqrt(se_f^2 + se_int^2)
-            se_int = float(bse[interaction_name]) if interaction_name in bse.index else np.nan
-            se_m = float(np.sqrt(max((se_f or 0.0)**2 + (se_int or 0.0)**2, 0.0)))
-        z_m = coef_m / se_m if se_m and not np.isnan(se_m) else np.nan
-        p_m = 2.0 * (1.0 - stats.norm.cdf(abs(z_m))) if not np.isnan(z_m) else np.nan
-        irr_m = np.exp(coef_m)
-        ci_lower_m = np.exp(coef_m - 1.96 * se_m) if not np.isnan(se_m) else np.nan
-        ci_upper_m = np.exp(coef_m + 1.96 * se_m) if not np.isnan(se_m) else np.nan
-        note = "Male effect computed as sum of has_children (count) and the children_x_male interaction."
+            return "No statistically significant effect detected (p>=0.05)."
 
-    output['male_effect_count'] = {
-        'param_names': (has_children_name, interaction_name),
-        'coef': coef_m,
-        'se': se_m,
-        'z': z_m,
-        'p_value': p_m,
-        'IRR': irr_m,
-        'IRR_95CI': (ci_lower_m, ci_upper_m),
-        'note': note,
-        'interpretation': (
-            "This is the log count effect of having children for males (gender_male=1). "
-            "IRR < 1 implies fewer expected affairs when having children."
-        )
-    }
-
-    # ----- Inflation (logit) effect of has_children -----
-    if inflate_has_children_name is not None and inflate_has_children_name in params.index:
-        coef_infl = float(params[inflate_has_children_name])
-        se_infl = float(bse[inflate_has_children_name]) if inflate_has_children_name in bse.index else np.nan
-        z_infl = coef_infl / se_infl if se_infl and not np.isnan(se_infl) else np.nan
-        p_infl = 2.0 * (1.0 - stats.norm.cdf(abs(z_infl))) if not np.isnan(z_infl) else np.nan
-        or_infl = np.exp(coef_infl)
-        ci_lower_infl = np.exp(coef_infl - 1.96 * se_infl) if not np.isnan(se_infl) else np.nan
-        ci_upper_infl = np.exp(coef_infl + 1.96 * se_infl) if not np.isnan(se_infl) else np.nan
-
-        output['inflation_has_children'] = {
-            'param_name': inflate_has_children_name,
-            'coef': coef_infl,
-            'se': se_infl,
-            'z': z_infl,
-            'p_value': p_infl,
-            'OR': or_infl,
-            'OR_95CI': (ci_lower_infl, ci_upper_infl),
-            'interpretation': (
-                "This is the log-odds effect of having children on being an 'excess' zero (structural non-participant). "
-                "OR < 1 implies having children is associated with lower odds of being in the always-zero group (i.e., "
-                "less likely to be a structural non-participant)."
-            )
-        }
-    else:
-        output['inflation_has_children'] = None
-
-    # Short textual description summarizing the results for the question:
-    # Determine whether having children decreases engagement in affairs based on IRR and p-values.
-    def interpret_decision(entry):
-        if entry is None:
-            return "No inflation term for has_children detected."
-        coef = entry['coef']
-        p = entry['p_value']
-        irr = entry['OR']
-        # For inflation we don't use this function; remain generic
-        return None
+    def interpret_binary(coef, pval, orr):
+        if pval < 0.05:
+            if orr < 1.0:
+                return "Significant decrease in odds of any affair (OR<1)."
+            else:
+                return "Significant increase in odds of any affair (OR>1)."
+        else:
+            return "No statistically significant effect detected (p>=0.05)."
 
     desc_lines = []
-    # Female
-    ff = output['female_effect_count']
-    desc_lines.append(
-        f"For females (gender_male=0): has_children coef={ff['coef']:.4f}, SE={ff['se']:.4f}, p={ff['p_value']:.3g}. "
-        f"IRR={ff['IRR']:.3f} (95% CI {ff['IRR_95CI'][0]:.3f} to {ff['IRR_95CI'][1]:.3f})."
-    )
-    # Male
-    mm = output['male_effect_count']
-    desc_lines.append(
-        f"For males (gender_male=1): has_children combined coef={mm['coef']:.4f}, SE={mm['se']:.4f}, p={mm['p_value']:.3g}. "
-        f"IRR={mm['IRR']:.3f} (95% CI {mm['IRR_95CI'][0]:.3f} to {mm['IRR_95CI'][1]:.3f})."
-    )
-    # Inflation
-    infl = output['inflation_has_children']
-    if infl is not None:
-        desc_lines.append(
-            f"Inflation-part (logit) for has_children: coef={infl['coef']:.4f}, SE={infl['se']:.4f}, p={infl['p_value']:.3g}. "
-            f"OR={infl['OR']:.3f} (95% CI {infl['OR_95CI'][0]:.3f} to {infl['OR_95CI'][1]:.3f})."
-        )
-    else:
-        desc_lines.append("No inflation (logit) parameter for has_children was found in the model output.")
+    # Females (baseline)
+    desc_lines.append("Negative binomial (count): children effect (females): " +
+                      interpret_count(results['neg_binom']['coef_children'],
+                                      results['neg_binom']['p_children'],
+                                      results['neg_binom']['irr_children']))
+    # Males
+    desc_lines.append("Negative binomial (count): children effect (males): " +
+                      interpret_count(results['neg_binom']['coef_children_male'],
+                                      results['neg_binom']['p_children_male'],
+                                      results['neg_binom']['irr_children_male']))
+    # Logit
+    desc_lines.append("Logit (any_affair): children effect (females): " +
+                      interpret_binary(results['logit']['coef_children'],
+                                       results['logit']['p_children'],
+                                       results['logit']['or_children']))
+    desc_lines.append("Logit (any_affair): children effect (males): " +
+                      interpret_binary(results['logit']['coef_children_male'],
+                                       results['logit']['p_children_male'],
+                                       results['logit']['or_children_male']))
 
-    # Overall interpretive summary (conservative): look at significance and direction for male & female
-    summary_interp = []
-    for label, part in [('females', ff), ('males', mm)]:
-        sign = 'decrease' if part['IRR'] < 1 else ('increase' if part['IRR'] > 1 else 'no change')
-        sig = 'statistically significant' if (part['p_value'] is not None and part['p_value'] < 0.05) else 'not statistically significant'
-        summary_interp.append(f"For {label}: having children is associated with a {sign} in the expected count of affairs ({sig}; p={part['p_value']:.3g}).")
+    description = " | ".join(desc_lines)
 
-    desc_lines.extend(summary_interp)
-
-    description = " ".join(desc_lines)
-
-    return {"object": output, "description": description}
+    return {"object": results, "description": description}

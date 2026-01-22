@@ -13,119 +13,113 @@ df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/anal
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Standardize and derive variables needed for modeling intergroup contest outcomes.
+    Transform the raw DataFrame into the final DataFrame used for modeling.
 
-    Assumptions/notes about original columns (based on provided schema descriptions):
-    - 'f_other' contains the total number of individuals in the focal group.
-    - 'f_focal' contains the total number of individuals in the other group.
-    - 'win' contains the focal group's distance (meters) from center of its home range.
-    - 'm_focal' contains the other group's distance (meters) from center of its home range.
-    - 'n_focal' contains number of males in focal group.
-    - 'other' contains number of males in other group.
-    - 'dist_focal' contains number of females in focal group (kept if needed, but not used directly here).
-    - 'focal' contains number of females in other group.
-    - 'dyad' is the binary contest outcome (1 if focal won, 0 if other won).
+    Produced columns (used in model):
+      - dyad_win: binary outcome (1 focal won, 0 other won)
+      - total_focal: total adults in focal group (n_focal + dist_focal)
+      - total_other: total adults in other group (other + focal)
+      - log_size_ratio: log(total_focal / total_other)
+      - log_size_ratio_c: standardized (z-scored) log_size_ratio
+      - focal_dist_m: distance (m) of focal group from center of its home range (column 'win' per metadata)
+      - focal_dist_m_c: standardized focal_dist_m
+      - other_dist_m: distance (m) of other group from center of its home range (column 'm_focal' per metadata)
+      - size_x_focaldist: interaction (log_size_ratio_c * focal_dist_m_c)
+      - pair_id: dyad pair id (m_other)
+      - focal_id: focal group id (n_other)
+      - other_id: other group id (dist_other)
 
-    The function will create clear named columns used in the model: focal_total, other_total, rel_size_ratio,
-    rel_size_diff, focal_dist, other_dist, dist_diff, contest_location, focal_males, other_males.
+    Notes on mappings: the provided metadata labels are inconsistent with column names; the code below follows the dataset column names and uses the descriptive metadata to interpret which columns represent counts and distances.
     """
+
     df = df.copy()
 
-    # Ensure dyad is binary integer
-    df['dyad'] = df['dyad'].astype(int)
+    # Required raw columns - ensure they exist
+    required_cols = ['dyad', 'n_focal', 'other', 'dist_focal', 'focal', 'win', 'm_focal', 'm_other', 'n_other', 'dist_other']
+    missing = [c for c in required_cols if c not in df.columns]
+    if len(missing) > 0:
+        raise ValueError(f"The following required columns are missing from the input dataframe: {missing}")
 
-    # Map / derive clear columns (use descriptions from schema)
-    # Total group sizes
-    df['focal_total'] = df['f_other']
-    df['other_total'] = df['f_focal']
+    # Outcome
+    df['dyad_win'] = df['dyad'].astype(int)
 
-    # Male counts
-    df['focal_males'] = df['n_focal']
-    df['other_males'] = df['other']
+    # Compute total group sizes using male + female counts (per metadata descriptions):
+    # total_focal: males in focal (n_focal) + females in focal (dist_focal per metadata)
+    # total_other: males in other (other) + females in other (focal per metadata)
+    df['total_focal'] = df['n_focal'] + df['dist_focal']
+    df['total_other'] = df['other'] + df['focal']
 
-    # Female counts (kept if needed later)
-    df['focal_females'] = df['dist_focal']
-    df['other_females'] = df['focal']
+    # Remove impossible rows (zero or missing totals) to avoid division-by-zero
+    df = df.dropna(subset=['total_focal', 'total_other', 'win', 'm_focal', 'dyad'])
+    df = df[(df['total_other'] > 0) & (df['total_focal'] > 0)]
 
-    # Distances from home-range centers to contest location (per schema descriptions)
-    df['focal_dist'] = df['win']
-    df['other_dist'] = df['m_focal']
+    # Relative group size: log ratio (focal / other). Add small epsilon for numerical safety.
+    eps = 1e-6
+    df['log_size_ratio'] = np.log((df['total_focal'] + eps) / (df['total_other'] + eps))
 
-    # Relative size (ratio and difference)
-    # Avoid division by zero by replacing zeros (unlikely given schema) with np.nan
-    df['other_total'] = df['other_total'].replace({0: np.nan})
-    df['rel_size_ratio'] = df['focal_total'] / df['other_total']
-    df['rel_size_diff'] = df['focal_total'] - df['other_total']
+    # Contest location distances (per metadata):
+    # 'win' described as distance (m) of focal group from center of its home range
+    # 'm_focal' described as distance (m) of other group from the center of its home range
+    df['focal_dist_m'] = df['win'].astype(float)
+    df['other_dist_m'] = df['m_focal'].astype(float)
 
-    # Distance difference (other_dist - focal_dist): positive means other is farther from its center than focal
-    df['dist_diff'] = df['other_dist'] - df['focal_dist']
+    # IDs for clustering and bookkeeping
+    df['pair_id'] = df['m_other'].astype(int)
+    df['focal_id'] = df['n_other'].astype(int)
+    df['other_id'] = df['dist_other'].astype(int)
 
-    # Categorical contest location: which group is nearer to the contest location
-    # If focal_dist < other_dist => focal group's home is nearer to contest => 'FocalNear'
-    # If focal_dist > other_dist => other group's home is nearer => 'OtherNear'
-    # If equal (rare) => 'Neutral'
-    df['contest_location'] = np.where(df['focal_dist'] < df['other_dist'],
-                                      'FocalNear',
-                                      np.where(df['focal_dist'] > df['other_dist'], 'OtherNear', 'Neutral'))
+    # Standardize (z-score) the main continuous predictors for interpretability and to help model convergence
+    # Use ddof=0 to match population std as typical in ML; statsmodels is fine with either.
+    df['log_size_ratio_c'] = (df['log_size_ratio'] - df['log_size_ratio'].mean()) / (df['log_size_ratio'].std(ddof=0) + eps)
+    df['focal_dist_m_c'] = (df['focal_dist_m'] - df['focal_dist_m'].mean()) / (df['focal_dist_m'].std(ddof=0) + eps)
 
-    # Drop rows missing any required modeling columns
-    required = [
-        'dyad',
-        'rel_size_ratio',
-        'rel_size_diff',
-        'contest_location',
-        'focal_males',
-        'other_males',
-        'dist_diff'
-    ]
-    df = df.dropna(subset=required)
+    # Interaction term: relative size x focal distance (standardized interaction)
+    df['size_x_focaldist'] = df['log_size_ratio_c'] * df['focal_dist_m_c']
 
-    # Reset index for cleanliness
-    df = df.reset_index(drop=True)
+    # Keep only columns necessary for modeling and diagnostics (but preserve in df to return)
+    # Ensure integer columns are int dtype
+    df['n_focal'] = df['n_focal'].astype(int)
+    df['other'] = df['other'].astype(int)
+
+    # Final returned dataframe includes both raw and derived columns for transparency
     return df
 
 
 # ======== MODEL CODE ========
 def model(df: pd.DataFrame) -> Any:
     """
-    Fit a logistic regression (binomial GLM / Logit) predicting the probability that the focal group wins
-    (dyad == 1) as a function of relative size, contest location, their interaction, and controls.
+    Fit a logistic (binomial) regression predicting focal-group win (dyad_win) from
+    relative group size, contest location, their interaction, and controls.
 
-    Model specification (final):
-      logit(P(dyad=1)) = const + rel_size_ratio + contest_location_dummies + rel_size_ratio:contest_location_dummies
-                          + focal_males + other_males + dist_diff + rel_size_diff
+    The function uses cluster-robust standard errors clustered on the dyad pair id (pair_id)
+    to account for non-independence of observations within the same group pair.
 
-    Interaction terms test whether the effect of relative size differs depending on contest location.
+    Returns the fitted GLMResults object.
     """
-    df2 = df.copy()
 
-    # Prepare design matrix
-    # Create dummies for contest_location; drop_first=True to use one level as reference
-    loc_dummies = pd.get_dummies(df2['contest_location'], prefix='contest_loc', drop_first=True)
+    # Columns expected in transformed dataframe
+    expected = ['dyad_win', 'log_size_ratio_c', 'focal_dist_m_c', 'size_x_focaldist', 'n_focal', 'other', 'pair_id']
+    missing = [c for c in expected if c not in df.columns]
+    if len(missing) > 0:
+        raise ValueError(f"The following required columns are missing from the transformed dataframe: {missing}")
 
-    # Base predictors and controls
-    X = pd.concat([
-        df2[['rel_size_ratio', 'focal_males', 'other_males', 'dist_diff', 'rel_size_diff']].astype(float),
-        loc_dummies
-    ], axis=1)
-
-    # Add interaction terms: rel_size_ratio * each location dummy
-    for col in loc_dummies.columns:
-        X[f'rel_size_ratio:{col}'] = X['rel_size_ratio'] * X[col]
-
-    # Add constant
+    # Design matrix
+    X_cols = ['log_size_ratio_c', 'focal_dist_m_c', 'size_x_focaldist', 'n_focal', 'other']
+    X = df[X_cols].astype(float)
     X = sm.add_constant(X, has_constant='add')
+    y = df['dyad_win'].astype(float)
 
-    # Response
-    y = df2['dyad'].astype(int)
-
-    # Fit logistic regression (Logit). Use try/except to fall back to GLM if convergence issues.
+    # Fit GLM with binomial family (logistic regression) and cluster-robust SEs by pair_id
+    model = sm.GLM(y, X, family=sm.families.Binomial())
     try:
-        model_res = sm.Logit(y, X).fit(disp=False)
+        results = model.fit(cov_type='cluster', cov_kwds={'groups': df['pair_id']})
     except Exception:
-        # fall back to GLM binomial with default freq weights if Logit fails
-        model_res = sm.GLM(y, X, family=sm.families.Binomial()).fit()
+        # Fallback to default fit if cluster covariance fails for small sample reasons
+        results = model.fit()
 
-    return model_res
+    # Print a concise summary (caller can inspect results further)
+    print(results.summary())
+
+    return results
 
 

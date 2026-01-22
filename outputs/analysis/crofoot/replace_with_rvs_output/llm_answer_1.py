@@ -1,278 +1,199 @@
 def extract_final_answer(model_output):
     """
-    Extracts coefficients, p-values, confidence intervals, and computes the
-    marginal effect of `size_diff` (log-odds scale) at each ContestLocation
-    level from a fitted statsmodels logistic regression (possibly cluster-robust).
+    Extract key statistics from a fitted statsmodels GLM/ResultsWrapper (possibly
+    cluster-robust results) to answer whether relative group size and contest
+    location influence the probability of focal group winning.
 
     Returns:
-      {
-        "object": {
-            "params": {name: value, ...},
-            "pvalues": {name: value, ...},
-            "conf_int": {name: [low, high], ...},
-            "marginal_effects_by_location": {
-                location_name: {
-                    "effect_log_odds": float,
-                    "se": float or None,
-                    "z": float or None,
-                    "p": float or None,
-                    "95%_ci": [low, high] or [None, None]
-                }, ...
-            },
-            "reference_level": str or None
-        },
-        "description": "Plain-English interpretation of the extracted results."
-      }
+      dict with keys:
+        - "object": dict of extracted numeric results (coef, SE, p, 95% CI,
+                    odds ratios, and marginal effects for RelSizeRatio at
+                    RelDistance = -1, 0, +1)
+        - "description": short plain-English interpretation of the results
     """
     import numpy as np
     import pandas as pd
-    from scipy.stats import norm
 
-    res = model_output
+    # Helper to try multiple possible names for the interaction term
+    possible_interactions = ['RelSizeRatio:RelDistance', 'RelDistance:RelSizeRatio']
 
-    # Validate we have parameter estimates
-    if not hasattr(res, "params"):
-        raise ValueError("model_output has no .params attribute; expected a statsmodels results object.")
-
-    params = res.params.copy()
-    pvalues = res.pvalues.copy() if hasattr(res, "pvalues") else pd.Series(index=params.index, data=[None]*len(params))
-    # conf_int may require alpha; most results provide conf_int() method
+    # Obtain parameter estimates, std errors, p-values, conf_int, covariance matrix robustly
     try:
-        ci_df = res.conf_int()  # returns DataFrame with two columns
-        ci_df.columns = ["2.5%", "97.5%"]
+        params = model_output.params
     except Exception:
-        # fallback: put Nones
-        ci_df = pd.DataFrame(index=params.index, columns=["2.5%", "97.5%"])
-        ci_df.loc[:, :] = None
+        raise ValueError("Could not extract params from model_output")
 
-    # Attempt to get covariance matrix for variance of linear combinations
-    cov = None
+    # Ensure params is a pandas Series for convenient .get/.index usage
+    if not isinstance(params, pd.Series):
+        params = pd.Series(params, index=getattr(model_output, 'param_names', None))
+
+    # p-values
+    pvalues = None
     try:
-        cov = res.cov_params()
+        pvalues = model_output.pvalues
+        if not isinstance(pvalues, pd.Series):
+            pvalues = pd.Series(pvalues, index=params.index)
     except Exception:
+        # may not be available
+        pvalues = pd.Series({k: np.nan for k in params.index})
+
+    # Confidence intervals
+    try:
+        ci = model_output.conf_int()
+        # conf_int may return an ndarray or DataFrame
+        if isinstance(ci, np.ndarray):
+            ci = pd.DataFrame(ci, index=params.index, columns=[0,1])
+        elif isinstance(ci, pd.DataFrame):
+            # ensure columns are numeric 0,1
+            pass
+        else:
+            ci = pd.DataFrame(ci, index=params.index, columns=[0,1])
+    except Exception:
+        # fallback to NA intervals
+        ci = pd.DataFrame(index=params.index, columns=[0,1], data=np.nan)
+
+    # Covariance matrix (for marginal effect SEs)
+    cov_ok = True
+    try:
+        cov = model_output.cov_params()
+        cov = pd.DataFrame(cov, index=params.index, columns=params.index)
+    except Exception:
+        cov_ok = False
         cov = None
 
-    # Identify variable names of interest
-    param_names = list(params.index)
-
-    # Standard name for focal predictor
-    size_name = None
-    for n in param_names:
-        if n == "size_diff":
-            size_name = n
+    # Terms of interest
+    terms = ['RelSizeRatio', 'RelDistance']
+    # find which interaction name is present
+    interaction_term = None
+    for name in possible_interactions:
+        if name in params.index:
+            interaction_term = name
             break
-    if size_name is None:
-        # try variations
-        for n in param_names:
-            if n.endswith("size_diff") or "size_diff" in n:
-                # prefer exact match but otherwise choose the one that is exactly 'size_diff'
-                size_name = n
-                break
+    if interaction_term is None:
+        # Interaction not present (maybe model was refit without it)
+        interaction_term = possible_interactions[0]  # still report attempted name
+    terms.append(interaction_term)
 
-    if size_name is None:
-        raise ValueError("Could not find a parameter corresponding to 'size_diff' in model parameters. Found: " + ", ".join(param_names))
-
-    # Find contest location main-effect dummy names and interaction names
-    contest_main = {}
-    contest_inter = {}
-    # Patterns to look for: 'ContestLocation[T.SomeLevel]' for main; interaction may be 'size_diff:ContestLocation[T.SomeLevel]' or vice versa
-    for n in param_names:
-        if "ContestLocation" in n and ":" not in n:
-            # main effect for a level (dummy)
-            contest_main[n] = params[n]
-        if "ContestLocation" in n and ":" in n and "size_diff" in n:
-            # interaction term
-            contest_inter[n] = params[n]
-
-    # Try to obtain full list of contest location levels from the original dataframe, if available
-    reference_level = None
-    levels_from_data = None
-    try:
-        df = res.model.data.frame
-        if "ContestLocation" in df.columns:
-            ser = pd.Categorical(df["ContestLocation"])
-            levels_from_data = list(ser.categories)
-            # Determine which levels appear as dummies in params: these will be 'ContestLocation[T.level]'
-            dummy_levels = []
-            for lvl in levels_from_data:
-                key = f"ContestLocation[T.{lvl}]"
-                if key in param_names:
-                    dummy_levels.append(lvl)
-            # reference level is the one not present as a dummy (if exactly one)
-            ref = [lvl for lvl in levels_from_data if lvl not in dummy_levels]
-            if len(ref) == 1:
-                reference_level = ref[0]
-            else:
-                # ambiguous or ordering unknown
-                reference_level = None
-    except Exception:
-        levels_from_data = None
-        reference_level = None
-
-    # If we couldn't get levels from data, infer levels from parameter names
-    inferred_levels = []
-    for n in param_names:
-        if n.startswith("ContestLocation[T."):
-            # extract between 'ContestLocation[T.' and ']'
-            try:
-                lvl = n.split("ContestLocation[T.")[1].split("]")[0]
-                inferred_levels.append(lvl)
-            except Exception:
-                continue
-    inferred_levels = list(dict.fromkeys(inferred_levels))  # unique preserve order
-
-    # Build list of all levels we can report: those inferred plus the reference (if known)
-    levels_report = []
-    if levels_from_data is not None:
-        levels_report = list(levels_from_data)
-    elif inferred_levels:
-        # we only know the dummy levels; we denote a reference as omitted
-        levels_report = list(inferred_levels)
-        # add a placeholder for the omitted/reference
-        levels_report.append("(reference omitted)")
-    else:
-        # no contest location info found
-        levels_report = ["(no ContestLocation info in model)"]
-
-    # Helper: find interaction param name for a given level (any order)
-    def find_interaction_name_for_level(level):
-        candidates = []
-        target_fragment = f"ContestLocation[T.{level}]"
-        for n in param_names:
-            if target_fragment in n and "size_diff" in n and ":" in n:
-                candidates.append(n)
-        if len(candidates) >= 1:
-            return candidates[0]
-        return None
-
-    # Prepare results per location: marginal effect of size_diff on log-odds scale
-    marg_effects = {}
-    coef_size = float(params[size_name])
-    var_size = None
-    if cov is not None and size_name in cov.index:
-        var_size = float(cov.loc[size_name, size_name])
-
-    for lvl in levels_report:
-        if lvl == "(no ContestLocation info in model)":
-            marg_effects[lvl] = {
-                "effect_log_odds": coef_size,
-                "se": float(np.sqrt(var_size)) if var_size is not None else None,
-                "z": (coef_size / np.sqrt(var_size)) if var_size is not None and var_size > 0 else None,
-                "p": (2 * (1 - norm.cdf(abs(coef_size / np.sqrt(var_size))))) if var_size is not None and var_size > 0 else None,
-                "95%_ci": [float(ci_df.loc[size_name, "2.5%"]) if size_name in ci_df.index else None,
-                           float(ci_df.loc[size_name, "97.5%"]) if size_name in ci_df.index else None]
-            }
-            continue
-
-        if lvl == "(reference omitted)":
-            # we can't identify which actual level is reference, but we can report the base effect
-            effect = coef_size
-            se = float(np.sqrt(var_size)) if var_size is not None else None
-            z = (effect / se) if se is not None and se > 0 else None
-            p = (2 * (1 - norm.cdf(abs(z)))) if z is not None else None
-            ci_low = float(ci_df.loc[size_name, "2.5%"]) if size_name in ci_df.index else None
-            ci_high = float(ci_df.loc[size_name, "97.5%"]) if size_name in ci_df.index else None
-            marg_effects[lvl] = {
-                "effect_log_odds": float(effect),
-                "se": se,
-                "z": float(z) if z is not None else None,
-                "p": float(p) if p is not None else None,
-                "95%_ci": [ci_low, ci_high]
-            }
-            continue
-
-        # For a concrete named level:
-        inter_name = find_interaction_name_for_level(lvl)
-        if inter_name is None:
-            # No interaction for this level -> effect is the main size_diff coefficient
-            effect = coef_size
-            # use var_size
-            se = float(np.sqrt(var_size)) if var_size is not None else None
-            z = (effect / se) if se is not None and se > 0 else None
-            p = (2 * (1 - norm.cdf(abs(z)))) if z is not None else None
-            ci_low = float(ci_df.loc[size_name, "2.5%"]) if size_name in ci_df.index else None
-            ci_high = float(ci_df.loc[size_name, "97.5%"]) if size_name in ci_df.index else None
-            marg_effects[lvl] = {
-                "effect_log_odds": float(effect),
-                "se": se,
-                "z": float(z) if z is not None else None,
-                "p": float(p) if p is not None else None,
-                "95%_ci": [ci_low, ci_high]
+    results = {}
+    for t in terms:
+        if t in params.index:
+            coef = float(params[t])
+            se = float(model_output.bse[t]) if hasattr(model_output, 'bse') and t in model_output.bse.index else (float(ci.loc[t,1] - ci.loc[t,0]) / (2*1.96) if t in ci.index else np.nan)
+            p = float(pvalues[t]) if t in pvalues.index else np.nan
+            ci_low = float(ci.loc[t, 0]) if (t in ci.index and 0 in ci.columns) else np.nan
+            ci_high = float(ci.loc[t, 1]) if (t in ci.index and 1 in ci.columns) else np.nan
+            or_val = float(np.exp(coef))
+            or_ci_low = float(np.exp(ci_low)) if not np.isnan(ci_low) else np.nan
+            or_ci_high = float(np.exp(ci_high)) if not np.isnan(ci_high) else np.nan
+            results[t] = {
+                'term': t,
+                'coef': coef,
+                'se': se,
+                'pvalue': p,
+                'ci_95': (ci_low, ci_high),
+                'odds_ratio': or_val,
+                'odds_ratio_95': (or_ci_low, or_ci_high),
+                'significant_at_0.05': bool((not np.isnan(p)) and (p < 0.05))
             }
         else:
-            # effect = coef(size_diff) + coef(interaction)
-            coef_inter = float(params[inter_name])
-            effect = coef_size + coef_inter
-            # variance of sum = var(size) + var(inter) + 2*cov(size,inter)
-            se = None
-            z = None
-            p = None
-            ci_low = None
-            ci_high = None
-            if cov is not None and inter_name in cov.index and size_name in cov.index:
-                v_size = float(cov.loc[size_name, size_name])
-                v_inter = float(cov.loc[inter_name, inter_name])
-                covar = float(cov.loc[size_name, inter_name])
-                var_sum = v_size + v_inter + 2.0 * covar
-                if var_sum >= 0:
-                    se = float(np.sqrt(var_sum))
-                    if se > 0:
-                        z = effect / se
-                        p = 2 * (1 - norm.cdf(abs(z)))
-                        # approximate CI on log-odds
-                        ci_low = effect - norm.ppf(0.975) * se
-                        ci_high = effect + norm.ppf(0.975) * se
-            # fallback: if cov missing, try to approximate with naive combination of CIs (not ideal)
-            if se is None:
-                marg_effects[lvl] = {
-                    "effect_log_odds": float(effect),
-                    "se": None,
-                    "z": None,
-                    "p": None,
-                    "95%_ci": [None, None]
-                }
+            results[t] = {
+                'term': t,
+                'note': 'term not present in model',
+            }
+
+    # Compute marginal effect (slope of log-odds w.r.t RelSizeRatio) at several values of RelDistance
+    # slope = beta_size + beta_interaction * RelDistance_value
+    marg_points = {'RelDistance=-1': -1.0, 'RelDistance=0': 0.0, 'RelDistance=+1': 1.0}
+    marg_results = {}
+    if ('RelSizeRatio' in params.index) and (interaction_term in params.index):
+        beta_size = float(params['RelSizeRatio'])
+        beta_int = float(params[interaction_term])
+        for lab, val in marg_points.items():
+            slope = beta_size + beta_int * val
+            # compute SE of slope if covariance available
+            if cov_ok and ('RelSizeRatio' in cov.index) and (interaction_term in cov.index):
+                var_size = float(cov.loc['RelSizeRatio', 'RelSizeRatio'])
+                var_int = float(cov.loc[interaction_term, interaction_term])
+                covar = float(cov.loc['RelSizeRatio', interaction_term])
+                var_slope = var_size + (val**2) * var_int + 2 * val * covar
+                se_slope = float(np.sqrt(max(var_slope, 0.0)))
+                ci_low = slope - 1.96 * se_slope
+                ci_high = slope + 1.96 * se_slope
+                or_slope = float(np.exp(slope))
+                or_ci = (float(np.exp(ci_low)), float(np.exp(ci_high)))
             else:
-                marg_effects[lvl] = {
-                    "effect_log_odds": float(effect),
-                    "se": se,
-                    "z": float(z),
-                    "p": float(p),
-                    "95%_ci": [float(ci_low), float(ci_high)]
-                }
-
-    # Build dictionaries for params, pvalues, ci
-    params_dict = {k: float(v) for k, v in params.items()}
-    pvalues_dict = {k: float(v) for k, v in pvalues.items()}
-    ci_dict = {k: [float(ci_df.loc[k, "2.5%"]) if k in ci_df.index and ci_df.loc[k, "2.5%"] is not None else None,
-                   float(ci_df.loc[k, "97.5%"]) if k in ci_df.index and ci_df.loc[k, "97.5%"] is not None else None]
-               for k in params.index}
-    ci_dict = dict(zip(params.index.tolist(), ci_dict))
-
-    # Compose a human-readable description
-    # We'll report the main coefficient for size_diff and whether any interaction modified it
-    desc_lines = []
-    desc_lines.append("Extracted model estimates related to relative group size (size_diff) and its interaction with ContestLocation.")
-    desc_lines.append(f"Main coefficient for 'size_diff' (log-odds change per unit size_diff): {params_dict.get(size_name):.4f}")
-    p_main = pvalues_dict.get(size_name, None)
-    if p_main is not None:
-        desc_lines.append(f"  - p-value for main size_diff term: {p_main:.4g}")
-    # Report interactions found
-    if len(contest_inter) > 0:
-        desc_lines.append("Interaction terms detected between size_diff and ContestLocation levels. Marginal effects (log-odds) of size_diff by location are provided under 'object' -> 'marginal_effects_by_location'.")
+                se_slope = np.nan
+                ci_low = np.nan
+                ci_high = np.nan
+                or_slope = float(np.exp(slope))
+                or_ci = (np.nan, np.nan)
+            marg_results[lab] = {
+                'RelDistance_value': val,
+                'slope_log_odds_per_unit_RelSizeRatio': slope,
+                'se_slope': se_slope,
+                'slope_95_CI': (ci_low, ci_high),
+                'odds_ratio_per_unit_RelSizeRatio': or_slope,
+                'or_95_CI': or_ci,
+                'significant_at_0.05': (not np.isnan(se_slope)) and (abs(slope / se_slope) > 1.96)
+            }
     else:
-        desc_lines.append("No interaction terms between size_diff and ContestLocation were detected in the fitted model. Effect of size_diff is the same across locations as modeled.")
-    desc_lines.append("Interpretation: effects are on the log-odds scale. Positive effect_log_odds means that when the focal group is relatively larger than the opponent, the log-odds of the focal group winning increase. To convert to odds ratio, exponentiate the effect (exp(effect_log_odds)). For approximate change in probability, compute predicted probabilities at relevant baseline probabilities or use marginal effects on probability scale (not computed here).")
+        marg_results = {'note': 'Cannot compute marginal effects because one or both terms missing.'}
 
-    description = " ".join(desc_lines)
+    # Short textual interpretation
+    # Determine conclusions about main effects and interaction
+    def sig_label(term_dict):
+        if 'significant_at_0.05' in term_dict:
+            return 'significant' if term_dict['significant_at_0.05'] else 'not significant'
+        return 'not available'
 
-    out = {
-        "object": {
-            "params": params_dict,
-            "pvalues": pvalues_dict,
-            "conf_int": ci_dict,
-            "marginal_effects_by_location": marg_effects,
-            "reference_level": reference_level
-        },
-        "description": description
+    interpret_lines = []
+    # RelSizeRatio
+    rs = results.get('RelSizeRatio', {})
+    if 'coef' in rs:
+        interpret_lines.append(
+            f"RelSizeRatio: coef={rs['coef']:.3f}, OR={rs['odds_ratio']:.3f}, p={rs['pvalue']:.3g} ({sig_label(rs)})."
+        )
+    else:
+        interpret_lines.append("RelSizeRatio: result not available in model output.")
+
+    # RelDistance
+    rd = results.get('RelDistance', {})
+    if 'coef' in rd:
+        interpret_lines.append(
+            f"RelDistance (location advantage): coef={rd['coef']:.3f}, OR={rd['odds_ratio']:.3f}, p={rd['pvalue']:.3g} ({sig_label(rd)})."
+        )
+    else:
+        interpret_lines.append("RelDistance: result not available in model output.")
+
+    # Interaction
+    ri = results.get(interaction_term, {})
+    if 'coef' in ri:
+        # interpret sign: positive interaction -> numerical advantage more effective when contest is closer to focal (RelDistance positive)
+        sign_desc = ("positive -> numerical advantage becomes stronger when contest is closer to focal"
+                     if ri['coef'] > 0 else
+                     "negative -> numerical advantage becomes weaker when contest is closer to focal")
+        interpret_lines.append(
+            f"Interaction ({interaction_term}): coef={ri['coef']:.3f}, OR={ri['odds_ratio']:.3f}, p={ri['pvalue']:.3g} ({sig_label(ri)}). Interpretation: {sign_desc}."
+        )
+    else:
+        interpret_lines.append(f"Interaction term {interaction_term} not present in model output.")
+
+    # Combine description
+    description = (
+        "Extracted model coefficients and uncertainty for RelSizeRatio, RelDistance, and their interaction.\n"
+        "Key numeric outputs are in 'object'.\n"
+        "Summary:\n" + "\n".join(interpret_lines) +
+        "\n\nMarginal effects (how the log-odds change per unit increase in RelSizeRatio) are provided for RelDistance = -1, 0, +1 in 'object'['marginal_effects']."
+    )
+
+    # Assemble final object to return
+    object_dict = {
+        'terms': results,
+        'marginal_effects': marg_results,
+        'notes': {
+            'interaction_term_used': interaction_term,
+            'covariance_available_for_marginal_SEs': cov_ok
+        }
     }
-    return out
+
+    return {'object': object_dict, 'description': description}

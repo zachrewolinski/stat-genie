@@ -1,170 +1,162 @@
 from typing import Any
 import numpy as np
 import pandas as pd
+import sklearn  # noqa: F401
+import scipy  # noqa: F401
 import statsmodels.api as sm
 import statsmodels.formula.api as smf
-import matplotlib.pyplot as plt
-import pickle
-import scipy
-
-from statsmodels.stats.sandwich_covariance import cov_cluster
+import matplotlib.pyplot as plt  # noqa: F401
+import pickle  # noqa: F401
 
 
-df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/analysis/amtl/noperturb_output/amtl.csv')
-
-# ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
-    # Work on a copy
+    """
+    Transform the raw dataset into a dataframe ready for binomial regression.
+
+    Produces the following columns required by the model:
+      - num_amtl (int): number of missing teeth for the tooth class
+      - sockets (int): number of observable sockets (trials)
+      - proportion (float): num_amtl / sockets (response for GLM with weights=sockets)
+      - IsHuman (int): 1 if genus indicates Homo sapiens, 0 otherwise
+      - age_c (float): age centered around the sample mean
+      - prob_male (float): clipped to [0,1]
+      - tooth_class (category): categorical tooth class
+      - pop (category): population/provenance
+      - specimen (category/string): specimen id (kept for clustering)
+    """
     df = df.copy()
 
-    # Ensure essential columns exist and coerce types
-    # Drop rows with missing critical data needed for the binomial model
-    required = ['num_amtl', 'sockets', 'age', 'prob_male', 'genus', 'tooth_class', 'specimen']
+    # Required source columns
+    required = ['num_amtl', 'sockets', 'age', 'prob_male', 'genus', 'tooth_class', 'specimen', 'pop']
+    # Drop rows missing essential data
     df = df.dropna(subset=required)
 
-    # Ensure numeric columns are numeric
-    df['num_amtl'] = pd.to_numeric(df['num_amtl'], errors='coerce')
+    # Ensure numeric types where appropriate
     df['sockets'] = pd.to_numeric(df['sockets'], errors='coerce')
+    df['num_amtl'] = pd.to_numeric(df['num_amtl'], errors='coerce')
     df['age'] = pd.to_numeric(df['age'], errors='coerce')
     df['prob_male'] = pd.to_numeric(df['prob_male'], errors='coerce')
 
-    # Drop any rows that became NA after coercion
+    # Drop rows that became NA after coercion
     df = df.dropna(subset=['num_amtl', 'sockets', 'age', 'prob_male'])
 
-    # Keep only rows with at least one observable socket
+    # Keep only rows with positive number of sockets
     df = df[df['sockets'] > 0].copy()
 
-    # Cap num_amtl to sockets in case of coding errors
-    df['num_amtl'] = df['num_amtl'].clip(lower=0)
-    # Ensure num_amtl does not exceed sockets
-    df['num_amtl'] = df[['num_amtl', 'sockets']].min(axis=1)
+    # Ensure counts are integers and valid (0 <= num_amtl <= sockets)
+    df['num_amtl'] = df['num_amtl'].round().astype(int)
+    # Remove any rows where num_amtl > sockets or num_amtl < 0 as data errors
+    df = df[(df['num_amtl'] >= 0) & (df['num_amtl'] <= df['sockets'])].copy()
 
-    # Proportion missing for binomial modeling
-    df['prop_miss'] = df['num_amtl'] / df['sockets']
+    # Proportion outcome for binomial GLM (we will pass sockets as weights)
+    df['proportion'] = df['num_amtl'] / df['sockets']
 
-    # Primary independent variable: human vs non-human
-    # Normalize genus strings then create indicator
-    df['genus'] = df['genus'].astype(str).str.strip()
-    df['is_human'] = (df['genus'].str.lower() == 'homo sapiens').astype(int)
+    # Create primary independent variable: human vs non-human primate
+    # Accept values like 'Homo sapiens', 'Homo', etc. Case-insensitive matching to 'homo'
+    df['IsHuman'] = df['genus'].astype(str).str.lower().str.contains('homo').astype(int)
 
-    # Center age to improve interpretability and numerical stability; include quadratic term for nonlinearity
+    # Center age (helps interpretation and numeric stability)
     df['age_c'] = df['age'] - df['age'].mean()
-    df['age_c2'] = df['age_c'] ** 2
 
-    # Create explicit dummy variables for tooth class, using 'Anterior' as the reference category
-    df['tooth_class_Posterior'] = (df['tooth_class'].astype(str) == 'Posterior').astype(int)
-    df['tooth_class_Premolar'] = (df['tooth_class'].astype(str) == 'Premolar').astype(int)
+    # Clip prob_male to [0,1] in case of rounding or input error
+    df['prob_male'] = df['prob_male'].clip(0.0, 1.0)
 
-    # Keep only columns needed for modeling (plus any useful metadata)
-    keep_cols = [
-        'specimen',
-        'num_amtl',
-        'sockets',
-        'prop_miss',
-        'is_human',
-        'age_c',
-        'age_c2',
-        'prob_male',
-        'tooth_class_Posterior',
-        'tooth_class_Premolar',
-        'genus',
-        'tooth_class'
-    ]
-    df = df.loc[:, [c for c in keep_cols if c in df.columns]]
+    # Ensure categorical columns are of category dtype
+    df['tooth_class'] = df['tooth_class'].astype('category')
+    df['pop'] = df['pop'].astype('category')
+    # specimen kept as identifier (string/category) for clustering standard errors
+    df['specimen'] = df['specimen'].astype(str)
 
-    # Final drop of any rows with NA in the kept columns
-    df = df.dropna(subset=['prop_miss', 'is_human', 'age_c', 'prob_male', 'specimen'])
+    # Final safety: drop any remaining rows with missing model columns
+    model_cols = ['num_amtl', 'sockets', 'proportion', 'IsHuman', 'age_c', 'prob_male', 'tooth_class', 'pop', 'specimen']
+    df = df.dropna(subset=model_cols)
 
+    # Reset index for cleanliness
+    df = df.reset_index(drop=True)
     return df
 
 
-# ======== MODEL CODE ========
 def model(df: pd.DataFrame) -> Any:
     """
-    Fit a binomial (logistic) GLM for number of missing teeth out of sockets,
-    using proportion response with binomial denominator = sockets.
+    Fit a binomial (logistic-link) GLM to test whether Homo sapiens have higher AMTL rates
+    than non-human primates, controlling for age, sex (prob_male), tooth class, and population.
 
-    Returns a dict with the fitted GLMResults, a clustered-robust-results-like
-    object (clustered by specimen), and some diagnostics (dispersion).
+    Uses the proportion (num_amtl / sockets) as the response and supplies sockets as weights
+    so the GLM models binomial counts. Returns an object exposing parameter estimates and
+    cluster-robust standard errors clustered by specimen (to account for multiple tooth-class
+    rows per specimen).
     """
-    # Build formula: proportion as response, model with var_weights = sockets
-    formula = 'prop_miss ~ is_human + age_c + age_c2 + prob_male + tooth_class_Posterior + tooth_class_Premolar'
+    import statsmodels.formula.api as smf_local
+    from scipy import stats as _stats
 
-    # Fit GLM with binomial family; use var_weights=sockets so that the model
-    # treats prop_miss as num_amtl/sockets with sockets trials
-    model_glm = sm.GLM.from_formula(formula, data=df, family=sm.families.Binomial(), var_weights=df['sockets'])
-    results = model_glm.fit()
+    # Formula: proportion modeled as a function of IsHuman (primary IV) + controls.
+    # C(tooth_class) and C(pop) denote categorical fixed effects.
+    formula = 'proportion ~ IsHuman + age_c + prob_male + C(tooth_class) + C(pop)'
 
-    # Compute clustered (by specimen) robust covariance (sandwich) to account for
-    # within-specimen correlation (specimen may appear multiple times across tooth classes)
-    clustered = None
-    if 'specimen' in df.columns:
-        try:
-            cov = cov_cluster(results, df['specimen'])
-            # Ensure cov is a DataFrame with appropriate index and columns
-            params = results.params
-            cov_df = pd.DataFrame(cov, index=params.index, columns=params.index)
+    # Fit the GLM using Binomial family and pass sockets as weights (number of trials)
+    glm_binom = smf_local.glm(formula=formula,
+                              data=df,
+                              family=sm.families.Binomial(),
+                              weights=df['sockets']).fit()
 
-            class ClusteredResults:
-                def __init__(self, params: pd.Series, cov_df: pd.DataFrame):
-                    self.params = params
-                    self._cov = cov_df
-
-                def cov_params(self):
-                    return self._cov
-
-                @property
-                def bse(self):
-                    return np.sqrt(np.diag(self._cov))
-
-                def conf_int(self, alpha=0.05):
-                    z = scipy.stats.norm.ppf(1 - alpha / 2)
-                    se = self.bse
-                    lower = self.params - z * se
-                    upper = self.params + z * se
-                    return pd.DataFrame({0: lower, 1: upper}, index=self.params.index)
-
-            clustered = ClusteredResults(params=results.params, cov_df=cov_df)
-        except Exception:
-            # Fallback: use the model results' covariance matrix (non-clustered)
-            clustered = results
-
-    else:
-        clustered = results
-
-    # Compute a simple overdispersion metric: Pearson chi2 / df_resid
-    # For binomial GLM fitted with weights, Pearson chi2 can still indicate overdispersion
-    res = results
-    pearson_chi2 = sum(res.resid_pearson ** 2)
-    df_resid = res.df_resid
-    dispersion = pearson_chi2 / df_resid if df_resid > 0 else np.nan
-
-    # Prepare odds ratios and CIs using clustered covariance if available
-    # clustered may be our ClusteredResults or a statsmodels results object
-    if hasattr(clustered, 'params'):
-        params = clustered.params
-    else:
-        params = results.params
-
+    # Try to compute cluster-robust covariance matrix clustered by specimen.
+    # Use statsmodels' sandwich covariance utilities where available.
+    cov = None
     try:
-        conf = clustered.conf_int()
+        cov = sm.stats.sandwich_covariance.cov_cluster(glm_binom, df['specimen'])
     except Exception:
-        conf = results.conf_int()
+        # Fallback to heteroskedasticity-robust (HC3) covariance if cluster fails
+        try:
+            cov = sm.stats.sandwich_covariance.cov_hc3(glm_binom)
+        except Exception:
+            # Final fallback: use the model's default covariance matrix
+            cov = glm_binom.cov_params()
 
-    or_vals = np.exp(params)
-    # conf is expected to have columns 0 and 1
-    or_ci_lower = np.exp(conf[0])
-    or_ci_upper = np.exp(conf[1])
+    class RobustResults:
+        """
+        Lightweight wrapper around a statsmodels results object that uses a
+        provided covariance matrix to compute robust standard errors, z-values,
+        p-values, and confidence intervals. It preserves access to the original
+        results object via the `.base` attribute.
+        """
+        def __init__(self, base_res, cov_matrix):
+            self.base = base_res
+            self.cov = cov_matrix
+            # ensure parameter order aligns
+            self.params = base_res.params
+            # Handle case where cov is a DataFrame
+            cov_arr = cov_matrix.values if isinstance(cov_matrix, pd.DataFrame) else cov_matrix
+            self.bse = np.sqrt(np.maximum(np.diag(cov_arr), 0.0))
+            # Avoid divide-by-zero
+            with np.errstate(divide='ignore', invalid='ignore'):
+                self.tvalues = self.params / self.bse
+            # two-sided p-values from normal approximation (GLM large-sample)
+            self.pvalues = 2 * (1 - _stats.norm.cdf(np.abs(self.tvalues)))
+            self.df_resid = getattr(base_res, 'df_resid', None)
 
-    # Pack results to return
-    out = {
-        'glm_results': results,
-        'clustered_results': clustered,
-        'dispersion': dispersion,
-        'odds_ratios': or_vals,
-        'or_conf_int_lower': or_ci_lower,
-        'or_conf_int_upper': or_ci_upper,
-        'formula': formula
-    }
+        def conf_int(self, alpha=0.05):
+            z = _stats.norm.ppf(1 - alpha / 2)
+            ci_lower = self.params - z * self.bse
+            ci_upper = self.params + z * self.bse
+            return np.column_stack([ci_lower, ci_upper])
 
-    return out
+        def summary(self):
+            # Return a simple pandas DataFrame summarizing coefficients and robust SEs
+            ci = self.conf_int()
+            summary_df = pd.DataFrame({
+                'coef': self.params,
+                'std err': self.bse,
+                'z': self.tvalues,
+                'P>|z|': self.pvalues,
+                '[0.025': ci[:, 0],
+                '0.975]': ci[:, 1]
+            }, index=self.params.index)
+            return summary_df
+
+        # Provide attribute access to the underlying results where sensible
+        def __getattr__(self, item):
+            # Delegate unknown attributes to the base results object
+            return getattr(self.base, item)
+
+    robust_res = RobustResults(glm_binom, cov)
+    return robust_res

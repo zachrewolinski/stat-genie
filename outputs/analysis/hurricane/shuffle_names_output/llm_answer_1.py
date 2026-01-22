@@ -1,145 +1,202 @@
 def extract_final_answer(model_output):
     """
-    Extracts relevant statistics for 'NameFem' and 'FemaleName' from a fitted statsmodels GLM (robust) result.
-    Returns a dict with keys:
-      - "object": dict with extracted numeric results (or None if missing)
-      - "description": human-readable explanation of what the numbers mean
-    
-    The returned numeric results for each variable (if present) include:
-      - coef: estimated coefficient (log change in expected count)
-      - se: robust standard error
-      - pvalue: robust p-value
-      - ci95: 95% confidence interval for the coefficient (lower, upper)
-      - IRR: incidence rate ratio = exp(coef)
-      - IRR_CI95: 95% CI for the IRR = exp(ci95)
+    Extract a concise, interpretable summary of the effect of the femininity measure
+    (mf_score_z) on hurricane deaths from the provided model_output dict.
+
+    Returns:
+      {
+        "object": {
+            "model_used": str,
+            "variable": str,
+            "coef": float,
+            "p_value": float,
+            "ci_lower": float,
+            "ci_upper": float,
+            "nobs": int (if available),
+            "note_on_scale": str (how to interpret coef)
+        },
+        "description": str (plain-language interpretation, including whether result supports the hypothesis)
+      }
+
+    The function handles:
+      - If a Negative Binomial model with robust results is present in model_output['nb_continuous_mf'],
+        it will prefer the robust results (if available) and extract statistics for 'mf_score_z'.
+      - Otherwise, it will fall back to the OLS robustness check in model_output['ols_log_continuous_mf'].
     """
     import numpy as np
-    import pandas as pd
 
-    # Handle the case where model fitting failed and returned None
-    if model_output is None:
-        return {
-            "object": None,
-            "description": "model_output is None (the model was not fitted or the fit failed). No statistics to extract."
-        }
-
-    # Try to extract standard results attributes
-    try:
-        params = getattr(model_output, "params", None)
-        bse = getattr(model_output, "bse", None)
-        pvalues = getattr(model_output, "pvalues", None)
-
-        # If any of the core pieces are missing, abort with explanation
-        if params is None or bse is None or pvalues is None:
-            return {
-                "object": None,
-                "description": "Model object does not expose expected attributes (params, bse, pvalues)."
-            }
-
-        # Ensure params/pvalues/bse are pandas Series for label-based indexing
-        if not isinstance(params, (pd.Series, pd.DataFrame)):
-            try:
-                params = pd.Series(params, index=getattr(model_output, "param_names", None))
-            except Exception:
-                params = pd.Series(params)
-
-        if not isinstance(bse, (pd.Series, pd.DataFrame)):
-            try:
-                bse = pd.Series(bse, index=params.index)
-            except Exception:
-                bse = pd.Series(bse)
-
-        if not isinstance(pvalues, (pd.Series, pd.DataFrame)):
-            try:
-                pvalues = pd.Series(pvalues, index=params.index)
-            except Exception:
-                pvalues = pd.Series(pvalues)
-
-        # Confidence intervals: prefer model_output.conf_int() if available
+    def _get_ci_scalar(conf_int_obj, idx):
+        # conf_int_obj may be numpy array (k x 2) or a DataFrame-like structure
         try:
-            ci = model_output.conf_int()
-            # conf_int may return ndarray or DataFrame; convert to DataFrame with columns [0,1]
-            if not isinstance(ci, pd.DataFrame):
-                ci = pd.DataFrame(ci, index=params.index, columns=[0, 1])
+            # If numpy array
+            if isinstance(conf_int_obj, np.ndarray):
+                return float(conf_int_obj[idx, 0]), float(conf_int_obj[idx, 1])
+            # If pandas DataFrame (has .iloc)
+            try:
+                low = float(conf_int_obj.iloc[idx, 0])
+                high = float(conf_int_obj.iloc[idx, 1])
+                return low, high
+            except Exception:
+                # fallback to list conversion
+                arr = np.asarray(conf_int_obj)
+                return float(arr[idx, 0]), float(arr[idx, 1])
         except Exception:
-            # Fall back to normal approximation: coef +/- 1.96*se
-            z = 1.96
-            ci = pd.DataFrame({
-                0: params - z * bse,
-                1: params + z * bse
-            }, index=params.index)
+            return None, None
 
-        # Helper to extract variable info if present
-        def extract_var(name):
-            if name in params.index:
-                coef = float(params.loc[name])
-                se = float(bse.loc[name]) if name in bse.index else None
-                p = float(pvalues.loc[name]) if name in pvalues.index else None
-                lower = float(ci.loc[name, 0]) if name in ci.index else None
-                upper = float(ci.loc[name, 1]) if name in ci.index else None
-                irr = float(np.exp(coef)) if coef is not None else None
-                irr_ci = [float(np.exp(lower)), float(np.exp(upper))] if (lower is not None and upper is not None) else None
-                return {
+    varname = 'mf_score_z'
+
+    # 1) Prefer Negative Binomial (robust if available)
+    if 'nb_continuous_mf' in model_output and isinstance(model_output['nb_continuous_mf'], dict):
+        nb_entry = model_output['nb_continuous_mf']
+        # prefer robust result if present
+        res = nb_entry.get('robust') or nb_entry.get('model')
+        if res is not None:
+            params = getattr(res, 'params', None)
+            if params is not None and varname in list(params.index):
+                try:
+                    coef = float(res.params[varname])
+                except Exception:
+                    coef = float(np.asarray(res.params)[list(params.index).index(varname)])
+                try:
+                    pval = float(res.pvalues[varname])
+                except Exception:
+                    pval = None
+                # confidence interval
+                try:
+                    ci_obj = res.conf_int()
+                    idx = list(params.index).index(varname)
+                    ci_low, ci_high = _get_ci_scalar(ci_obj, idx)
+                except Exception:
+                    ci_low, ci_high = None, None
+                # nobs if present
+                try:
+                    nobs = int(res.nobs)
+                except Exception:
+                    nobs = None
+
+                # Interpretation note: GLM NegativeBinomial in statsmodels uses the log link by default,
+                # so the coefficient is on the log scale (a one-unit increase in mf_score_z multiplies expected deaths by exp(coef)).
+                note = ("Negative Binomial GLM (log link): coef is change in log(expected deaths) "
+                        "per 1-unit increase in mf_score_z (higher = more feminine). "
+                        "exp(coef) gives multiplicative effect on expected deaths.")
+
+                obj = {
+                    "model_used": "nb_continuous_mf (robust preferred)",
+                    "variable": varname,
                     "coef": coef,
-                    "se": se,
-                    "pvalue": p,
-                    "ci95": [lower, upper],
-                    "IRR": irr,
-                    "IRR_CI95": irr_ci
+                    "p_value": pval,
+                    "ci_lower": ci_low,
+                    "ci_upper": ci_high,
+                    "nobs": nobs,
+                    "note_on_scale": note
                 }
-            else:
-                return None
 
-        namefem_res = extract_var("NameFem")
-        femname_res = extract_var("FemaleName")
+                # Plain-language description and conclusion regarding hypothesis
+                sign = "positive" if coef is not None and coef > 0 else ("negative" if coef is not None and coef < 0 else "null/zero")
+                sig = (pval is not None and pval < 0.05)
+                if sig:
+                    conclusion = ("The coefficient on mf_score_z is {} (coef = {:.4g}, 95% CI [{:.4g}, {:.4g}], p = {:.4g}), "
+                                  "statistically significant at alpha=0.05. ").format(
+                                      sign, coef, ci_low if ci_low is not None else float('nan'),
+                                      ci_high if ci_high is not None else float('nan'),
+                                      pval if pval is not None else float('nan'))
+                else:
+                    conclusion = ("The coefficient on mf_score_z is {} (coef = {:.4g}, 95% CI [{:.4g}, {:.4g}], p = {:.4g}), "
+                                  "not statistically significant at alpha=0.05. ").format(
+                                      sign, coef, ci_low if ci_low is not None else float('nan'),
+                                      ci_high if ci_high is not None else float('nan'),
+                                      pval if pval is not None else float('nan'))
 
-        # Additional model-level info
-        # Try to get number of observations
-        nobs = None
+                # Relate to hypothesis: hypothesis expects more feminine names -> fewer precautions -> more deaths
+                # That implies a positive relationship between femininity and deaths.
+                hypothesis_dir = "positive"
+                if coef is None:
+                    support = "Could not determine effect size."
+                elif coef > 0 and sig:
+                    support = "Result supports the hypothesis (more feminine -> higher deaths)."
+                elif coef > 0 and not sig:
+                    support = "Point estimate is in the hypothesized direction (positive) but not statistically significant."
+                elif coef < 0 and sig:
+                    support = "Result contradicts the hypothesis (more feminine -> lower deaths) and is statistically significant."
+                else:
+                    support = "Point estimate is opposite the hypothesized direction (negative) but not statistically significant."
+
+                description = conclusion + support
+
+                return {"object": obj, "description": description}
+
+    # 2) Fall back to OLS on log_deaths if present
+    if 'ols_log_continuous_mf' in model_output:
+        res = model_output['ols_log_continuous_mf']
+        # statsmodels RegressionResultsWrapper interface
         try:
-            if hasattr(model_output, "nobs"):
-                nobs = int(model_output.nobs)
-            else:
-                # try from model/endog
-                nobs = int(getattr(model_output, "model").endog.shape[0])
-        except Exception:
-            nobs = None
+            params = res.params
+            if varname not in list(params.index):
+                return {"object": None, "description": f"Variable '{varname}' not found in OLS result params. Available params: {list(params.index)}"}
+            coef = float(params[varname])
+            try:
+                pval = float(res.pvalues[varname])
+            except Exception:
+                pval = None
+            # confidence interval (uses HC3 robust cov already when model was fit with cov_type='HC3')
+            try:
+                ci_obj = res.conf_int()
+                idx = list(params.index).index(varname)
+                ci_low, ci_high = _get_ci_scalar(ci_obj, idx)
+            except Exception:
+                ci_low, ci_high = None, None
+            try:
+                nobs = int(res.nobs)
+            except Exception:
+                nobs = None
 
-        result_object = {
-            "variables": {
-                "NameFem": namefem_res,
-                "FemaleName": femname_res
-            },
-            "model_info": {
-                "nobs": nobs
+            note = ("OLS on log_deaths (log(1 + deaths)): coef is the expected change in log(1+deaths) "
+                    "for a one-unit increase in mf_score_z (higher = more feminine). "
+                    "Because the outcome is log-transformed, a small coef approx equals percent change ≈ 100*coef %.")
+            obj = {
+                "model_used": "ols_log_continuous_mf",
+                "variable": varname,
+                "coef": coef,
+                "p_value": pval,
+                "ci_lower": ci_low,
+                "ci_upper": ci_high,
+                "nobs": nobs,
+                "note_on_scale": note
             }
-        }
 
-        # Build a concise description explaining interpretation
-        desc_lines = []
-        desc_lines.append(
-            "Extracted coefficients are from a Negative Binomial GLM predicting hurricane death counts."
-        )
-        desc_lines.append(
-            "Coefficient = log change in expected death count per unit increase (for continuous NameFem) "
-            "or for being female vs male (for FemaleName)."
-        )
-        desc_lines.append(
-            "IRR = exp(coef) is the multiplicative change in expected deaths (e.g., IRR < 1 means fewer expected deaths)."
-        )
-        desc_lines.append("Returned fields per variable: coef, se (robust), pvalue (robust), ci95, IRR, IRR_CI95.")
-        # If variable results missing, note that
-        if namefem_res is None:
-            desc_lines.append("Note: 'NameFem' not found in model parameters.")
-        if femname_res is None:
-            desc_lines.append("Note: 'FemaleName' not found in model parameters.")
+            # Interpretation
+            sign = "positive" if coef > 0 else ("negative" if coef < 0 else "null/zero")
+            sig = (pval is not None and pval < 0.05)
+            if sig:
+                conclusion = ("OLS (log outcome) coefficient on mf_score_z is {} (coef = {:.4g}, 95% CI [{:.4g}, {:.4g}], p = {:.4g}), "
+                              "statistically significant at alpha=0.05. ").format(
+                                  sign, coef, ci_low if ci_low is not None else float('nan'),
+                                  ci_high if ci_high is not None else float('nan'),
+                                  pval if pval is not None else float('nan'))
+            else:
+                conclusion = ("OLS (log outcome) coefficient on mf_score_z is {} (coef = {:.4g}, 95% CI [{:.4g}, {:.4g}], p = {:.4g}), "
+                              "not statistically significant at alpha=0.05. ").format(
+                                  sign, coef, ci_low if ci_low is not None else float('nan'),
+                                  ci_high if ci_high is not None else float('nan'),
+                                  pval if pval is not None else float('nan'))
 
-        description = " ".join(desc_lines)
+            # Hypothesis: more feminine -> fewer precautions -> more deaths => positive coefficient expected
+            if coef > 0 and sig:
+                support = "This result supports the hypothesis: more feminine names are associated with higher deaths."
+            elif coef > 0 and not sig:
+                support = "Point estimate is in the hypothesized direction (positive) but not statistically significant."
+            elif coef < 0 and sig:
+                support = "This result contradicts the hypothesis: more feminine names are associated with lower deaths (statistically significant)."
+            elif coef < 0 and not sig:
+                support = "Point estimate is opposite the hypothesized direction (negative) but not statistically significant."
+            else:
+                support = "No meaningful effect detected."
 
-        return {"object": result_object, "description": description}
+            description = conclusion + support
 
-    except Exception as e:
-        return {
-            "object": None,
-            "description": f"An error occurred while extracting statistics: {e}"
-        }
+            return {"object": obj, "description": description}
+        except Exception as e:
+            return {"object": None, "description": f"Error extracting from OLS result: {e}"}
+
+    # 3) If neither model present
+    return {"object": None, "description": "No usable model results found in model_output. Expected keys like 'nb_continuous_mf' or 'ols_log_continuous_mf'."}

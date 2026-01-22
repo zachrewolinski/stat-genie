@@ -1,135 +1,124 @@
-from typing import Any
+from typing import Dict, FrozenSet, List, Literal, Optional, Set, Tuple, Any
 import numpy as np
 import pandas as pd
+import sklearn
+import scipy
 import statsmodels.api as sm
-
+import statsmodels.formula.api as smf
+import matplotlib.pyplot as plt
+import pickle
+  
 df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/analysis/caschools/shuffle_names_output/caschools.csv')
 
-
+# ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Transform raw dataframe into FINAL dataframe containing the exact columns:
-      - StudentTeacherRatio
-      - AvgScore
-      - ExpenditurePerStudent
-      - PctFreeLunch
-      - PctEnglishLearners
-      - ComputersPerClassroom
+    Transform the raw district-level dataframe into a cleaned dataframe with the variables
+    needed for the analysis.
 
-    The function will:
-      - Coerce likely numeric source columns to numeric.
-      - Create the required final columns (even if filled with NaN when source missing).
-      - Compute StudentTeacherRatio when possible (calworks / teachers).
-      - Compute AvgScore as the mean of available standardized reading/math columns
-        (uses 'grades' and 'rownames' when available).
-      - Preserve rows (only drop rows that lack both the primary IV and DV), so that
-        model can handle missing controls via statsmodels' missing='drop'.
+    Produces the following columns (exact names used in the model):
+      - StudentTeacherRatio: Enrollment (calworks) divided by Teachers (teachers)
+      - AvgScore: mean of 'grades' and 'rownames' (district average reading and math scores)
+      - ExpenditurePerStudent: from 'expenditure'
+      - PctCalWorks: from 'income' (percent qualifying for CalWorks)
+      - PctReducedLunch: from 'math' (percent qualifying for reduced-price lunch)
+      - PctEngLearners: from 'district' (percent English learners)
+      - NumComputers: from 'english' (number of computers)
+      - SchoolSpan: from 'school' (categorical)
+      - Enrollment, Teachers: raw enrollment and teacher counts (kept for inspection)
     """
     df = df.copy()
 
-    # Coerce candidate columns to numeric if present
-    candidate_numeric = [
-        'calworks', 'teachers', 'grades', 'rownames',
-        'read', 'math', 'district', 'english'
+    # Ensure required columns exist; attempt to coerce numeric columns
+    # and drop rows that cannot be used for the primary variables.
+    # 'calworks' is treated as enrollment, 'teachers' as teacher FTE.
+    numeric_cols = ['calworks', 'teachers', 'grades', 'rownames', 'expenditure', 'income', 'math', 'district', 'english']
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+
+    # Drop rows without enrollment, teacher counts, or test scores
+    df = df.dropna(subset=['calworks', 'teachers', 'grades', 'rownames'])
+
+    # Remove impossible teacher values (avoid division by zero)
+    df = df[df['teachers'] > 0]
+
+    # Create Enrollment and Teachers columns (clean numeric)
+    df['Enrollment'] = df['calworks']
+    df['Teachers'] = df['teachers']
+
+    # Student-teacher ratio (students per teacher)
+    df['StudentTeacherRatio'] = df['Enrollment'] / df['Teachers']
+
+    # Dependent variable: average of reading and math district scores
+    df['AvgScore'] = df[['grades', 'rownames']].astype(float).mean(axis=1)
+
+    # Controls (coerce numeric where possible)
+    df['ExpenditurePerStudent'] = df['expenditure']
+    df['PctCalWorks'] = df['income']
+    df['PctReducedLunch'] = df['math']
+    df['PctEngLearners'] = df['district']
+    df['NumComputers'] = df['english']
+
+    # Categorical control: grade-span / school type
+    if 'school' in df.columns:
+        df['SchoolSpan'] = df['school'].astype('category')
+    else:
+        df['SchoolSpan'] = pd.Categorical(['unknown'] * len(df))
+
+    # Keep only the columns required for modeling and inspection
+    result_cols = [
+        'StudentTeacherRatio', 'AvgScore', 'ExpenditurePerStudent', 'PctCalWorks',
+        'PctReducedLunch', 'PctEngLearners', 'NumComputers', 'SchoolSpan', 'Enrollment', 'Teachers'
     ]
-    for c in candidate_numeric:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors='coerce')
 
-    # Initialize required final columns to ensure they exist in output
-    df['StudentTeacherRatio'] = np.nan
-    df['AvgScore'] = np.nan
-    df['ExpenditurePerStudent'] = np.nan
-    df['PctFreeLunch'] = np.nan
-    df['PctEnglishLearners'] = np.nan
-    df['ComputersPerClassroom'] = np.nan
-
-    # Compute StudentTeacherRatio if possible (students per FTE teacher)
-    if ('calworks' in df.columns) and ('teachers' in df.columns):
-        # Avoid division by zero and require positive teachers
-        valid_mask = df['teachers'].notna() & (df['teachers'] > 0) & df['calworks'].notna()
-        df.loc[valid_mask, 'StudentTeacherRatio'] = df.loc[valid_mask, 'calworks'] / df.loc[valid_mask, 'teachers']
-
-    # Compute AvgScore as mean of available reading/math district averages.
-    # Prefer 'grades' and 'rownames' as indicated by dataset schema; use whichever are present.
-    score_sources = [c for c in ['grades', 'rownames'] if c in df.columns]
-    if score_sources:
-        df['AvgScore'] = df[score_sources].mean(axis=1)
-
-    # Map controls from source columns to required final column names (keep NaN if source absent)
-    if 'read' in df.columns:
-        df['ExpenditurePerStudent'] = df['read']
-    if 'math' in df.columns:
-        df['PctFreeLunch'] = df['math']
-    if 'district' in df.columns:
-        df['PctEnglishLearners'] = df['district']
-    if 'english' in df.columns:
-        df['ComputersPerClassroom'] = df['english']
-
-    # Optional helper: log transform of StudentTeacherRatio (not used by model by default)
-    # Only compute where StudentTeacherRatio is positive
-    df['LogStudentTeacherRatio'] = np.nan
-    positive_mask = df['StudentTeacherRatio'].notna() & (df['StudentTeacherRatio'] > 0)
-    df.loc[positive_mask, 'LogStudentTeacherRatio'] = np.log(df.loc[positive_mask, 'StudentTeacherRatio'])
-
-    # Final: ensure the FINAL dataframe contains the required columns (already created).
-    # Drop rows that are missing the essential IV or DV (model cannot run without them).
-    # Controls may be missing; statsmodels will drop rows with missing values when fitting.
-    df = df.dropna(subset=['StudentTeacherRatio', 'AvgScore'])
-
-    return df
+    # Some rows may still have NaNs in controls; keep them (statsmodels will drop rows with NaNs when fitting)
+    return df[result_cols]
 
 
-def model(df: pd.DataFrame) -> Any:
+# ======== MODEL CODE ========
+def model(df: pd.DataFrame):
     """
-    Fit OLS of AvgScore on StudentTeacherRatio and controls with robust SEs.
-    Required columns (must be present in the FINAL dataframe):
-      - StudentTeacherRatio (IV)
-      - AvgScore (DV)
-      - ExpenditurePerStudent, PctFreeLunch, PctEnglishLearners, ComputersPerClassroom (controls; may be all-NaN)
-    The function validates inputs and raises a clear error if there are no usable observations.
+    Fit an OLS model predicting average district test score from student-teacher ratio
+    controlling for expenditures, socioeconomic and resource variables. Returns the
+    fitted statsmodels regression results object (with robust standard errors).
+
+    Model specification:
+      AvgScore ~ StudentTeacherRatio + ExpenditurePerStudent + PctCalWorks
+                 + PctReducedLunch + PctEngLearners + NumComputers + SchoolSpan(dummies)
+
+    Uses heteroskedasticity-robust (HC3) standard errors.
     """
     df = df.copy()
 
-    # Define predictors in the required order and keep those columns present in the dataframe
+    # Create dummies for SchoolSpan (drop_first to avoid multicollinearity)
+    if 'SchoolSpan' in df.columns:
+        school_dummies = pd.get_dummies(df['SchoolSpan'], prefix='SchoolSpan', drop_first=True)
+    else:
+        school_dummies = pd.DataFrame(index=df.index)
+
+    # Predictor matrix
     predictors = [
-        'StudentTeacherRatio',
-        'ExpenditurePerStudent',
-        'PctFreeLunch',
-        'PctEnglishLearners',
-        'ComputersPerClassroom'
+        'StudentTeacherRatio', 'ExpenditurePerStudent', 'PctCalWorks',
+        'PctReducedLunch', 'PctEngLearners', 'NumComputers'
     ]
-    # Ensure the final dataframe contains these columns (transform should have created them)
-    missing_required_columns = [col for col in ['StudentTeacherRatio', 'AvgScore'] if col not in df.columns]
-    if missing_required_columns:
-        raise ValueError(f"Transformed dataframe is missing required columns: {missing_required_columns}")
 
-    # Keep only predictors that exist as columns (transform ensures columns exist, but be defensive)
-    predictors = [p for p in predictors if p in df.columns]
-
-    if 'StudentTeacherRatio' not in predictors:
-        # This should not happen if transform followed contract; provide helpful error
-        raise ValueError("Required predictor 'StudentTeacherRatio' is missing from the dataframe.")
-
-    X = df[predictors]
+    X = df[predictors].join(school_dummies)
     X = sm.add_constant(X, has_constant='add')
+
+    # Outcome
     y = df['AvgScore']
 
-    # Ensure there are observations after removing rows with missing endog/exog
-    # We simulate statsmodels' missing='drop' behavior to count usable observations
-    combined = pd.concat([y, X], axis=1)
-    combined = combined.dropna(how='any')  # drop rows with any missing values used in the regression
-    if combined.shape[0] == 0:
-        raise ValueError("No observations available with non-missing outcome and predictors for estimation.")
-    if combined.shape[0] < 2 and X.shape[1] > 1:
-        # With very few observations, estimation will either fail or be uninformative;
-        # allow statsmodels to run but warn via error to avoid confusing internal failures.
-        raise ValueError(
-            f"Too few observations ({combined.shape[0]}) after dropping missing values to reliably fit the model."
-        )
+    # Drop rows with any missing values in X or y (statsmodels requires complete cases)
+    complete_cases = X.join(y).dropna()
+    X_cc = complete_cases.drop(columns=['AvgScore']) if 'AvgScore' in complete_cases.columns else complete_cases
+    y_cc = complete_cases['AvgScore']
 
-    # Fit OLS with heteroskedasticity-robust (HC3) standard errors
-    model_sm = sm.OLS(y, X, missing='drop')
-    results = model_sm.fit(cov_type='HC3')
+    # Fit OLS with robust standard errors (HC3)
+    ols = sm.OLS(y_cc, X_cc)
+    results = ols.fit(cov_type='HC3')
 
+    # Return the fitted results object. The caller can inspect results.summary(), results.params, etc.
     return results
+
+

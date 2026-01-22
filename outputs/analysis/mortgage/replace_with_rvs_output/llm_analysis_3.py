@@ -1,157 +1,226 @@
-from typing import Dict, FrozenSet, List, Literal, Optional, Set, Tuple, Any
+from typing import Any
 import numpy as np
 import pandas as pd
-import sklearn
-import scipy
 import statsmodels.api as sm
-import statsmodels.formula.api as smf
-import matplotlib.pyplot as plt
-import pickle
-  
+from scipy import stats
+from statsmodels.stats.sandwich_covariance import cov_hc3
+
 df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/analysis/mortgage/replace_with_rvs_output/mortgage.csv')
+
 
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
     """
-    - Ensure relevant columns are numeric and drop rows with missing values on outcome, key IV, and controls.
-    - Create standardized (z-scored) versions of continuous controls to aid interpretation and numerical stability.
-    - Returns dataframe containing all columns listed in the conceptual variables.
+    Transform the raw Boston Fed mortgage dataset for logistic regression.
+
+    Steps performed:
+    - Make a copy of the dataframe
+    - Ensure the key binary columns are numeric and in {0,1}
+    - Convert continuous predictors to numeric and create standardized (z-scored) versions for modeling
+    - Drop rows with missing values in any variable used by the model
+    - Return the dataframe containing the original + derived columns required for the model
     """
-    # Keep a copy to avoid modifying input in place
     df = df.copy()
 
-    # Columns required for the analysis
+    # Ensure target and key binaries are numeric
+    binary_cols = ['accept', 'female', 'black', 'self_employed', 'married', 'bad_history', 'denied_PMI']
+    for c in binary_cols:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors='coerce')
+
+    # Ensure continuous predictors are numeric
+    cont_cols = ['housing_expense_ratio', 'PI_ratio', 'loan_to_value', 'mortgage_credit', 'consumer_credit']
+    for c in cont_cols:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors='coerce')
+
+    # Create standardized versions (z-scores) for continuous controls used in the model
+    # Use sample std (pandas default ddof=1)
+    if 'housing_expense_ratio' in df.columns:
+        df['housing_expense_ratio_std'] = (df['housing_expense_ratio'] - df['housing_expense_ratio'].mean()) / df['housing_expense_ratio'].std()
+    else:
+        df['housing_expense_ratio_std'] = np.nan
+
+    if 'PI_ratio' in df.columns:
+        df['PI_ratio_std'] = (df['PI_ratio'] - df['PI_ratio'].mean()) / df['PI_ratio'].std()
+    else:
+        df['PI_ratio_std'] = np.nan
+
+    if 'loan_to_value' in df.columns:
+        df['loan_to_value_std'] = (df['loan_to_value'] - df['loan_to_value'].mean()) / df['loan_to_value'].std()
+    else:
+        df['loan_to_value_std'] = np.nan
+
+    if 'mortgage_credit' in df.columns:
+        df['mortgage_credit_std'] = (df['mortgage_credit'] - df['mortgage_credit'].mean()) / df['mortgage_credit'].std()
+    else:
+        df['mortgage_credit_std'] = np.nan
+
+    if 'consumer_credit' in df.columns:
+        df['consumer_credit_std'] = (df['consumer_credit'] - df['consumer_credit'].mean()) / df['consumer_credit'].std()
+    else:
+        df['consumer_credit_std'] = np.nan
+
+    # List of columns required by the model
     required_cols = [
         'accept',
         'female',
         'black',
-        'married',
+        'housing_expense_ratio_std',
         'self_employed',
+        'married',
+        'mortgage_credit_std',
+        'consumer_credit_std',
         'bad_history',
-        'denied_PMI',
-        'mortgage_credit',
-        'consumer_credit',
-        'PI_ratio',
-        'loan_to_value',
-        'housing_expense_ratio'
+        'PI_ratio_std',
+        'loan_to_value_std',
+        'denied_PMI'
     ]
 
-    # Coerce these columns to numeric where appropriate
-    for col in required_cols:
-        if col in df.columns:
-            # errors='coerce' will turn non-convertible values into NaN which will be dropped below
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-        else:
-            raise KeyError(f"Required column '{col}' not found in dataframe")
+    # Drop rows with missing values in any required column
+    df = df.dropna(subset=required_cols).reset_index(drop=True)
 
-    # Drop rows with missing values in the required columns
-    df = df.dropna(subset=required_cols)
+    # Cast binary variables to integer type (0/1)
+    for c in ['accept', 'female', 'black', 'self_employed', 'married', 'bad_history', 'denied_PMI']:
+        if c in df.columns:
+            # Values are already numeric and rows with missing values dropped; cast to integer
+            df[c] = df[c].astype(int)
 
-    # Ensure binary indicators are integer 0/1
-    binary_cols = ['accept', 'female', 'black', 'married', 'self_employed', 'bad_history', 'denied_PMI']
-    for col in binary_cols:
-        # round then clip to {0,1}
-        df[col] = df[col].round().astype(int).clip(0, 1)
-
-    # Standardize continuous controls (z-scores). Use population std (ddof=0) for stability.
-    cont_cols = ['mortgage_credit', 'consumer_credit', 'PI_ratio', 'loan_to_value', 'housing_expense_ratio']
-    for col in cont_cols:
-        mean = df[col].mean()
-        std = df[col].std(ddof=0)
-        if std == 0 or np.isnan(std):
-            # If no variation, create zero column to avoid divide-by-zero
-            df['z_' + col] = 0.0
-        else:
-            df['z_' + col] = (df[col] - mean) / std
-
-    # Final column list that will be used by the model (keeps original binary columns and z_ continuous)
-    final_cols = [
-        'accept',
-        'female',
-        'black',
-        'married',
-        'self_employed',
-        'bad_history',
-        'denied_PMI',
-        'z_mortgage_credit',
-        'z_consumer_credit',
-        'z_PI_ratio',
-        'z_loan_to_value',
-        'z_housing_expense_ratio'
-    ]
-
-    # Subset to final columns (keeps dataframe compact). This also ensures the exact column names exist.
-    df = df[final_cols].reset_index(drop=True)
-
+    # Return the full dataframe (with derived standardized columns available).
     return df
 
 
 # ======== MODEL CODE ========
-def model(df: pd.DataFrame) -> dict:
+def model(df: pd.DataFrame) -> Any:
     """
-    Fit a logistic regression for the binary outcome 'accept' on 'female' plus controls.
-    Returns a dict with the fitted model result object and average marginal effects.
+    Fit a logistic regression to estimate the effect of applicant gender on mortgage acceptance,
+    controlling for applicant financial and demographic covariates.
 
-    Model specification (logistic):
-      accept ~ female + black + married + self_employed + bad_history + denied_PMI
-               + z_mortgage_credit + z_consumer_credit + z_PI_ratio + z_loan_to_value + z_housing_expense_ratio
+    Model specification:
+    logit( P(accept=1) ) = alpha + beta_female * female + sum(gamma_k * control_k)
 
-    Notes:
-    - We include a constant in the model.
-    - We compute average marginal effects (AME) to make interpretation on probability scale straightforward.
+    Returns a dictionary with the robust fitted model object and a summary table of odds ratios,
+    confidence intervals and p-values.
     """
-    # Copy to avoid side-effects
-    df = df.copy()
-
-    # Define predictors used in the model (must match transform output column names)
-    predictors = [
+    # Columns used in the model (must match those created in transform)
+    model_cols = [
         'female',
         'black',
-        'married',
+        'housing_expense_ratio_std',
         'self_employed',
+        'married',
+        'mortgage_credit_std',
+        'consumer_credit_std',
         'bad_history',
-        'denied_PMI',
-        'z_mortgage_credit',
-        'z_consumer_credit',
-        'z_PI_ratio',
-        'z_loan_to_value',
-        'z_housing_expense_ratio'
+        'PI_ratio_std',
+        'loan_to_value_std',
+        'denied_PMI'
     ]
 
-    # Ensure no missing values (transform should have removed them already)
-    df = df.dropna(subset=['accept'] + predictors)
+    # Ensure the dataframe contains the needed columns
+    missing = [c for c in model_cols + ['accept'] if c not in df.columns]
+    if len(missing) > 0:
+        raise ValueError(f"Dataframe is missing required columns for modeling: {missing}")
 
-    # Prepare design matrices
-    X = df[predictors]
-    X = sm.add_constant(X, has_constant='add')
     y = df['accept']
+    X = df[model_cols]
 
-    # Fit logistic regression using statsmodels Logit; use robust covariance (HC1) for standard errors
-    logit_model = sm.Logit(y, X)
-    try:
-        result = logit_model.fit(disp=False, cov_type='HC1')
-    except TypeError:
-        # Some versions of statsmodels don't accept cov_type in fit(...). Fit then get robust cov separately.
-        result = logit_model.fit(disp=False)
-        # attempt to get robust covariance if available
+    # Add intercept
+    X = sm.add_constant(X, has_constant='add')
+
+    # Fit logistic regression (maximum likelihood)
+    logit_mod = sm.Logit(y, X)
+    logit_res = logit_mod.fit(disp=False)
+
+    # Some statsmodels sandwich covariance helpers expect a 'resid' attribute on results.
+    # LogitResults does not always expose 'resid', so attach a response residuals array if missing.
+    # Use response residuals: observed - predicted probability
+    if not hasattr(logit_res, 'resid'):
         try:
-            robust_res = result.get_robustcov_results(cov_type='HC1')
-            result = robust_res
+            resid_arr = logit_res.model.endog - logit_res.predict()
         except Exception:
-            # fall back to the original result
+            # Fallback: try resid_response if present
+            resid_arr = getattr(logit_res, 'resid_response', None)
+            if resid_arr is None:
+                raise
+        setattr(logit_res, 'resid', resid_arr)
+
+    # Some versions of statsmodels' cov_hc3 expect the model to have a pinv_wexog attribute.
+    # Ensure that attribute exists by computing a pseudo-inverse of the design matrix if necessary.
+    if not hasattr(logit_res.model, 'pinv_wexog'):
+        try:
+            exog = getattr(logit_res.model, 'exog', None)
+            if exog is not None:
+                pinv = np.linalg.pinv(exog)
+                setattr(logit_res.model, 'pinv_wexog', pinv)
+        except Exception:
+            # If we cannot set pinv_wexog, allow cov_hc3 to raise its own error.
             pass
 
-    # Compute average marginal effects (AME) for interpretation on probability scale
-    try:
-        marg = result.get_margeff(at='overall', method='dydx')
-        marg_summary = marg.summary_frame()
-    except Exception:
-        marg_summary = None
+    # Compute robust (HC3) covariance matrix using statsmodels' sandwich covariance utility
+    robust_cov_arr = cov_hc3(logit_res)
+    params = logit_res.params
+    # Convert to DataFrame for labeling
+    robust_cov = pd.DataFrame(robust_cov_arr, index=params.index, columns=params.index)
 
-    # Return the fitted result and marginal effects table (pandas DataFrame) if available
+    # Robust standard errors as a Series aligned with params index
+    robust_se_series = pd.Series(np.sqrt(np.diag(robust_cov)), index=params.index)
+
+    # z-scores using robust standard errors
+    z_scores = params / robust_se_series
+    pvalues = 2 * (1 - stats.norm.cdf(np.abs(z_scores)))
+
+    # 95% robust confidence intervals on parameter scale
+    z_975 = stats.norm.ppf(0.975)
+    conf_lower = params - z_975 * robust_se_series
+    conf_upper = params + z_975 * robust_se_series
+
+    # Compute odds ratios and robust confidence intervals for OR
+    or_vals = np.exp(params)
+    conf_or_lower = np.exp(conf_lower)
+    conf_or_upper = np.exp(conf_upper)
+
+    summary_table = pd.DataFrame({
+        'OR': or_vals,
+        '2.5%': conf_or_lower,
+        '97.5%': conf_or_upper,
+        'pvalue': pvalues
+    }, index=params.index)
+
+    # Sort so key variable female is near the top for readability; put const last
+    idx = list(summary_table.index)
+    ordered_index = []
+    if 'female' in idx:
+        ordered_index.append('female')
+    for c in idx:
+        if c not in ('female', 'const'):
+            ordered_index.append(c)
+    if 'const' in idx:
+        ordered_index.append('const')
+    summary_table = summary_table.loc[ordered_index]
+
+    # Create a small wrapper object to hold robust results-like attributes
+    class RobustResults:
+        def __init__(self, orig_res, cov_rob_df, bse_series, pvals_series):
+            self.orig_res = orig_res
+            self.params = orig_res.params
+            self._cov = cov_rob_df
+            # cov_params method to mimic statsmodels results
+            self.cov_params = lambda: self._cov
+            # bse as Series aligned with params for convenience
+            self.bse = bse_series
+            self.pvalues = pvals_series
+
+        def conf_int(self, alpha=0.05):
+            z = stats.norm.ppf(1 - alpha / 2)
+            lower = self.params - z * self.bse
+            upper = self.params + z * self.bse
+            ci = pd.DataFrame({0: lower, 1: upper}, index=self.params.index)
+            return ci
+
+    robust_res = RobustResults(logit_res, robust_cov, robust_se_series, pvalues)
+
     return {
-        'model_result': result,
-        'average_marginal_effects': marg_summary
+        'model_results_robust': robust_res,
+        'summary_table': summary_table
     }
-
-

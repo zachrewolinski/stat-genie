@@ -13,103 +13,123 @@ df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/anal
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Prepare the dataset for modeling. The transformations performed:
-      - Drop rows missing the key variables needed to compute the DV or IV (students, teachers, read, math).
-      - Remove rows with nonpositive teacher counts (to avoid division by zero).
-      - Create AvgScore = (read + math) / 2.
-      - Create StudentTeacherRatio = students / teachers (students per teacher).
-      - Create ComputerPerStudent = computer / students (handle zero enrollment safely by setting NA if students==0).
-      - Create LogStudents = np.log1p(students) to reduce skew.
-      - Ensure grades and county are categorical.
-    The returned dataframe contains all columns used in the model.
+    Transform the raw district dataset into a cleaned dataframe ready for modeling.
+    Adds the following columns required by the model:
+      - StudentTeacherRatio: students / teachers
+      - AvgScore: mean of 'read' and 'math'
+      - Expenditure, LunchPct, EnglishLearnersPct, Income, Students, LogStudents
+      - County, Grades as categorical columns
+
+    Drops rows with missing critical values (students, teachers, read, math).
     """
-    # Make a copy to avoid modifying input in-place
     df = df.copy()
 
-    # Drop rows missing the required variables for DV and IV
-    required_cols = ['students', 'teachers', 'read', 'math']
-    df = df.dropna(subset=required_cols)
+    # Standardize column names for safety (work with given schema names)
+    # Ensure numeric columns are numeric
+    numeric_cols = ['students', 'teachers', 'read', 'math', 'expenditure', 'lunch', 'english', 'income']
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
 
-    # Remove rows where teachers is zero or negative to prevent division by zero
+    # Drop rows missing the core variables needed to compute ratio and outcome
+    df = df.dropna(subset=['students', 'teachers', 'read', 'math'])
+
+    # Remove rows with non-positive teachers to avoid division by zero
     df = df[df['teachers'] > 0]
 
-    # Dependent variable: average of reading and math scores
-    df['AvgScore'] = df[['read', 'math']].mean(axis=1)
-
-    # Independent variable: student-teacher ratio (students per teacher)
+    # Compute Student-Teacher Ratio
     df['StudentTeacherRatio'] = df['students'] / df['teachers']
 
-    # Computer resources: computers per student (set to NaN if students == 0)
-    df['ComputerPerStudent'] = np.where(df['students'] > 0, df['computer'] / df['students'], np.nan)
+    # Dependent variable: average of read and math scores
+    df['AvgScore'] = df[['read', 'math']].mean(axis=1)
 
-    # Log enrollment to control for size (use log1p to handle small values)
-    df['LogStudents'] = np.log1p(df['students'].astype(float))
+    # Map and copy control variables to the exact column names used in the model
+    # Expenditure per student
+    if 'expenditure' in df.columns:
+        df['Expenditure'] = df['expenditure'].astype(float)
+    else:
+        df['Expenditure'] = np.nan
 
-    # Ensure categorical controls are typed properly
-    if 'grades' in df.columns:
-        df['grades'] = df['grades'].astype('category')
+    # Percent qualifying for reduced-price lunch
+    if 'lunch' in df.columns:
+        df['LunchPct'] = df['lunch'].astype(float)
+    else:
+        df['LunchPct'] = np.nan
+
+    # Percent English learners
+    if 'english' in df.columns:
+        df['EnglishLearnersPct'] = df['english'].astype(float)
+    else:
+        df['EnglishLearnersPct'] = np.nan
+
+    # Income (district average income in 1,000s)
+    if 'income' in df.columns:
+        df['Income'] = df['income'].astype(float)
+    else:
+        df['Income'] = np.nan
+
+    # Students (raw enrollment)
+    df['Students'] = df['students'].astype(float)
+
+    # Log of students (handle zeros by replacing with small positive value if any)
+    df['LogStudents'] = np.log(df['Students'].replace(0, np.nan))
+
+    # Categorical controls: County and Grades
     if 'county' in df.columns:
-        df['county'] = df['county'].astype('category')
+        df['County'] = df['county'].astype('category')
+    else:
+        df['County'] = pd.Categorical([np.nan] * len(df))
 
-    # Keep only columns needed for modeling plus identifiers for traceability
-    model_cols = [
-        'AvgScore',
-        'StudentTeacherRatio',
-        'ComputerPerStudent',
-        'LogStudents',
-        # socioeconomic / resource controls present in the original dataset
-        'expenditure',
-        'income',
-        'lunch',
-        'english',
-        'grades',
-        'county'
+    if 'grades' in df.columns:
+        df['Grades'] = df['grades'].astype('category')
+    else:
+        df['Grades'] = pd.Categorical([np.nan] * len(df))
+
+    # Keep only columns necessary for modeling plus a few helpful raw columns
+    keep_cols = [
+        'StudentTeacherRatio', 'AvgScore', 'Expenditure', 'LunchPct',
+        'EnglishLearnersPct', 'Income', 'Students', 'LogStudents',
+        'County', 'Grades'
     ]
 
-    # Some datasets may not contain all control columns; ensure they exist in the returned df (fill missing with NaN)
-    for c in model_cols:
-        if c not in df.columns:
-            df[c] = np.nan
+    # Ensure all keep_cols exist in dataframe (they should, but fill missing with NaN)
+    for col in keep_cols:
+        if col not in df.columns:
+            df[col] = np.nan
 
-    # Return dataframe limited to the model columns plus any index/identifier columns (if present)
-    # Keep original index
-    return df[model_cols]
+    return df[keep_cols]
 
 
 # ======== MODEL CODE ========
-def model(df: pd.DataFrame) -> Any:
+def model(df: pd.DataFrame):
     """
-    Fit an OLS regression to estimate the association between student-teacher ratio and academic performance.
+    Fit an OLS regression of AvgScore on StudentTeacherRatio with controls.
 
-    Model specification (controls included):
-      AvgScore ~ StudentTeacherRatio + expenditure + income + lunch + english
-                 + ComputerPerStudent + LogStudents + C(grades) + C(county)
+    Model specification:
+      AvgScore ~ StudentTeacherRatio + Expenditure + LunchPct + EnglishLearnersPct + Income + LogStudents + C(County)
 
-    County and grades are included as categorical fixed effects. Robust (HC3) standard errors are used.
-
-    The function returns the fitted results object (statsmodels RegressionResults).
+    Uses robust (HC1) standard errors. Returns the fitted statsmodels regression results object.
     """
     import statsmodels.formula.api as smf
 
-    # Ensure the columns used in the formula exist in df (precondition: df is output of transform)
-    formula = (
-        'AvgScore ~ StudentTeacherRatio + expenditure + income + lunch + english '
-        '+ ComputerPerStudent + LogStudents + C(grades) + C(county)'
-    )
-
-    # Fit model using OLS with robust standard errors (HC3)
-    # Drop rows with NA in the variables used by the model
-    vars_in_formula = [
-        'AvgScore', 'StudentTeacherRatio', 'expenditure', 'income', 'lunch', 'english',
-        'ComputerPerStudent', 'LogStudents', 'grades', 'county'
+    # Drop rows with missing values in the variables used in the model
+    required_vars = [
+        'AvgScore', 'StudentTeacherRatio', 'Expenditure', 'LunchPct',
+        'EnglishLearnersPct', 'Income', 'LogStudents', 'County'
     ]
-    df_model = df.dropna(subset=['AvgScore', 'StudentTeacherRatio'])
-    # It's ok if some controls are NA; statsmodels will drop rows automatically, but explicitly drop rows
-    df_model = df_model.dropna(subset=['expenditure', 'income', 'lunch', 'english', 'ComputerPerStudent', 'LogStudents'], how='any')
+    df_model = df.dropna(subset=required_vars).copy()
 
-    results = smf.ols(formula=formula, data=df_model).fit(cov_type='HC3')
+    # If LogStudents is still missing (e.g., Students was 0), try to compute from Students
+    if 'LogStudents' in df_model.columns and df_model['LogStudents'].isna().any():
+        df_model.loc[df_model['LogStudents'].isna(), 'LogStudents'] = np.log(df_model.loc[df_model['LogStudents'].isna(), 'Students'].replace(0, np.nan))
+        df_model = df_model.dropna(subset=['LogStudents'])
 
-    # Return the fitted results object so the caller can inspect .summary(), params, conf_int(), etc.
-    return results
+    # Define formula including county fixed effects
+    formula = 'AvgScore ~ StudentTeacherRatio + Expenditure + LunchPct + EnglishLearnersPct + Income + LogStudents + C(County)'
+
+    # Fit OLS with robust standard errors (HC1)
+    model_res = smf.ols(formula=formula, data=df_model).fit(cov_type='HC1')
+
+    return model_res
 
 

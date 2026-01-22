@@ -1,242 +1,274 @@
 def extract_final_answer(model_output):
     """
-    Extracts coefficients, clustered SEs, z-stats, p-values, odds ratios and 95% CIs
-    for the key predictors in the fitted ClusteredResults-like object returned
-    by the modeling function.
+    Extract coefficients, standard errors, p-values, 95% CIs, odds ratios (OR) and
+    interpretable marginal effects for the primary predictors:
+      - size_ratio
+      - FocalHome
+      - size_ratio:FocalHome (interaction)
 
-    Returns a dictionary with keys:
-      - "object": a pandas.DataFrame with numeric results for:
-           rel_size_z, focal_central, rel_size_x_central
-           and additionally the combined effect of rel_size when focal is central
-           (rel_size_when_focal_central = rel_size_z + rel_size_x_central).
-      - "description": a short human-readable interpretation of those results
-           in the context of the question.
+    Returns:
+      {
+        "object": {
+          "terms": {
+            "<term>": {
+              "coef": float,
+              "se": float,
+              "pval": float,
+              "ci_lower": float,
+              "ci_upper": float,
+              "odds_ratio": float,
+              "or_ci_lower": float,
+              "or_ci_upper": float
+            }, ...
+          },
+          "marginal_effects": {
+            "size_effect_when_FocalHome_0": { "logit_coef":..., "OR":..., "OR_CI":(...) },
+            "size_effect_when_FocalHome_1": { "logit_coef":..., "OR":..., "OR_CI":(...) }
+          }
+        },
+        "description": "text explanation"
+      }
     """
     import numpy as np
-    import pandas as pd
-    from scipy.stats import norm
 
-    # Helper to get cov matrix as DataFrame
-    cov = getattr(model_output, "cov_params", None)
-    if cov is None:
-        raise ValueError("Model output does not provide clustered covariance matrix as cov_params.")
+    res = model_output
 
-    # Convert cov to DataFrame if it's ndarray
-    if isinstance(cov, np.ndarray):
-        # try to get index/columns from params
-        params_raw = getattr(model_output, "params", None)
-        if params_raw is not None and hasattr(params_raw, "index"):
-            idx = params_raw.index
-        else:
-            idx = [f"b{i}" for i in range(cov.shape[0])]
-        cov = pd.DataFrame(cov, index=idx, columns=idx)
-    elif isinstance(cov, pd.DataFrame):
-        cov = cov.copy()
-    else:
-        # try to coerce
-        cov = pd.DataFrame(np.asarray(cov))
-
-    params = getattr(model_output, "params", None)
-    if params is None:
-        raise ValueError("Model output does not provide params.")
-
-    # Ensure params is a Series
-    if not isinstance(params, pd.Series):
-        try:
-            # If params has index attribute (like numpy structured), preserve it
-            if hasattr(params, "index"):
-                params = pd.Series(params, index=params.index)
-            else:
-                params = pd.Series(list(params))
-        except Exception:
-            raise ValueError("Could not interpret params from model output as a pandas Series.")
-
-    # align cov and params indices if possible
+    # Helper to safely get series/dict-like attributes
     try:
-        if list(cov.index) != list(params.index):
-            cov = cov.reindex(index=params.index, columns=params.index)
+        params = res.params
     except Exception:
-        # if reindexing fails, proceed with what we have
-        pass
-
-    # Clustered standard errors (sqrt diag of cov)
-    se = pd.Series(np.sqrt(np.diag(cov.values)), index=params.index)
-
-    # z-stats and p-values
-    # Ensure z and pvals are pandas Series so .loc works below
-    z_vals = (params / se).astype(float)
-    if not isinstance(z_vals, pd.Series):
-        z_vals = pd.Series(z_vals, index=params.index)
-    else:
-        z_vals = pd.Series(z_vals, index=params.index)
-
-    pvals = 2 * (1 - norm.cdf(np.abs(z_vals.values)))
-    pvals = pd.Series(pvals, index=params.index)
-
-    # Clustered CIs from params +/- z*se (z=1.96 for 95%)
-    z_alpha = norm.ppf(0.975)
-    ci_lower = pd.Series((params - z_alpha * se).astype(float), index=params.index)
-    ci_upper = pd.Series((params + z_alpha * se).astype(float), index=params.index)
-
-    # Odds ratios and CIs
-    or_vals = pd.Series(np.exp(params).astype(float), index=params.index)
-    or_lower = pd.Series(np.exp(ci_lower).astype(float), index=params.index)
-    or_upper = pd.Series(np.exp(ci_upper).astype(float), index=params.index)
-
-    # Terms of interest
-    terms = ['rel_size_z', 'focal_central', 'rel_size_x_central']
-    rows = []
-    for t in terms:
-        if t in params.index:
-            rows.append({
-                'term': t,
-                'coef': float(params.loc[t]),
-                'se': float(se.loc[t]) if t in se.index else float(np.nan),
-                'z': float(z_vals.loc[t]),
-                'p': float(pvals.loc[t]),
-                'OR': float(or_vals.loc[t]),
-                'CI_lower_OR': float(or_lower.loc[t]),
-                'CI_upper_OR': float(or_upper.loc[t])
-            })
-        else:
-            rows.append({
-                'term': t,
-                'coef': np.nan,
-                'se': np.nan,
-                'z': np.nan,
-                'p': np.nan,
-                'OR': np.nan,
-                'CI_lower_OR': np.nan,
-                'CI_upper_OR': np.nan
-            })
-
-    results_df = pd.DataFrame(rows).set_index('term')
-
-    # Compute combined effect of rel_size when focal is central:
-    # effect = coef(rel_size_z) + coef(rel_size_x_central)
-    comb_name = 'rel_size_when_focal_central'
-    if all(t in params.index for t in ['rel_size_z', 'rel_size_x_central']):
-        coef_a = params.loc['rel_size_z']
-        coef_b = params.loc['rel_size_x_central']
-        coef_sum = coef_a + coef_b
-        # Var(a+b) = Var(a) + Var(b) + 2*Cov(a,b)
+        raise ValueError("Model output has no .params attribute. Provide a statsmodels results object.")
+    try:
+        bse = res.bse
+    except Exception:
+        # fallback: try to compute from cov_params if available
         try:
-            var_a = cov.loc['rel_size_z', 'rel_size_z']
-            var_b = cov.loc['rel_size_x_central', 'rel_size_x_central']
-            cov_ab = cov.loc['rel_size_z', 'rel_size_x_central']
+            cov = res.cov_params()
+            bse = np.sqrt(np.diag(cov))
+            # align index if params is a Series
+            if hasattr(params, "index"):
+                bse = type(params)(bse, index=params.index)
         except Exception:
-            # If covariance lookup fails, fallback to NaN
-            var_a = np.nan
-            var_b = np.nan
-            cov_ab = np.nan
+            raise ValueError("Cannot obtain standard errors from model output.")
+    # p-values
+    pvalues = None
+    try:
+        pvalues = res.pvalues
+    except Exception:
+        # if pvalues not present, set to NaN
+        pvalues = params * 0 + np.nan
+        if hasattr(params, "index"):
+            pvalues = type(params)(pvalues, index=params.index)
 
-        if np.isfinite(var_a) and np.isfinite(var_b) and np.isfinite(cov_ab):
-            se_sum = np.sqrt(var_a + var_b + 2 * cov_ab)
-            z_sum = coef_sum / se_sum
-            p_sum = 2 * (1 - norm.cdf(np.abs(z_sum)))
-            ci_low_sum = coef_sum - z_alpha * se_sum
-            ci_up_sum = coef_sum + z_alpha * se_sum
-            or_sum = float(np.exp(coef_sum))
-            or_low_sum = float(np.exp(ci_low_sum))
-            or_up_sum = float(np.exp(ci_up_sum))
-
-            combined_row = {
-                'term': comb_name,
-                'coef': float(coef_sum),
-                'se': float(se_sum),
-                'z': float(z_sum),
-                'p': float(p_sum),
-                'OR': or_sum,
-                'CI_lower_OR': or_low_sum,
-                'CI_upper_OR': or_up_sum
-            }
+    # conf_int: try provided, otherwise compute normal-approx
+    try:
+        ci_df = res.conf_int()
+        # conf_int returns DataFrame-like with 0,1 columns or similar
+        if hasattr(ci_df, "iloc"):
+            ci_lower = ci_df.iloc[:, 0]
+            ci_upper = ci_df.iloc[:, 1]
         else:
-            combined_row = {
-                'term': comb_name,
-                'coef': float(coef_sum),
-                'se': np.nan,
-                'z': np.nan,
-                'p': np.nan,
-                'OR': float(np.exp(coef_sum)),
-                'CI_lower_OR': np.nan,
-                'CI_upper_OR': np.nan
-            }
-    else:
-        combined_row = {
-            'term': comb_name,
-            'coef': np.nan,
-            'se': np.nan,
-            'z': np.nan,
-            'p': np.nan,
-            'OR': np.nan,
-            'CI_lower_OR': np.nan,
-            'CI_upper_OR': np.nan
+            # fallback if it's array
+            ci_lower = ci_df[:, 0]
+            ci_upper = ci_df[:, 1]
+        if hasattr(params, "index"):
+            # try to align index
+            try:
+                ci_lower = type(params)(ci_lower, index=params.index)
+                ci_upper = type(params)(ci_upper, index=params.index)
+            except Exception:
+                pass
+    except Exception:
+        # normal approximation
+        z = 1.96
+        ci_lower = params - z * bse
+        ci_upper = params + z * bse
+
+    # function to find exact or partial match for term name in index
+    def find_term_index(term_name):
+        if hasattr(params, "index"):
+            names = list(params.index)
+            # exact match
+            if term_name in names:
+                return term_name
+            # try common alternative notations
+            alternatives = [
+                term_name,
+                term_name.replace(":", "*"),  # unlikely but safe
+                term_name.replace(":", ":"),
+                term_name.replace("FocalHome", "FocalHome[T.1]"),
+                term_name.replace("FocalHome", "FocalHome[T.1]"),
+            ]
+            for alt in alternatives:
+                if alt in names:
+                    return alt
+            # try contains
+            for n in names:
+                if term_name in str(n):
+                    return n
+        # if params not indexed or not found
+        return None
+
+    # target terms
+    main_terms = ["size_ratio", "FocalHome", "size_ratio:FocalHome"]
+    extracted = {"terms": {}}
+
+    for t in main_terms:
+        idx = find_term_index(t)
+        if idx is None:
+            extracted["terms"][t] = None
+            continue
+        coef = float(params[idx])
+        se = float(bse[idx])
+        pval = float(pvalues[idx]) if idx in pvalues.index else float(pvalues[idx]) if hasattr(pvalues, "__getitem__") else float("nan")
+        ci_l = float(ci_lower[idx])
+        ci_u = float(ci_upper[idx])
+        or_ = float(np.exp(coef))
+        or_ci_l = float(np.exp(ci_l))
+        or_ci_u = float(np.exp(ci_u))
+        extracted["terms"][t] = {
+            "coef": coef,
+            "se": se,
+            "pval": pval,
+            "ci_lower": ci_l,
+            "ci_upper": ci_u,
+            "odds_ratio": or_,
+            "or_ci_lower": or_ci_l,
+            "or_ci_upper": or_ci_u
         }
 
-    results_df = pd.concat([results_df, pd.DataFrame([combined_row]).set_index('term')])
+    # compute marginal effect of size_ratio when FocalHome = 0 and 1
+    # effect_when_FH0 = beta_size
+    # effect_when_FH1 = beta_size + beta_interaction
+    size_idx = find_term_index("size_ratio")
+    int_idx = find_term_index("size_ratio:FocalHome")
+    marg = {}
+    if size_idx is None:
+        marg["size_effect_when_FocalHome_0"] = None
+        marg["size_effect_when_FocalHome_1"] = None
+    else:
+        beta_size = float(params[size_idx])
+        se_size = float(bse[size_idx])
+        # when FocalHome = 0
+        or0 = float(np.exp(beta_size))
+        # CI for beta_size
+        ci0_l = float(ci_lower[size_idx])
+        ci0_u = float(ci_upper[size_idx])
+        or0_ci = (float(np.exp(ci0_l)), float(np.exp(ci0_u)))
+        marg["size_effect_when_FocalHome_0"] = {
+            "logit_coef": beta_size,
+            "se": se_size,
+            "OR": or0,
+            "OR_CI": or0_ci,
+            "pval": float(pvalues[size_idx]) if size_idx in pvalues.index else float("nan")
+        }
 
-    # Short interpretation
-    # significance threshold
-    alpha = 0.05
-    interp_lines = []
-    # rel_size main effect (when focal_central == 0)
-    if 'rel_size_z' in results_df.index and not pd.isna(results_df.loc['rel_size_z', 'coef']):
-        coef = results_df.loc['rel_size_z', 'coef']
-        p = results_df.loc['rel_size_z', 'p']
-        orv = results_df.loc['rel_size_z', 'OR']
-        cil = results_df.loc['rel_size_z', 'CI_lower_OR']
-        ciu = results_df.loc['rel_size_z', 'CI_upper_OR']
-        sig = (p < alpha) if pd.notna(p) else False
-        interp_lines.append(
-            f"Relative group size (rel_size_z) has coefficient {coef:.3f}, OR={orv:.3f} "
-            f"(95% CI {cil:.3f}–{ciu:.3f}), p={p:.3f} -> {'statistically significant' if sig else 'not statistically significant'} "
-            f"at alpha={alpha} for non-central contests (focal_central=0)."
+        # when FocalHome = 1
+        if int_idx is not None:
+            beta_int = float(params[int_idx])
+            # variance of sum = var(beta_size) + var(beta_int) + 2*cov(beta_size,beta_int)
+            try:
+                cov = res.cov_params()
+                # cov might be DataFrame; access elements
+                var_size = float(cov.loc[size_idx, size_idx])
+                var_int = float(cov.loc[int_idx, int_idx])
+                cov_si = float(cov.loc[size_idx, int_idx])
+                se_sum = float(np.sqrt(var_size + var_int + 2 * cov_si))
+                beta_sum = beta_size + beta_int
+                or1 = float(np.exp(beta_sum))
+                z = 1.96
+                ci1_l = beta_sum - z * se_sum
+                ci1_u = beta_sum + z * se_sum
+                or1_ci = (float(np.exp(ci1_l)), float(np.exp(ci1_u)))
+                # compute p-value for sum is not directly available; we keep pval for interaction separately
+                marg["size_effect_when_FocalHome_1"] = {
+                    "logit_coef": beta_sum,
+                    "se": se_sum,
+                    "OR": or1,
+                    "OR_CI": or1_ci,
+                    "pval_interaction": float(pvalues[int_idx]) if int_idx in pvalues.index else float("nan")
+                }
+            except Exception:
+                # fallback without covariance
+                beta_sum = beta_size + beta_int
+                # approximate se by sqrt(se_size^2 + se_int^2)
+                se_int = float(bse[int_idx])
+                se_sum = float(np.sqrt(se_size ** 2 + se_int ** 2))
+                or1 = float(np.exp(beta_sum))
+                z = 1.96
+                ci1_l = beta_sum - z * se_sum
+                ci1_u = beta_sum + z * se_sum
+                or1_ci = (float(np.exp(ci1_l)), float(np.exp(ci1_u)))
+                marg["size_effect_when_FocalHome_1"] = {
+                    "logit_coef": beta_sum,
+                    "se": se_sum,
+                    "OR": or1,
+                    "OR_CI": or1_ci,
+                    "pval_interaction": float(pvalues[int_idx]) if int_idx in pvalues.index else float("nan")
+                }
+        else:
+            marg["size_effect_when_FocalHome_1"] = None
+
+    extracted["marginal_effects"] = marg
+
+    # Build a short description interpreting the key results
+    desc_lines = []
+    # check existence and significance
+    def sig_label(p):
+        try:
+            if p < 0.001:
+                return "*** (p<0.001)"
+            elif p < 0.01:
+                return "** (p<0.01)"
+            elif p < 0.05:
+                return "* (p<0.05)"
+            else:
+                return f"(p={p:.3f})"
+        except Exception:
+            return "(p=NA)"
+    t_size = extracted["terms"].get("size_ratio")
+    t_home = extracted["terms"].get("FocalHome")
+    t_int = extracted["terms"].get("size_ratio:FocalHome")
+
+    if t_size is not None:
+        desc_lines.append(
+            f"Relative group size (size_ratio): coef={t_size['coef']:.3f}, OR={t_size['odds_ratio']:.3f}, "
+            f"95%CI_OR=({t_size['or_ci_lower']:.3f}, {t_size['or_ci_upper']:.3f}) {sig_label(t_size['pval'])}."
+            " Positive coef => larger focal group increases odds of winning."
         )
-    # interaction
-    if 'rel_size_x_central' in results_df.index and not pd.isna(results_df.loc['rel_size_x_central', 'coef']):
-        coef = results_df.loc['rel_size_x_central', 'coef']
-        p = results_df.loc['rel_size_x_central', 'p']
-        orv = results_df.loc['rel_size_x_central', 'OR']
-        cil = results_df.loc['rel_size_x_central', 'CI_lower_OR']
-        ciu = results_df.loc['rel_size_x_central', 'CI_upper_OR']
-        sig = (p < alpha) if pd.notna(p) else False
-        interp_lines.append(
-            f"Interaction (rel_size_x_central) has coefficient {coef:.3f}, OR={orv:.3f} "
-            f"(95% CI {cil:.3f}–{ciu:.3f}), p={p:.3f} -> {'statistically significant' if sig else 'not statistically significant'}."
+    else:
+        desc_lines.append("Relative group size (size_ratio) term not found in model output.")
+
+    if t_home is not None:
+        desc_lines.append(
+            f"Focal home advantage (FocalHome): coef={t_home['coef']:.3f}, OR={t_home['odds_ratio']:.3f}, "
+            f"95%CI_OR=({t_home['or_ci_lower']:.3f}, {t_home['or_ci_upper']:.3f}) {sig_label(t_home['pval'])}."
+            " Positive coef => contests nearer the focal group's home increase odds of focal win."
         )
-        interp_lines.append(
-            "Interpretation: the interaction modifies the effect of relative group size when the focal group is more central."
+    else:
+        desc_lines.append("FocalHome term not found in model output.")
+
+    if t_int is not None:
+        desc_lines.append(
+            f"Interaction (size_ratio:FocalHome): coef={t_int['coef']:.3f}, OR={t_int['odds_ratio']:.3f}, "
+            f"95%CI_OR=({t_int['or_ci_lower']:.3f}, {t_int['or_ci_upper']:.3f}) {sig_label(t_int['pval'])}."
+            " A significant interaction indicates the effect of relative size differs when focal group has home advantage."
         )
-    # combined effect when focal is central
-    if comb_name in results_df.index and not pd.isna(results_df.loc[comb_name, 'coef']):
-        coef = results_df.loc[comb_name, 'coef']
-        p = results_df.loc[comb_name, 'p']
-        orv = results_df.loc[comb_name, 'OR']
-        cil = results_df.loc[comb_name, 'CI_lower_OR']
-        ciu = results_df.loc[comb_name, 'CI_upper_OR']
-        sig = (p < alpha) if pd.notna(p) else False
-        interp_lines.append(
-            f"When the focal group is more central (focal_central=1), the combined rel_size effect is coef {coef:.3f}, "
-            f"OR={orv:.3f} (95% CI {cil:.3f}–{ciu:.3f}), p={p:.3f} -> "
-            f"{'statistically significant' if sig else 'not statistically significant'}."
+    else:
+        desc_lines.append("Interaction term size_ratio:FocalHome not found in model output.")
+
+    # Add marginal interpretation if available
+    if marg.get("size_effect_when_FocalHome_0") is not None:
+        m0 = marg["size_effect_when_FocalHome_0"]
+        desc_lines.append(
+            f"Marginal effect of size when FocalHome=0: logit_coef={m0['logit_coef']:.3f}, OR={m0['OR']:.3f}."
         )
-    # focal_central main effect
-    if 'focal_central' in results_df.index and not pd.isna(results_df.loc['focal_central', 'coef']):
-        coef = results_df.loc['focal_central', 'coef']
-        p = results_df.loc['focal_central', 'p']
-        orv = results_df.loc['focal_central', 'OR']
-        cil = results_df.loc['focal_central', 'CI_lower_OR']
-        ciu = results_df.loc['focal_central', 'CI_upper_OR']
-        sig = (p < alpha) if pd.notna(p) else False
-        interp_lines.append(
-            f"Focal centrality main effect (focal_central) has coef {coef:.3f}, OR={orv:.3f} "
-            f"(95% CI {cil:.3f}–{ciu:.3f}), p={p:.3f} -> {'significant' if sig else 'not significant'}; "
-            "this is the effect of centrality when rel_size_z = 0 (average relative size)."
+    if marg.get("size_effect_when_FocalHome_1") is not None:
+        m1 = marg["size_effect_when_FocalHome_1"]
+        desc_lines.append(
+            f"Marginal effect of size when FocalHome=1: logit_coef={m1['logit_coef']:.3f}, OR={m1['OR']:.3f}."
         )
 
-    description = " ".join(interp_lines) if interp_lines else "No relevant terms found in model output."
+    description = " ".join(desc_lines)
 
-    return {
-        "object": results_df,
-        "description": description
-    }
+    return {"object": extracted, "description": description}

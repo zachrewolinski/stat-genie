@@ -1,145 +1,52 @@
 def extract_final_answer(model_output):
     """
-    Extract the estimated effect of 'female' from a fitted statsmodels Logit result
-    or from a dict returned by the modeling function (with keys 'fit', 'odds_ratios', 'conf_odds').
+    Extracts statistics for the 'female' coefficient from a fitted statsmodels Logit result.
 
-    Returns a dict with:
-      - "object": dict with numeric results (coef, se, p-value, odds ratio, 95% CI, significance)
-      - "description": brief interpretation of those statistics in context
+    Returns a dictionary with:
+      - "object": a dict containing numeric results (log-odds coef, SE, p-value, OR, OR 95% CI)
+      - "description": a short plain-language interpretation of the effect of being female
     """
     import numpy as np
 
-    # Unwrap if model_output is the dict fallback
-    if isinstance(model_output, dict) and 'fit' in model_output:
-        res = model_output['fit']
-        odds_ratios_attr = model_output.get('odds_ratios', None)
-        conf_odds_attr = model_output.get('conf_odds', None)
-    else:
-        res = model_output
-        odds_ratios_attr = getattr(res, 'odds_ratios', None)
-        conf_odds_attr = getattr(res, 'conf_odds', None)
+    # Expect model_output to be a dict with at least 'model_result' (a statsmodels results object).
+    if not isinstance(model_output, dict) or 'model_result' not in model_output:
+        raise ValueError("model_output must be a dict containing key 'model_result' (a statsmodels results object).")
 
-    # Helper to error if female not present
-    def _raise_no_female():
-        raise KeyError("The fitted model does not appear to contain a parameter named 'female'.")
+    res = model_output['model_result']
 
-    # Try to extract coefficient, se, p-value
-    try:
-        params = res.params
-    except Exception:
-        raise ValueError("Cannot access params on the provided model object.")
+    # Ensure the required 'female' parameter exists
+    if 'female' not in res.params.index:
+        raise ValueError("The fitted model does not contain a parameter named 'female'.")
 
-    # Determine index/key for female
-    female_key = None
-    try:
-        if hasattr(params, 'index') and 'female' in params.index:
-            female_key = 'female'
-        elif hasattr(res, 'model') and hasattr(res.model, 'exog_names') and 'female' in res.model.exog_names:
-            # params may be a numpy array; find corresponding position
-            idx = res.model.exog_names.index('female')
-            female_key = idx
-        else:
-            _raise_no_female()
-    except Exception:
-        _raise_no_female()
+    # Extract statistics
+    coef = float(res.params['female'])
+    se = float(res.bse['female'])
+    pval = float(res.pvalues['female'])
 
-    # Extract numeric statistics with fallbacks
-    try:
-        coef = float(params[female_key])
-    except Exception:
-        coef = float(params.iloc[female_key])
+    # Confidence interval for the log-odds coefficient, then convert to OR scale
+    conf = res.conf_int()
+    ci_log_lower = float(conf.loc['female', 0])
+    ci_log_upper = float(conf.loc['female', 1])
 
-    # standard error
-    try:
-        se = float(res.bse[female_key])
-    except Exception:
-        # fallback: compute from Hessian-inverse if available
-        try:
-            se = float(res.bse.iloc[female_key])
-        except Exception:
-            se = None
+    or_value = float(np.exp(coef))
+    or_ci_lower = float(np.exp(ci_log_lower))
+    or_ci_upper = float(np.exp(ci_log_upper))
 
-    # p-value
-    try:
-        p_value = float(res.pvalues[female_key])
-    except Exception:
-        try:
-            p_value = float(res.pvalues.iloc[female_key])
-        except Exception:
-            p_value = None
-
-    # odds ratio and CI: prefer provided odds_ratios/conf_odds if present, else compute
-    try:
-        if odds_ratios_attr is not None:
-            # odds_ratios_attr may be a Series/DataFrame/ndarray
-            try:
-                odds_ratio = float(odds_ratios_attr[female_key])
-            except Exception:
-                odds_ratio = float(odds_ratios_attr.iloc[female_key])
-        else:
-            odds_ratio = float(np.exp(coef))
-    except Exception:
-        odds_ratio = None
-
-    # confidence interval for odds ratio
-    ci_low = ci_high = None
-    try:
-        if conf_odds_attr is not None:
-            try:
-                ci_low = float(conf_odds_attr.loc['female'][0]) if hasattr(conf_odds_attr, 'loc') else float(conf_odds_attr[female_key, 0])
-                ci_high = float(conf_odds_attr.loc['female'][1]) if hasattr(conf_odds_attr, 'loc') else float(conf_odds_attr[female_key, 1])
-            except Exception:
-                # try positional
-                try:
-                    ci_row = conf_odds_attr.iloc[female_key]
-                    ci_low, ci_high = float(ci_row[0]), float(ci_row[1])
-                except Exception:
-                    ci_low = ci_high = None
-        else:
-            # compute from conf_int on log-odds, then exponentiate
-            conf = res.conf_int()
-            if hasattr(conf, 'loc') and 'female' in conf.index:
-                lower_log, upper_log = float(conf.loc['female'][0]), float(conf.loc['female'][1])
-            else:
-                # positional
-                lower_log, upper_log = float(conf.iloc[female_key, 0]), float(conf.iloc[female_key, 1])
-            ci_low, ci_high = float(np.exp(lower_log)), float(np.exp(upper_log))
-    except Exception:
-        ci_low = ci_high = None
-
-    significance = None
-    if p_value is not None:
-        significance = (p_value < 0.05)
-
-    result_object = {
-        'coef_log_odds': coef,
+    object_out = {
+        'coefficient_log_odds': coef,
         'std_error': se,
-        'p_value': p_value,
-        'odds_ratio': odds_ratio,
-        'odds_ratio_ci_lower': ci_low,
-        'odds_ratio_ci_upper': ci_high,
-        'significant_at_0.05': significance
+        'p_value': pval,
+        'odds_ratio': or_value,
+        'OR_95_CI': [or_ci_lower, or_ci_upper]
     }
 
-    # Build short description interpreting direction and statistical evidence
-    if odds_ratio is None:
-        descr_nums = "Could not compute odds ratio / CI from the model output."
-    else:
-        direction = "higher" if odds_ratio > 1 else ("lower" if odds_ratio < 1 else "no change")
-        descr_nums = (f"Estimated odds ratio for female vs male = {odds_ratio:.3g}"
-                      + (f" (95% CI: {ci_low:.3g} to {ci_high:.3g})" if (ci_low is not None and ci_high is not None) else "")
-                      + f"; log-odds coef = {coef:.3g}; p = {p_value:.3g}" if p_value is not None else "")
+    # Plain-language description
+    significance = "statistically significant" if pval < 0.05 else "not statistically significant"
+    description = (
+        f"The estimated log-odds coefficient for female = {coef:.3f} (SE = {se:.3f}, p = {pval:.3f}). "
+        f"This corresponds to an odds ratio of {or_value:.3f} with 95% CI [{or_ci_lower:.3f}, {or_ci_upper:.3f}]. "
+        f"Interpretation: holding the included controls constant, female applicants have about {or_value:.2f}× the odds "
+        f"of mortgage approval compared with male applicants. The effect is {significance} at the 0.05 level."
+    )
 
-    if significance is True:
-        conclusion = f"The effect is statistically significant at the 5% level: female applicants have {direction} odds of mortgage approval compared to males."
-    elif significance is False:
-        conclusion = "The effect is not statistically significant at the 5% level: no strong evidence that female applicants are treated differently than male applicants in approval odds."
-    else:
-        conclusion = "Significance could not be determined from the available output."
-
-    description = f"{descr_nums} {conclusion}"
-
-    return {
-        "object": result_object,
-        "description": description
-    }
+    return {"object": object_out, "description": description}

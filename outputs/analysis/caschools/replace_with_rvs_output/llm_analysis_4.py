@@ -12,79 +12,102 @@ df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/anal
 
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
-    # Work on a copy
+    """
+    Transform the raw district dataframe to produce the columns needed for modeling.
+
+    Produces:
+      - AvgScore: mean of 'read' and 'math'
+      - StudentTeacherRatio: students / teachers
+      - ComputersPerStudent: computer / students
+      - LogStudents: log1p(students)
+
+    It drops rows with missing values in any columns required for the model.
+    """
     df = df.copy()
 
-    # Ensure relevant numeric columns are numeric (coerce non-numeric to NaN)
-    numeric_cols = ['students', 'teachers', 'read', 'math', 'computer', 'expenditure', 'income', 'english', 'lunch', 'calworks']
+    # Ensure numeric columns are numeric
+    numeric_cols = ['students', 'teachers', 'read', 'math', 'computer', 'expenditure', 'income', 'calworks', 'lunch', 'english']
     for c in numeric_cols:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors='coerce')
 
-    # Drop rows missing the core variables needed to compute ratio and outcome
+    # Drop rows missing the core outcome or core size/teacher values
     df = df.dropna(subset=['students', 'teachers', 'read', 'math'])
 
-    # Remove impossible / degenerate values (zero or negative teachers or students)
-    df = df[(df['teachers'] > 0) & (df['students'] > 0)]
+    # Dependent variable: average test score (read & math)
+    df['AvgScore'] = df[['read', 'math']].mean(axis=1)
 
-    # Create the student-teacher ratio (students per teacher)
-    df['student_teacher_ratio'] = df['students'] / df['teachers']
-
-    # Dependent variable: average of read and math scores
-    df['avg_score'] = df[['read', 'math']].mean(axis=1)
+    # Independent variable: student-teacher ratio
+    # Protect against division by zero
+    df['StudentTeacherRatio'] = df['students'] / df['teachers']
+    df.loc[~np.isfinite(df['StudentTeacherRatio']), 'StudentTeacherRatio'] = np.nan
 
     # Resource control: computers per student
-    # If 'computer' missing, result will be NaN; we will impute below
-    df['computers_per_student'] = df['computer'] / df['students']
+    df['ComputersPerStudent'] = df['computer'] / df['students']
+    df.loc[~np.isfinite(df['ComputersPerStudent']), 'ComputersPerStudent'] = np.nan
 
-    # Ensure categorical variables are proper dtype
+    # District size (log transform)
+    df['LogStudents'] = np.log1p(df['students'])
+
+    # Ensure categorical fields exist and are of type category
     if 'grades' in df.columns:
         df['grades'] = df['grades'].astype('category')
     if 'county' in df.columns:
         df['county'] = df['county'].astype('category')
 
-    # For remaining numeric controls, impute a small number of missing values with the median
-    controls_for_impute = ['expenditure', 'income', 'english', 'lunch', 'calworks', 'computers_per_student']
-    for c in controls_for_impute:
-        if c in df.columns:
-            median_val = df[c].median()
-            # If median is NaN (all missing), fill with 0 to avoid errors; otherwise use median
-            if np.isnan(median_val):
-                df[c] = df[c].fillna(0)
-            else:
-                df[c] = df[c].fillna(median_val)
+    # Keep only the columns needed for modeling (plus a few originals for traceability)
+    needed_cols = [
+        'AvgScore', 'StudentTeacherRatio', 'income', 'calworks', 'lunch', 'english',
+        'expenditure', 'ComputersPerStudent', 'LogStudents', 'grades', 'county',
+        'students', 'teachers', 'computer', 'read', 'math'
+    ]
+    # Select intersection of needed_cols and actual columns to avoid KeyError
+    cols_to_keep = [c for c in needed_cols if c in df.columns]
+    df = df[cols_to_keep]
 
-    # Optional: Winsorize extreme student_teacher_ratio values to reduce influence of outliers
-    # Here we cap to 1st and 99th percentiles
-    if 'student_teacher_ratio' in df.columns:
-        lower = df['student_teacher_ratio'].quantile(0.01)
-        upper = df['student_teacher_ratio'].quantile(0.99)
-        df['student_teacher_ratio'] = df['student_teacher_ratio'].clip(lower=lower, upper=upper)
+    # Final drop: remove rows with any missing values among the columns that will be used in the model
+    df = df.dropna(subset=[c for c in ['AvgScore', 'StudentTeacherRatio', 'income', 'calworks', 'lunch', 'english', 'expenditure', 'ComputersPerStudent', 'LogStudents', 'grades', 'county'] if c in df.columns])
 
-    # Return dataframe containing all columns needed for modeling (and keep other original columns)
+    # Reset index for cleanliness
+    df = df.reset_index(drop=True)
+
     return df
 
 
 # ======== MODEL CODE ========
 def model(df: pd.DataFrame):
-    # This model estimates the association between student-teacher ratio and average test score,
-    # controlling for district resources and demographics and including categorical fixed effects for grades and county.
+    """
+    Fit an OLS regression of average test score on student-teacher ratio with controls.
+
+    Returns the fitted statsmodels regression results object (with robust standard errors).
+    """
     import statsmodels.formula.api as smf
 
-    # Define formula: avg_score on main IV and controls. C() wraps categorical variables.
-    formula = (
-        'avg_score ~ student_teacher_ratio + expenditure + income + english + lunch + '
-        'calworks + computers_per_student + C(grades) + C(county)'
-    )
+    # Build the formula. Include categorical controls for grades and county if present.
+    formula_parts = [
+        'StudentTeacherRatio',
+        'income',
+        'calworks',
+        'lunch',
+        'english',
+        'expenditure',
+        'ComputersPerStudent',
+        'LogStudents'
+    ]
 
-    # Fit OLS
-    fit = smf.ols(formula=formula, data=df).fit()
+    # Start formula
+    formula = 'AvgScore ~ ' + ' + '.join(formula_parts)
 
-    # Obtain robust (heteroskedasticity-consistent) standard errors (HC3)
-    results = fit.get_robustcov_results(cov_type='HC3')
+    # Add categorical terms if present in df
+    if 'grades' in df.columns:
+        formula += ' + C(grades)'
+    if 'county' in df.columns:
+        formula += ' + C(county)'
 
-    # Print a concise summary and return the results object for further inspection
-    print(results.summary())
-    return results
+    # Fit OLS with robust (HC3) standard errors
+    model = smf.ols(formula, data=df).fit(cov_type='HC3')
+
+    # Return the fitted model object. The caller can inspect model.summary() or model.params etc.
+    return model
 
 

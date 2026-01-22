@@ -12,75 +12,120 @@ df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/anal
 
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
-    # Work on a copy
+    """
+    Transform the raw dataset into a dataframe ready for modeling. Assumptions based on dataset schema:
+      - 'majority_first' encodes the child's choice: 1 = undemonstrated/unchosen option, 2 = majority option, 3 = minority option.
+      - 'culture' column contains the child's age in years (values 4-14 in schema), while the column named 'age' encodes whether the majority was demonstrated first (0/1).
+      - 'y' is the site ID.
+
+    The function will:
+      - Create binary outcome ChooseMajority (1 if choice == 2 else 0).
+      - Create ChooseSocial (for exploratory use): 1 if chose either majority or minority (2 or 3).
+      - Create Age, AgeCentered, AgeGroup, Culture (categorical), Gender, MajorityFirst, SiteID.
+      - Drop rows missing any of the columns required for the primary model.
+    """
+    # Copy to avoid modifying original
     df = df.copy()
 
-    # Required source columns (based on provided schema):
-    # - 'majority_first': outcome encoding 1=unchosen, 2=majority, 3=minority
-    # - 'culture': contains the child's age in years (per schema samples)
-    # - 'y': site id (1..8)
-    # - 'gender': 1=girl, 2=boy
-    # - 'age': (per schema) indicator whether majority option was demonstrated first (0/1)
+    # Standardize expected column names and types
+    # According to provided schema notes: 'majority_first' = choice; 'culture' actually contains ages; 'age' encodes majority-first; 'y' is site id
+    # Ensure columns exist
+    expected = ['majority_first', 'gender', 'culture', 'age', 'y']
+    missing = [c for c in expected if c not in df.columns]
+    if missing:
+        raise ValueError(f"Input dataframe is missing expected columns: {missing}")
 
-    # Drop rows missing any of the required variables
-    df = df.dropna(subset=['majority_first', 'culture', 'y', 'gender', 'age'])
+    # Create Choice and binary outcomes
+    df['Choice'] = pd.to_numeric(df['majority_first'], errors='coerce').astype('Int64')
+    # Binary: chose the majority option (Choice == 2)
+    df['ChooseMajority'] = (df['Choice'] == 2).astype('Int64')
+    # Binary: chose any demonstrated option (majority or minority)
+    df['ChooseSocial'] = df['Choice'].isin([2, 3]).astype('Int64')
 
-    # Dependent variable: binary indicator for choosing the majority option
-    # According to the schema: majority is encoded as 2
-    df['ChoiceMajority'] = (df['majority_first'] == 2).astype(int)
+    # Age: use column 'culture' (schema indicates values 4-14)
+    df['Age'] = pd.to_numeric(df['culture'], errors='coerce')
 
-    # Age: in the provided schema 'culture' appears to contain ages (4-14)
-    # Convert to numeric and store as AgeYears
-    df['AgeYears'] = pd.to_numeric(df['culture'], errors='coerce')
+    # MajorityFirst (order) is in the column named 'age' according to schema inconsistencies (0/1)
+    df['MajorityFirst'] = pd.to_numeric(df['age'], errors='coerce').astype('Int64')
 
-    # Site / cultural context: create a categorical label from site id column 'y'
-    df['Site'] = 'Site_' + df['y'].astype(int).astype(str)
-    df['Site'] = df['Site'].astype('category')
+    # Gender: keep numeric coding 1=girl, 2=boy
+    df['Gender'] = pd.to_numeric(df['gender'], errors='coerce').astype('Int64')
 
-    # Gender: map to a male indicator (1 = boy, 0 = girl)
-    df['GenderMale'] = (df['gender'] == 2).astype(int)
+    # SiteID and Culture: use 'y' as site identifier; create Culture as categorical site-level variable
+    df['SiteID'] = pd.to_numeric(df['y'], errors='coerce').astype('Int64')
+    df['Culture'] = df['SiteID'].astype('category')
 
-    # MajorityFirst: indicator whether majority was demonstrated first (source column 'age' per schema)
-    df['MajorityFirst'] = df['age'].astype(int)
+    # Center age for better interpretability and interaction stability
+    df['AgeCentered'] = df['Age'] - df['Age'].mean()
 
-    # Center age and add quadratic term to allow non-linear developmental effects
-    df['Age_c'] = df['AgeYears'] - df['AgeYears'].mean()
-    df['Age_c2'] = df['Age_c'] ** 2
+    # Create coarse developmental AgeGroup for descriptive analyses: Early (4-6), Middle (7-9), Late (10+)
+    bins = [3.5, 6.5, 9.5, 14.5]
+    labels = ['Early', 'Middle', 'Late']
+    df['AgeGroup'] = pd.cut(df['Age'], bins=bins, labels=labels, include_lowest=True)
 
-    # Keep only the columns needed for modeling (and in the conceptual variables)
-    result_cols = ['ChoiceMajority', 'AgeYears', 'Age_c', 'Age_c2', 'Site', 'GenderMale', 'MajorityFirst']
-    df_out = df[result_cols].copy()
+    # Drop rows with missing values in the primary variables used in modeling
+    required_for_model = ['ChooseMajority', 'Age', 'Gender', 'MajorityFirst', 'SiteID']
+    df = df.dropna(subset=required_for_model)
 
-    return df_out
+    # Cast final columns to standard dtypes
+    df['ChooseMajority'] = df['ChooseMajority'].astype(int)
+    df['Gender'] = df['Gender'].astype(int)
+    df['MajorityFirst'] = df['MajorityFirst'].astype(int)
+    df['SiteID'] = df['SiteID'].astype(int)
+
+    # Keep only the columns needed for modeling and sensible diagnostics (but return full df; model function will use needed columns)
+    keep_cols = [
+        'Choice', 'ChooseMajority', 'ChooseSocial', 'Age', 'AgeCentered', 'AgeGroup',
+        'Gender', 'MajorityFirst', 'SiteID', 'Culture'
+    ]
+    for c in keep_cols:
+        if c not in df.columns:
+            df[c] = pd.NA
+
+    return df
 
 
 # ======== MODEL CODE ========
 def model(df: pd.DataFrame):
-    """Runs a binomial (logistic) regression predicting choice of majority option.
-    Model specification:
-      ChoiceMajority ~ Age_c + Age_c2 + C(Site) + GenderMale + MajorityFirst + Age_c:C(Site)
-    - C(Site) includes site fixed effects to control for average differences across cultures.
-    - Age_c:C(Site) tests whether the age-developmental slope differs across sites (culture x age interaction).
-    - GenderMale and MajorityFirst are included as nuisance covariates.
-
-    Returns the fitted GLM (statsmodels) results object.
     """
-    import statsmodels.api as sm
+    Fit a primary statistical model testing whether children's choice of the majority option
+    varies with age and across cultural sites, controlling for gender and order (MajorityFirst).
+
+    Primary model: logistic regression (binomial GLM) predicting ChooseMajority.
+    Key predictor terms: AgeCentered, Culture (categorical), and their interaction AgeCentered:C(Culture).
+    Controls: Gender, MajorityFirst.
+
+    We cluster standard errors by SiteID to account for within-site dependence.
+
+    Returns the fitted model object with cluster-robust covariances.
+    """
     import statsmodels.formula.api as smf
 
-    # Ensure Site is categorical
-    df = df.copy()
-    df['Site'] = df['Site'].astype('category')
+    # Ensure needed columns exist
+    required = ['ChooseMajority', 'AgeCentered', 'Culture', 'Gender', 'MajorityFirst', 'SiteID']
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"Transformed dataframe is missing required columns for modeling: {missing}")
 
-    # Formula with interaction between age (centered) and site (culture)
-    formula = 'ChoiceMajority ~ Age_c + Age_c2 + C(Site) + GenderMale + MajorityFirst + Age_c:C(Site)'
+    # Formula: main effects + interaction between age and culture
+    # C(Culture) treats Culture as categorical
+    formula = 'ChooseMajority ~ AgeCentered * C(Culture) + Gender + MajorityFirst'
 
-    # Fit a GLM with binomial family (logistic regression)
-    model_glm = smf.glm(formula=formula, data=df, family=sm.families.Binomial()).fit()
+    # Fit binomial GLM
+    glm_mod = smf.glm(formula=formula, data=df, family=sm.families.Binomial())
+    glm_res = glm_mod.fit()
 
-    # Print a summary for quick inspection (can be removed if not desired)
-    print(model_glm.summary())
+    # Obtain cluster-robust standard errors grouped by SiteID
+    try:
+        glm_res_clust = glm_res.get_robustcov_results(cov_type='cluster', groups=df['SiteID'])
+    except Exception:
+        # Fallback: return original glm_res if clustering fails
+        print('Warning: clustering by SiteID failed; returning unclustered estimates')
+        glm_res_clust = glm_res
 
-    return model_glm
+    # Print summary for quick inspection
+    print(glm_res_clust.summary())
+
+    return glm_res_clust
 
 

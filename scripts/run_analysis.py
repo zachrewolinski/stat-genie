@@ -21,7 +21,7 @@ def run_analysis():
     parser.add_argument("--dataset", required=True, help="Dataset name")
     parser.add_argument("--analysis-num", type=int, required=True, help="Analysis number (1, 2, 3, etc.)")
     parser.add_argument("--perturbation-type", required=True, 
-                       choices=["noperturb", "anonymize", "shuffle_names", "add_features", "replace_with_rvs"],
+                       choices=["noperturb", "anonymize", "shuffle_names", "add_features", "replace_with_rvs", "positive_leading_statement", "negative_leading_statement", "replace_and_positive_statement"],
                        help="Type of feature perturbation")
     parser.add_argument("--llm-provider", default="openai", help="LLM provider")
     parser.add_argument("--llm-model", default="gpt-5-mini", help="LLM model")

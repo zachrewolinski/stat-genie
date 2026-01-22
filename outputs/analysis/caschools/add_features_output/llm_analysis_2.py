@@ -13,92 +13,143 @@ df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/anal
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Transform the raw district-level dataframe into the analysis-ready dataframe.
+    Transform the original dataframe to produce variables used in the statistical model.
 
-    Produces the following columns used in modeling (kept or created):
+    Outputs (added columns):
       - StudentTeacherRatio: students / teachers
-      - AvgScore: mean of 'read' and 'math'
+      - AvgScore: mean of read and math
       - ComputersPerStudent: computer / students
-      - keeps expenditure, income, calworks, lunch, english, students, grades, county
+      - grades_KK08: binary indicator for grades == 'KK-08'
+      - standardized versions (z-scores) for DV, IV, and continuous controls:
+          AvgScore_z, STR_z, expenditure_z, lunch_z, english_z, calworks_z,
+          ComputersPerStudent_z, income_z, students_z
 
-    Rows with missing values in required fields or with non-positive students/teachers are dropped.
+    The function drops rows with missing or invalid critical values (students, teachers, read, math).
     """
+
+    # Make a working copy
     df = df.copy()
 
-    # Columns required for analysis
-    required = [
-        'students', 'teachers', 'read', 'math', 'computer',
-        'expenditure', 'income', 'calworks', 'lunch', 'english',
-        'grades', 'county'
-    ]
+    # Ensure numeric columns are numeric
+    num_cols = ['students', 'teachers', 'read', 'math', 'computer', 'expenditure', 'lunch', 'english', 'calworks', 'income']
+    for c in num_cols:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors='coerce')
 
-    # Drop rows missing any of the required columns
+    # Drop rows missing essential fields for computing ratio and outcome
+    required = [c for c in ['students', 'teachers', 'read', 'math'] if c in df.columns]
     df = df.dropna(subset=required)
 
-    # Remove impossible/nonpositive values for students or teachers
-    df = df[(df['students'] > 0) & (df['teachers'] > 0)]
+    # Remove invalid or zero teachers to avoid division by zero
+    df = df[df['teachers'] > 0]
+    df = df[df['students'] > 0]
 
-    # Create student-teacher ratio (students per teacher)
+    # Compute student-teacher ratio and average score
     df['StudentTeacherRatio'] = df['students'] / df['teachers']
-
-    # Create outcome: average of reading and math scores
     df['AvgScore'] = df[['read', 'math']].mean(axis=1)
 
-    # Create computers per student (resource control)
-    # If 'computer' is 0, result will be 0; division safe because students > 0
-    df['ComputersPerStudent'] = df['computer'] / df['students']
+    # Computers per student (if computer column exists)
+    if 'computer' in df.columns:
+        # Avoid dividing by zero; we already filtered students > 0
+        df['ComputersPerStudent'] = df['computer'] / df['students']
+    else:
+        df['ComputersPerStudent'] = np.nan
 
-    # Ensure categorical variables have category dtype (keeps them usable by formula interface)
-    try:
-        df['grades'] = df['grades'].astype('category')
-    except Exception:
-        # if conversion fails, keep as-is
-        pass
-    try:
-        df['county'] = df['county'].astype('category')
-    except Exception:
-        pass
+    # Binary indicator for grade span KK-08 vs KK-06
+    # Create a column grades_KK08 = 1 if grades == 'KK-08', else 0 (including missing treated as 0)
+    if 'grades' in df.columns:
+        df['grades_KK08'] = df['grades'].astype(str).apply(lambda x: 1 if x == 'KK-08' else 0)
+    else:
+        df['grades_KK08'] = 0
 
-    # Return the transformed dataframe (contains original columns plus derived columns)
+    # Keep county for clustering (preserve original values)
+    if 'county' not in df.columns:
+        df['county'] = np.nan
+
+    # Select continuous controls to standardize (z-score)
+    to_standardize = {
+        'STR': 'StudentTeacherRatio',
+        'AvgScore': 'AvgScore',
+        'expenditure': 'expenditure',
+        'lunch': 'lunch',
+        'english': 'english',
+        'calworks': 'calworks',
+        'ComputersPerStudent': 'ComputersPerStudent',
+        'income': 'income',
+        'students': 'students'
+    }
+
+    # Compute z-scores and place in columns with suffix _z
+    for short, col in to_standardize.items():
+        if col in df.columns:
+            mean = df[col].mean()
+            std = df[col].std(ddof=0)
+            # If std is zero or NaN, fill result with zeros to avoid division by zero
+            if pd.isna(std) or std == 0:
+                df[f"{short}_z"] = 0.0
+            else:
+                df[f"{short}_z"] = (df[col] - mean) / std
+        else:
+            df[f"{short}_z"] = np.nan
+
+    # For clarity, rename the StudentTeacherRatio z column to match the conceptual name used in the model
+    # The mapping above created 'STR_z' and 'AvgScore_z' etc.
+
+    # Keep only rows with a non-missing AvgScore_z and STR_z (model requires both)
+    df = df.dropna(subset=['AvgScore_z', 'STR_z'])
+
+    # Final dataframe returned contains the original columns plus the derived ones used in modeling
     return df
 
 
 # ======== MODEL CODE ========
 def model(df: pd.DataFrame):
     """
-    Fit an OLS model to estimate the association between student-teacher ratio and average test score.
+    Fit a linear regression of standardized average score on standardized student-teacher ratio
+    controlling for relevant district-level covariates. Cluster-robust standard errors by county.
 
-    Model formula (controls included):
-      AvgScore ~ StudentTeacherRatio + expenditure + income + calworks + lunch + english
-                 + ComputersPerStudent + np.log(students) + C(grades) + C(county)
+    Model formula:
+      AvgScore_z ~ STR_z + expenditure_z + lunch_z + english_z + calworks_z
+                 + ComputersPerStudent_z + income_z + students_z + grades_KK08
 
-    Returns the fitted statsmodels regression results object (with robust HC3 standard errors).
+    Returns the fitted statsmodels results object (OLSResults).
     """
+
     import statsmodels.formula.api as smf
-    import numpy as np
 
-    # Work on a copy to avoid modifying original
-    df = df.copy()
-
-    # Ensure required columns exist
-    needed = [
-        'AvgScore', 'StudentTeacherRatio', 'expenditure', 'income', 'calworks',
-        'lunch', 'english', 'ComputersPerStudent', 'students', 'grades', 'county'
-    ]
-    missing = [c for c in needed if c not in df.columns]
+    # Ensure required columns are available
+    required_cols = ['AvgScore_z', 'STR_z', 'expenditure_z', 'lunch_z', 'english_z', 'calworks_z',
+                     'ComputersPerStudent_z', 'income_z', 'students_z', 'grades_KK08', 'county']
+    missing = [c for c in required_cols if c not in df.columns]
     if len(missing) > 0:
-        raise ValueError(f"Transformed dataframe is missing required columns: {missing}")
+        raise ValueError(f"The following required columns are missing from the dataframe passed to model(): {missing}")
 
-    # Build formula. Use log(students) to flexibly control for size.
+    # Drop rows with missing values in the predictors or outcome
+    model_df = df.dropna(subset=['AvgScore_z', 'STR_z'])
+
+    # Define formula
     formula = (
-        'AvgScore ~ StudentTeacherRatio + expenditure + income + calworks + lunch + english '
-        '+ ComputersPerStudent + np.log(students) + C(grades) + C(county)'
+        'AvgScore_z ~ STR_z + expenditure_z + lunch_z + english_z + calworks_z '
+        '+ ComputersPerStudent_z + income_z + students_z + grades_KK08'
     )
 
-    # Fit OLS with robust (HC3) standard errors
-    fit = smf.ols(formula=formula, data=df).fit(cov_type='HC3')
+    # Fit OLS
+    ols_mod = smf.ols(formula=formula, data=model_df)
 
-    # Return the fitted results object for downstream inspection
-    return fit
+    # Use cluster-robust standard errors clustered by county if county has enough groups
+    # fall back to default if county is all NA or single group
+    try:
+        # If county has only one unique non-null value, clustering will fail; check that
+        valid_counties = model_df['county'].dropna().unique()
+        if len(valid_counties) > 1:
+            results = ols_mod.fit(cov_type='cluster', cov_kwds={'groups': model_df['county']})
+        else:
+            results = ols_mod.fit()
+    except Exception:
+        # If clustering raises an error for any reason, use default OLS fit
+        results = ols_mod.fit()
+
+    # Return the fitted results object so the caller can inspect params, summary, etc.
+    return results
 
 

@@ -13,108 +13,117 @@ df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/anal
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Prepare the Fair (affairs) dataset for analysis.
+    Transform the raw Fair dataset to prepare variables for modeling.
 
-    Creates the following columns used in modeling (exact names):
-      - AffairsCount: numeric copy of original 'affairs' column
-      - AnyAffair: binary indicator (1 if AffairsCount > 0, else 0)
-      - HasChildren: binary indicator (1 if 'children' == 'yes', 0 if 'no')
-      - IsMale: binary indicator (1 if gender == 'male', 0 otherwise)
-      - Age, YearsMarried, Religiousness, Education, Occupation, Rating: numeric controls
+    Produces the following columns used by the model:
+      - affairs: integer count outcome (keeps original values)
+      - HasChildren: binary indicator 1 if 'children' == 'yes', 0 if 'no'
+      - IsFemale: binary indicator 1 if gender == 'female', 0 if 'male'
+      - age_c, yearsmarried_c, religiousness_c, education_c, occupation_c, rating_c: centered numeric controls
 
-    Drops rows with missing values in any variable needed for the primary analysis.
+    Drops rows with missing values in any of the required columns.
     """
     df = df.copy()
 
-    # Keep relevant columns and ensure they exist
-    needed = ['affairs', 'children', 'gender', 'age', 'yearsmarried', 'religiousness', 'education', 'occupation', 'rating']
-    for col in needed:
-        if col not in df.columns:
-            raise ValueError(f"Required column '{col}' not found in dataframe")
+    # Ensure expected columns are present
+    required = ['affairs', 'children', 'gender', 'age', 'yearsmarried', 'religiousness', 'education', 'occupation', 'rating']
+    missing = [c for c in required if c not in df.columns]
+    if len(missing) > 0:
+        raise ValueError(f"Missing required columns for transform: {missing}")
 
-    # Convert/clean columns
-    # AffairsCount: preserve numeric coding as provided (0,1,2,3,7,12 etc.)
-    df['AffairsCount'] = pd.to_numeric(df['affairs'], errors='coerce')
+    # Keep a working subset to avoid surprises and drop rows with missing data in required columns
+    df = df.loc[:, required].copy()
+    df = df.dropna(subset=required)
 
-    # HasChildren: map 'yes'/'no' to 1/0; support mixed capitalization
-    df['HasChildren'] = df['children'].astype(str).str.strip().str.lower().map({'yes': 1, 'no': 0})
+    # Ensure affairs is integer (it may be numeric but with top-coding values like 7,12 already present)
+    df['affairs'] = df['affairs'].astype(int)
 
-    # Binary indicator for any affair
-    df['AnyAffair'] = (df['AffairsCount'] > 0).astype(int)
-
-    # Gender indicator: IsMale = 1 if 'male', 0 otherwise
-    df['IsMale'] = df['gender'].astype(str).str.strip().str.lower().map(lambda x: 1 if x == 'male' else 0)
-
-    # Numeric controls: coerce to numeric, keep original variable meaning
-    df['Age'] = pd.to_numeric(df['age'], errors='coerce')
-    df['YearsMarried'] = pd.to_numeric(df['yearsmarried'], errors='coerce')
-    df['Religiousness'] = pd.to_numeric(df['religiousness'], errors='coerce')
-    df['Education'] = pd.to_numeric(df['education'], errors='coerce')
-    df['Occupation'] = pd.to_numeric(df['occupation'], errors='coerce')
-    df['Rating'] = pd.to_numeric(df['rating'], errors='coerce')
-
-    # Drop rows with missing values in any of the model columns
-    model_cols = ['AffairsCount', 'AnyAffair', 'HasChildren', 'IsMale', 'Age', 'YearsMarried', 'Religiousness', 'Education', 'Occupation', 'Rating']
-    df = df.dropna(subset=model_cols)
-
-    # Ensure integer types where appropriate
+    # Children -> HasChildren binary (1=yes, 0=no)
+    # normalize text if necessary
+    df['children'] = df['children'].astype(str).str.strip().str.lower()
+    df['HasChildren'] = df['children'].map({'yes': 1, 'no': 0})
+    # If any other values remain, treat as missing and drop
+    df = df.dropna(subset=['HasChildren'])
     df['HasChildren'] = df['HasChildren'].astype(int)
-    df['IsMale'] = df['IsMale'].astype(int)
-    df['AnyAffair'] = df['AnyAffair'].astype(int)
 
-    # Return transformed dataframe containing at least the columns listed in cvars
+    # Gender -> IsFemale binary (1=female, 0=male)
+    df['gender'] = df['gender'].astype(str).str.strip().str.lower()
+    df['IsFemale'] = df['gender'].map({'female': 1, 'male': 0})
+    df = df.dropna(subset=['IsFemale'])
+    df['IsFemale'] = df['IsFemale'].astype(int)
+
+    # Ensure numeric controls are numeric
+    numeric_cols = ['age', 'yearsmarried', 'religiousness', 'education', 'occupation', 'rating']
+    for c in numeric_cols:
+        # coerce to numeric; drop if cannot convert
+        df[c] = pd.to_numeric(df[c], errors='coerce')
+    df = df.dropna(subset=numeric_cols)
+
+    # Center numeric controls to aid interpretability
+    df['age_c'] = df['age'] - df['age'].mean()
+    df['yearsmarried_c'] = df['yearsmarried'] - df['yearsmarried'].mean()
+    df['religiousness_c'] = df['religiousness'] - df['religiousness'].mean()
+    df['education_c'] = df['education'] - df['education'].mean()
+    df['occupation_c'] = df['occupation'] - df['occupation'].mean()
+    df['rating_c'] = df['rating'] - df['rating'].mean()
+
+    # Final column selection - keep the columns the model will use plus affairs
+    final_cols = [
+        'affairs',
+        'HasChildren',
+        'IsFemale',
+        'age_c',
+        'yearsmarried_c',
+        'religiousness_c',
+        'education_c',
+        'occupation_c',
+        'rating_c'
+    ]
+    df = df[final_cols].reset_index(drop=True)
+
     return df
 
 
 # ======== MODEL CODE ========
-def model(df: pd.DataFrame) -> dict:
+def model(df: pd.DataFrame) -> Any:
     """
-    Runs two complementary models to assess whether having children decreases engagement in extramarital affairs.
+    Fit a count regression model for affairs with main predictor HasChildren and controls.
 
-    1) Primary analysis: logistic regression (GLM Binomial) on AnyAffair (binary outcome).
-       - Includes HasChildren as primary predictor and controls (IsMale, Age, YearsMarried,
-         Religiousness, Education, Occupation, Rating).
-       - Also fits a second logistic model that includes the interaction HasChildren * IsMale to test
-         whether the effect of children differs by gender.
+    Primary specification: Negative Binomial (to account for overdispersion in the count outcome).
+    Includes an interaction between HasChildren and IsFemale to test whether the effect of children
+    differs by gender.
 
-    2) Robustness / secondary analysis: Negative binomial regression (GLM NegativeBinomial)
-       on AffairsCount (count outcome with top-coding) using the same covariates and interaction.
-
-    Returns a dictionary with fitted results objects from statsmodels for each model.
+    Returns the fitted model results object.
     """
-    # copy to avoid side effects
-    df = df.copy()
+    import statsmodels.api as sm
+    import statsmodels.formula.api as smf
 
-    # Define covariates used in all models
-    covariates = ['HasChildren', 'IsMale', 'Age', 'YearsMarried', 'Religiousness', 'Education', 'Occupation', 'Rating']
+    # Check required model columns exist
+    required = ['affairs', 'HasChildren', 'IsFemale', 'age_c', 'yearsmarried_c', 'religiousness_c', 'education_c', 'occupation_c', 'rating_c']
+    missing = [c for c in required if c not in df.columns]
+    if len(missing) > 0:
+        raise ValueError(f"Missing required columns for model: {missing}")
 
-    # Prepare design matrix (no categorical expansion beyond IsMale which we've coded)
-    X = df[covariates]
-    X = sm.add_constant(X)
+    # Build formula with interaction between HasChildren and IsFemale
+    formula = (
+        'affairs ~ HasChildren + IsFemale + HasChildren:IsFemale '
+        '+ age_c + yearsmarried_c + religiousness_c + education_c + occupation_c + rating_c'
+    )
 
-    # Outcome: binary AnyAffair
-    y_bin = df['AnyAffair']
+    # Fit Negative Binomial GLM
+    nb_model = smf.glm(formula=formula, data=df, family=sm.families.NegativeBinomial())
+    nb_results = nb_model.fit()
 
-    # Fit logistic (GLM with Binomial family)
-    logit_model = sm.GLM(y_bin, X, family=sm.families.Binomial()).fit()
+    # Provide basic diagnostics and return results object
+    print(nb_results.summary())
 
-    # Fit logistic with interaction HasChildren * IsMale
-    X_int = X.copy()
-    X_int['HasChildren_x_IsMale'] = X_int['HasChildren'] * X_int['IsMale']
-    logit_model_inter = sm.GLM(y_bin, X_int, family=sm.families.Binomial()).fit()
+    # As a robustness check, also fit a Poisson and compare AIC/BIC (optional)
+    try:
+        pois_model = smf.glm(formula=formula, data=df, family=sm.families.Poisson()).fit()
+        print('\nPoisson AIC:', pois_model.aic, 'NB AIC:', nb_results.aic)
+    except Exception:
+        pass
 
-    # Secondary: Negative binomial on count outcome (AffairsCount) as robustness
-    y_count = df['AffairsCount']
-    # Use same X_int (with interaction) for count model
-    nb_model = sm.GLM(y_count, X_int, family=sm.families.NegativeBinomial()).fit()
-
-    # Package results
-    results = {
-        'logit': logit_model,
-        'logit_interaction': logit_model_inter,
-        'negbin': nb_model
-    }
-
-    return results
+    return nb_results
 
 

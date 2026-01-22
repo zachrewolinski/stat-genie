@@ -12,103 +12,99 @@ df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/anal
 
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
-    # Work on a copy
+    """
+    Transform the original dataframe to prepare variables for modeling.
+
+    Outputs (columns guaranteed if present in input):
+    - AcademicScore: mean of 'read' and 'math'
+    - StudentTeacherRatio: students / teachers (capped at 99th percentile to reduce influence of extreme outliers)
+    - LogStudents: log1p(students)
+    - StdStudentTeacherRatio, StdAcademicScore: standardized versions (z-scores)
+    - plus the original control columns (expenditure, income, calworks, lunch, english, county, grades)
+    """
+
     df = df.copy()
 
-    # Ensure necessary columns exist and coerce numeric columns
-    numeric_cols = ['students', 'teachers', 'read', 'math', 'calworks', 'lunch', 'income', 'english', 'expenditure', 'computer']
-    for col in numeric_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
+    # Ensure numeric conversion for key numeric columns; coerce errors to NaN
+    num_cols = ['students', 'teachers', 'read', 'math', 'expenditure', 'income', 'calworks', 'lunch', 'english']
+    for c in num_cols:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors='coerce')
 
-    # Required columns for the analytic sample
-    required_cols = ['students', 'teachers', 'read', 'math', 'calworks', 'lunch', 'income', 'english', 'expenditure', 'computer', 'grades', 'county']
+    # Drop rows that lack the critical variables needed to compute DV/IV
+    required = [c for c in ['students', 'teachers', 'read', 'math'] if c in df.columns]
+    df = df.dropna(subset=required)
 
-    # Drop rows missing any required column or with nonpositive teachers/students
-    df = df.dropna(subset=required_cols)
-    df = df[df['teachers'] > 0]
-    df = df[df['students'] > 0]
+    # Remove rows with non-positive teacher counts (can't compute ratio)
+    if 'teachers' in df.columns:
+        df = df[df['teachers'] > 0]
 
-    # Dependent variable: average of reading and math scores
-    df['AvgScore'] = df[['read', 'math']].mean(axis=1)
+    # Compute dependent variable: average of read and math
+    df['AcademicScore'] = df[['read', 'math']].mean(axis=1)
 
-    # Independent variable: student-teacher ratio (students per teacher)
+    # Compute independent variable: students per teacher
     df['StudentTeacherRatio'] = df['students'] / df['teachers']
 
-    # Controls: rename and compute derived controls
-    df['PercentCalWorks'] = df['calworks']
-    df['PercentReducedLunch'] = df['lunch']
-    df['IncomeK'] = df['income']  # income already in thousands per schema
-    df['PercentEnglishLearners'] = df['english']
-    df['ExpenditurePerStudent'] = df['expenditure']
+    # Trim extreme outliers in the ratio by capping at the 99th percentile
+    if df['StudentTeacherRatio'].notna().any():
+        p99 = df['StudentTeacherRatio'].quantile(0.99)
+        df['StudentTeacherRatio'] = df['StudentTeacherRatio'].clip(upper=p99)
 
-    # Computers per student
-    df['ComputersPerStudent'] = df['computer'] / df['students']
+    # Auxiliary transforms
+    df['LogStudents'] = np.log1p(df['students'])
 
-    # Log enrollment
-    df['LogEnrollment'] = np.log(df['students'].astype(float))
+    # Standardized versions for interpretation (use population std to avoid ddof mismatches)
+    df['StdStudentTeacherRatio'] = (df['StudentTeacherRatio'] - df['StudentTeacherRatio'].mean()) / (df['StudentTeacherRatio'].std(ddof=0) if df['StudentTeacherRatio'].std(ddof=0) != 0 else 1)
+    df['StdAcademicScore'] = (df['AcademicScore'] - df['AcademicScore'].mean()) / (df['AcademicScore'].std(ddof=0) if df['AcademicScore'].std(ddof=0) != 0 else 1)
 
-    # Keep grade span and county as categorical columns with consistent names used in model
-    df['Grades'] = df['grades'].astype(str).fillna('Unknown')
-    df['County'] = df['county'].astype(str).fillna('Unknown')
+    # Ensure categorical variables are treated as categories
+    if 'county' in df.columns:
+        df['county'] = df['county'].astype('category')
+    if 'grades' in df.columns:
+        df['grades'] = df['grades'].astype('category')
 
-    # Keep only columns needed for modeling (this also implicitly drops unwanted raw columns)
-    model_cols = ['AvgScore', 'StudentTeacherRatio', 'PercentCalWorks', 'PercentReducedLunch', 'IncomeK',
-                  'PercentEnglishLearners', 'ExpenditurePerStudent', 'ComputersPerStudent', 'LogEnrollment',
-                  'Grades', 'County']
-    df = df[model_cols].reset_index(drop=True)
+    # Keep only columns necessary for modeling and diagnostics (if they exist)
+    keep = [
+        'AcademicScore', 'StudentTeacherRatio', 'StdStudentTeacherRatio', 'StdAcademicScore',
+        'expenditure', 'income', 'calworks', 'lunch', 'english', 'students', 'LogStudents',
+        'county', 'grades', 'teachers'
+    ]
+    keep_present = [c for c in keep if c in df.columns]
+    df = df[keep_present]
 
     return df
 
 
 # ======== MODEL CODE ========
-def model(df: pd.DataFrame) -> Any:
+def model(df: pd.DataFrame):
     """
-    Fit an OLS regression of AvgScore on StudentTeacherRatio controlling for socio-economic
-    and resource variables plus categorical controls for Grades and County.
+    Fit an OLS regression of academic performance on the student-teacher ratio and controls.
 
-    Model specification (linear OLS):
-      AvgScore_i = beta0 + beta1 * StudentTeacherRatio_i + gamma' * Controls_i + delta_Grades + theta_County + epsilon_i
+    Model specification:
+    AcademicScore ~ StudentTeacherRatio + expenditure + income + calworks + lunch + english + np.log(students) + C(county) + C(grades)
 
-    Returns the fitted statsmodels regression results object.
+    Returns the fitted statsmodels RegressionResults object (with robust standard errors, HC3).
     """
 
-    # Make a copy
-    df = df.copy()
+    import statsmodels.formula.api as smf
+    # Copy input to avoid side-effects
+    data = df.copy()
 
-    # Prepare numeric covariates
-    covariates = [
-        'StudentTeacherRatio',
-        'PercentCalWorks',
-        'PercentReducedLunch',
-        'IncomeK',
-        'PercentEnglishLearners',
-        'ExpenditurePerStudent',
-        'ComputersPerStudent',
-        'LogEnrollment'
-    ]
+    # Ensure 'students' is numeric for the log term
+    if 'students' in data.columns:
+        data['students'] = pd.to_numeric(data['students'], errors='coerce')
 
-    # Ensure no missing values remain in modeling columns
-    modeling_cols = ['AvgScore'] + covariates + ['Grades', 'County']
-    df = df.dropna(subset=modeling_cols)
+    # Drop rows with any remaining missing values in variables used by the formula
+    formula = 'AcademicScore ~ StudentTeacherRatio + expenditure + income + calworks + lunch + english + np.log(students) + C(county) + C(grades)'
+    # Identify variables used in the formula to drop NA rows
+    vars_needed = ['AcademicScore', 'StudentTeacherRatio', 'expenditure', 'income', 'calworks', 'lunch', 'english', 'students', 'county', 'grades']
+    vars_present = [v for v in vars_needed if v in data.columns]
+    data = data.dropna(subset=vars_present)
 
-    # Create categorical dummies for Grades and County (drop_first to avoid collinearity)
-    grades_dummies = pd.get_dummies(df['Grades'], prefix='G', drop_first=True)
-    county_dummies = pd.get_dummies(df['County'], prefix='C', drop_first=True)
+    # Fit OLS with robust standard errors (HC3)
+    model = smf.ols(formula, data=data).fit(cov_type='HC3')
 
-    # Combine regressors
-    X = df[covariates].reset_index(drop=True)
-    X = pd.concat([X, grades_dummies.reset_index(drop=True), county_dummies.reset_index(drop=True)], axis=1)
-
-    # Add constant
-    X = sm.add_constant(X)
-    y = df['AvgScore'].astype(float)
-
-    # Fit OLS
-    results = sm.OLS(y, X).fit()
-
-    # Print a concise summary and return results
-    print(results.summary())
-    return results
+    # Return the fitted model object so the caller can inspect summary, params, etc.
+    return model
 
 

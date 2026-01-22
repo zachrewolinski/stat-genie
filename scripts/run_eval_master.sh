@@ -1,8 +1,11 @@
 #!/bin/bash
+#SBATCH --mail-type=END
+#SBATCH --mail-user=zachrewolinski@berkeley.edu
 
 slurm_script="scripts/run_pairwise_eval.sh"
 
-datasets=("mortgage" "panda_nuts" "reading" "soccer" "teachingratings")
+# datasets=("mortgage" "panda_nuts" "reading" "soccer" "teachingratings")
+datasets=("affairs")
 
 for dataset in "${datasets[@]}"; do
     echo "Submitting eval job for dataset: $dataset"

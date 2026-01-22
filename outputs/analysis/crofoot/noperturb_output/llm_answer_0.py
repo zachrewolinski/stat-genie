@@ -1,105 +1,195 @@
 def extract_final_answer(model_output):
     """
-    Extract key statistics from a fitted statsmodels GLMResultsWrapper (logistic) object
-    for the predictors of interest:
-      - size_diff_z (relative group size)
-      - location_adv_z (location advantage)
-      - their interaction (if present)
-    Returns a dict with:
-      - "object": a pandas.DataFrame with coef, SE, p-value, 95% CI, odds ratio and OR 95% CI
-                 for each term of interest
-      - "description": a short plain-language interpretation of what these numbers mean
+    Extract coefficients, p-values, confidence intervals, odds ratios, and
+    marginal effects of relative group size at different location advantage
+    values from a fitted statsmodels GLMResultsWrapper (logistic).
+    
+    Returns:
+      {
+        "object": {
+          "params": {param_name: float, ...},
+          "pvalues": {param_name: float, ...},
+          "bse": {param_name: float, ...},
+          "ci_95": {param_name: (ci_low, ci_high), ...},
+          "odds_ratios": {param_name: OR, ...},
+          "odds_ratio_ci_95": {param_name: (OR_low, OR_high), ...},
+          "marginal_effects_of_size_at": {
+             dist_value: {
+               "coef": float,
+               "se": float,
+               "z": float,
+               "p": float,
+               "odds_ratio": float,
+               "odds_ratio_ci_95": (low, high)
+             }, ...
+          }
+        },
+        "description": "Plain-language interpretation of the key results"
+      }
     """
-    import pandas as pd
     import numpy as np
+    import pandas as pd
+    from scipy import stats
 
     res = model_output
 
-    # Basic checks
-    if not hasattr(res, "params"):
-        raise ValueError("model_output does not look like a statsmodels results object (missing .params)")
-
-    params = res.params
-    bse = getattr(res, "bse", None)
-    pvalues = getattr(res, "pvalues", None)
+    # Basic extracts
+    params = res.params.copy()            # pandas Series
+    pvalues = res.pvalues.copy()
+    bse = res.bse.copy()
     try:
-        ci = res.conf_int()
+        ci = res.conf_int()               # DataFrame with 2 columns
     except Exception:
-        # If conf_int fails, compute using normal approximation
-        if bse is None:
-            raise
-        z = 1.96
+        # fallback: compute approx CI using bse and normal quantile
+        zcrit = stats.norm.ppf(0.975)
         ci = pd.DataFrame({
-            0: params - z * bse,
-            1: params + z * bse
+            0: params - zcrit * bse,
+            1: params + zcrit * bse
         }, index=params.index)
 
-    # Identify parameter names for main effects and interaction more robustly
-    def find_param(name):
-        if name in params.index:
-            return name
-        # if exact not found, look for any param containing the token
-        matches = [idx for idx in params.index if name in idx]
-        return matches[0] if matches else None
+    # Covariance matrix (robust cluster cov if model was fit with cov_type='cluster')
+    cov = res.cov_params()
+    if not isinstance(cov, pd.DataFrame):
+        cov = pd.DataFrame(cov, index=params.index, columns=params.index)
 
-    size_name = find_param("size_diff_z")
-    loc_name = find_param("location_adv_z")
-    # find interaction: parameter name usually contains both tokens, separated by ':'.
+    # Odds ratios and CI
+    or_dict = {}
+    or_ci_dict = {}
+    for name in params.index:
+        or_dict[name] = float(np.exp(params.loc[name]))
+        or_ci_dict[name] = (float(np.exp(ci.loc[name, 0])), float(np.exp(ci.loc[name, 1])))
+
+    # Identify interaction term between size_diff_z and dist_diff_z (patsy uses ':' order unpredictable)
     inter_name = None
-    for idx in params.index:
-        if "size_diff_z" in idx and "location_adv_z" in idx:
-            inter_name = idx
+    for nm in params.index:
+        if ':' in nm and 'size_diff_z' in nm and 'dist_diff_z' in nm:
+            inter_name = nm
             break
 
-    terms = []
-    for term_name, pretty in [(size_name, "size_diff_z"),
-                              (loc_name, "location_adv_z"),
-                              (inter_name, "interaction")]:
-        if term_name is None:
-            continue
-        coef = float(params[term_name])
-        se = float(bse[term_name]) if bse is not None else np.nan
-        p = float(pvalues[term_name]) if pvalues is not None else np.nan
-        ci_low = float(ci.loc[term_name, 0])
-        ci_high = float(ci.loc[term_name, 1])
-        # odds ratio and CI (exp of log-odds coef)
-        or_coef = float(np.exp(coef))
-        or_low = float(np.exp(ci_low))
-        or_high = float(np.exp(ci_high))
+    size_name = 'size_diff_z'
+    dist_name = 'dist_diff_z'
 
-        terms.append({
-            "term": pretty,
-            "param_name": term_name,
-            "coef (log-odds)": coef,
-            "SE": se,
-            "p_value": p,
-            "CI_lower": ci_low,
-            "CI_upper": ci_high,
-            "odds_ratio": or_coef,
-            "OR_CI_lower": or_low,
-            "OR_CI_upper": or_high
-        })
+    # Prepare marginal effects of size at dist = -1, 0, +1 (z-units)
+    marginal_effects = {}
+    if size_name in params.index:
+        beta_size = float(params.loc[size_name])
+        for dist_val in [-1.0, 0.0, 1.0]:
+            if inter_name is not None and inter_name in params.index:
+                beta_inter = float(params.loc[inter_name])
+                coef = beta_size + beta_inter * dist_val
+                # variance: var(size) + dist_val^2 * var(inter) + 2 * dist_val * cov(size,inter)
+                var_size = cov.loc[size_name, size_name]
+                var_inter = cov.loc[inter_name, inter_name]
+                cov_si = cov.loc[size_name, inter_name]
+                var_coef = var_size + (dist_val ** 2) * var_inter + 2.0 * dist_val * cov_si
+            else:
+                coef = beta_size
+                var_coef = cov.loc[size_name, size_name]
+            se_coef = float(np.sqrt(var_coef)) if var_coef >= 0 else float(np.nan)
+            z_stat = float(coef / se_coef) if se_coef > 0 else float('nan')
+            p_val = float(2.0 * stats.norm.sf(abs(z_stat))) if se_coef > 0 else float('nan')
+            or_val = float(np.exp(coef))
+            # CI for coef
+            ci_low = coef - stats.norm.ppf(0.975) * se_coef
+            ci_high = coef + stats.norm.ppf(0.975) * se_coef
+            or_ci_low = float(np.exp(ci_low))
+            or_ci_high = float(np.exp(ci_high))
+            marginal_effects[dist_val] = {
+                "coef": float(coef),
+                "se": float(se_coef),
+                "z": float(z_stat),
+                "p": float(p_val),
+                "odds_ratio": or_val,
+                "odds_ratio_ci_95": (or_ci_low, or_ci_high)
+            }
+    else:
+        marginal_effects = {}
 
-    if len(terms) == 0:
-        raise ValueError("None of the expected terms (size_diff_z, location_adv_z, interaction) were found in the model parameters.")
+    # Pack coefficient-level info
+    coeffs = {name: float(params.loc[name]) for name in params.index}
+    pvals = {name: float(pvalues.loc[name]) for name in params.index}
+    bses = {name: float(bse.loc[name]) for name in params.index}
+    cis = {name: (float(ci.loc[name, 0]), float(ci.loc[name, 1])) for name in params.index}
 
-    df_out = pd.DataFrame(terms).set_index("term")
+    result_object = {
+        "params": coeffs,
+        "pvalues": pvals,
+        "bse": bses,
+        "ci_95": cis,
+        "odds_ratios": or_dict,
+        "odds_ratio_ci_95": or_ci_dict,
+        "marginal_effects_of_size_at": marginal_effects
+    }
 
-    # Build a concise description interpreting the key results generically.
-    # Note: this text will tell the user what to look for; numeric decisions (significant or not)
-    # are based on p-values computed above.
+    # Construct a concise description / interpretation
+    def sig(p): return (p < 0.05) if (p is not None and not np.isnan(p)) else False
     desc_lines = []
-    desc_lines.append("Extracted coefficients (log-odds), standard errors, p-values, 95% CIs, and odds ratios for:")
-    desc_lines.append(" - size_diff_z: relative group size (focal - other). Positive coef => being larger increases log-odds of winning.")
-    desc_lines.append(" - location_adv_z: contest location advantage (positive => closer to focal home). Positive coef => being nearer increases log-odds of winning.")
-    desc_lines.append(" - interaction: whether the effect of size_diff_z depends on location_adv_z.")
-    desc_lines.append("")
-    desc_lines.append("How to interpret the numbers in the returned table:")
-    desc_lines.append(" - If coef > 0 and odds_ratio > 1, that predictor increases the odds of the focal group winning; coef < 0 and OR < 1 decreases odds.")
-    desc_lines.append(" - p_value indicates statistical evidence against the null that coef == 0 (commonly using p < 0.05).")
-    desc_lines.append(" - A statistically significant interaction (p < 0.05) implies the effect of relative group size on win probability depends on contest location.")
-    desc_lines.append("")
-    desc_lines.append("The 'object' returned is a pandas DataFrame with the numerical results for these terms.")
-    description = "\n".join(desc_lines)
 
-    return {"object": df_out, "description": description}
+    # Size main effect (note when interaction exists, main effect is effect at dist_diff_z = 0)
+    if size_name in params.index:
+        p_sz = pvalues.loc[size_name]
+        coef_sz = params.loc[size_name]
+        or_sz = or_dict[size_name]
+        ci_sz = ci.loc[size_name].tolist()
+        desc_lines.append(
+            f"Relative group size (size_diff_z): coef = {coef_sz:.3f}, OR = {or_sz:.3f}, "
+            f"95% CI for coef = ({ci_sz[0]:.3f}, {ci_sz[1]:.3f}), p = {p_sz:.3f}."
+        )
+        if sig(p_sz):
+            desc_lines.append("This indicates a statistically significant association: larger focal groups have higher odds of winning (at mean location advantage).")
+        else:
+            desc_lines.append("This effect is not statistically significant at alpha=0.05 (at mean location advantage).")
+
+    # Location main effect
+    if dist_name in params.index:
+        p_dt = pvalues.loc[dist_name]
+        coef_dt = params.loc[dist_name]
+        or_dt = or_dict[dist_name]
+        ci_dt = ci.loc[dist_name].tolist()
+        desc_lines.append(
+            f"Location advantage (dist_diff_z): coef = {coef_dt:.3f}, OR = {or_dt:.3f}, "
+            f"95% CI for coef = ({ci_dt[0]:.3f}, {ci_dt[1]:.3f}), p = {p_dt:.3f}."
+        )
+        if sig(p_dt):
+            desc_lines.append("This indicates being relatively closer to the home-range center increases the odds of the focal group winning.")
+        else:
+            desc_lines.append("No statistically significant main effect of location advantage at alpha=0.05.")
+
+    # Interaction
+    if inter_name is not None:
+        p_it = pvalues.loc[inter_name]
+        coef_it = params.loc[inter_name]
+        or_it = or_dict[inter_name]
+        ci_it = ci.loc[inter_name].tolist()
+        desc_lines.append(
+            f"Interaction ({inter_name}): coef = {coef_it:.3f}, OR = {or_it:.3f}, "
+            f"95% CI for coef = ({ci_it[0]:.3f}, {ci_it[1]:.3f}), p = {p_it:.3f}."
+        )
+        if sig(p_it):
+            desc_lines.append("The interaction is statistically significant: the effect of relative group size on winning depends on location advantage.")
+            # add marginal outcomes summary
+            me_lines = []
+            for dv in sorted(marginal_effects.keys()):
+                me = marginal_effects[dv]
+                me_lines.append(
+                    f"At dist_diff_z = {dv:+.1f}: size coef = {me['coef']:.3f}, OR = {me['odds_ratio']:.3f}, p = {me['p']:.3f}"
+                )
+            desc_lines.append("Marginal effects of size at selected location values: " + "; ".join(me_lines) + ".")
+        else:
+            desc_lines.append("No evidence of a significant interaction: the effect of size does not appear to depend on location advantage at alpha=0.05.")
+    else:
+        desc_lines.append("No interaction term between size_diff_z and dist_diff_z was found in the model; the effect of size is constant across location in this specification.")
+
+    # Controls: m_diff_z and FocalCloser if present
+    for ctl in ['m_diff_z', 'FocalCloser']:
+        if ctl in params.index:
+            p_ctl = pvalues.loc[ctl]
+            coef_ctl = params.loc[ctl]
+            or_ctl = or_dict[ctl]
+            desc_lines.append(
+                f"Control {ctl}: coef = {coef_ctl:.3f}, OR = {or_ctl:.3f}, p = {p_ctl:.3f}."
+            )
+
+    description = " ".join(desc_lines)
+
+    return {"object": result_object, "description": description}

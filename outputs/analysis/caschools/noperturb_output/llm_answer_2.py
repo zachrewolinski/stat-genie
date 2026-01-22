@@ -1,121 +1,90 @@
 def extract_final_answer(model_output):
     """
-    Extracts the coefficient, standard error, p-value, 95% CI, and sample size
-    for the StudentTeacherRatio variable from a fitted statsmodels OLS result
-    (RegressionResultsWrapper). Returns a dictionary with keys:
-      - "object": a dict of numeric results
-      - "description": a short interpretation in the context of the task
+    Extracts the coefficient, standard error, p-value, 95% CI, sample size, and a short
+    interpretation regarding whether a lower student-teacher ratio (fewer students per teacher)
+    is associated with higher average academic performance.
 
-    Interpretation logic:
-      - If the coefficient is negative and statistically significant (p < 0.05),
-        this is interpreted as evidence that a lower student-teacher ratio
-        (fewer students per teacher) is associated with higher AvgScore.
-      - If the coefficient is positive and significant, it indicates the
-        opposite.
-      - If not significant, we state there is no strong evidence of an association.
+    Returns a dictionary with keys:
+      - "object": dict with numeric results (coef, se, pvalue, ci_lower, ci_upper, nobs, significant)
+      - "description": short textual interpretation in the context of the task
     """
     import numpy as np
 
-    res = model_output
+    var = 'StudentsPerTeacher'
 
-    var = 'StudentTeacherRatio'
-    # Safety checks
-    try:
-        params = res.params
-    except Exception as e:
-        return {
-            "object": None,
-            "description": f"Provided model_output does not appear to be a fitted statsmodels results object: {e}"
-        }
+    # Basic checks
+    if not hasattr(model_output, 'params'):
+        raise ValueError("model_output does not appear to be a statsmodels results object with .params")
 
+    params = model_output.params
     if var not in params.index:
-        return {
-            "object": None,
-            "description": f"Variable '{var}' not found in the fitted model parameters."
-        }
+        raise KeyError(f"Variable '{var}' not found in model parameters. Available params: {list(params.index)}")
 
-    # Extract numeric statistics
-    try:
-        coef = float(res.params[var])
-    except Exception:
-        coef = float(np.asarray(res.params)[list(res.params.index).index(var)])
+    # Extract estimates
+    coef = float(params.loc[var])
+    # robust se should already be in model_output.bse when fit(..., cov_type=...)
+    se = float(model_output.bse.loc[var]) if hasattr(model_output, 'bse') else float(np.nan)
+    pval = float(model_output.pvalues.loc[var]) if hasattr(model_output, 'pvalues') else float(np.nan)
 
+    # 95% confidence interval (try built-in, fall back to t-based if needed)
     try:
-        se = float(res.bse[var])
+        ci = model_output.conf_int().loc[var].tolist()
     except Exception:
-        se = float(np.asarray(res.bse)[list(res.bse.index).index(var)])
-
-    try:
-        pval = float(res.pvalues[var])
-    except Exception:
-        pval = float(np.asarray(res.pvalues)[list(res.pvalues.index).index(var)])
-
-    # Confidence interval (default 95%)
-    try:
-        ci = res.conf_int().loc[var].tolist()
-        ci_lower, ci_upper = float(ci[0]), float(ci[1])
-    except Exception:
-        # fallback if conf_int returns array-like without index
+        # fallback: use t-critical and bse (requires df_resid)
         try:
-            ci_arr = res.conf_int()
-            idx = list(res.params.index).index(var)
-            ci_lower, ci_upper = float(ci_arr[idx, 0]), float(ci_arr[idx, 1])
+            from scipy import stats
+            df_resid = float(model_output.df_resid)
+            tcrit = stats.t.ppf(1 - 0.025, df_resid)
+            ci = [coef - tcrit * se, coef + tcrit * se]
         except Exception:
-            ci_lower, ci_upper = (np.nan, np.nan)
+            ci = [float(np.nan), float(np.nan)]
 
-    # Sample size if available
-    nobs = getattr(res, "nobs", None)
+    # sample size
     try:
-        if nobs is not None:
-            nobs = int(nobs)
+        nobs = int(getattr(model_output, 'nobs', model_output.model.nobs))
     except Exception:
         nobs = None
 
-    # Formulate conclusion
-    alpha = 0.05
-    if pval < alpha:
+    # Significance decision (conventional 0.05 level)
+    significant = (pval < 0.05) if not np.isnan(pval) else False
+
+    # Interpret direction relative to the research question:
+    # - StudentsPerTeacher: higher value = more students per teacher.
+    # A negative coefficient implies that fewer students per teacher (lower ratio) is associated with higher AvgScore.
+    if significant:
         if coef < 0:
-            conclusion = (
-                "Statistically significant (p < 0.05). The negative coefficient "
-                "indicates that higher StudentTeacherRatio (more students per teacher) "
-                "is associated with lower AvgScore; equivalently, a lower "
-                "student-teacher ratio (fewer students per teacher) is associated "
-                "with higher academic performance."
+            decision_text = (
+                "Yes — statistically significant negative association: a higher StudentsPerTeacher is associated "
+                "with LOWER AvgScore, so a lower student-teacher ratio (fewer students per teacher) is associated "
+                "with HIGHER academic performance."
             )
         else:
-            conclusion = (
-                "Statistically significant (p < 0.05). The positive coefficient "
-                "indicates that higher StudentTeacherRatio (more students per teacher) "
-                "is associated with higher AvgScore (opposite to the commonly expected direction)."
+            decision_text = (
+                "No — statistically significant positive association: a higher StudentsPerTeacher is associated "
+                "with HIGHER AvgScore (opposite of the hypothesized direction)."
             )
     else:
-        if coef < 0:
-            conclusion = (
-                "Coefficient is negative but not statistically significant (p >= 0.05). "
-                "There is no strong evidence that a lower student-teacher ratio is associated "
-                "with higher academic performance in this model."
-            )
-        else:
-            conclusion = (
-                "Coefficient is positive but not statistically significant (p >= 0.05). "
-                "There is no strong evidence of an association between student-teacher ratio "
-                "and academic performance in this model."
-            )
+        decision_text = (
+            "No strong evidence of an association at conventional significance levels (p >= 0.05). "
+            "The estimated effect is not statistically significant."
+        )
 
+    # Pack results
     result_object = {
-        "variable": var,
         "coef": coef,
-        "std_error": se,
-        "p_value": pval,
-        "ci_lower_95": ci_lower,
-        "ci_upper_95": ci_upper,
-        "nobs": nobs
+        "se": se,
+        "pvalue": pval,
+        "ci_lower": float(ci[0]) if ci and len(ci) >= 1 else None,
+        "ci_upper": float(ci[1]) if ci and len(ci) >= 2 else None,
+        "nobs": nobs,
+        "significant": bool(significant),
+        "variable": var
     }
 
     description = (
-        f"Extracted results for '{var}': coefficient = {coef:.4f}, SE = {se:.4f}, "
-        f"95% CI = [{ci_lower:.4f}, {ci_upper:.4f}], p-value = {pval:.4g}. "
-        + conclusion
+        f"StudentsPerTeacher coefficient = {coef:.6g}, SE = {se:.6g}, p-value = {pval:.6g}, "
+        f"95% CI = [{result_object['ci_lower']:.6g}, {result_object['ci_upper']:.6g}]. "
+        f"{decision_text}"
     )
 
     return {"object": result_object, "description": description}

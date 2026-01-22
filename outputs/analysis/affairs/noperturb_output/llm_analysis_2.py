@@ -13,85 +13,116 @@ df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/anal
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Prepare the Fair (Psychology Today) dataset for modeling the effect of children on extramarital affairs.
+    Transform the raw Fair (1978) affairs dataset into a modeling dataframe.
 
-    Transformations performed:
-    - Copy input dataframe to avoid side effects.
-    - Create numeric outcome column 'AffairCount' from 'affairs'.
-    - Create binary independent variable 'HasChildren' from 'children' ('yes' -> 1, 'no' -> 0).
-    - Create binary gender indicator 'Gender_Male' from 'gender' ('male' -> 1, 'female' -> 0).
-    - Ensure numeric controls and create centered versions (suffix _c) for interpretability.
-    - Drop rows with missing values in any columns required for the model.
+    Produces the following columns (exact names used by the model):
+      - affairs (dependent variable, numeric)
+      - Children (binary independent variable: 1 if children present, 0 if not)
+      - Gender_Male (binary control: 1 = male, 0 = female)
+      - age, yearsmarried, religiousness, education, occupation, rating (numeric controls)
 
-    Final dataframe contains the columns used in the model: 
-    ['AffairCount','HasChildren','Gender_Male','age_c','yearsmarried_c','religiousness_c','education_c','occupation_c','rating_c']
+    Steps:
+      - drop rows with missing values in required fields
+      - coerce types, map categorical text values to numeric
+      - return dataframe with only the columns needed for modeling
     """
     df = df.copy()
 
-    # Outcome: make sure numeric
-    df['AffairCount'] = pd.to_numeric(df.get('affairs'), errors='coerce')
+    # Ensure required columns exist
+    required = [
+        'affairs', 'children', 'gender', 'age', 'yearsmarried',
+        'religiousness', 'education', 'occupation', 'rating'
+    ]
+    missing = [c for c in required if c not in df.columns]
+    if len(missing) > 0:
+        raise KeyError(f"Missing required columns in input dataframe: {missing}")
 
-    # Independent variable: children indicator
-    # Accept variations in text; map yes/no to 1/0
-    df['HasChildren'] = df.get('children').astype(str).str.strip().str.lower().map({'yes': 1, 'no': 0})
-
-    # Gender dummy: male = 1, female = 0
-    df['Gender_Male'] = df.get('gender').astype(str).str.strip().str.lower().map({'male': 1, 'female': 0})
-
-    # Ensure numeric controls
-    numeric_controls = ['age', 'yearsmarried', 'religiousness', 'education', 'occupation', 'rating']
-    for col in numeric_controls:
-        # get and coerce to numeric
-        df[col] = pd.to_numeric(df.get(col), errors='coerce')
-
-    # Drop rows with missing values in any required modeling columns
-    required = ['AffairCount', 'HasChildren', 'Gender_Male'] + numeric_controls
+    # Drop rows with missing values in key variables
     df = df.dropna(subset=required)
 
-    # Center continuous/numeric controls for interpretability (mean = 0)
-    for col in numeric_controls:
-        centered_col = f"{col}_c"
-        df[centered_col] = df[col] - df[col].mean()
+    # Encode Children: original values are 'yes'/'no' (factor). Map to 1/0.
+    df['Children'] = df['children'].astype(str).str.strip().str.lower().map({'yes': 1, 'no': 0})
+    # If there are other encodings (e.g., 'Yes', 'No', 1, 0), handle them
+    df['Children'] = df['Children'].fillna(df['children'].replace({1: 1, 0: 0}))
 
-    # Keep only the columns needed for modeling plus original identifiers if present
-    # (We keep all columns but ensure the required transformed columns exist.)
-    return df
+    # Drop rows where Children mapping failed
+    df = df.dropna(subset=['Children'])
+    df['Children'] = df['Children'].astype(int)
+
+    # Encode gender: map 'male' -> 1, 'female' -> 0
+    df['Gender_Male'] = df['gender'].astype(str).str.strip().str.lower().map({'male': 1, 'female': 0})
+    # If already coded differently, attempt to coerce
+    df['Gender_Male'] = df['Gender_Male'].fillna(df['gender'].replace({'m': 1, 'f': 0}))
+    df = df.dropna(subset=['Gender_Male'])
+    df['Gender_Male'] = df['Gender_Male'].astype(int)
+
+    # Ensure numeric columns are numeric; coerce errors to NaN then drop
+    numeric_cols = ['affairs', 'age', 'yearsmarried', 'religiousness', 'education', 'occupation', 'rating']
+    for col in numeric_cols:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+
+    df = df.dropna(subset=numeric_cols)
+
+    # Keep only the exact columns needed for modeling (and in the exact names expected)
+    out_cols = ['affairs', 'Children', 'Gender_Male', 'age', 'yearsmarried',
+                'religiousness', 'education', 'occupation', 'rating']
+    df_out = df[out_cols].reset_index(drop=True)
+
+    return df_out
 
 
 # ======== MODEL CODE ========
-def model(df: pd.DataFrame):
+def model(df: pd.DataFrame) -> dict:
     """
-    Fit a regression model to estimate the association between having children and reported extramarital affairs,
-    controlling for observed covariates. Because the outcome is a count-like variable with many zeros and
-    potential over-dispersion, use a Negative Binomial generalized linear model (GLM).
+    Fit two complementary models to estimate the association between having children and
+    extramarital affairs, controlling for covariates.
 
-    The model estimated:
-      AffairCount ~ HasChildren + Gender_Male + HasChildren:Gender_Male + age_c + yearsmarried_c + 
-                   religiousness_c + education_c + occupation_c + rating_c
+    Models:
+      1) Robust OLS (linear) as a baseline (heteroskedasticity-robust SEs)
+      2) Zero-Inflated Negative Binomial (ZINB) to account for count-like outcome with many zeros
 
-    Returns the fitted model results object (statsmodels GLMResultsWrapper).
+    Returns a dictionary containing both fitted results objects:
+      { 'ols_results': <statsmodels.regression.linear_model.RegressionResultsWrapper>,
+        'zinb_results': <statsmodels.discrete.count_model.ZeroInflatedNegativeBinomialResults> }
+
+    Note: the calling environment can print .summary() on each result object.
     """
     import statsmodels.api as sm
     import statsmodels.formula.api as smf
+    from statsmodels.discrete.count_model import ZeroInflatedNegativeBinomialP
 
-    # Ensure the columns the transform step should have created are present
-    required_cols = ['AffairCount', 'HasChildren', 'Gender_Male', 'age_c', 'yearsmarried_c',
-                     'religiousness_c', 'education_c', 'occupation_c', 'rating_c']
-    missing = [c for c in required_cols if c not in df.columns]
-    if missing:
-        raise ValueError(f"Missing required columns for modeling: {missing}")
+    # Ensure input contains the required columns (names set by transform)
+    req = ['affairs', 'Children', 'Gender_Male', 'age', 'yearsmarried',
+           'religiousness', 'education', 'occupation', 'rating']
+    missing = [c for c in req if c not in df.columns]
+    if len(missing) > 0:
+        raise KeyError(f"Missing required columns for modeling: {missing}")
 
-    # Define formula with interaction to allow effect of HasChildren to vary by gender
-    formula = (
-        'AffairCount ~ HasChildren + Gender_Male + HasChildren:Gender_Male '
-        '+ age_c + yearsmarried_c + religiousness_c + education_c + occupation_c + rating_c'
-    )
+    # 1) OLS with robust SEs
+    formula = 'affairs ~ Children + Gender_Male + age + yearsmarried + religiousness + education + occupation + rating'
+    ols_res = smf.ols(formula, data=df).fit(cov_type='HC3')
 
-    # Fit Negative Binomial GLM
-    # Note: this accounts for over-dispersion relative to Poisson; if NB fails consider Poisson or zero-inflated models.
-    model = smf.glm(formula=formula, data=df, family=sm.families.NegativeBinomial()).fit()
+    # 2) Zero-Inflated Negative Binomial
+    # Prepare exogenous matrices. Use a richer set for the count model and a smaller set for inflation.
+    exog_vars = ['Children', 'Gender_Male', 'age', 'yearsmarried', 'religiousness', 'education', 'occupation', 'rating']
+    exog = sm.add_constant(df[exog_vars], has_constant='add')
 
-    # Return fitted model (caller can inspect .summary(), params, conf_int(), etc.)
-    return model
+    # For the inflation (zero) model use a subset that plausibly predicts structural zeros (e.g., Children, Gender, age, yearsmarried)
+    exog_infl = sm.add_constant(df[['Children', 'Gender_Male', 'age', 'yearsmarried']], has_constant='add')
+
+    endog = df['affairs'].astype(int)
+
+    # Fit ZINB. Set disp=False to avoid printing optimizer output.
+    zinb_model = ZeroInflatedNegativeBinomialP(endog, exog, exog_infl=exog_infl, inflation='logit')
+    try:
+        zinb_res = zinb_model.fit(disp=False, maxiter=1000)
+    except Exception:
+        # In case of convergence issues, try a few different optimizers / increased iterations
+        zinb_res = zinb_model.fit(disp=False, method='bfgs', maxiter=2000)
+
+    return {
+        'ols_results': ols_res,
+        'zinb_results': zinb_res
+    }
 
 

@@ -13,110 +13,124 @@ df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/anal
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Transforms the input dataframe to include the variables required for modeling.
+    Transform the raw district dataframe into a cleaned dataframe containing the
+    dependent variable (AvgScore), independent variable (StudentTeacherRatio),
+    and control variables used in the regression.
 
-    - Drops observations missing key variables.
-    - Removes observations with non-positive teacher counts.
-    - Constructs StudentTeacherRatio, AvgScore, ComputersPerStudent, LogEnrollment,
-      Grades_KK08 and ensures county is a string for later dummy creation.
+    Final columns produced/kept:
+      - AvgScore
+      - StudentTeacherRatio
+      - ExpenditurePerStudent
+      - PctReducedLunch
+      - PctEnglishLearners
+      - ComputersPerStudent
+      - IncomeThousands
+      - GradeSpan_KK08
+      - county
 
-    Returns the transformed dataframe containing the new columns used in the model.
+    Rows with missing values in any of these columns are dropped.
     """
+    # Work on a copy
     df = df.copy()
 
-    # Columns required to compute primary variables and controls
-    required_cols = [
-        'students', 'teachers', 'read', 'math',
-        'expenditure', 'lunch', 'english', 'income', 'computer', 'grades', 'county'
-    ]
+    # Ensure expected columns exist; if not, this will raise a KeyError which notifies user
+    required_raw_cols = ['students', 'teachers', 'read', 'math', 'expenditure', 'lunch', 'english', 'computer', 'income', 'grades', 'county']
 
-    # Drop rows missing any of the required raw inputs
-    df = df.dropna(subset=required_cols)
+    # Normalize column names (in case of stray whitespace) for string columns
+    if 'grades' in df.columns:
+        df['grades'] = df['grades'].astype(str).str.strip()
+    if 'county' in df.columns:
+        df['county'] = df['county'].astype(str).str.strip()
 
-    # Remove invalid teacher counts (avoid division by zero)
-    df = df[df['teachers'] > 0]
+    # Drop rows with missing data in variables required for model
+    df = df.dropna(subset=required_raw_cols)
 
-    # Student-teacher ratio (students per teacher)
+    # Convert numeric columns to numeric types (coerce any non-numeric to NaN then drop)
+    num_cols = ['students', 'teachers', 'read', 'math', 'expenditure', 'lunch', 'english', 'computer', 'income']
+    for c in num_cols:
+        df[c] = pd.to_numeric(df[c], errors='coerce')
+    df = df.dropna(subset=num_cols)
+
+    # Prevent division by zero (teachers should be > 0). If zero or very small, mark as NaN and drop.
+    df.loc[df['teachers'] <= 0, 'teachers'] = np.nan
+    df = df.dropna(subset=['teachers'])
+
+    # Dependent variable: average of reading and math
+    df['AvgScore'] = (df['read'] + df['math']) / 2.0
+
+    # Independent variable: student-teacher ratio
     df['StudentTeacherRatio'] = df['students'] / df['teachers']
 
-    # Dependent variable: average of reading and math scores
-    df['AvgScore'] = df[['read', 'math']].mean(axis=1)
-
-    # Computers per student
-    # if students == 0 (unlikely) this will produce inf/NaN; handled by subsequent dropna
+    # Controls: rename / derive to final column names used in model
+    df['ExpenditurePerStudent'] = df['expenditure']
+    df['PctReducedLunch'] = df['lunch']
+    df['PctEnglishLearners'] = df['english']
+    # Computers per student (if students > 0). If zero students (unlikely), result will be inf -> set to NaN
     df['ComputersPerStudent'] = df['computer'] / df['students']
+    df.loc[~np.isfinite(df['ComputersPerStudent']), 'ComputersPerStudent'] = np.nan
 
-    # Log enrollment (protect against zeros, but zeros were removed earlier by required_cols and students>0)
-    df['LogEnrollment'] = np.log(df['students'].astype(float))
+    # Income is already in thousands per schema; keep name matching the model
+    df['IncomeThousands'] = df['income']
 
-    # Binary indicator for grade span KK-08 (1) vs KK-06 (0)
-    # Ensure comparison handles possible whitespace or casing issues
-    df['Grades_KK08'] = (df['grades'].astype(str).str.strip() == 'KK-08').astype(int)
+    # Binary indicator for grade span KK-08 (1 if KK-08, else 0). Use string match after stripping.
+    df['GradeSpan_KK08'] = df['grades'].fillna('').astype(str).str.strip().apply(lambda x: 1 if x == 'KK-08' else 0)
 
-    # Ensure county is a string (categorical) for dummy creation in model
-    df['county'] = df['county'].astype(str)
+    # Ensure county is a clean categorical string (used as fixed effects)
+    df['county'] = df['county'].astype(str).str.strip()
 
-    # Final drop of any rows that produced NaNs in derived columns
-    derived_cols = ['StudentTeacherRatio', 'AvgScore', 'ComputersPerStudent', 'LogEnrollment', 'Grades_KK08', 'county']
-    df = df.dropna(subset=derived_cols)
-
-    # Keep only columns that are needed (original controls kept in original names)
-    keep_cols = [
-        'StudentTeacherRatio', 'AvgScore', 'ComputersPerStudent', 'LogEnrollment', 'Grades_KK08', 'county',
-        'expenditure', 'lunch', 'english', 'income', 'students', 'teachers', 'read', 'math', 'computer', 'grades'
+    # Finally select and return only the columns needed for the statistical model
+    final_cols = [
+        'AvgScore',
+        'StudentTeacherRatio',
+        'ExpenditurePerStudent',
+        'PctReducedLunch',
+        'PctEnglishLearners',
+        'ComputersPerStudent',
+        'IncomeThousands',
+        'GradeSpan_KK08',
+        'county'
     ]
 
-    # Some of these may not exist if original dataset used different casing; assume schema-provided names are correct
-    existing_keep = [c for c in keep_cols if c in df.columns]
-    df = df[existing_keep]
+    df_final = df[final_cols].dropna()  # drop any rows with missing values in final predictors/controls
 
-    return df
+    # Reset index for cleanliness
+    df_final = df_final.reset_index(drop=True)
+
+    return df_final
 
 
 # ======== MODEL CODE ========
-def model(df: pd.DataFrame) -> Any:
+def model(df: pd.DataFrame):
     """
-    Fits an OLS regression of AvgScore on StudentTeacherRatio controlling for
-    expenditure, lunch, english, income, ComputersPerStudent, LogEnrollment, Grades_KK08,
-    and county fixed effects (implemented via dummies).
+    Fit an OLS regression of AvgScore on StudentTeacherRatio controlling for district-level covariates
+    and county fixed effects. Returns the fitted statsmodels results object with robust standard errors.
 
-    Uses heteroskedasticity-robust (HC3) standard errors.
-    Returns the fitted statsmodels results object.
+    Model specification:
+      AvgScore ~ StudentTeacherRatio + ExpenditurePerStudent + PctReducedLunch +
+                 PctEnglishLearners + ComputersPerStudent + IncomeThousands + GradeSpan_KK08 + C(county)
+
+    Uses HC3 heteroskedasticity-robust standard errors.
     """
-    df = df.copy()
+    import statsmodels.formula.api as smf
 
-    # Define baseline covariates (must match transformed dataframe column names)
-    covariates = [
-        'StudentTeacherRatio',
-        'expenditure',
-        'lunch',
-        'english',
-        'income',
-        'ComputersPerStudent',
-        'LogEnrollment',
-        'Grades_KK08'
-    ]
-
-    # Verify covariates present
-    missing = [c for c in covariates if c not in df.columns]
+    # Ensure the necessary columns exist in the provided dataframe
+    needed = ['AvgScore', 'StudentTeacherRatio', 'ExpenditurePerStudent', 'PctReducedLunch',
+              'PctEnglishLearners', 'ComputersPerStudent', 'IncomeThousands', 'GradeSpan_KK08', 'county']
+    missing = [c for c in needed if c not in df.columns]
     if missing:
-        raise ValueError(f"Missing required covariate columns in transformed df: {missing}")
+        raise ValueError(f"Missing required columns for modeling: {missing}")
 
-    X = df[covariates].copy()
+    # Build formula with county as categorical fixed effect
+    formula = (
+        'AvgScore ~ StudentTeacherRatio + ExpenditurePerStudent + PctReducedLunch + '
+        'PctEnglishLearners + ComputersPerStudent + IncomeThousands + GradeSpan_KK08 + C(county)'
+    )
 
-    # Create county dummies (drop first to avoid multicollinearity)
-    county_dummies = pd.get_dummies(df['county'].astype(str), prefix='county', drop_first=True)
-    if not county_dummies.empty:
-        X = pd.concat([X, county_dummies], axis=1)
+    # Fit OLS
+    ols_model = smf.ols(formula=formula, data=df)
+    results = ols_model.fit(cov_type='HC3')
 
-    # Add constant
-    X = sm.add_constant(X)
-
-    y = df['AvgScore']
-
-    # Fit OLS with robust standard errors (HC3)
-    model = sm.OLS(y, X).fit(cov_type='HC3')
-
-    return model
+    # Return the fitted results object. Users can call results.summary() for a printable summary.
+    return results
 
 

@@ -1,115 +1,155 @@
-from typing import Dict, FrozenSet, List, Literal, Optional, Set, Tuple, Any
+from typing import Any
 import numpy as np
 import pandas as pd
-import sklearn
-import scipy
-import statsmodels.api as sm
 import statsmodels.formula.api as smf
-import matplotlib.pyplot as plt
-import pickle
-  
-df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/analysis/reading/noperturb_output/reading.csv')
 
-# ======== TRANSFORM CODE ========
+
 def transform(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Transform raw dataset into a dataframe suitable for modeling.
+    Transforms the raw dataframe into the analysis-ready dataframe.
 
-    Produces the following additional/modified columns required by the model:
-      - log_speed: natural log of speed (dependent variable)
-      - log_num_words: natural log of num_words (control)
-      - english_native_binary: 1 if english_native == 'Y', else 0
-
-    Filters rows with missing or invalid values for the required columns.
+    Output columns required by the model:
+      - reader_view: int (0/1)
+      - dyslexia_bin: int (0/1)
+      - log_speed: float (natural log of speed + 1)
+      - num_words: numeric
+      - Flesch_Kincaid: numeric
+      - age_c: numeric (age centered)
+      - retake_trial: int (0/1)
+      - page_id: categorical
+      - device: categorical
+      - english_native: categorical
+      - uuid: identifier (used to cluster SEs)
     """
     df = df.copy()
 
-    # Required columns for analysis
-    required_cols = [
-        'uuid', 'page_id', 'reader_view', 'speed', 'num_words', 'Flesch_Kincaid',
-        'age', 'device', 'dyslexia_bin', 'english_native', 'correct_rate', 'retake_trial'
+    # Required columns for analysis: list (we'll check existence below)
+    required = [
+        'speed',
+        'reader_view',
+        'dyslexia',           # optional if dyslexia_bin present
+        'dyslexia_bin',       # optional if dyslexia present
+        'num_words',
+        'Flesch_Kincaid',
+        'age',
+        'retake_trial',
+        'page_id',
+        'device',
+        'english_native',
+        'uuid',
     ]
 
-    # Drop rows with missing values in required columns
-    df = df.dropna(subset=required_cols)
+    # Coerce numeric columns that we'll immediately operate on
+    if 'speed' in df.columns:
+        df['speed'] = pd.to_numeric(df['speed'], errors='coerce')
+    else:
+        raise ValueError('Required column for analysis missing: speed')
 
-    # Ensure numeric columns are numeric
-    df['speed'] = pd.to_numeric(df['speed'], errors='coerce')
+    # Ensure reader_view is numeric-ish before dropping rows
+    if 'reader_view' in df.columns:
+        df['reader_view'] = pd.to_numeric(df['reader_view'], errors='coerce')
+    else:
+        raise ValueError('Required column for analysis missing: reader_view')
+
+    # Drop rows missing essential variables speed or reader_view
+    df = df.dropna(subset=['speed', 'reader_view'])
+
+    # Handle dyslexia_bin/dyslexia robustly without converting to int until after NA rows are removed
+    if 'dyslexia_bin' in df.columns:
+        # Coerce to numeric; keep NaN for rows where it's missing/invalid
+        df['dyslexia_bin'] = pd.to_numeric(df['dyslexia_bin'], errors='coerce')
+    elif 'dyslexia' in df.columns:
+        # Coerce dyslexia to numeric then derive dyslexia_bin where dyslexia is present
+        df['dyslexia'] = pd.to_numeric(df['dyslexia'], errors='coerce')
+        df['dyslexia_bin'] = df['dyslexia'].apply(
+            lambda x: 1 if (pd.notnull(x) and x > 0) else (0 if pd.notnull(x) and x == 0 else np.nan)
+        )
+    else:
+        raise ValueError('Neither dyslexia_bin nor dyslexia column present in dataframe')
+
+    # Create the log-transformed dependent variable to reduce skew
+    df['log_speed'] = np.log(df['speed'].astype(float) + 1.0)
+
+    # Center age for interpretability (use available ages only)
+    if 'age' in df.columns:
+        df['age'] = pd.to_numeric(df['age'], errors='coerce')
+        age_mean = df['age'].mean(skipna=True)
+        df['age_c'] = df['age'] - age_mean
+    else:
+        df['age_c'] = np.nan
+
+    # Ensure numeric controls exist and raise if missing required columns
+    for col in ['num_words', 'Flesch_Kincaid', 'retake_trial', 'uuid', 'page_id', 'device', 'english_native']:
+        if col not in df.columns:
+            raise ValueError(f"Required column for analysis missing: {col}")
+
+    # Coerce num_words and Flesch_Kincaid to numeric
     df['num_words'] = pd.to_numeric(df['num_words'], errors='coerce')
     df['Flesch_Kincaid'] = pd.to_numeric(df['Flesch_Kincaid'], errors='coerce')
-    df['age'] = pd.to_numeric(df['age'], errors='coerce')
-    df['reader_view'] = pd.to_numeric(df['reader_view'], errors='coerce').astype(int)
-    df['dyslexia_bin'] = pd.to_numeric(df['dyslexia_bin'], errors='coerce').astype(int)
-    df['correct_rate'] = pd.to_numeric(df['correct_rate'], errors='coerce')
-    df['retake_trial'] = pd.to_numeric(df['retake_trial'], errors='coerce').astype(int)
 
-    # Remove rows with non-positive speed (cannot log-transform) or missing after coercion
-    df = df[df['speed'] > 0]
-    df = df.dropna(subset=['speed', 'num_words', 'Flesch_Kincaid', 'age', 'device', 'english_native', 'correct_rate'])
-
-    # Log-transform dependent variable and text length
-    df['log_speed'] = np.log(df['speed'].astype(float))
-    # To stabilize the influence of extreme page lengths, use log(num_words)
-    df['log_num_words'] = np.log(df['num_words'].astype(float))
-
-    # Derive english native binary: 'Y' -> 1, else 0
-    df['english_native_binary'] = df['english_native'].apply(lambda x: 1 if str(x).strip().upper() == 'Y' else 0)
-
-    # Ensure device is categorical
+    # Cast categorical variables to categories (keeps them for formula-based modeling)
+    df['page_id'] = df['page_id'].astype('category')
     df['device'] = df['device'].astype('category')
+    df['english_native'] = df['english_native'].astype('category')
 
-    # Optional: remove extreme outliers in log_speed by winsorizing at 1st and 99th percentiles to reduce undue influence
-    # (keeps shape while limiting extreme points). This is conservative and can be commented out if undesired.
-    lower = df['log_speed'].quantile(0.01)
-    upper = df['log_speed'].quantile(0.99)
-    df['log_speed'] = df['log_speed'].clip(lower, upper)
+    # Ensure retake_trial numeric and fill missing with 0 (assume missing => not a retake)
+    df['retake_trial'] = pd.to_numeric(df['retake_trial'], errors='coerce').fillna(0)
 
-    # Final dropna to be safe
-    final_cols = [
-        'uuid', 'page_id', 'reader_view', 'log_speed', 'dyslexia_bin', 'log_num_words',
-        'Flesch_Kincaid', 'age', 'device', 'english_native_binary', 'correct_rate', 'retake_trial'
+    # Now drop rows with any missing values in model columns (this will remove rows where dyslexia_bin is NaN)
+    model_cols = [
+        'log_speed',
+        'reader_view',
+        'dyslexia_bin',
+        'num_words',
+        'Flesch_Kincaid',
+        'age_c',
+        'retake_trial',
+        'page_id',
+        'device',
+        'english_native',
+        'uuid',
     ]
-    df = df.dropna(subset=final_cols)
+    df = df.dropna(subset=model_cols)
 
-    # Reset index for cleanliness
+    # After removing rows with NaNs, it's safe to cast to integer types for binary indicators
+    df['reader_view'] = df['reader_view'].astype(int)
+    df['dyslexia_bin'] = df['dyslexia_bin'].astype(int)
+    df['retake_trial'] = df['retake_trial'].astype(int)
+
+    # Reset index
     df = df.reset_index(drop=True)
 
     return df
 
 
-# ======== MODEL CODE ========
-def model(df: pd.DataFrame) -> any:
+def model(df: pd.DataFrame) -> Any:
     """
-    Fit a linear model testing whether Reader View (reader_view) affects reading speed and whether
-    this effect is different for readers with dyslexia (interaction reader_view * dyslexia_bin).
+    Runs an OLS regression of log_speed on reader_view, dyslexia_bin, their interaction,
+    and controls. Returns the fitted results object with cluster-robust standard errors by uuid.
 
-    Model: log_speed ~ reader_view * dyslexia_bin + log_num_words + Flesch_Kincaid + age + C(device) + english_native_binary + correct_rate + retake_trial
+    Model formula:
+      log_speed ~ reader_view * dyslexia_bin + num_words + Flesch_Kincaid + age_c + retake_trial + C(page_id) + C(device) + C(english_native)
 
-    Uses cluster-robust standard errors clustered by participant UUID to account for repeated measures.
-
-    Returns the fitted OLS results object.
+    We cluster standard errors by uuid to account for repeated measurements by the same reader.
     """
-    import statsmodels.formula.api as smf
-
-    # Ensure required columns exist
-    required_model_cols = [
-        'log_speed', 'reader_view', 'dyslexia_bin', 'log_num_words', 'Flesch_Kincaid',
-        'age', 'device', 'english_native_binary', 'correct_rate', 'retake_trial', 'uuid'
-    ]
-    missing = [c for c in required_model_cols if c not in df.columns]
-    if missing:
-        raise ValueError(f"Missing columns for model: {missing}")
-
+    # Specify formula with interaction. C(...) tells statsmodels to treat as categorical.
     formula = (
-        'log_speed ~ reader_view * dyslexia_bin + log_num_words + Flesch_Kincaid + '
-        'age + C(device) + english_native_binary + correct_rate + retake_trial'
+        'log_speed ~ reader_view * dyslexia_bin'
+        ' + num_words + Flesch_Kincaid + age_c + retake_trial'
+        ' + C(page_id) + C(device) + C(english_native)'
     )
 
-    ols_mod = smf.ols(formula=formula, data=df)
-    # Cluster robust standard errors clustered on participant UUID
-    results = ols_mod.fit(cov_type='cluster', cov_kwds={'groups': df['uuid']})
+    # Fit OLS
+    ols_model = smf.ols(formula, data=df).fit()
 
-    # Return the fitted results object (has .summary(), .params, .bse, etc.)
+    # Cluster-robust covariance by uuid (accounts for within-user correlation across trials)
+    try:
+        results = ols_model.get_robustcov_results(cov_type='cluster', groups=df['uuid'])
+    except Exception:
+        # Fallback: use HC3 robust SE if clustering fails
+        results = ols_model.get_robustcov_results(cov_type='HC3')
+
+    # Print summary for quick inspection (can be removed if used programmatically)
+    print(results.summary())
+
     return results
-
-

@@ -1,191 +1,155 @@
-from typing import Any
+from typing import Dict, FrozenSet, List, Literal, Optional, Set, Tuple, Any
 import numpy as np
 import pandas as pd
+import sklearn
+import scipy
+import statsmodels.api as sm
 import statsmodels.formula.api as smf
+import matplotlib.pyplot as plt
+import pickle
+
+# NOTE: this file originally read a specific CSV at import time.
+# Kept here to preserve original structure; if running in a different
+# environment you may want to remove or modify this line.
+try:
+    df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/analysis/reading/noperturb_output/reading.csv')
+except Exception:
+    df = pd.DataFrame()
 
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Perform cleaning and feature engineering for the Reader View analysis.
-
-    Output dataframe contains the columns used in the model (see conceptual variables):
-      - log_speed
-      - reader_view
-      - dyslexia_bin
-      - age_scaled
-      - num_words_scaled
-      - Flesch_Kincaid_scaled
-      - english_native_bin
-      - retake_trial
-      - device
-      - page_id
-      - uuid
-    """
+    # Work on a copy
     df = df.copy()
 
-    # Keep rows with essential variables
-    df = df.dropna(subset=['speed', 'reader_view', 'uuid'])
+    # Ensure required columns exist
+    required = ['adjusted_running_time', 'num_words', 'reader_view', 'dyslexia_bin', 'uuid', 'page_id']
+    for c in required:
+        if c not in df.columns:
+            raise KeyError(f"Required column missing: {c}")
 
-    # Ensure numeric types for key variables
-    # Remove non-positive speeds (cannot log-transform)
-    df = df[df['speed'] > 0]
+    # Drop obvious missing/invalid measurements
+    # adjusted_running_time must be positive and non-null; num_words must be positive
+    df = df.dropna(subset=['adjusted_running_time', 'num_words', 'reader_view', 'dyslexia_bin', 'uuid'])
+    df = df[df['adjusted_running_time'] > 0]
+    df = df[df['num_words'] > 0]
 
-    # Standardize/clean dyslexia indicator. Prefer existing dyslexia_bin (0/1); if missing, derive from 'dyslexia' flag
-    if 'dyslexia_bin' in df.columns:
-        # Some datasets may encode dyslexia_bin as floats; coerce to 0/1
-        df['dyslexia_bin'] = df['dyslexia_bin'].fillna(0).astype(float).apply(lambda x: 1 if x == 1 else 0).astype(int)
-    else:
-        # If only 'dyslexia' (0/1/2) is present, convert any nonzero to 1
-        if 'dyslexia' in df.columns:
-            df['dyslexia_bin'] = df['dyslexia'].fillna(0).astype(float).apply(lambda x: 1 if x > 0 else 0).astype(int)
-        else:
-            # If no dyslexia info, create column of zeros (will effectively test main effect only)
-            df['dyslexia_bin'] = 0
-            df['dyslexia_bin'] = df['dyslexia_bin'].astype(int)
-
-    # Ensure reader_view is integer 0/1
-    df['reader_view'] = df['reader_view'].fillna(0).astype(int)
-
-    # Log-transform speed (dependent variable)
-    df['log_speed'] = np.log(df['speed'].astype(float))
-
-    # Binary for english native (map Y/N -> 1/0). Missing -> 0
-    if 'english_native' in df.columns:
-        df['english_native_bin'] = df['english_native'].map({'Y': 1, 'N': 0})
-        df['english_native_bin'] = df['english_native_bin'].fillna(0).astype(int)
-    else:
-        df['english_native_bin'] = 0
-        df['english_native_bin'] = df['english_native_bin'].astype(int)
-
-    # Ensure retake_trial is binary 0/1
+    # Exclude retake trials (they may reflect practice effects)
     if 'retake_trial' in df.columns:
-        df['retake_trial'] = df['retake_trial'].fillna(0).astype(int)
+        df = df[df['retake_trial'] == 0]
+
+    # Compute words per minute (wpm) from adjusted_running_time (ms)
+    # Avoid divide-by-zero (we already filtered > 0)
+    df['wpm'] = df['num_words'] * 60000.0 / df['adjusted_running_time']
+
+    # Filter out extreme implausible speeds (e.g., extremely large due to tiny adjusted_running_time)
+    # Use robust bounds: keep wpm between 0.1 and 5000 wpm (very generous). If needed adjust later.
+    df = df[(df['wpm'] > 0.1) & (df['wpm'] < 5000)]
+
+    # Log-transform the wpm for modeling (stabilizes skew)
+    df['log_wpm'] = np.log(df['wpm'])
+
+    # Ensure ivs and controls have clean types
+    df['reader_view'] = pd.to_numeric(df['reader_view'], errors='coerce').astype(float)
+    df['dyslexia_bin'] = pd.to_numeric(df['dyslexia_bin'], errors='coerce').astype(float)
+
+    # Create english native binary if present
+    if 'english_native' in df.columns:
+        # Map 'Y'/'N' or other encodings to binary
+        df['english_native_binary'] = df['english_native'].map({'Y': 1, 'N': 0})
+        # If english_native is not Y/N, try to coerce to numeric
+        if df['english_native_binary'].isnull().any():
+            df['english_native_binary'] = pd.to_numeric(df['english_native'], errors='coerce')
+        # Fill remaining missing english_native with 0 (non-native) only if necessary
+        df['english_native_binary'] = df['english_native_binary'].fillna(0).astype(int)
     else:
-        df['retake_trial'] = 0
-        df['retake_trial'] = df['retake_trial'].astype(int)
+        # If column not present, create a default column of zeros (conservative)
+        df['english_native_binary'] = 0
 
-    # Standardize continuous covariates: age, num_words, Flesch_Kincaid
-    for col in ['age', 'num_words', 'Flesch_Kincaid']:
-        if col in df.columns:
-            # use population std (ddof=0) for stable scaling
-            mean = df[col].mean()
-            std = df[col].std(ddof=0)
-            # avoid division by zero
-            if std == 0 or np.isnan(std):
-                df[col + '_scaled'] = 0.0
-            else:
-                df[col + '_scaled'] = (df[col] - mean) / std
-        else:
-            df[col + '_scaled'] = 0.0
-
-    # Device and page_id as categorical (kept in the dataframe; will be used as fixed effects in the model)
+    # Coerce device and gender into categorical fields
     if 'device' in df.columns:
         df['device'] = df['device'].astype('category')
     else:
         df['device'] = 'unknown'
         df['device'] = df['device'].astype('category')
 
-    if 'page_id' in df.columns:
-        df['page_id'] = df['page_id'].astype('category')
+    if 'gender' in df.columns:
+        # If gender is numeric (0/1/2), keep as categorical so model can include C(gender)
+        df['gender'] = df['gender'].astype('category')
     else:
-        df['page_id'] = 'page_unknown'
-        df['page_id'] = df['page_id'].astype('category')
+        df['gender'] = 'unknown'
+        df['gender'] = df['gender'].astype('category')
 
-    # Ensure uuid is string (grouping variable for mixed model)
-    df['uuid'] = df['uuid'].astype(str)
+    # Coerce uuid and page_id to categorical (grouping variables)
+    df['uuid'] = df['uuid'].astype('category')
+    df['page_id'] = df['page_id'].astype('category')
 
-    # Final column set required by the model
-    final_cols = [
-        'uuid',
-        'log_speed',
-        'reader_view',
-        'dyslexia_bin',
-        'age_scaled',
-        'num_words_scaled',
-        'Flesch_Kincaid_scaled',
-        'english_native_bin',
-        'retake_trial',
-        'device',
-        'page_id'
+    # Keep only columns needed for modeling to simplify downstream steps
+    keep_cols = [
+        'uuid', 'page_id', 'reader_view', 'dyslexia_bin', 'wpm', 'log_wpm',
+        'age', 'correct_rate', 'Flesch_Kincaid', 'num_words', 'english_native_binary',
+        'device', 'gender'
     ]
+    # Add columns that may not be present but referenced (filled with NaN/defaults)
+    for extra in keep_cols:
+        if extra not in df.columns:
+            df[extra] = np.nan
 
-    # Keep only rows that still have non-missing values for the essential columns used in modeling.
-    # Note: some columns like age_scaled etc. are filled with 0.0 if missing, so ensure DV/IV/moderator present.
-    df = df.dropna(subset=['log_speed', 'reader_view', 'dyslexia_bin', 'uuid'])
+    # Ensure device and gender remain categorical if they were set earlier
+    if not pd.api.types.is_categorical_dtype(df['device']):
+        df['device'] = df['device'].astype('category')
+    if not pd.api.types.is_categorical_dtype(df['gender']):
+        df['gender'] = df['gender'].astype('category')
 
-    # Return dataframe with the final columns (reset index to avoid issues with statsmodels grouping)
-    return df[final_cols].reset_index(drop=True)
+    df = df[keep_cols]
+
+    # Final drop rows with missing values in dependent variable or main ivs/controls
+    df = df.dropna(subset=['log_wpm', 'reader_view', 'dyslexia_bin'])
+
+    # Convert reader_view and dyslexia_bin to numeric 0/1
+    df['reader_view'] = df['reader_view'].astype(float)
+    df['dyslexia_bin'] = df['dyslexia_bin'].astype(float)
+
+    # Return transformed dataframe used in modeling
+    return df
 
 
 # ======== MODEL CODE ========
 def model(df: pd.DataFrame) -> Any:
     """
-    Fit a mixed-effects regression to test whether Reader View (reader_view) improves reading speed
-    and whether that effect differs for readers with dyslexia (dyslexia_bin as moderator).
+    Fit a mixed-effects linear model predicting log_wpm with Reader View, Dyslexia, and their interaction.
+    Random intercepts are included for participant (uuid) to account for repeated measures.
 
-    Model specification (fixed effects):
-      log_speed ~ reader_view * dyslexia_bin + age_scaled + num_words_scaled + Flesch_Kincaid_scaled
-                   + english_native_bin + retake_trial + C(device) + C(page_id)
-
-    Random effects: random intercept for each participant (uuid) to account for repeated measures.
-
-    Returns the fitted results object from statsmodels.
+    Returns the fitted results object. If mixed model fails to converge, falls back to OLS with cluster-robust SEs by uuid.
     """
-    # Ensure required columns exist
-    required = [
-        'log_speed',
-        'reader_view',
-        'dyslexia_bin',
-        'age_scaled',
-        'num_words_scaled',
-        'Flesch_Kincaid_scaled',
-        'english_native_bin',
-        'retake_trial',
-        'device',
-        'page_id',
-        'uuid'
-    ]
+    import statsmodels.formula.api as smf
+    import statsmodels.api as sm
+
+    # Check required columns
+    required = ['log_wpm', 'reader_view', 'dyslexia_bin', 'uuid', 'device', 'gender']
     for c in required:
         if c not in df.columns:
-            raise ValueError(f"Missing required column for modeling: {c}")
+            raise KeyError(f"Required column for modeling missing: {c}")
 
-    # Make a working copy and drop rows with any missing values in the variables used by the model.
-    model_cols = required.copy()
-    df_model = df.dropna(subset=model_cols).copy()
-
-    if df_model.shape[0] == 0:
-        raise ValueError("No rows available for modeling after dropping missing values in required columns.")
-
-    # Reset index to ensure statsmodels group indexing works correctly
-    df_model = df_model.reset_index(drop=True)
-
-    # Ensure appropriate dtypes for modeling
-    # categorical fixed effects
-    df_model['device'] = df_model['device'].astype('category')
-    df_model['page_id'] = df_model['page_id'].astype('category')
-
-    # Ensure binary/int columns are numeric ints
-    for col in ['reader_view', 'dyslexia_bin', 'english_native_bin', 'retake_trial']:
-        df_model[col] = pd.to_numeric(df_model[col]).astype(int)
-
-    # Ensure uuid is string (grouping)
-    df_model['uuid'] = df_model['uuid'].astype(str)
-
-    # Build formula with interaction term and controls. C(device) and C(page_id) include categorical fixed effects.
+    # Build formula: include main IVs + interaction + controls + categorical device and gender
     formula = (
-        "log_speed ~ reader_view * dyslexia_bin + age_scaled + num_words_scaled + Flesch_Kincaid_scaled"
-        " + english_native_bin + retake_trial + C(device) + C(page_id)"
+        'log_wpm ~ reader_view * dyslexia_bin '
+        '+ correct_rate + age + Flesch_Kincaid + num_words + english_native_binary '
+        '+ C(device) + C(gender)'
     )
 
-    # Fit mixed linear model with random intercept by uuid
-    md = smf.mixedlm(formula, df_model, groups=df_model['uuid'], re_formula="~1")
+    # Try Mixed Linear Model with random intercept for uuid
     try:
-        results = md.fit(reml=False, method='lbfgs')
-    except Exception:
-        # fallback to default fit if lbfgs fails
-        results = md.fit(reml=False)
-
-    # Print a concise summary for quick inspection
-    print(results.summary())
-
-    return results
+        md = smf.mixedlm(formula, df, groups=df['uuid'], re_formula='1')
+        mdf = md.fit(reml=False, method='lbfgs', maxiter=200)
+        return mdf
+    except Exception as e:
+        # If MixedLM fails (convergence etc.), fall back to OLS with cluster-robust SEs by uuid
+        print('MixedLM failed, falling back to OLS with cluster-robust SEs. Error:', e)
+        ols_mod = smf.ols(formula, data=df).fit()
+        try:
+            # Cluster robust standard errors by uuid
+            clustered = ols_mod.get_robustcov_results(cov_type='cluster', groups=df['uuid'])
+            return clustered
+        except Exception:
+            # As a last fallback, return the plain OLS fit
+            return ols_mod

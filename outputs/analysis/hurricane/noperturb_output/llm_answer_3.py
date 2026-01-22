@@ -1,140 +1,142 @@
 def extract_final_answer(model_output):
     """
-    Extract relevant statistics about the main predictor (masfem_z) or the binary
-    gender predictor (gender_female) from a statsmodels-like result dict.
+    Extracts coefficients, standard errors, p-values, 95% CIs and interpretable effect sizes
+    for the key predictors (masfem_z and gender_mf) from the provided model_output dict.
 
-    Returns a dict with keys:
-      - "object": a dict keyed by model name containing either extracted stats
-                  or an error message when extraction is not possible.
-      - "description": a short plain-English explanation of what was returned
-                       and (if relevant) why extraction failed and how to fix it.
+    Returns a dictionary:
+      {
+        "object": {
+           "ols_deaths": { "masfem_z": {coef, se, p_value, ci_95, percent_change, percent_change_CI_95}, "gender_mf": {...}, ...},
+           "ols_damage": { ... },
+           "nb_deaths": { "masfem_z": {coef, se, p_value, ci_95, IRR, IRR_CI_95, percent_change}, ...}
+        },
+        "description": "Plain-language explanation of what the numbers mean and how to interpret them re: the hypothesis"
+      }
+
+    Notes on interpretation encoded in results:
+      - For OLS on log outcomes: percent_change = (exp(coef) - 1) * 100 gives the multiplicative percent change in the outcome
+        associated with a one-unit increase in the predictor (masfem_z is standardized, so per SD).
+      - For Negative Binomial: IRR = exp(coef) is the incidence-rate ratio; percent_change = (IRR - 1) * 100.
     """
     import numpy as np
-    res = {}
+    results_summary = {}
 
-    # Helper to safely extract stats for a given parameter name
-    def _extract_from_result(obj, param):
-        out = {}
+    # helper to safely extract attributes
+    def safe_attr(res, attr_name):
         try:
-            params = getattr(obj, "params", None)
-            pvalues = getattr(obj, "pvalues", None)
-            conf = None
-            try:
-                conf = obj.conf_int()
-            except Exception:
-                # some result-objects may require explicit alpha kw; catch all
-                try:
-                    conf = obj.conf_int(alpha=0.05)
-                except Exception:
-                    conf = None
+            return getattr(res, attr_name)
+        except Exception:
+            return None
 
-            if params is None or param not in params.index:
-                out["error"] = f"parameter '{param}' not found in result.params"
-                return out
+    for key in ['ols_deaths', 'ols_damage', 'nb_deaths']:
+        res = model_output.get(key, None)
+        results_summary[key] = {}
 
-            coef = float(params[param])
-            pval = float(pvalues[param]) if (pvalues is not None and param in pvalues.index) else None
-            ci_low = ci_high = None
-            if conf is not None and param in conf.index:
-                ci_low, ci_high = float(conf.loc[param, 0]), float(conf.loc[param, 1])
-
-            out["coef"] = coef
-            out["pvalue"] = pval
-            out["conf_int_95"] = (ci_low, ci_high)
-
-            # If model is a count model (e.g., NegativeBinomial/GLM), report exp(coef)
-            fam = None
-            try:
-                fam = getattr(getattr(obj, "model", None), "family", None)
-            except Exception:
-                fam = None
-            is_count_family = False
-            if fam is not None:
-                fname = fam.__class__.__name__.lower()
-                if "negativ" in fname or "poisson" in fname or "count" in fname:
-                    is_count_family = True
-
-            # Some wrappers (like robustcov_results) still expose model.family above;
-            # if not found, we still provide exp(coef) because it is easy to interpret for counts.
-            if is_count_family or True:
-                try:
-                    out["exp_coef"] = float(np.exp(coef))
-                    if ci_low is not None and ci_high is not None:
-                        out["exp_conf_int_95"] = (float(np.exp(ci_low)), float(np.exp(ci_high)))
-                    else:
-                        out["exp_conf_int_95"] = (None, None)
-                except Exception:
-                    out["exp_coef"] = None
-                    out["exp_conf_int_95"] = (None, None)
-
-            return out
-        except Exception as e:
-            return {"error": f"exception during extraction: {type(e).__name__}: {str(e)}"}
-
-    # Validate input structure
-    if not isinstance(model_output, dict):
-        return {
-            "object": None,
-            "description": f"Expected model_output to be a dict of models; got {type(model_output).__name__}."
-        }
-
-    # Iterate models and attempt extraction or record errors
-    for name, obj in model_output.items():
-        # If the entry is an Exception object (e.g., fitting failed), record the error string
-        if isinstance(obj, BaseException):
-            res[name] = {"error": str(obj)}
+        if res is None:
+            results_summary[key]['error'] = 'model not present (None)'
             continue
 
-        # Try to extract masfem_z first; if not present, try gender_female
+        if isinstance(res, Exception):
+            # model fitting raised an exception earlier
+            results_summary[key]['error'] = f'model object is an Exception: {str(res)}'
+            continue
+
+        # Try to extract params, bse, pvalues, conf_int
+        params = safe_attr(res, 'params')
+        pvalues = safe_attr(res, 'pvalues')
+        bse = safe_attr(res, 'bse')
         try:
-            params = getattr(obj, "params", None)
-            if params is None:
-                res[name] = {"error": "model object has no .params attribute; not a statsmodels result?"}
+            conf = res.conf_int(alpha=0.05)
+        except Exception:
+            conf = None
+
+        if params is None:
+            results_summary[key]['error'] = 'could not extract params from model object'
+            continue
+
+        for var in ['masfem_z', 'gender_mf']:
+            if var not in params.index:
+                results_summary[key][var] = {'error': f'{var} not in model coefficients'}
                 continue
-            idx = list(params.index)
-            if "masfem_z" in idx:
-                res[name] = _extract_from_result(obj, "masfem_z")
-            elif "gender_female" in idx:
-                res[name] = _extract_from_result(obj, "gender_female")
+
+            coef = float(params.loc[var])
+            se = float(bse.loc[var]) if (bse is not None and var in bse.index) else None
+            pval = float(pvalues.loc[var]) if (pvalues is not None and var in pvalues.index) else None
+            if conf is not None and var in conf.index:
+                ci_lower = float(conf.loc[var].iloc[0])
+                ci_upper = float(conf.loc[var].iloc[1])
             else:
-                # If neither parameter present, return available params for inspection
-                res[name] = {
-                    "warning": "neither 'masfem_z' nor 'gender_female' found in model parameters",
-                    "available_params": idx
+                ci_lower = ci_upper = None
+
+            if key.startswith('ols'):
+                # Outcome is log-transformed -> interpret multiplicatively
+                # Use exp(coef)-1 for exact percent change
+                try:
+                    pct_change = (np.exp(coef) - 1.0) * 100.0
+                    pct_ci_lower = (np.exp(ci_lower) - 1.0) * 100.0 if ci_lower is not None else None
+                    pct_ci_upper = (np.exp(ci_upper) - 1.0) * 100.0 if ci_upper is not None else None
+                except Exception:
+                    pct_change = pct_ci_lower = pct_ci_upper = None
+
+                results_summary[key][var] = {
+                    'coef': coef,
+                    'se': se,
+                    'p_value': pval,
+                    'ci_95': (ci_lower, ci_upper),
+                    'percent_change': pct_change,
+                    'percent_change_CI_95': (pct_ci_lower, pct_ci_upper),
+                    'interpretation_note': (
+                        "For log outcome: percent_change = (exp(coef)-1)*100 gives the percent change in the outcome "
+                        "for a one-unit increase in the predictor. masfem_z is standardized, so this is per SD."
+                    )
                 }
-        except Exception as e:
-            res[name] = {"error": f"exception while parsing model result: {type(e).__name__}: {str(e)}"}
+            else:
+                # Negative Binomial: coef on log scale -> IRR
+                try:
+                    irr = float(np.exp(coef))
+                    irr_ci_lower = float(np.exp(ci_lower)) if ci_lower is not None else None
+                    irr_ci_upper = float(np.exp(ci_upper)) if ci_upper is not None else None
+                    pct_change = (irr - 1.0) * 100.0
+                except Exception:
+                    irr = irr_ci_lower = irr_ci_upper = pct_change = None
 
-    # Compose user-facing description
-    # If any model entries are errors, mention likely dtype problem (from the observed run)
-    any_errors = any(("error" in v) for v in res.values())
-    if any_errors:
-        description = (
-            "Extraction produced the per-model results (or errors) in 'object'. "
-            "One or more models failed to fit or could not be parsed. If you saw "
-            "TypeError(\"Cannot interpret 'Int64Dtype()' as a data type\"), this "
-            "usually means pandas' nullable integer dtype (Int64) or other non-numpy "
-            "dtypes were present; statsmodels expects native numpy dtypes. "
-            "Fix by converting columns to native types before fitting, e.g.:\n"
-            "  df = df.copy()\n"
-            "  df['alldeaths_count'] = df['alldeaths_count'].astype(int)\n"
-            "  df['masfem_z'] = df['masfem_z'].astype(float)\n"
-            "  df['wind_z'] = df['wind_z'].astype(float)\n"
-            "  df['min_z'] = df['min_z'].astype(float)\n"
-            "  df['year_c'] = df['year_c'].astype(float)\n"
-            "  df['gender_female'] = df['gender_female'].astype(int)\n"
-            "  df['category'] = df['category'].astype('category')\n"
-            "  df['source'] = df['source'].astype('category')\n"
-            "Then re-run the models and call this extractor on the new results to obtain "
-            "coefficients, p-values, confidence intervals, and (for count models) the "
-            "exponentiated coefficients (incidence rate ratios)."
-        )
-    else:
-        description = (
-            "Extraction succeeded for all models. 'object' contains, per model, the "
-            "coefficient, p-value, 95% CI for the target parameter (masfem_z or "
-            "gender_female), and the exponentiated coefficient plus exponentiated CI "
-            "(useful for interpreting count/Gamma/Poisson/NegativeBinomial models)."
-        )
+                results_summary[key][var] = {
+                    'coef': coef,
+                    'se': se,
+                    'p_value': pval,
+                    'ci_95': (ci_lower, ci_upper),
+                    'IRR': irr,
+                    'IRR_CI_95': (irr_ci_lower, irr_ci_upper),
+                    'percent_change': pct_change,
+                    'interpretation_note': (
+                        "For Negative Binomial: IRR = exp(coef). IRR>1 means a higher expected count with higher predictor; "
+                        "percent_change = (IRR-1)*100."
+                    )
+                }
 
-    return {"object": res, "description": description}
+        # Add quick verdict for masfem_z relative to hypothesis
+        mm = results_summary[key].get('masfem_z')
+        if isinstance(mm, dict) and 'coef' in mm:
+            coef = mm['coef']
+            pval = mm['p_value']
+            supports_hypothesis = None
+            # Hypothesis: more feminine -> more harm -> coef should be positive
+            if pval is not None:
+                supports_hypothesis = (coef > 0) and (pval < 0.05)
+            else:
+                supports_hypothesis = (coef > 0)
+            results_summary[key]['masfem_z_summary'] = {
+                'sign': 'positive' if coef > 0 else ('zero' if coef == 0 else 'negative'),
+                'p_value': pval,
+                'supports_hypothesis_at_p_lt_0.05': bool(supports_hypothesis)
+            }
+
+    description_lines = [
+        "This function returns extracted statistics for 'masfem_z' (numeric femininity) and 'gender_mf' (binary) from each model in model_output.",
+        "- For OLS models on log outcomes (ols_deaths, ols_damage): 'percent_change' reports (exp(coef)-1)*100, the multiplicative percent change in the outcome for a one-unit increase in the predictor (masfem_z is standardized, so interpreted per SD).",
+        "- For the Negative Binomial model (nb_deaths): 'IRR' = exp(coef) and 'percent_change' = (IRR-1)*100 give the multiplicative change in expected death counts.",
+        "- The returned 'masfem_z_summary' for each model gives a quick yes/no style check whether the estimate is positive and statistically significant at p < 0.05 (which would be consistent with the hypothesis that more feminine names lead to more harm).",
+        "Use the numeric outputs in 'object' to make precise statements about direction, magnitude, and statistical significance."
+    ]
+
+    return {'object': results_summary, 'description': " ".join(description_lines)}

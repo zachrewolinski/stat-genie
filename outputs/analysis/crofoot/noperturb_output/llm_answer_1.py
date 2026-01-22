@@ -1,146 +1,217 @@
 def extract_final_answer(model_output):
     """
-    Extracts coefficient table and tests the effect of relative group size (RelSize_z)
-    across contest locations (Neutral, FocalHome, OtherHome) from a fitted statsmodels
-    Logit BinaryResultsWrapper.
-
-    Returns a dict with keys:
-      - "object": dict containing:
-          - "coef_table": pandas.DataFrame with coefficients, SE, z, p, 95% CI, odds ratios and OR CI
-            for each model term.
-          - "simple_slopes": pandas.DataFrame with the slope of RelSize_z (log-odds per SD)
-            evaluated at each Location (Neutral, FocalHome, OtherHome), including SE, z, p,
-            95% CI and odds ratio (and OR CI).
-      - "description": short explanation of the results and how to interpret them.
+    Extract relevant statistics from a fitted statsmodels binary outcome result (BinaryResultsWrapper).
+    Returns a dictionary with:
+      - "object": dict of extracted numeric results (coefficients, SEs, z, p, 95% CIs, odds ratios)
+      - "description": brief interpretation regarding whether size advantage and location predict winning,
+                       and whether being closer to home moderates the size advantage.
     """
     import numpy as np
-    import pandas as pd
-    from scipy import stats
-
-    res = model_output  # statsmodels BinaryResultsWrapper
-
-    # Extract basic coefficient table
-    params = res.params.copy()
-    bse = res.bse.copy()
-    zvals = params / bse
-    # Prefer using res.pvalues if available for individual coefficients
+    from math import exp
     try:
-        pvals = res.pvalues.copy()
+        from scipy.stats import norm
     except Exception:
-        pvals = 2 * (1 - stats.norm.cdf(np.abs(zvals)))
-    ci = res.conf_int(alpha=0.05)
-    ci.columns = ['ci_lower', 'ci_upper']
+        # Minimal replacement for normal CDF if scipy not available
+        def _norm_cdf(x):
+            return 0.5 * (1.0 + np.erf(x / np.sqrt(2.0)))
+        class norm:
+            @staticmethod
+            def cdf(x):
+                return _norm_cdf(x)
 
-    coef_table = pd.DataFrame({
-        'coef': params,
-        'se': bse,
-        'z': zvals,
-        'p': pvals,
-        'ci_lower': ci['ci_lower'],
-        'ci_upper': ci['ci_upper']
-    })
-    # Add odds ratios and OR CIs
-    coef_table['odds_ratio'] = np.exp(coef_table['coef'])
-    coef_table['or_ci_lower'] = np.exp(coef_table['ci_lower'])
-    coef_table['or_ci_upper'] = np.exp(coef_table['ci_upper'])
+    params = model_output.params  # pandas Series
+    names = list(params.index)
 
-    # Prepare covariance matrix for tests of linear combinations (simple slopes)
-    cov = res.cov_params()
+    # Obtain covariance matrix used for inference (should reflect cluster-robust cov if fit that way)
+    try:
+        cov = model_output.cov_params()
+    except Exception:
+        # fallback to default covariance (may be HC or model default)
+        try:
+            cov = model_output.cov_params_default
+        except Exception:
+            cov = None
 
-    # Names used in the model code
-    term_R = 'RelSize_z'
-    term_R_Focal_inter = 'RelSize_z_x_Loc_FocalHome'
-    term_R_Other_inter = 'RelSize_z_x_Loc_OtherHome'
-
-    # Function to compute linear combination stats
-    def lincomb_stats(coef_vector):
-        """
-        coef_vector: pandas Series or 1D array aligned with params.index,
-                     containing weights for linear combination.
-        Returns dict with coef, se, z, p, ci_lower, ci_upper, odds_ratio, or_ci_lower, or_ci_upper
-        """
-        # Align with params index
-        a = np.zeros(len(params))
-        index = list(params.index)
-        for i, name in enumerate(index):
-            a[i] = float(coef_vector.get(name, 0.0))
-        est = float(np.dot(a, params.values))
-        se = float(np.sqrt(np.dot(a, np.dot(cov.values, a))))
-        # If se is zero (degenerate), set z/p to nan
-        if se > 0:
-            z = est / se
-            p = 2 * (1 - stats.norm.cdf(abs(z)))
-            ci_low = est - 1.96 * se
-            ci_high = est + 1.96 * se
+    # Helper to get numeric series of standard errors, z, p, conf if cov unavailable
+    def se_from_cov(covmat):
+        if covmat is None:
+            # fallback to model_output.bse and pvalues/conf_int if available
+            bse = getattr(model_output, 'bse', None)
+            pvals = getattr(model_output, 'pvalues', None)
+            try:
+                ci = model_output.conf_int()
+            except Exception:
+                ci = None
+            return bse, pvals, ci
         else:
-            z = np.nan
-            p = np.nan
-            ci_low = np.nan
-            ci_high = np.nan
-        or_est = np.exp(est) if np.isfinite(est) else np.nan
-        or_ci_low = np.exp(ci_low) if np.isfinite(ci_low) else np.nan
-        or_ci_high = np.exp(ci_high) if np.isfinite(ci_high) else np.nan
+            se = np.sqrt(np.diag(covmat))
+            se = np.array(se)
+            se_series = None
+            try:
+                import pandas as pd
+                se_series = pd.Series(se, index=names)
+            except Exception:
+                # fallback: create dict
+                se_series = dict(zip(names, se))
+            return se_series, None, None
 
-        return {
-            'coef': est,
-            'se': se,
-            'z': z,
-            'p': p,
-            'ci_lower': ci_low,
-            'ci_upper': ci_high,
-            'odds_ratio': or_est,
-            'or_ci_lower': or_ci_low,
-            'or_ci_upper': or_ci_high
-        }
+    se_series, pvals_fallback, ci_fallback = se_from_cov(cov)
 
-    # Simple slopes for RelSize_z at each location:
-    # Neutral: slope = RelSize_z
-    vec_neutral = {term_R: 1.0}
-    neutral_stats = lincomb_stats(vec_neutral)
+    # Function to compute z, p, CI from beta and SE
+    def stats_from_beta_se(beta, se):
+        z = beta / se
+        p = 2 * (1 - norm.cdf(abs(z)))
+        ci_lower = beta - 1.96 * se
+        ci_upper = beta + 1.96 * se
+        return float(beta), float(se), float(z), float(p), float(ci_lower), float(ci_upper)
 
-    # FocalHome: slope = RelSize_z + RelSize_z_x_Loc_FocalHome
-    vec_focal = {term_R: 1.0, term_R_Focal_inter: 1.0}
-    focal_stats = lincomb_stats(vec_focal)
+    # find interaction term name containing both SizeAdv_c and FocalCloser
+    interaction_name = None
+    for n in names:
+        if ('SizeAdv_c' in n) and ('FocalCloser' in n):
+            interaction_name = n
+            break
 
-    # OtherHome: slope = RelSize_z + RelSize_z_x_Loc_OtherHome
-    vec_other = {term_R: 1.0, term_R_Other_inter: 1.0}
-    other_stats = lincomb_stats(vec_other)
+    # core variables expected
+    def _get_name(target):
+        if target in names:
+            return target
+        # fallback: find name containing target
+        for n in names:
+            if target in n:
+                return n
+        raise KeyError(f"Variable {target} not found in model parameters. Available: {names}")
 
-    simple_slopes = pd.DataFrame({
-        'Neutral': neutral_stats,
-        'FocalHome': focal_stats,
-        'OtherHome': other_stats
-    }).T[['coef', 'se', 'z', 'p', 'ci_lower', 'ci_upper', 'odds_ratio', 'or_ci_lower', 'or_ci_upper']]
+    name_size = _get_name('SizeAdv_c')
+    name_dist = _get_name('DistAdv_c')
 
-    # Build description explaining interpretation
-    description = (
-        "This output gives (1) the model coefficient table for each model term, including\n"
-        "    log-odds coefficients (coef), standard errors, z-statistics, p-values,\n"
-        "    95% confidence intervals, and corresponding odds ratios (and their CIs);\n"
-        "and (2) the simple slopes of RelSize_z (the effect of being relatively larger by 1 SD)\n"
-        "    evaluated at each contest location (Neutral, FocalHome, OtherHome).\n\n"
-        "Interpretation notes:\n"
-        "- The coef for RelSize_z in the 'coef_table' is the effect of relative group size\n"
-        "  when Location == 'Neutral' (the reference). A positive coefficient means that\n"
-        "  as the focal group is relatively larger (per SD), its log-odds of winning increase;\n"
-        "  exp(coef) gives the multiplicative change in odds of winning per SD increase in RelSize_z.\n"
-        "- The interaction coefficients (RelSize_z_x_Loc_FocalHome and RelSize_z_x_Loc_OtherHome)\n"
-        "  modify the RelSize_z slope in those locations. The 'simple_slopes' table reports the\n"
-        "  combined slope (RelSize_z + interaction) for FocalHome and OtherHome, with SE, p-value,\n"
-        "  and odds ratios. Use these to see whether the effect of relative size is stronger,\n"
-        "  weaker, or reversed in different locations.\n"
-        "- Coefficients for Loc_FocalHome and Loc_OtherHome (in coef_table) represent the effect\n"
-        "  of being at that location (versus Neutral) when RelSize_z == 0 (an average/centered value).\n\n"
-        "To answer the research question, inspect the sign, magnitude, and statistical significance\n"
-        "of the simple slopes and their odds ratios: if the slope is positive and significant,\n"
-        "being relatively larger increases win probability at that location; if the slope differs\n"
-        "across locations, the interaction is present (check interaction p-values in coef_table).\n"
+    # Extract coefficients
+    beta_size = float(params[name_size])
+    beta_dist = float(params[name_dist])
+    beta_inter = float(params[interaction_name]) if interaction_name is not None else 0.0
+
+    # Get SEs
+    if cov is not None:
+        # se for individual coefficients
+        se_size = float(np.sqrt(cov.loc[name_size, name_size]))
+        se_dist = float(np.sqrt(cov.loc[name_dist, name_dist]))
+        se_inter = float(np.sqrt(cov.loc[interaction_name, interaction_name])) if interaction_name is not None else None
+    else:
+        # fallback to model_output.bse and pvalues/conf_int
+        se_size = float(model_output.bse[name_size])
+        se_dist = float(model_output.bse[name_dist])
+        se_inter = float(model_output.bse[interaction_name]) if interaction_name is not None else None
+
+    # Stats for main SizeAdv_c effect when FocalCloser == 0 (this is the main term)
+    beta0, se0, z0, p0, ci0_low, ci0_up = stats_from_beta_se(beta_size, se_size)
+
+    # Stats for SizeAdv_c when FocalCloser == 1 (beta_size + beta_inter)
+    if interaction_name is not None:
+        beta1 = beta_size + beta_inter
+        # variance = var(size) + var(inter) + 2*cov(size, inter)
+        if cov is not None:
+            var1 = cov.loc[name_size, name_size] + cov.loc[interaction_name, interaction_name] + 2 * cov.loc[name_size, interaction_name]
+            se1 = float(np.sqrt(var1))
+        else:
+            # approximate by summing variances (conservative, ignores covariance)
+            se1 = float(np.sqrt(se_size**2 + se_inter**2))
+        beta1, se1, z1, p1, ci1_low, ci1_up = stats_from_beta_se(beta1, se1)
+    else:
+        # no interaction found; size effect same regardless of FocalCloser
+        beta1, se1, z1, p1, ci1_low, ci1_up = beta0, se0, z0, p0, ci0_low, ci0_up
+
+    # DistAdv stats
+    beta_d, se_d, z_d, p_d, ci_d_low, ci_d_up = stats_from_beta_se(beta_dist, se_dist)
+
+    # Interaction term stats
+    if interaction_name is not None:
+        beta_i = beta_inter
+        se_i = se_inter
+        beta_i, se_i, z_i, p_i, ci_i_low, ci_i_up = stats_from_beta_se(beta_i, se_i)
+    else:
+        beta_i = se_i = z_i = p_i = ci_i_low = ci_i_up = None
+
+    # Odds ratios and CIs
+    def or_and_ci(beta, se):
+        or_ = exp(beta)
+        ci_low = exp(beta - 1.96 * se)
+        ci_up = exp(beta + 1.96 * se)
+        return float(or_), float(ci_low), float(ci_up)
+
+    or0, or0_low, or0_up = or_and_ci(beta0, se0)
+    or1, or1_low, or1_up = or_and_ci(beta1, se1)
+    ordist, ordist_low, ordist_up = or_and_ci(beta_d, se_d)
+    if beta_i is not None:
+        ori, ori_low, ori_up = or_and_ci(beta_i, se_i)
+    else:
+        ori = ori_low = ori_up = None
+
+    # Simple significance verdicts (alpha = 0.05)
+    sig_size_when_far = (p0 < 0.05)
+    sig_size_when_close = (p1 < 0.05)
+    sig_dist = (p_d < 0.05)
+    sig_interaction = (p_i < 0.05) if p_i is not None else False
+
+    # Build output object
+    output = {
+        'SizeAdv_c_when_FocalCloser_0': {
+            'coef': beta0, 'se': se0, 'z': z0, 'p': p0,
+            '95%_CI': [ci0_low, ci0_up],
+            'OR': or0, 'OR_95%_CI': [or0_low, or0_up],
+            'significant_at_0.05': sig_size_when_far
+        },
+        'SizeAdv_c_when_FocalCloser_1': {
+            'coef': beta1, 'se': se1, 'z': z1, 'p': p1,
+            '95%_CI': [ci1_low, ci1_up],
+            'OR': or1, 'OR_95%_CI': [or1_low, or1_up],
+            'significant_at_0.05': sig_size_when_close
+        },
+        'Interaction_term (SizeAdv_c:FocalCloser)': {
+            'coef': beta_i, 'se': se_i, 'z': z_i, 'p': p_i,
+            '95%_CI': [ci_i_low, ci_i_up] if beta_i is not None else None,
+            'OR': ori, 'OR_95%_CI': [ori_low, ori_up] if ori is not None else None,
+            'significant_at_0.05': sig_interaction
+        },
+        'DistAdv_c': {
+            'coef': beta_d, 'se': se_d, 'z': z_d, 'p': p_d,
+            '95%_CI': [ci_d_low, ci_d_up],
+            'OR': ordist, 'OR_95%_CI': [ordist_low, ordist_up],
+            'significant_at_0.05': sig_dist
+        },
+        # model reference
+        'model_params_index': names
+    }
+
+    # Short textual interpretation
+    parts = []
+    # Size adv when focal not closer
+    parts.append(
+        f"Size advantage (SizeAdv_c) when focal group is NOT closer to home: coef={beta0:.3f}, p={p0:.3f}, "
+        f"OR={or0:.3f} (95% CI [{or0_low:.3f}, {or0_up:.3f}]). "
+        + ("Statistically significant." if sig_size_when_far else "Not statistically significant.")
+    )
+    # Size adv when focal closer
+    parts.append(
+        f"Size advantage when focal group IS closer to home: coef={beta1:.3f}, p={p1:.3f}, "
+        f"OR={or1:.3f} (95% CI [{or1_low:.3f}, {or1_up:.3f}]). "
+        + ("Statistically significant." if sig_size_when_close else "Not statistically significant.")
+    )
+    # Interaction
+    if interaction_name is not None:
+        parts.append(
+            f"Interaction (SizeAdv_c x FocalCloser): coef={beta_i:.3f}, p={p_i:.3f}. "
+            + ("Evidence that being closer to home changes the size advantage effect." if sig_interaction else "No strong evidence of moderation by being closer to home.")
+        )
+    else:
+        parts.append("No interaction term found in the fitted model output.")
+
+    # DistAdv
+    parts.append(
+        f"Location advantage (DistAdv_c): coef={beta_d:.3f}, p={p_d:.3f}, OR={ordist:.3f} "
+        f"(95% CI [{ordist_low:.3f}, {ordist_up:.3f}]). "
+        + ("Statistically significant." if sig_dist else "Not statistically significant.")
     )
 
-    return {
-        "object": {
-            "coef_table": coef_table,
-            "simple_slopes": simple_slopes
-        },
-        "description": description
-    }
+    description = " ".join(parts)
+
+    return {'object': output, 'description': description}

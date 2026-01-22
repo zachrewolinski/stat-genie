@@ -1,139 +1,121 @@
 def extract_final_answer(model_output):
     """
-    Extracts coefficients, standard errors, z-scores, p-values, odds ratios (OR) and 95% CIs
-    for the effect of rel_size_ratio on the probability that the focal group wins,
-    summarized separately for each contest location (FocalNear, OtherNear, Neutral).
-    
-    Returns:
-      {
-        "object": {
-          "reference_level": <which contest_loc_* dummy was omitted (reference)>,
-          "per_location": {
-            "FocalNear": {
-              "slope_logit": ...,
-              "se": ...,
-              "z": ...,
-              "p": ...,
-              "OR": ...,
-              "OR_CI": [lower, upper]
-            },
-            "OtherNear": { ... },
-            "Neutral": { ... }
-          },
-          "raw_params": { <model params as dict> }
-        },
-        "description": "..."
-      }
+    Extract coefficients, SEs, z-stats, p-values, 95% CIs, and odds-ratios for the
+    focal predictors from a fitted statsmodels GLMResults/GLMResultsWrapper object.
+
+    Returns a dictionary with:
+      - "object": dict mapping variable -> extracted numeric summary
+      - "description": human-readable interpretation focusing on the key predictors
     """
+    import numpy as np
     import math
 
-    res = model_output  # GLMResultsWrapper or LogitResults-like object
+    # Variables of primary interest
+    focal_vars = ['log_size_ratio_c', 'focal_dist_m_c', 'size_x_focaldist']
 
-    # Extract parameter vector and covariance matrix
-    params = res.params  # pandas Series
-    cov = res.cov_params()  # pandas DataFrame
+    # Prepare outputs
+    stats = {}
+    missing_vars = []
 
-    # Names used when creating dummies in the model code
-    loc_levels = ['FocalNear', 'OtherNear', 'Neutral']
-    dummy_names = [f'contest_loc_{lev}' for lev in loc_levels]
-    interaction_names = [f'rel_size_ratio:{dn}' for dn in dummy_names]
+    # Try to access usual attributes on statsmodels result object
+    try:
+        params = model_output.params
+        bse = model_output.bse
+        pvalues = model_output.pvalues
+        conf = model_output.conf_int()
+    except Exception as e:
+        raise ValueError("Provided model_output does not have expected statsmodels attributes: " + str(e))
 
-    # Determine which location dummy was dropped (reference) by seeing which dummy is missing
-    present_dummies = [dn for dn in dummy_names if dn in params.index]
-    missing = [dn for dn in dummy_names if dn not in params.index]
-    reference_level = None
-    if len(missing) == 1:
-        # missing dummy indicates reference
-        reference_level = missing[0].replace('contest_loc_', '')
-    else:
-        # fallback: if none or multiple missing, mark unknown
-        reference_level = 'unknown_or_all_present'
+    # Helper to safely get numeric value for a variable (if present)
+    def get_val(series_or_df, var, default=math.nan):
+        try:
+            return float(series_or_df[var])
+        except Exception:
+            # conf_int returns DataFrame with two columns (0,1) — handle that
+            try:
+                row = series_or_df.loc[var]
+                # If it's a length-2 array-like, return as tuple
+                if hasattr(row, "__len__") and len(row) >= 2:
+                    return (float(row[0]), float(row[1]))
+            except Exception:
+                return default
 
-    # Base coefficient for rel_size_ratio
-    if 'rel_size_ratio' not in params.index:
-        raise KeyError("Model does not contain 'rel_size_ratio' parameter.")
-    beta_base = float(params['rel_size_ratio'])
-    var_base = float(cov.loc['rel_size_ratio', 'rel_size_ratio']) if 'rel_size_ratio' in cov.index else None
+    # Extract stats for each focal var
+    for v in focal_vars:
+        if v not in params.index:
+            missing_vars.append(v)
+            continue
+        coef = get_val(params, v)
+        se = get_val(bse, v)
+        p = get_val(pvalues, v)
+        # z-stat
+        z = coef / se if (not math.isnan(coef) and not math.isnan(se) and se != 0) else math.nan
+        # 95% CI on coefficient scale
+        ci = None
+        try:
+            ci_row = conf.loc[v]
+            ci = (float(ci_row[0]), float(ci_row[1]))
+        except Exception:
+            ci = (math.nan, math.nan)
+        # Odds ratio and CI
+        or_val = float(np.exp(coef)) if not math.isnan(coef) else math.nan
+        or_ci = (float(np.exp(ci[0])) if not math.isnan(ci[0]) else math.nan,
+                 float(np.exp(ci[1])) if not math.isnan(ci[1]) else math.nan)
 
-    # Helper: normal cdf using math.erf to avoid scipy dependency
-    def norm_cdf(x):
-        return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
-
-    results_by_location = {}
-    for lev in loc_levels:
-        dn = f'contest_loc_{lev}'
-        inter = f'rel_size_ratio:{dn}'
-
-        # If interaction term exists in model, combine base + interaction
-        if inter in params.index:
-            beta_inter = float(params[inter])
-            # variance of sum = var(base) + var(inter) + 2*cov(base, inter)
-            var_inter = float(cov.loc[inter, inter]) if inter in cov.index else None
-            cov_bi = float(cov.loc['rel_size_ratio', inter]) if (('rel_size_ratio' in cov.index) and (inter in cov.index)) else 0.0
-
-            slope = beta_base + beta_inter
-            if (var_base is None) or (var_inter is None):
-                se = None
-            else:
-                se = math.sqrt(max(0.0, var_base + var_inter + 2.0 * cov_bi))
-        else:
-            # No interaction term -> effect is just the base coefficient
-            slope = beta_base
-            se = math.sqrt(max(0.0, var_base)) if var_base is not None else None
-
-        # z, p-value (two-sided) and odds ratio + CI
-        if (se is None) or (se == 0):
-            z = None
-            p = None
-            ci_lower = None
-            ci_upper = None
-        else:
-            z = slope / se
-            p = 2.0 * (1.0 - norm_cdf(abs(z)))
-            # 95% CI on log-odds scale
-            z_crit = 1.959963984540054  # approximate 97.5% quantile
-            ci_lower = slope - z_crit * se
-            ci_upper = slope + z_crit * se
-
-        # Odds ratio and CI (exponentiated)
-        OR = math.exp(slope) if slope is not None else None
-        OR_ci = [math.exp(ci_lower) if ci_lower is not None else None,
-                 math.exp(ci_upper) if ci_upper is not None else None]
-
-        results_by_location[lev] = {
-            "slope_logit": slope,
-            "se": se,
-            "z": z,
-            "p": p,
-            "OR": OR,
-            "OR_CI": OR_ci
+        stats[v] = {
+            'coef': coef,
+            'se': se,
+            'z': z,
+            'p': p,
+            'ci_2.5%': ci[0],
+            'ci_97.5%': ci[1],
+            'odds_ratio': or_val,
+            'odds_ratio_ci_2.5%': or_ci[0],
+            'odds_ratio_ci_97.5%': or_ci[1],
+            'significant_0.05': bool(p < 0.05)
         }
 
-    # Package raw params for reference (convert to plain dict)
+    # Also include basic model-level info if available (N, llf)
+    model_info = {}
     try:
-        raw_params = {k: float(v) for k, v in params.items()}
+        model_info['n_obs'] = int(model_output.nobs)
     except Exception:
-        raw_params = params.to_dict()
+        model_info['n_obs'] = None
+    try:
+        model_info['deviance'] = float(model_output.deviance)
+    except Exception:
+        model_info['deviance'] = None
 
-    output = {
-        "object": {
-            "reference_level": reference_level,
-            "per_location": results_by_location,
-            "raw_params": raw_params
-        },
-        "description": (
-            "For each contest location (FocalNear, OtherNear, Neutral) the function reports:\n"
-            "- slope_logit: the effect (coefficient) of rel_size_ratio on the log-odds that the focal group wins\n"
-            "- se: standard error of that linear combination (base rel_size_ratio +/- interaction if present)\n"
-            "- z and p: z-statistic and two-sided p-value testing slope != 0\n"
-            "- OR: odds ratio = exp(slope) (multiplicative change in odds of focal win per unit increase in rel_size_ratio)\n"
-            "- OR_CI: 95% CI for the odds ratio (exponentiated 95% CI on the log-odds scale)\n\n"
-            "Interpretation: a slope_logit > 0 (OR > 1) means that increasing rel_size_ratio "
-            "(i.e., the focal group being larger relative to the other group) increases the probability "
-            "that the focal group wins. The p-value indicates whether that effect is statistically significant. "
-            "Because the model included interactions rel_size_ratio:contest_loc_*, the reported slope for each "
-            "location reflects the combined base effect plus the location-specific interaction term (if present)."
-        )
-    }
+    # Build a concise human-readable description using the extracted numbers
+    lines = []
+    if missing_vars:
+        lines.append("Warning: the following focal variables were not found in the model output: " +
+                     ", ".join(missing_vars) + ".")
+    lines.append(f"Model sample size (n_obs): {model_info.get('n_obs')}")
+    for v in focal_vars:
+        if v not in stats:
+            continue
+        s = stats[v]
+        sig = "statistically significant (p < 0.05)" if s['significant_0.05'] else "not statistically significant (p ≥ 0.05)"
+        # Interpret sign for direction
+        direction = "positive" if s['coef'] > 0 else ("negative" if s['coef'] < 0 else "near zero")
+        # Special interpretation for focal_dist_m_c: increasing distance = farther from home
+        if v == 'focal_dist_m_c':
+            meaning = ("This coefficient is per meter increase in focal distance from home; "
+                       "a negative coef means being closer to home (smaller distance) increases the focal group's odds of winning.")
+        elif v == 'log_size_ratio_c':
+            meaning = ("This coefficient is per unit increase in the log ratio of focal:other adult group size; "
+                       "a positive coef means a larger focal group (relative to the opponent) increases the odds the focal group wins.")
+        elif v == 'size_x_focaldist':
+            meaning = ("This is the interaction term between relative size and focal distance; "
+                       "a significant interaction means the effect of relative size on winning depends on contest location (distance).")
+        else:
+            meaning = ""
+        line = (f"{v}: coef={s['coef']:.4f}, SE={s['se']:.4f}, z={s['z']:.2f}, p={s['p']:.3g}; "
+                f"OR={s['odds_ratio']:.3f} (95% CI [{s['odds_ratio_ci_2.5%']:.3f}, {s['odds_ratio_ci_97.5%']:.3f}]); "
+                f"Direction: {direction}; {sig}. {meaning}")
+        lines.append(line)
 
-    return output
+    description = " ".join(lines)
+
+    return {"object": stats, "description": description}

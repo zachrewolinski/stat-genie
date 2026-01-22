@@ -1,135 +1,205 @@
 def extract_final_answer(model_output):
     """
-    Extracts the estimated effect of having children on reported extramarital affairs
-    from a fitted statsmodels GLM (Negative Binomial) object that used the formula:
-      AffairCount ~ HasChildren + Gender_Male + HasChildren:Gender_Male + ...
-    Returns a dict with numerical results under "object" and a short human-readable
-    interpretation under "description".
+    Extracts statistics about the effect of 'Children' from OLS and ZINB model outputs.
+
+    Returns a dictionary with:
+      - "object": a dict containing numeric estimates, SEs, p-values and 95% CIs for the
+                  'Children' coefficient from the OLS, and from both parts of the ZINB
+                  (count model and inflation model).
+      - "description": a short interpretation stating whether having children appears
+                       to decrease engagement in extramarital affairs, based on the
+                       direction and significance of the coefficients.
+
+    The function is robust to common naming conventions used by statsmodels for zero-inflated
+    parameter names (e.g., 'Children' and 'inflate_Children' or similar).
     """
     import numpy as np
-    from math import sqrt
-    from scipy import stats
 
-    # Helper to format results for one coefficient
-    def summarize_effect(beta, se):
-        z = beta / se if se > 0 else np.nan
-        p = 2 * (1 - stats.norm.cdf(abs(z))) if se > 0 else np.nan
-        ci_low = beta - 1.96 * se
-        ci_upp = beta + 1.96 * se
-        irr = np.exp(beta)
-        irr_ci = (np.exp(ci_low), np.exp(ci_upp))
-        pct_change = (irr - 1.0) * 100.0
-        return {
-            "coef_log": float(beta),
-            "se": float(se),
-            "z": float(z),
-            "p_value": float(p),
-            "irr": float(irr),
-            "irr_95ci": (float(irr_ci[0]), float(irr_ci[1])),
-            "percent_change": float(pct_change),
-            "log_95ci": (float(ci_low), float(ci_upp))
-        }
+    # Validate input
+    if not isinstance(model_output, dict):
+        raise ValueError("model_output must be a dict with keys 'ols_results' and 'zinb_results'.")
 
-    # Validate object has expected attributes
-    if not hasattr(model_output, "params") or not hasattr(model_output, "cov_params"):
-        raise ValueError("model_output does not appear to be a fitted statsmodels results object with .params and .cov_params()")
+    if 'ols_results' not in model_output or 'zinb_results' not in model_output:
+        raise KeyError("model_output must contain keys 'ols_results' and 'zinb_results'.")
 
-    params = model_output.params
-    cov = model_output.cov_params()
+    ols = model_output['ols_results']
+    zinb = model_output['zinb_results']
 
-    # Names of terms as expected from the formula
-    term_base = "HasChildren"
-    term_inter = "HasChildren:Gender_Male"  # statsmodels uses ':' for interaction in formulas
+    result_obj = {}
+    description_lines = []
 
-    if term_base not in params.index:
-        raise KeyError(f"Expected coefficient '{term_base}' not found in model params: {list(params.index)}")
+    # Helper to safely extract parameter stats from a results object
+    def _extract_from_result(res, param_name):
+        # res: results wrapper (has .params, .bse, .pvalues, .conf_int())
+        params = getattr(res, 'params', None)
+        if params is None:
+            return None
+        if param_name not in params.index:
+            return None
+        coef = float(params[param_name])
+        se = float(res.bse[param_name]) if hasattr(res, 'bse') and param_name in res.bse.index else None
+        pval = float(res.pvalues[param_name]) if hasattr(res, 'pvalues') and param_name in res.pvalues.index else None
+        ci_df = res.conf_int() if hasattr(res, 'conf_int') else None
+        ci = list(map(float, ci_df.loc[param_name].values)) if (ci_df is not None and param_name in ci_df.index) else None
+        return {'coef': coef, 'se': se, 'pval': pval, '95%_CI': ci}
 
-    beta_base = float(params[term_base])
-    var_base = float(cov.loc[term_base, term_base])
-    se_base = sqrt(var_base)
+    # 1) OLS: extract 'Children'
+    ols_stats = _extract_from_result(ols, 'Children')
+    if ols_stats is None:
+        # Try alternative capitalization / prefix
+        for name in ols.params.index:
+            if 'children' in name.lower():
+                ols_stats = _extract_from_result(ols, name)
+                break
 
-    # Summarize baseline effect (this is effect for Gender_Male == 0, i.e., females under coding)
-    effect_female = summarize_effect(beta_base, se_base)
+    if ols_stats is None:
+        raise KeyError("Could not find a 'Children' coefficient in the OLS results.")
 
-    # Prepare male effect = HasChildren + HasChildren:Gender_Male (if interaction present)
-    if term_inter in params.index:
-        beta_inter = float(params[term_inter])
-        # variance of sum = var(b1) + var(b2) + 2*cov(b1,b2)
-        var_inter = float(cov.loc[term_inter, term_inter])
-        cov_b1b2 = float(cov.loc[term_base, term_inter])
-        beta_male = beta_base + beta_inter
-        var_male = var_base + var_inter + 2.0 * cov_b1b2
-        se_male = sqrt(max(var_male, 0.0))
-        effect_male = summarize_effect(beta_male, se_male)
-        interaction_present = True
-    else:
-        # No interaction term: effect is same for males and females
-        effect_male = effect_female.copy()
-        interaction_present = False
+    result_obj['ols_children'] = ols_stats
 
-    # Also extract individual coefficient p-values/CIs for reporting
-    # For completeness include raw HasChildren and interaction c.oefs if present
-    raw = {}
-    raw["HasChildren"] = {
-        "coef_log": float(beta_base),
-        "se": float(se_base),
-        "p_value": float(2 * (1 - stats.norm.cdf(abs(beta_base / se_base)))) if se_base > 0 else np.nan,
-        "irr": float(np.exp(beta_base)),
-        "irr_95ci": (float(np.exp(beta_base - 1.96 * se_base)), float(np.exp(beta_base + 1.96 * se_base))),
-    }
-    if interaction_present:
-        beta_inter = float(params[term_inter])
-        se_inter = sqrt(float(cov.loc[term_inter, term_inter]))
-        raw["HasChildren:Gender_Male"] = {
-            "coef_log": float(beta_inter),
-            "se": float(se_inter),
-            "p_value": float(2 * (1 - stats.norm.cdf(abs(beta_inter / se_inter)))) if se_inter > 0 else np.nan,
-            "irr": float(np.exp(beta_inter)),
-            "irr_95ci": (float(np.exp(beta_inter - 1.96 * se_inter)), float(np.exp(beta_inter + 1.96 * se_inter))),
-        }
+    # Interpret OLS briefly
+    ols_dir = 'negative' if ols_stats['coef'] < 0 else 'positive' if ols_stats['coef'] > 0 else 'zero'
+    ols_sig = (ols_stats['pval'] is not None) and (ols_stats['pval'] < 0.05)
+    description_lines.append(
+        f"OLS: Children coef = {ols_stats['coef']:.4g} (SE={ols_stats['se']:.4g}, p={ols_stats['pval']:.4g}). "
+        f"Direction: {ols_dir}. {'Statistically significant (p<0.05).' if ols_sig else 'Not statistically significant.'}"
+    )
 
-    # Decision rules for short conclusion
-    def interpret(effect_dict):
-        p = effect_dict["p_value"]
-        irr = effect_dict["irr"]
-        pct = effect_dict["percent_change"]
-        if np.isnan(p):
-            return "Effect could not be tested (missing SE/p)."
-        if p < 0.05:
-            if irr < 1.0:
-                return f"Statistically significant decrease: expected affair count {abs(pct):.1f}% lower (IRR={irr:.3f}, p={p:.3g})."
-            else:
-                return f"Statistically significant increase: expected affair count {pct:.1f}% higher (IRR={irr:.3f}, p={p:.3g})."
+    # 2) ZINB: need to find both count and inflation coefficients for Children.
+    zinb_params = zinb.params
+    zinb_pvalues = getattr(zinb, 'pvalues', None)
+    zinb_bse = getattr(zinb, 'bse', None)
+    zinb_ci = zinb.conf_int() if hasattr(zinb, 'conf_int') else None
+
+    # Find parameter names that refer to Children
+    children_param_names = [n for n in zinb_params.index if 'children' in n.lower()]
+    # Typical names: 'Children' (count), 'inflate_Children' or 'Children_infl' etc.
+    count_name = None
+    infl_name = None
+    for n in children_param_names:
+        if 'inflate' in n.lower() or 'infl' in n.lower() or 'zero' in n.lower():
+            infl_name = n
         else:
-            return f"No statistically significant effect detected (IRR={irr:.3f}, p={p:.3g})."
+            # If there are two names and one has a prefix/suffix indicating inflation, prefer that as infl.
+            # Otherwise assume first is count if we haven't assigned count_name yet.
+            if count_name is None:
+                count_name = n
 
-    conclusion_female = interpret(effect_female)
-    conclusion_male = interpret(effect_male)
+    # If not found by the above heuristic, try splitting params index into two blocks using model metadata
+    if count_name is None or infl_name is None:
+        # Try to use model attribute lists if available
+        model = getattr(zinb, 'model', None)
+        if model is not None:
+            exog_names = getattr(model, 'exog_names', None)
+            exog_infl_names = getattr(model, 'exog_infl_names', None)
+            if exog_names is not None:
+                for n in exog_names:
+                    if 'children' in n.lower():
+                        count_name = n
+            if exog_infl_names is not None:
+                for n in exog_infl_names:
+                    if 'children' in n.lower():
+                        # statsmodels may prefix inflation names when stored in params; find matching param
+                        # find a param in zinb_params.index that contains n (or its basename)
+                        matches = [p for p in zinb_params.index if n.lower() in p.lower()]
+                        if matches:
+                            infl_name = matches[0]
 
-    # Build return object
-    result_object = {
-        "effect_female": effect_female,
-        "effect_male": effect_male,
-        "interaction_present": interaction_present,
-        "raw_terms": raw,
-        "model_summary_available": hasattr(model_output, "summary")  # quick indicator
-    }
+    # If still missing, fall back to any param name that contains 'children' and assign heuristically:
+    if count_name is None and len(children_param_names) > 0:
+        count_name = children_param_names[0]
+        if len(children_param_names) > 1 and infl_name is None:
+            infl_name = children_param_names[1]
 
-    # Short human-readable description
-    if interaction_present:
-        description = (
-            "Estimated effect of having children on reported extramarital affairs (Negative Binomial GLM, log link):\n"
-            f"- Females (Gender_Male=0): {conclusion_female}\n"
-            f"- Males (Gender_Male=1): {conclusion_male}\n"
-            "Interpretation: IRR < 1 indicates fewer reported affairs associated with having children; IRR > 1 indicates more. "
-            "See 'object' for coefficients, standard errors, p-values, IRRs, and 95% CIs."
+    # Extract stats if names found
+    zinb_count_stats = None
+    zinb_infl_stats = None
+    if count_name is not None:
+        zinb_count_stats = {
+            'name': count_name,
+            'coef': float(zinb_params[count_name]),
+            'se': float(zinb_bse[count_name]) if (zinb_bse is not None and count_name in zinb_bse.index) else None,
+            'pval': float(zinb_pvalues[count_name]) if (zinb_pvalues is not None and count_name in zinb_pvalues.index) else None,
+            '95%_CI': list(map(float, zinb_ci.loc[count_name].values)) if (zinb_ci is not None and count_name in zinb_ci.index) else None,
+            'interpretation': 'count (log link)'
+        }
+        result_obj['zinb_count_children'] = zinb_count_stats
+
+    if infl_name is not None:
+        zinb_infl_stats = {
+            'name': infl_name,
+            'coef': float(zinb_params[infl_name]),
+            'se': float(zinb_bse[infl_name]) if (zinb_bse is not None and infl_name in zinb_bse.index) else None,
+            'pval': float(zinb_pvalues[infl_name]) if (zinb_pvalues is not None and infl_name in zinb_pvalues.index) else None,
+            '95%_CI': list(map(float, zinb_ci.loc[infl_name].values)) if (zinb_ci is not None and infl_name in zinb_ci.index) else None,
+            'interpretation': 'inflation (logit of being an excess-zero)'
+        }
+        result_obj['zinb_inflation_children'] = zinb_infl_stats
+
+    if zinb_count_stats is None and zinb_infl_stats is None:
+        raise KeyError("Could not locate 'Children' parameters in the ZINB results.")
+
+    # Interpret ZINB:
+    # - For count coef: negative -> lower expected counts (fewer affairs) among those with children (for the non-structural-zero group)
+    # - For inflation coef: positive -> higher probability of being a structural zero (i.e., certain no-affair), which also means children -> fewer affairs
+    if zinb_count_stats is not None:
+        dir_count = 'negative' if zinb_count_stats['coef'] < 0 else 'positive' if zinb_count_stats['coef'] > 0 else 'zero'
+        sig_count = (zinb_count_stats['pval'] is not None) and (zinb_count_stats['pval'] < 0.05)
+        description_lines.append(
+            f"ZINB (count): {zinb_count_stats['name']} coef = {zinb_count_stats['coef']:.4g} "
+            f"(SE={zinb_count_stats['se']:.4g}, p={zinb_count_stats['pval']:.4g}). "
+            f"Direction: {dir_count}. {'Significant.' if sig_count else 'Not significant.'}"
         )
+    if zinb_infl_stats is not None:
+        dir_infl = 'positive' if zinb_infl_stats['coef'] > 0 else 'negative' if zinb_infl_stats['coef'] < 0 else 'zero'
+        sig_infl = (zinb_infl_stats['pval'] is not None) and (zinb_infl_stats['pval'] < 0.05)
+        description_lines.append(
+            f"ZINB (inflation): {zinb_infl_stats['name']} coef = {zinb_infl_stats['coef']:.4g} "
+            f"(SE={zinb_infl_stats['se']:.4g}, p={zinb_infl_stats['pval']:.4g}). "
+            f"Direction: {dir_infl}. {'Significant.' if sig_infl else 'Not significant.'}"
+        )
+
+    # Synthesize a simple conclusion about whether children decrease engagement in affairs.
+    # Use ZINB evidence primarily (more appropriate for count-with-zeros), supported by OLS.
+    evidence_count = None
+    evidence_infl = None
+    if zinb_count_stats is not None:
+        evidence_count = (zinb_count_stats['coef'] < 0) and ((zinb_count_stats['pval'] is not None) and zinb_count_stats['pval'] < 0.05)
+    if zinb_infl_stats is not None:
+        # positive inflation coef that is significant indicates higher structural-zero probability (fewer affairs)
+        evidence_infl = (zinb_infl_stats['coef'] > 0) and ((zinb_infl_stats['pval'] is not None) and zinb_infl_stats['pval'] < 0.05)
+
+    # Combine
+    if evidence_count or evidence_infl:
+        conclusion = "Evidence that having children is associated with decreased engagement in extramarital affairs."
+        # note if both significant
+        if evidence_count and evidence_infl:
+            conclusion += " Both the count and inflation parts of the ZINB indicate fewer affairs among those with children."
+        elif evidence_count:
+            conclusion += " The count part (expected number of affairs) is significantly lower for those with children."
+        else:
+            conclusion += " The inflation part (probability of being a certain zero/no-affair) is significantly higher for those with children."
     else:
-        description = (
-            "Estimated (common) effect of having children on reported extramarital affairs (no HasChildren:Gender_Male interaction found):\n"
-            f"- All respondents: {conclusion_female}\n"
-            "Interpretation: IRR < 1 indicates fewer reported affairs associated with having children; IRR > 1 indicates more. "
-            "See 'object' for coefficients, standard errors, p-values, IRRs, and 95% CIs."
-        )
+        # If neither is significant but directions point to decrease, say 'weak' or 'no strong evidence'
+        # Check directions
+        dir_count_flag = (zinb_count_stats is not None) and (zinb_count_stats['coef'] < 0)
+        dir_infl_flag = (zinb_infl_stats is not None) and (zinb_infl_stats['coef'] > 0)
+        if (dir_count_flag or dir_infl_flag) and not (evidence_count or evidence_infl):
+            conclusion = ("Point estimates from ZINB suggest children may be associated with fewer affairs "
+                          " (negative count coef and/or positive inflation coef), but these estimates are not statistically significant.")
+        else:
+            # Use OLS as tie-breaker: if OLS significant negative and ZINB not significant, mention mixed evidence.
+            ols_negative_sig = (ols_stats['coef'] < 0) and (ols_stats['pval'] is not None) and (ols_stats['pval'] < 0.05)
+            if ols_negative_sig:
+                conclusion = ("Mixed evidence: OLS indicates a statistically significant negative association between children and affairs, "
+                              "but ZINB (more appropriate for this outcome) does not show significant effects.")
+            else:
+                conclusion = ("No strong evidence that having children decreases engagement in extramarital affairs in these models. "
+                              "Point estimates are not consistently significant.")
 
-    return {"object": result_object, "description": description}
+    description_lines.append("Conclusion: " + conclusion)
+
+    return {
+        "object": result_obj,
+        "description": " ".join(description_lines)
+    }

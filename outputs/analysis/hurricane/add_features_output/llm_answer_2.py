@@ -1,177 +1,151 @@
 def extract_final_answer(model_output):
     """
-    Extract key statistics for the main hypothesis from the provided statsmodels results.
-
-    Expects model_output to be a dict with keys:
-      - 'main_deaths_model' -> statsmodels RegressionResultsWrapper (contains 'FemScore')
-      - 'binary_deaths_model' -> statsmodels RegressionResultsWrapper (contains 'FemaleBinary')
-      - 'damage_model' -> statsmodels RegressionResultsWrapper (contains 'FemScore')
+    Extracts coefficients, standard errors, test statistics, p-values, and 95% CIs
+    for the predictors 'masfem_std' and 'gender_mf' from the negative-binomial (GLM)
+    and OLS models contained in model_output.
 
     Returns:
       {
         "object": {
-           "main_deaths": { ... stats ... },
-           "binary_deaths": { ... stats ... },
-           "damage": { ... stats ... }
+          "nb": {
+            "masfem_std": {coef, se, z, pvalue, ci_low, ci_high, irr, irr_ci_low, irr_ci_high},
+            "gender_mf": {...}
+          },
+          "ols": {
+            "masfem_std": {coef, se, t, pvalue, ci_low, ci_high},
+            "gender_mf": {...}
+          }
         },
-        "description": "Plain-language summary of results and (direction/significance) relative to the hypothesis"
+        "description": "Plain-language interpretation"
       }
     """
-    def _get_stats(model, varname):
-        out = {
-            "variable": varname,
-            "present": False,
-            "coef": None,
-            "se": None,
-            "t": None,
-            "p_value": None,
-            "ci_lower": None,
-            "ci_upper": None,
-            "nobs": None
-        }
-        try:
-            params = model.params
-            if varname not in params.index:
-                return out
-            out["present"] = True
-            out["coef"] = float(params.loc[varname])
-            # standard error, t, p
-            try:
-                out["se"] = float(model.bse.loc[varname])
-            except Exception:
-                out["se"] = float(model.bse[varname])
-            try:
-                out["t"] = float(model.tvalues.loc[varname])
-            except Exception:
-                out["t"] = float(model.tvalues[varname])
-            try:
-                out["p_value"] = float(model.pvalues.loc[varname])
-            except Exception:
-                out["p_value"] = float(model.pvalues[varname])
-            # confidence interval
-            try:
-                ci = model.conf_int().loc[varname]
-                out["ci_lower"] = float(ci[0])
-                out["ci_upper"] = float(ci[1])
-            except Exception:
-                ci_arr = model.conf_int().values
-                # try to find row by matching varname in index
+    import math
+    import numpy as np
+
+    def _safe_get_stats(model, predictors, model_type='nb'):
+        """
+        model_type: 'nb' for GLM negative binomial (log link), 'ols' for OLS.
+        """
+        results = {}
+        if model is None:
+            for p in predictors:
+                results[p] = None
+            return results
+
+        # Check that model has expected attributes
+        has_params = hasattr(model, 'params')
+        has_bse = hasattr(model, 'bse')
+        has_pvalues = hasattr(model, 'pvalues')
+        has_conf_int = hasattr(model, 'conf_int')
+
+        for p in predictors:
+            if not (has_params and p in model.params.index):
+                results[p] = None
+                continue
+            coef = float(model.params[p])
+            se = float(model.bse[p]) if has_bse else None
+            # test stat: z for GLM, t for OLS
+            stat = None
+            if se is not None and se != 0:
+                stat = float(coef / se)
+            pval = float(model.pvalues[p]) if has_pvalues else None
+            ci_low, ci_high = (None, None)
+            if has_conf_int:
+                ci = model.conf_int().loc[p].values if hasattr(model.conf_int(), 'loc') else np.asarray(model.conf_int())[list(model.params.index).index(p)]
+                ci_low, ci_high = float(ci[0]), float(ci[1])
+
+            entry = {
+                'coef': round(coef, 4),
+                'se': round(se, 4) if se is not None else None,
+                'stat': round(stat, 4) if stat is not None else None,
+                'pvalue': round(pval, 4) if pval is not None else None,
+                'ci_95%': (round(ci_low, 4) if ci_low is not None else None,
+                          round(ci_high, 4) if ci_high is not None else None)
+            }
+
+            # For GLM NB with log link: also provide incidence rate ratio (exp(coef)) and CI
+            if model_type == 'nb':
                 try:
-                    row = model.conf_int().loc[varname].values
-                    out["ci_lower"], out["ci_upper"] = float(row[0]), float(row[1])
+                    irr = math.exp(coef)
+                    irr_ci_low = math.exp(ci_low) if ci_low is not None else None
+                    irr_ci_high = math.exp(ci_high) if ci_high is not None else None
+                    entry.update({
+                        'irr': round(irr, 4),
+                        'irr_95%': (round(irr_ci_low, 4) if irr_ci_low is not None else None,
+                                    round(irr_ci_high, 4) if irr_ci_high is not None else None)
+                    })
                 except Exception:
-                    # fallback: set None
-                    out["ci_lower"], out["ci_upper"] = None, None
-            # nobs
-            try:
-                out["nobs"] = int(model.nobs)
-            except Exception:
-                try:
-                    out["nobs"] = int(getattr(model, "nobs"))
-                except Exception:
-                    out["nobs"] = None
-        except Exception:
-            # return what we have (mostly Nones)
-            pass
-        return out
+                    entry.update({'irr': None, 'irr_95%': (None, None)})
 
-    results = {}
-    descriptions = []
+            results[p] = entry
+        return results
 
-    # Safely extract models from input dict
-    main_model = model_output.get('main_deaths_model')
-    bin_model = model_output.get('binary_deaths_model')
-    dmg_model = model_output.get('damage_model')
+    predictors = ['masfem_std', 'gender_mf']
+    nb_model = model_output.get('nb_model')
+    ols_model = model_output.get('ols_model')
 
-    # Main model: FemScore -> LogDeaths
-    main_stats = None
-    if main_model is not None:
-        main_stats = _get_stats(main_model, "FemScore")
-        results["main_deaths"] = main_stats
-        if not main_stats["present"]:
-            descriptions.append("Main model: variable 'FemScore' not present in model object.")
+    nb_stats = _safe_get_stats(nb_model, predictors, model_type='nb')
+    ols_stats = _safe_get_stats(ols_model, predictors, model_type='ols')
+
+    # Build concise interpretation
+    def interpret(p, nb_s, ols_s, alpha=0.05):
+        lines = []
+        # NB: fatalities
+        if nb_s is None:
+            lines.append(f"Fatalities model: no result for {p}.")
         else:
-            sig = main_stats["p_value"] < 0.05
-            direction = "positive" if main_stats["coef"] > 0 else "negative" if main_stats["coef"] < 0 else "null"
-            descriptions.append(
-                f"Main model (LogDeaths ~ FemScore + controls): coef={main_stats['coef']:.4f}, SE={main_stats['se']:.4f}, "
-                f"p={main_stats['p_value']:.4f}, 95% CI=[{main_stats['ci_lower']:.4f}, {main_stats['ci_upper']:.4f}], "
-                f"n={main_stats['nobs']}. This is a {direction} effect; "
-                + ("statistically significant (p<0.05)." if sig else "not statistically significant (p>=0.05).")
-            )
+            coef = nb_s['coef']; pval = nb_s['pvalue']; irr = nb_s.get('irr')
+            dir_text = "positive" if coef > 0 else ("negative" if coef < 0 else "null")
+            sig = (pval is not None and pval < alpha)
+            lines.append(f"Fatalities (NB): coef={coef}, IRR={irr}, p={pval} -> {('significant' if sig else 'not significant')} ({dir_text}).")
+        # OLS: log damage
+        if ols_s is None:
+            lines.append(f"Damage model: no result for {p}.")
+        else:
+            coef = ols_s['coef']; pval = ols_s['pvalue']
+            dir_text = "positive" if coef > 0 else ("negative" if coef < 0 else "null")
+            sig = (pval is not None and pval < alpha)
+            lines.append(f"Log damage (OLS): coef={coef}, p={pval} -> {('significant' if sig else 'not significant')} ({dir_text}).")
+        return " ".join(lines)
+
+    interpretation = {}
+    for p in predictors:
+        interpretation[p] = interpret(p, nb_stats.get(p), ols_stats.get(p))
+
+    # Overall conclusion about the hypothesis:
+    # Hypothesis: more feminine names -> less precaution -> higher fatalities or higher damage.
+    # We check sign and significance for masfem_std primarily.
+    masfem_nb = nb_stats.get('masfem_std')
+    masfem_ols = ols_stats.get('masfem_std')
+    conclusion_lines = []
+    if masfem_nb is None and masfem_ols is None:
+        conclusion_lines.append("No estimable results for 'masfem_std'. Cannot evaluate hypothesis.")
     else:
-        descriptions.append("Main model ('main_deaths_model') not found in model_output.")
-
-    # Binary-name robustness: FemaleBinary -> LogDeaths
-    bin_stats = None
-    if bin_model is not None:
-        bin_stats = _get_stats(bin_model, "FemaleBinary")
-        results["binary_deaths"] = bin_stats
-        if not bin_stats["present"]:
-            descriptions.append("Binary robustness model: variable 'FemaleBinary' not present in model object.")
+        # Determine whether either model shows a significant positive association (supporting hypothesis)
+        nb_pos_sig = masfem_nb is not None and (masfem_nb['coef'] > 0) and (masfem_nb['pvalue'] is not None and masfem_nb['pvalue'] < 0.05)
+        ols_pos_sig = masfem_ols is not None and (masfem_ols['coef'] > 0) and (masfem_ols['pvalue'] is not None and masfem_ols['pvalue'] < 0.05)
+        if nb_pos_sig or ols_pos_sig:
+            conclusion_lines.append("At least one model shows a statistically significant positive association between name femininity and the outcome, which would support the hypothesis.")
         else:
-            sig = bin_stats["p_value"] < 0.05
-            direction = "positive" if bin_stats["coef"] > 0 else "negative" if bin_stats["coef"] < 0 else "null"
-            descriptions.append(
-                f"Binary robustness (LogDeaths ~ FemaleBinary + controls): coef={bin_stats['coef']:.4f}, SE={bin_stats['se']:.4f}, "
-                f"p={bin_stats['p_value']:.4f}, 95% CI=[{bin_stats['ci_lower']:.4f}, {bin_stats['ci_upper']:.4f}], "
-                f"n={bin_stats['nobs']}. This is a {direction} effect; "
-                + ("statistically significant (p<0.05)." if sig else "not statistically significant (p>=0.05).")
+            # If coefficients are in opposite directions or not significant, say no evidence.
+            # Report observed directions and p-values
+            nb_part = ("NB coef={coef}, p={p}".format(coef=masfem_nb['coef'], p=masfem_nb['pvalue']) if masfem_nb is not None else "NB: NA")
+            ols_part = ("OLS coef={coef}, p={p}".format(coef=masfem_ols['coef'], p=masfem_ols['pvalue']) if masfem_ols is not None else "OLS: NA")
+            conclusion_lines.append(
+                "No evidence supporting the hypothesis: neither model shows a statistically significant positive association. Observed estimates: "
+                + nb_part + "; " + ols_part + "."
             )
-    else:
-        descriptions.append("Binary robustness model ('binary_deaths_model') not found in model_output.")
 
-    # Damage robustness: FemScore -> LogDamage2015
-    dmg_stats = None
-    if dmg_model is not None:
-        dmg_stats = _get_stats(dmg_model, "FemScore")
-        results["damage"] = dmg_stats
-        if not dmg_stats["present"]:
-            descriptions.append("Damage robustness model: variable 'FemScore' not present in model object.")
-        else:
-            sig = dmg_stats["p_value"] < 0.05
-            direction = "positive" if dmg_stats["coef"] > 0 else "negative" if dmg_stats["coef"] < 0 else "null"
-            descriptions.append(
-                f"Damage robustness (LogDamage2015 ~ FemScore + controls): coef={dmg_stats['coef']:.4f}, SE={dmg_stats['se']:.4f}, "
-                f"p={dmg_stats['p_value']:.4f}, 95% CI=[{dmg_stats['ci_lower']:.4f}, {dmg_stats['ci_upper']:.4f}], "
-                f"n={dmg_stats['nobs']}. This is a {direction} effect; "
-                + ("statistically significant (p<0.05)." if sig else "not statistically significant (p>=0.05).")
-            )
-    else:
-        descriptions.append("Damage robustness model ('damage_model') not found in model_output.")
+    final_description = (
+        "Extracted coefficient estimates, standard errors, test statistics, p-values, and 95% CIs for 'masfem_std' and 'gender_mf' "
+        "from the negative-binomial (fatalities) and OLS (log damage) models. "
+        "Interpretation: " + " ".join(conclusion_lines) + " See individual predictor summaries for details."
+    )
 
-    # Summarize relevance to hypothesis
-    # Hypothesis: more feminine names -> higher fatalities (positive coef on FemScore or FemaleBinary)
-    def _interpret_section(stat):
-        if stat is None or not stat.get("present"):
-            return None
-        coef = stat["coef"]
-        p = stat["p_value"]
-        if p is None:
-            return None
-        if p < 0.05:
-            sig_text = "statistically significant"
-        elif p < 0.1:
-            sig_text = "marginally significant (p<0.10)"
-        else:
-            sig_text = "not statistically significant"
-        direction = "consistent with" if coef > 0 else "in the opposite direction to"
-        return f"The effect is {sig_text} and the sign is {direction} the hypothesis (coef={coef:.4f})."
+    result_object = {
+        'nb': nb_stats,
+        'ols': ols_stats,
+        'interpretation_by_predictor': interpretation
+    }
 
-    interp_main = _interpret_section(main_stats)
-    interp_bin = _interpret_section(bin_stats)
-    interp_dmg = _interpret_section(dmg_stats)
-
-    summary_lines = []
-    if interp_main:
-        summary_lines.append("Main model: " + interp_main)
-    if interp_bin:
-        summary_lines.append("Binary robustness: " + interp_bin)
-    if interp_dmg:
-        summary_lines.append("Damage robustness: " + interp_dmg)
-    if not summary_lines:
-        summary_lines.append("No interpretable statistics were extracted to evaluate the hypothesis.")
-
-    full_description = "\n".join(descriptions) + "\n\nSummary interpretation:\n" + "\n".join(summary_lines)
-
-    return {"object": results, "description": full_description}
+    return {'object': result_object, 'description': final_description}

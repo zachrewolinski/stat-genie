@@ -1,234 +1,142 @@
-from typing import Any
+from typing import Dict, FrozenSet, List, Literal, Optional, Set, Tuple, Any
 import numpy as np
 import pandas as pd
+import sklearn
+import scipy
 import statsmodels.api as sm
 import statsmodels.formula.api as smf
+import matplotlib.pyplot as plt
+import pickle
+  
+df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/analysis/boxes/anonymize_output/boxes.csv')
 
-# Attempt to read a CSV if running as a script; keep for compatibility but won't execute on import.
-try:
-    df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/analysis/boxes/anonymize_output/boxes.csv')
-except Exception:
-    df = None
-
-
-def _find_column(df: pd.DataFrame, candidates):
-    """
-    Helper: find the first column in df whose lowercase name matches any candidate (also lowered).
-    Returns the actual column name if found, otherwise None.
-    """
-    cols_lower = {c.lower(): c for c in df.columns}
-    for cand in candidates:
-        if cand is None:
-            continue
-        cl = cand.lower()
-        if cl in cols_lower:
-            return cols_lower[cl]
-    # Also try substring match: candidate appears within column name
-    for cand in candidates:
-        cl = cand.lower()
-        for col in df.columns:
-            if cl in col.lower():
-                return col
-    return None
-
-
+# ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Transform the raw dataset to a modeling-ready dataframe.
+    Transform raw dataset to analysis-ready dataframe with the exact column names used in the model.
 
-    Required final columns that this function guarantees (and that the model expects):
-      - ChoiceMajority : int (1 if original outcome indicates majority chosen else 0)
-      - Age : original age as float
-      - Age_c : mean-centered age
-      - Age_sq : squared mean-centered age
-      - SiteID : categorical site identifier (string)
-      - Gender : binary (1 = girl, 0 = boy)
-      - MajorityFirst : int copy of demonstration-order indicator (0/1)
+    Inputs expected (original columns):
+      - feature1: outcome (1=unchosen, 2=majority, 3=minority)
+      - feature2: gender (1=girl, 2=boy)
+      - feature3: age in years (4-14)
+      - feature4: whether majority was demonstrated first (0/1)
+      - feature5: site id (1..8)
 
-    This function is robust to several common alternative column namings in the raw CSV.
-    It will search for plausible alternative names for the required raw features and copy them
-    to internal columns named 'feature1'..'feature5' before performing transformations.
+    Outputs (added / cleaned columns):
+      - Choice: categorical string label ('unchosen','majority','minority')
+      - ChoiceNum: integer 0/1/2 mapping for multinomial modeling (0=unchosen,1=majority,2=minority)
+      - DemonstratedChosen: binary (1 if majority or minority chosen, else 0)
+      - AgeYears: same as feature3 (float)
+      - Male: 1 if boy, 0 if girl
+      - SiteID: categorical site label like 'Site_1'
+      - OrderMajorityFirst: same as feature4 (0/1)
+      - DevelopmentStage: categorical age bins '4-6','7-9','10-12','13-14'
     """
     df = df.copy()
 
-    # Define canonical raw feature names we expect to find (we will create these as copies if needed)
-    canonical = ['feature1', 'feature2', 'feature3', 'feature4', 'feature5']
+    # Keep only rows with non-missing critical fields
+    df = df.dropna(subset=['feature1', 'feature3', 'feature5'])
 
-    # Candidate alternative names for each canonical feature (common variants)
-    alternatives = {
-        'feature1': ['feature1', 'feature_1', 'feature 1', 'outcome', 'choice', 'response', 'resp', 'result', 'feature.1', 'f1'],
-        'feature2': ['feature2', 'feature_2', 'feature 2', 'gender', 'sex', 'sex_assigned', 'participant_sex', 'feature.2', 'f2'],
-        'feature3': ['feature3', 'feature_3', 'feature 3', 'age', 'age_years', 'age_in_years', 'child_age', 'feature.3', 'f3'],
-        'feature4': ['feature4', 'feature_4', 'feature 4', 'majority_first', 'demo_order', 'first_demo', 'order', 'presentation_order', 'feature.4', 'f4'],
-        'feature5': ['feature5', 'feature_5', 'feature 5', 'site', 'siteid', 'site_id', 'siteID', 'location', 'study_site', 'feature.5', 'f5'],
-    }
+    # Map choices to readable labels and numeric codes
+    choice_map = {1: 'unchosen', 2: 'majority', 3: 'minority'}
+    df['Choice'] = df['feature1'].map(choice_map).astype('category')
+    # Numeric mapping for MNLogit: 0,1,2
+    num_map = {1: 0, 2: 1, 3: 2}
+    df['ChoiceNum'] = df['feature1'].map(num_map).astype(int)
 
-    # For each canonical feature, find a matching column in df and create a canonical-named copy
-    for feat in canonical:
-        col_found = _find_column(df, alternatives[feat])
-        if col_found is None:
-            # If not found, create the column with NaNs so downstream dropna will remove invalid rows.
-            df[feat] = np.nan
-        else:
-            # Copy to canonical name (creates/overwrites)
-            df[feat] = df[col_found]
+    # Binary: did the child choose one of the demonstrated options (majority or minority)
+    df['DemonstratedChosen'] = df['feature1'].isin([2, 3]).astype(int)
 
-    # Now drop rows missing any of the raw canonical features (these are required to construct final vars)
-    required_raw = canonical
-    df = df.dropna(subset=required_raw)
+    # Age
+    df['AgeYears'] = pd.to_numeric(df['feature3'], errors='coerce')
 
-    # Dependent variable: chose the majority (feature1 == 2)
-    # Some datasets may encode majority choice differently; here we follow the documented mapping:
-    # original: 1=unchosen, 2=majority, 3=minority
-    df['ChoiceMajority'] = (pd.to_numeric(df['feature1'], errors='coerce') == 2).astype(int)
+    # Gender -> Male (1=boy, 0=girl). If missing or other, set to NaN
+    df['Male'] = df['feature2'].map({1: 0, 2: 1})
 
-    # Age and transformations
-    # Accept numeric strings as well.
-    df['Age'] = pd.to_numeric(df['feature3'], errors='coerce').astype(float)
-    # mean-center age for interpretability
-    # If Age column ended up all-NaN, mean() will be nan and results will be NaN; such rows will be dropped below.
-    age_mean = df['Age'].mean()
-    df['Age_c'] = df['Age'] - age_mean
-    # quadratic term to allow non-linear development
-    df['Age_sq'] = df['Age_c'] ** 2
+    # Site as categorical string (useable in formulas)
+    df['SiteID'] = 'Site_' + df['feature5'].astype(int).astype(str)
+    df['SiteID'] = df['SiteID'].astype('category')
 
-    # Site / cultural context as categorical
-    # Construct robust string labels for SiteID from feature5
-    site_raw = df['feature5']
+    # Order variable (ensure numeric 0/1)
+    df['OrderMajorityFirst'] = pd.to_numeric(df['feature4'], errors='coerce').fillna(0).astype(int)
 
-    def _to_site_label(x):
-        if pd.isna(x):
-            return np.nan
-        # Try integer-like numeric
-        try:
-            num = float(x)
-            if np.isfinite(num):
-                # If it's integer-valued, prefer integer string
-                if num.is_integer():
-                    return str(int(num))
-                return str(num)
-        except Exception:
-            pass
-        s = str(x).strip()
-        if s == '':
-            return np.nan
-        return s
+    # Developmental stage bins - labels chosen to reflect age ranges in dataset
+    bins = [3.999, 6.0, 9.0, 12.0, 14.1]
+    labels = ['4-6', '7-9', '10-12', '13-14']
+    df['DevelopmentStage'] = pd.cut(df['AgeYears'], bins=bins, labels=labels, include_lowest=True).astype('category')
 
-    site_labels = [_to_site_label(x) for x in site_raw.tolist()]
-    # assign and make categorical; NaNs will be removed by subsequent dropna on final columns
-    df['SiteID'] = pd.Categorical(site_labels)
+    # Optionally drop rows with missing derived key covariates (Age or Gender missing)
+    # we keep rows where AgeYears is present; gender may be used as control but we won't drop rows missing Male here
+    df = df.dropna(subset=['AgeYears'])
 
-    # Gender: map to binary (1 = girl, 0 = boy)
-    # Support multiple encodings: numeric (1=girl,2=boy), textual ('girl'/'boy', 'female'/'male')
-    gender_raw = df['feature2']
+    # Return only the columns necessary for modeling (plus originals if desired)
+    # Keep originals plus derived columns for traceability
+    keep_cols = list(df.columns)
+    # But ensure the final dataframe contains the required model columns
+    required_cols = [
+        'Choice', 'ChoiceNum', 'DemonstratedChosen',
+        'AgeYears', 'Male', 'SiteID', 'OrderMajorityFirst', 'DevelopmentStage'
+    ]
+    for c in required_cols:
+        if c not in df.columns:
+            raise KeyError(f"Required column missing after transform: {c}")
 
-    gender_mapped = pd.Series(index=df.index, dtype='float64')
-
-    # Numeric mapping first
-    gender_num = pd.to_numeric(gender_raw, errors='coerce')
-    # If numeric mapping yields 1 or 2, map accordingly
-    mask_num = gender_num.isin([1, 2])
-    gender_mapped.loc[mask_num] = gender_num.loc[mask_num].map({1: 1, 2: 0})
-
-    # Textual mapping for the rest
-    mask_text = gender_mapped.isna()
-    if mask_text.any():
-        text_vals = gender_raw.astype(str).str.strip().str.lower()
-        map_text = {
-            'girl': 1, 'female': 1, 'f': 1, 'woman': 1,
-            'boy': 0, 'male': 0, 'm': 0, 'man': 0
-        }
-        gender_mapped.loc[mask_text] = text_vals.map(map_text)
-
-    # Final cast to integer type where possible
-    df['Gender'] = gender_mapped.astype('Int64')  # nullable integer to preserve potential NAs
-
-    # MajorityFirst: ensure integer 0/1
-    maj_raw = df['feature4']
-
-    # Try numeric coercion first
-    maj_num = pd.to_numeric(maj_raw, errors='coerce')
-    maj_mapped = maj_num.copy()
-
-    # For non-numeric, map common textual variants
-    mask_nonnum = maj_mapped.isna()
-    if mask_nonnum.any():
-        text_vals = maj_raw.astype(str).str.strip().str.lower()
-        map_text = {
-            '1': 1, '0': 0, 'yes': 1, 'no': 0, 'true': 1, 'false': 0,
-            't': 1, 'f': 0, 'y': 1, 'n': 0, 'majority_first': 1, 'first': 1
-        }
-        maj_mapped.loc[mask_nonnum] = text_vals.map(map_text)
-
-    # If values are booleans, convert True/False to 1/0
-    if maj_mapped.isin([True, False]).any():
-        maj_mapped = maj_mapped.replace({True: 1, False: 0})
-
-    df['MajorityFirst'] = maj_mapped.astype('Int64')
-
-    # Final check: drop any rows that may have become NA after transformations in the final columns
-    final_cols = ['ChoiceMajority', 'Age', 'Age_c', 'Age_sq', 'SiteID', 'Gender', 'MajorityFirst']
-    df = df.dropna(subset=final_cols)
-
-    # Ensure final column types are as expected (concrete ints where possible)
-    df['ChoiceMajority'] = df['ChoiceMajority'].astype(int)
-    df['Age'] = df['Age'].astype(float)
-    df['Age_c'] = df['Age_c'].astype(float)
-    df['Age_sq'] = df['Age_sq'].astype(float)
-    # SiteID is categorical already (pd.Categorical)
-    # Convert categorical to have only observed categories (drop unused)
-    if isinstance(df['SiteID'].dtype, pd.CategoricalDtype):
-        df['SiteID'] = df['SiteID'].cat.remove_unused_categories()
-    df['Gender'] = df['Gender'].astype(int)
-    df['MajorityFirst'] = df['MajorityFirst'].astype(int)
-
-    return df
+    return df[required_cols + [c for c in keep_cols if c not in required_cols]]
 
 
-def model(df: pd.DataFrame) -> Any:
+# ======== MODEL CODE ========
+def model(df: pd.DataFrame) -> dict:
     """
-    Fit a binomial (logistic) generalized linear model to predict the probability
-    of choosing the majority option. The formula includes:
-      - main effect of mean-centered age (Age_c) and Age_sq for nonlinearity
-      - main effect of SiteID (C(SiteID)) to capture cultural differences
-      - interaction Age_c:C(SiteID) to allow age slopes to differ by culture
-      - controls: Gender and MajorityFirst
+    Fit two models to answer the research question:
+      1) A multinomial logistic regression predicting Choice (unchosen / majority / minority) using AgeYears, SiteID, Male, OrderMajorityFirst and Age x Site interactions. This tests whether developmental trajectories (age effects) on choice differ across cultures.
+      2) A binary logistic regression predicting DemonstratedChosen (0/1) with AgeYears * C(SiteID) to test whether general reliance on social information (any demonstrated option) changes with age differently across sites.
 
-    Returns a dictionary with the fitted model and a clustered-robust-covariance
-    version (clustered by SiteID) when available.
+    Returns a dict with fitted model results objects.
     """
-    # Ensure required columns exist
-    required = ['ChoiceMajority', 'Age_c', 'Age_sq', 'SiteID', 'Gender', 'MajorityFirst']
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        raise ValueError(f"Missing required columns for modeling: {missing}")
+    import statsmodels.api as sm
+    import statsmodels.formula.api as smf
+    # Work on a copy
+    d = df.copy()
 
-    # If no rows, return empty results instead of attempting to fit
-    if df.shape[0] == 0:
-        return {'glm_result': None, 'glm_result_clustered_se': None}
+    # --- Multinomial model setup (MNLogit expects numeric endogenous) ---
+    # Endog: ChoiceNum (0=unchosen,1=majority,2=minority)
+    endog = d['ChoiceNum'].astype(int)
 
-    # If SiteID has no observed levels, avoid fitting (patsy will error); return empty results
+    # Build exog with site dummy variables (drop first to avoid multicollinearity)
+    site_dummies = pd.get_dummies(d['SiteID'], prefix='Site', drop_first=True)
+
+    # Basic covariates
+    base_covs = d[['AgeYears', 'Male', 'OrderMajorityFirst']].copy()
+
+    exog = pd.concat([base_covs, site_dummies], axis=1)
+
+    # Add Age x Site interaction terms to test whether age effects vary by site
+    for col in site_dummies.columns:
+        exog[f'Age_x_{col}'] = exog['AgeYears'] * exog[col]
+
+    exog = sm.add_constant(exog, has_constant='add')
+
+    # Fit multinomial logistic regression
     try:
-        n_sites = df['SiteID'].nunique(dropna=True)
-    except Exception:
-        n_sites = 0
-    if n_sites == 0:
-        return {'glm_result': None, 'glm_result_clustered_se': None}
+        mnlogit_mod = sm.MNLogit(endog, exog)
+        mnlogit_res = mnlogit_mod.fit(method='newton', maxiter=100, disp=False)
+    except Exception as e:
+        # If MNLogit fails to converge, try alternative solver or return the exception
+        mnlogit_res = {'error': str(e)}
 
-    # Formula: Age (linear + quadratic), site main effects, Age x Site interactions, plus controls
-    formula = 'ChoiceMajority ~ Age_c + Age_sq + C(SiteID) + Age_c:C(SiteID) + Gender + MajorityFirst'
-
-    # Fit GLM with binomial family (logistic regression)
-    glm_binom = smf.glm(formula=formula, data=df, family=sm.families.Binomial())
-    res = glm_binom.fit()
-
-    # Attempt to get clustered (by SiteID) robust standard errors
+    # --- Binary logistic regression for DemonstratedChosen ---
+    # Use a formula with C(SiteID) so statsmodels creates dummies automatically and we can include AgeYears * C(SiteID)
+    formula = 'DemonstratedChosen ~ AgeYears * C(SiteID) + Male + OrderMajorityFirst'
     try:
-        res_cluster = res.get_robustcov_results(cov_type='cluster', groups=df['SiteID'])
-    except Exception:
-        res_cluster = None
+        logit_mod = smf.logit(formula, data=d)
+        logit_res = logit_mod.fit(disp=False)
+    except Exception as e:
+        logit_res = {'error': str(e)}
 
+    # Return both fitted results (or error messages) so downstream code can inspect summaries / coefficients
     return {
-        'glm_result': res,
-        'glm_result_clustered_se': res_cluster
+        'mnlogit_result': mnlogit_res,
+        'logit_result': logit_res
     }
+
+

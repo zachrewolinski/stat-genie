@@ -1,220 +1,192 @@
 def extract_final_answer(model_output):
     """
-    Extracts coefficients, cluster-robust standard errors, p-values, confidence intervals,
-    odds ratios, and marginal effects for the key predictors from a fitted statsmodels
-    logit model object (the object returned by the `model` function in the prompt).
-
-    Returns a dictionary with keys:
-      - "object": nested dict of extracted numeric results (see structure below)
-      - "description": brief explanation of the meaning of the numbers
-
-    The "object" dict contains entries for:
-      - terms: main coefficients for z_SizeDiff, z_RelDist, and their interaction
-               (if present) with coef, cluster_se, z, p, 95% CI, OR, OR 95% CI
-      - marginal_size_at_relDist: marginal effect of z_SizeDiff at z_RelDist = -1, 0, +1
-               (coef, se, z, p, 95% CI, OR, OR 95% CI)
+    Extracts coefficients, robust SEs, z-stats, p-values, and 95% CIs for:
+      - the main effect of RelSize_z
+      - the interaction terms RelSize_z:C(ContestLocation)[T.<level>]
+      - the implied marginal effect of RelSize_z at each ContestLocation level
+    Returns:
+      {
+        "object": {
+           "param_table": pd.DataFrame,         # rows for main + interactions (coef, se, z, p, ci_lower, ci_upper)
+           "marginal_effects": pd.DataFrame,    # rows for each location level (coef, se, z, p, ci_lower, ci_upper)
+        },
+        "description": str  # brief interpretation
+      }
     """
+    import re
     import numpy as np
     import pandas as pd
-    from math import exp
     from scipy import stats
 
-    res = model_output
+    # Basic parameter objects
+    params = model_output.params
+    param_names = [str(n) for n in params.index]
+    # Covariance matrix (robust cov if model_output already contains robust results)
+    cov = model_output.cov_params()
+    # Ensure cov is an ndarray ordered to param_names
+    if isinstance(cov, pd.DataFrame):
+        cov_mat = cov.reindex(index=param_names, columns=param_names).values
+    else:
+        cov_mat = np.asarray(cov)
 
-    # Try to obtain parameter table with cluster-robust SEs if attached
-    summary_df = getattr(res, 'clustered_summary', None)
+    # Helper to get index of a parameter name (exact match)
+    name_to_idx = {name: i for i, name in enumerate(param_names)}
 
-    if summary_df is None:
-        # Build summary_df from available info
-        params = getattr(res, 'params', None)
-        # prefer cluster robust bse if attached
-        bse = getattr(res, 'clustered_bse', None)
-        if bse is None:
-            # fallback to default bse (not cluster-robust)
-            bse = getattr(res, 'bse', None)
+    # Find main RelSize_z parameter
+    if 'RelSize_z' in name_to_idx:
+        main_name = 'RelSize_z'
+    else:
+        # Try to find any parameter that equals 'RelSize_z' or starts with it (defensive)
+        candidates = [n for n in param_names if n.split(':')[0] == 'RelSize_z' and ':' not in n]
+        if len(candidates) > 0:
+            main_name = candidates[0]
+        else:
+            raise ValueError("Could not find main effect parameter 'RelSize_z' in model parameters.")
 
-        # try to obtain covariance matrix if available (clustered or default)
-        cov = getattr(res, 'cluster_cov', None)
-        if cov is None:
-            try:
-                cov = res.cov_params()
-            except Exception:
-                cov = None
+    main_idx = name_to_idx[main_name]
 
-        if params is None or bse is None:
-            raise ValueError("Cannot find parameters or standard errors on the model_output object.")
+    # Find interaction parameters that involve RelSize_z and ContestLocation
+    interaction_pattern = re.compile(r"RelSize_z:.*ContestLocation|ContestLocation.*:RelSize_z")
+    interaction_names = [n for n in param_names if interaction_pattern.search(n)]
 
-        # construct DataFrame
-        z_vals = params / bse
-        p_vals = 2 * stats.norm.sf(np.abs(z_vals))
-        conf_low = params - 1.96 * bse
-        conf_high = params + 1.96 * bse
-        summary_df = pd.DataFrame({
-            'coef': params,
-            'cluster_se': bse,
-            'z': z_vals,
-            'P>|z|': p_vals,
-            '2.5%': conf_low,
-            '97.5%': conf_high
+    # Extract level labels for interactions (if possible)
+    interaction_levels = []
+    for n in interaction_names:
+        m = re.search(r"C\(ContestLocation\)\[T\.([^]]+)\]", n)
+        if not m:
+            # try alternate pattern without C(...)
+            m = re.search(r"ContestLocation\[T\.([^]]+)\]", n)
+        interaction_levels.append(m.group(1) if m else n)
+
+    # Build parameter table for main + interactions
+    rows = []
+    for n in [main_name] + interaction_names:
+        idx = name_to_idx[n]
+        coef = float(params.iloc[idx])
+        # SE from covariance diagonal
+        se = float(np.sqrt(cov_mat[idx, idx]))
+        z = coef / se if se != 0 else np.nan
+        p = 2 * (1 - stats.norm.cdf(abs(z))) if not np.isnan(z) else np.nan
+        ci_low = coef - 1.96 * se
+        ci_upp = coef + 1.96 * se
+        rows.append({
+            "param": n,
+            "coef": coef,
+            "se": se,
+            "z": z,
+            "p": p,
+            "ci_lower": ci_low,
+            "ci_upper": ci_upp
         })
-    else:
-        # ensure it's a DataFrame
-        if not isinstance(summary_df, pd.DataFrame):
-            summary_df = pd.DataFrame(summary_df)
+    param_table = pd.DataFrame(rows).set_index('param')
 
-        # also try to get covariance matrix for linear combinations
-        cov = getattr(res, 'cluster_cov', None)
-        if cov is None:
-            try:
-                cov = res.cov_params()
-            except Exception:
-                cov = None
+    # Determine all observed ContestLocation levels from the model data if available
+    baseline_label = None
+    observed_levels = None
+    try:
+        df = model_output.model.data.frame
+        if 'ContestLocation' in df.columns:
+            observed_levels = list(pd.unique(df['ContestLocation']))
+            # baseline is the one without an explicit indicator param (i.e., omitted category)
+            baseline_candidates = []
+            for lvl in observed_levels:
+                indicator_name = f"C(ContestLocation)[T.{lvl}]"
+                if indicator_name not in param_names:
+                    baseline_candidates.append(lvl)
+            if len(baseline_candidates) == 1:
+                baseline_label = baseline_candidates[0]
+    except Exception:
+        # If frame not available, fall back to inferring baseline from parameter names:
+        pass
 
-    # helper to find parameter names (accounts for possible naming differences)
-    params_index = list(summary_df.index.astype(str))
-    def _find_term(*candidates):
-        for cand in candidates:
-            if cand in params_index:
-                return cand
-        return None
+    # If baseline not found, attempt to infer from parameter names:
+    if baseline_label is None and observed_levels is None:
+        # Try to extract all levels from param names and set baseline as the one not present
+        # Find all levels mentioned in C(ContestLocation)[T.<level>] tokens
+        mentioned = []
+        for n in param_names:
+            m = re.search(r"C\(ContestLocation\)\[T\.([^]]+)\]", n)
+            if m:
+                mentioned.append(m.group(1))
+        # We cannot know full set reliably; treat baseline generically as "reference (omitted) level"
+        baseline_label = "reference (omitted)"
+    elif baseline_label is None and observed_levels is not None:
+        # Determine which observed level is omitted
+        mentioned = []
+        for n in param_names:
+            m = re.search(r"C\(ContestLocation\)\[T\.([^]]+)\]", n)
+            if m:
+                mentioned.append(m.group(1))
+        omitted = [lvl for lvl in observed_levels if lvl not in mentioned]
+        baseline_label = omitted[0] if len(omitted) == 1 else "reference (omitted)"
 
-    term_size = _find_term('z_SizeDiff', 'z_SizeDiff')
-    term_rel = _find_term('z_RelDist', 'z_RelDist')
-    term_inter = _find_term('z_SizeDiff:z_RelDist', 'z_RelDist:z_SizeDiff', 'z_SizeDiff*z_RelDist')
+    # Compute marginal effect of RelSize_z at each location level:
+    # - For baseline: effect = main coef
+    # - For each other level L: effect = main coef + interaction coef for L (if present)
+    marg_rows = []
+    # baseline first
+    a = np.zeros(len(param_names))
+    a[main_idx] = 1.0
+    coef_baseline = float(np.dot(a, params.values))
+    var_baseline = float(a @ cov_mat @ a)
+    se_baseline = float(np.sqrt(var_baseline))
+    z_baseline = coef_baseline / se_baseline if se_baseline != 0 else np.nan
+    p_baseline = 2 * (1 - stats.norm.cdf(abs(z_baseline))) if not np.isnan(z_baseline) else np.nan
+    marg_rows.append({
+        "location": str(baseline_label),
+        "coef": coef_baseline,
+        "se": se_baseline,
+        "z": z_baseline,
+        "p": p_baseline,
+        "ci_lower": coef_baseline - 1.96 * se_baseline,
+        "ci_upper": coef_baseline + 1.96 * se_baseline
+    })
 
-    # build results for present terms
-    terms_out = {}
-    for name, term in [('z_SizeDiff', term_size), ('z_RelDist', term_rel), ('z_SizeDiff:z_RelDist', term_inter)]:
-        if term is not None:
-            row = summary_df.loc[term]
-            coef = float(row['coef'])
-            se = float(row['cluster_se'])
-            z = float(row['z'])
-            p = float(row['P>|z|'])
-            ci_low = float(row['2.5%'])
-            ci_high = float(row['97.5%'])
-            or_ = float(np.exp(coef))
-            or_ci_low = float(np.exp(ci_low))
-            or_ci_high = float(np.exp(ci_high))
-            terms_out[name] = {
-                'term_name': term,
-                'coef': coef,
-                'cluster_se': se,
-                'z': z,
-                'p': p,
-                '95%_CI_coef': (ci_low, ci_high),
-                'odds_ratio': or_,
-                '95%_CI_OR': (or_ci_low, or_ci_high)
-            }
-        else:
-            terms_out[name] = None
+    # Now each interaction level
+    for name, lvl in zip(interaction_names, interaction_levels):
+        a = np.zeros(len(param_names))
+        a[main_idx] = 1.0
+        idx_int = name_to_idx[name]
+        a[idx_int] = 1.0
+        coef_val = float(np.dot(a, params.values))
+        var_val = float(a @ cov_mat @ a)
+        se_val = float(np.sqrt(var_val))
+        z_val = coef_val / se_val if se_val != 0 else np.nan
+        p_val = 2 * (1 - stats.norm.cdf(abs(z_val))) if not np.isnan(z_val) else np.nan
+        marg_rows.append({
+            "location": str(lvl),
+            "coef": coef_val,
+            "se": se_val,
+            "z": z_val,
+            "p": p_val,
+            "ci_lower": coef_val - 1.96 * se_val,
+            "ci_upper": coef_val + 1.96 * se_val
+        })
 
-    # Compute marginal effect of z_SizeDiff at z_RelDist = -1, 0, +1 (standardized units)
-    marginal_effects = {}
-    if term_size is not None:
-        beta_size = float(summary_df.loc[term_size, 'coef'])
-        # if interaction exists, use it; else interaction coef = 0
-        if term_inter is not None:
-            beta_inter = float(summary_df.loc[term_inter, 'coef'])
-        else:
-            beta_inter = 0.0
+    marginal_effects = pd.DataFrame(marg_rows).set_index('location')
 
-        # need covariance entries for variance of linear combination
-        # cov must be a DataFrame or array with parameter order matching summary_df.index
-        cov_df = None
-        if cov is not None:
-            try:
-                # if cov is a numpy array, convert to DataFrame with same index
-                if isinstance(cov, np.ndarray):
-                    cov_df = pd.DataFrame(cov, index=summary_df.index, columns=summary_df.index)
-                else:
-                    # assume DataFrame-like
-                    cov_df = pd.DataFrame(cov)
-                    # ensure indices align
-                    if not all(str(i) in summary_df.index.astype(str) for i in cov_df.index):
-                        # attempt to reindex
-                        cov_df = cov_df.reindex(index=summary_df.index, columns=summary_df.index)
-            except Exception:
-                cov_df = None
-
-        for val in [-1.0, 0.0, 1.0]:
-            eff_coef = beta_size + beta_inter * val
-            # compute se for linear combination: Var(beta_size + val*beta_inter)
-            if cov_df is not None and (term_size in cov_df.index) and (term_inter in cov_df.index if term_inter is not None else True):
-                try:
-                    var_size = float(cov_df.loc[term_size, term_size])
-                    if term_inter is not None:
-                        var_inter = float(cov_df.loc[term_inter, term_inter])
-                        cov_si = float(cov_df.loc[term_size, term_inter])
-                    else:
-                        var_inter = 0.0
-                        cov_si = 0.0
-                    eff_var = var_size + (val ** 2) * var_inter + 2.0 * val * cov_si
-                    eff_se = float(np.sqrt(max(eff_var, 0.0)))
-                except Exception:
-                    eff_se = None
-            else:
-                # fallback: approximate using cluster_ses ignoring covariance
-                se_size = float(summary_df.loc[term_size, 'cluster_se'])
-                se_inter = float(summary_df.loc[term_inter, 'cluster_se']) if (term_inter is not None) else 0.0
-                eff_se = float(np.sqrt(se_size**2 + (val**2) * se_inter**2))
-
-            if eff_se is not None and eff_se > 0:
-                eff_z = eff_coef / eff_se
-                eff_p = float(2 * stats.norm.sf(abs(eff_z)))
-                ci_low = eff_coef - 1.96 * eff_se
-                ci_high = eff_coef + 1.96 * eff_se
-            else:
-                eff_z = None
-                eff_p = None
-                ci_low = None
-                ci_high = None
-
-            marginal_effects[val] = {
-                'z_RelDist_value': val,
-                'marginal_coef_for_z_SizeDiff': eff_coef,
-                'se': eff_se,
-                'z': eff_z,
-                'p': eff_p,
-                '95%_CI_coef': (ci_low, ci_high),
-                'odds_ratio': (np.exp(eff_coef) if eff_coef is not None else None),
-                '95%_CI_OR': (np.exp(ci_low) if ci_low is not None else None,
-                              np.exp(ci_high) if ci_high is not None else None)
-            }
-    else:
-        marginal_effects = None
-
-    # Compose output object
-    output_object = {
-        'terms': terms_out,
-        'marginal_size_at_relDist': marginal_effects,
-        'notes': (
-            "Positive coefficient means higher log-odds of the focal group winning. "
-            "Odds ratio > 1 means higher odds of focal win. The interaction term (if present) "
-            "indicates whether the effect of relative group size depends on contest location. "
-            "Marginal effects report the effective coefficient of z_SizeDiff when z_RelDist = -1, 0, +1."
-        )
-    }
-
-    # Human-readable description (keeps interpretation general because actual numeric
-    # significance depends on the extracted p-values).
-    descr_lines = [
-        "I extracted coefficient estimates, cluster-robust standard errors (if available), z-values, two-sided p-values,",
-        "95% confidence intervals on coefficients, and odds ratios for the key predictors:",
-        "  - z_SizeDiff (relative group size)",
-        "  - z_RelDist (relative contest location)",
-        "  - z_SizeDiff:z_RelDist (interaction)",
+    description_lines = [
+        "Extracted results concern the effect of relative group size (RelSize_z) on the log-odds",
+        "that the focal group wins, and how that effect differs by ContestLocation.",
+        "- 'param_table' shows the estimated coefficient, robust SE, z, p-value, and 95% CI for",
+        "  the main RelSize_z term and its interactions with ContestLocation.",
+        "- 'marginal_effects' gives the implied effect of a one-unit increase in RelSize_z (here standardized)",
+        "  on the log-odds of focal victory at each contest location. Positive coef => higher log-odds of winning",
+        "  with increasing relative group size. P-values indicate whether effects differ from zero.",
         "",
-        "Additionally, I computed the marginal effect of relative group size at z_RelDist = -1, 0, +1 (standardized units),",
-        "including approximate standard errors, p-values, confidence intervals, and odds ratios.",
-        "",
-        "How to interpret the numbers you'll find in 'object':",
-        "  - coef > 0 => increases log-odds of the focal group winning; coef < 0 => decreases.",
-        "  - odds_ratio = exp(coef): value >1 increases odds of focal win; <1 decreases odds.",
-        "  - If the interaction term is statistically significant (small p-value), the effect of group size depends on location.",
-        "  - The marginal effects show how the size effect changes when the focal group is relatively farther from (-1),",
-        "    average (0), or closer to (+1) its home-range center compared to the opponent.",
+        "Interpretation guidance (example):",
+        "- If the marginal effect for 'FocalHome' (or the baseline/omitted level) is positive and statistically",
+        "  significant (p < 0.05), then larger relative group size increases the focal group's probability of winning",
+        "  when contests occur nearer the focal group's center.",
+        "- If the interaction term for 'OtherHome' is negative and statistically significant, the positive effect",
+        "  of RelSize_z is reduced (or reversed) when contests occur nearer the other group's center."
     ]
-    description = "\n".join(descr_lines)
+    description = "\n".join(description_lines)
 
-    return {"object": output_object, "description": description}
+    return {
+        "object": {
+            "param_table": param_table,
+            "marginal_effects": marginal_effects
+        },
+        "description": description
+    }

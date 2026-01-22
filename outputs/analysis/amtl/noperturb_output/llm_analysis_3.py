@@ -1,168 +1,120 @@
-from typing import Any
+from typing import Dict, FrozenSet, List, Literal, Optional, Set, Tuple, Any
 import numpy as np
 import pandas as pd
+import sklearn
+import scipy
 import statsmodels.api as sm
 import statsmodels.formula.api as smf
-from scipy.stats import norm
-
-
+import matplotlib.pyplot as plt
+import pickle
+  
 df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/analysis/amtl/noperturb_output/amtl.csv')
 
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Transform the raw dataset to the form required for binomial GLM modeling of AMTL.
+    Prepare dataframe for binomial GLM of AMTL.
 
-    Produces the following new columns used in the model:
-      - prop_amtl: num_amtl / sockets (proportion of missing teeth for the observation)
-      - age_c: centered age (age - mean(age))
+    Transformations performed:
+    - Drop rows with missing critical fields (num_amtl, sockets, genus, tooth_class, age, prob_male).
+    - Remove rows with non-positive sockets.
+    - Ensure integer counts and cap num_amtl at sockets if necessary.
+    - Sanitize genus values (replace spaces with underscore so factor names are safe for dummies).
+    - Create proportion column 'prop_amtl' = num_amtl / sockets (for inspection only).
+    - Standardize (z-score) age into 'age_z' to aid model convergence/interpretation.
+    - Create indicator 'is_human' (1 if genus == 'Homo_sapiens', 0 otherwise) for convenience / post-hoc checks.
 
-    Also ensures categorical columns are strings and removes rows with invalid/missing key data.
+    Returns transformed dataframe containing at least these columns used in modeling:
+    ['num_amtl', 'sockets', 'genus', 'tooth_class', 'age_z', 'prob_male', 'prop_amtl', 'is_human']
     """
-    # Work on a copy
     df = df.copy()
 
-    # Required columns for modeling
-    required_cols = ['num_amtl', 'sockets', 'age', 'prob_male', 'genus', 'tooth_class', 'specimen']
-    # Drop rows missing any of the required columns
+    # Required columns for analysis
+    required_cols = ['num_amtl', 'sockets', 'genus', 'tooth_class', 'age', 'prob_male']
+    missing = [c for c in required_cols if c not in df.columns]
+    if len(missing) > 0:
+        raise ValueError(f"Input dataframe is missing required columns: {missing}")
+
+    # Drop rows missing required data
     df = df.dropna(subset=required_cols)
 
-    # Ensure numeric columns are numeric
-    df['num_amtl'] = pd.to_numeric(df['num_amtl'], errors='coerce')
-    df['sockets'] = pd.to_numeric(df['sockets'], errors='coerce')
-    df['age'] = pd.to_numeric(df['age'], errors='coerce')
-    df['prob_male'] = pd.to_numeric(df['prob_male'], errors='coerce')
-
-    # Drop newly introduced NaNs (bad conversions)
-    df = df.dropna(subset=['num_amtl', 'sockets', 'age', 'prob_male'])
-
-    # Keep only rows where sockets > 0 (valid binomial trials)
+    # Keep only rows with positive (non-zero) sockets
     df = df[df['sockets'] > 0]
 
-    # Ensure num_amtl in valid range [0, sockets]
-    df = df[(df['num_amtl'] >= 0) & (df['num_amtl'] <= df['sockets'])]
+    # Ensure integer counts and sensible ranges
+    df['num_amtl'] = df['num_amtl'].astype(int)
+    df['sockets'] = df['sockets'].astype(int)
 
-    # Ensure prob_male within [0, 1]; drop otherwise
-    df = df[(df['prob_male'] >= 0.0) & (df['prob_male'] <= 1.0)]
+    # If num_amtl > sockets (data error), cap to sockets
+    df['num_amtl'] = df[['num_amtl', 'sockets']].min(axis=1)
 
-    # Convert categorical columns to strings (explicit) to avoid issues in formula handling
-    df['genus'] = df['genus'].astype(str)
-    df['tooth_class'] = df['tooth_class'].astype(str)
-    df['specimen'] = df['specimen'].astype(str)
-    if 'pop' in df.columns:
-        df['pop'] = df['pop'].astype(str)
+    # Sanitize genus labels so they are safe as column names (e.g., 'Homo sapiens' -> 'Homo_sapiens')
+    df['genus'] = df['genus'].astype(str).str.strip().str.replace('\n', ' ').str.replace(' ', '_')
 
-    # Derived response: proportion of missing teeth per observation
+    # Ensure tooth_class is a string categorical
+    df['tooth_class'] = df['tooth_class'].astype(str).str.strip()
+
+    # Proportion (useful for EDA). Kept for completeness but the model uses counts.
     df['prop_amtl'] = df['num_amtl'] / df['sockets']
 
-    # Center age to make the intercept interpretable
-    df['age_c'] = df['age'] - df['age'].mean()
+    # Standardize age (z-score) for model stability
+    age_mean = df['age'].mean()
+    age_std = df['age'].std(ddof=0)
+    if age_std == 0 or np.isnan(age_std):
+        df['age_z'] = 0.0
+    else:
+        df['age_z'] = (df['age'] - age_mean) / age_std
 
-    # Final safety drop: drop any rows with NaN created during transformations
-    df = df.dropna(subset=['prop_amtl', 'age_c'])
+    # Convenience indicator for human specimens
+    df['is_human'] = (df['genus'] == 'Homo_sapiens').astype(int)
 
+    # Return only rows/columns necessary for modeling & inspection
+    # (we keep full df but guarantee these columns exist)
     return df
 
 
 # ======== MODEL CODE ========
-def model(df: pd.DataFrame) -> Any:
+def model(df: pd.DataFrame) -> any:
     """
-    Fit a binomial (logistic) GLM for AMTL rates and produce clustered robust standard errors by specimen.
+    Fit a binomial GLM predicting probability of AMTL (missing tooth) per socket.
 
-    Model specification (formula):
-      prop_amtl ~ C(genus, Treatment(reference="Homo sapiens")) + age_c + prob_male + C(tooth_class)
+    Modeling approach:
+    - Use endog as a two-column array of successes/failures: [num_amtl, sockets - num_amtl].
+    - Build design matrix with categorical dummies for 'genus' and 'tooth_class' (drop_first=True),
+      plus continuous controls 'age_z' and 'prob_male'. Intercept is added explicitly.
+    - Fit a GLM with Binomial family using statsmodels.api.GLM and return the fitted results object.
 
-    The binomial response is supplied as a proportion (prop_amtl) with frequency weights equal to the number of sockets
-    so that the GLM fits the number of successes out of the number of trials.
-
-    Returns a dictionary with the raw fitted GLM result and a clustered-robust-covariance adjusted result
-    (clustered by 'specimen'). The raw GLM result is a statsmodels result object; the clustered result provides
-    parameter estimates and cluster-robust standard errors and related statistics.
+    Returns:
+    - statsmodels GLMResults object (call .summary() on it to inspect coefficients and p-values).
     """
-    # Check required columns
-    for col in ['prop_amtl', 'sockets', 'genus', 'age_c', 'prob_male', 'tooth_class', 'specimen']:
-        if col not in df.columns:
-            raise ValueError(f"Required column '{col}' not found in dataframe passed to model().")
+    import statsmodels.api as sm
 
-    # Formula: use Treatment coding with 'Homo sapiens' as the reference level
-    formula = 'prop_amtl ~ C(genus, Treatment(reference="Homo sapiens")) + age_c + prob_male + C(tooth_class)'
+    df = df.copy()
 
-    # Fit GLM with Binomial family. Use freq_weights = number of trials (sockets)
-    glm_model = smf.glm(formula=formula,
-                        data=df,
-                        family=sm.families.Binomial(),
-                        freq_weights=df['sockets'])
+    # Basic validation
+    for c in ['num_amtl', 'sockets', 'genus', 'tooth_class', 'age_z', 'prob_male']:
+        if c not in df.columns:
+            raise ValueError(f"Transformed dataframe must contain column '{c}' for modeling")
 
-    res = glm_model.fit()
+    # Build design matrix: categorical dummies for genus and tooth_class
+    cat_df = pd.get_dummies(df[['genus', 'tooth_class']], drop_first=True)
 
-    # Attempt to compute cluster-robust covariance by specimen.
-    clustered_res = None
+    # Add continuous controls
+    cont_df = df[['age_z', 'prob_male', 'is_human']].copy()
 
-    # First try the built-in convenience method if available
-    try:
-        clustered_res = res.get_robustcov_results(cov_type='cluster', groups=df['specimen'])
-    except Exception:
-        # Fallback: compute cluster-robust covariance matrix using sandwich estimator
-        try:
-            from statsmodels.stats.sandwich_covariance import cov_cluster
-            cov = cov_cluster(res, df['specimen'])
-        except Exception:
-            # If cov_cluster is not available, raise informative error
-            raise RuntimeError("Could not compute cluster-robust covariance: neither "
-                               "res.get_robustcov_results nor statsmodels.stats.sandwich_covariance.cov_cluster "
-                               "are available in this environment.")
+    X = pd.concat([cat_df, cont_df], axis=1)
+    X = sm.add_constant(X, has_constant='add')
 
-        # Build a lightweight wrapper object that exposes common attributes/methods expected by users.
-        class ClusteredResults:
-            def __init__(self, base_res, cov_matrix):
-                self._base = base_res
-                # params as pandas Series (keep index)
-                self.params = base_res.params.copy()
-                # covariance as DataFrame for nicer labeling if params is a Series
-                try:
-                    self.cov_params = pd.DataFrame(cov_matrix, index=self.params.index, columns=self.params.index)
-                except Exception:
-                    # Fallback to numpy array if indices don't align
-                    self.cov_params = cov_matrix
-                # standard errors
-                self.bse = pd.Series(np.sqrt(np.diag(cov_matrix)), index=self.params.index)
-                # z-statistics and p-values using normal approximation
-                with np.errstate(divide='ignore', invalid='ignore'):
-                    z = self.params.values / self.bse.values
-                z = np.asarray(z)
-                # handle zeros in bse leading to inf z; pvals become 0 in that case
-                pvals = 2 * (1 - norm.cdf(np.abs(z)))
-                self.pvalues = pd.Series(pvals, index=self.params.index)
-                self.df_model = getattr(base_res, 'df_model', None)
-                self.df_resid = getattr(base_res, 'df_resid', None)
+    # Endogenous: two-column (successes, failures) array required by statsmodels for binomial counts
+    successes = df['num_amtl'].astype(int).values
+    failures = (df['sockets'] - df['num_amtl']).astype(int).values
+    endog = np.vstack([successes, failures]).T
 
-            def cov_params_default(self):
-                # for compatibility if some code expects method
-                return self.cov_params
+    # Fit GLM with Binomial family
+    model = sm.GLM(endog, X, family=sm.families.Binomial())
+    results = model.fit()
 
-            def conf_int(self, alpha=0.05):
-                q = norm.ppf(1 - alpha / 2.0)
-                lower = self.params - q * self.bse
-                upper = self.params + q * self.bse
-                ci = pd.DataFrame({'lower': lower, 'upper': upper})
-                return ci
+    # Return the fitted results object for downstream inspection
+    return results
 
-            def summary(self):
-                # Return the base model summary; this will show original SEs, but users can inspect
-                # params, bse, pvalues, and conf_int on this wrapper for clustered results.
-                try:
-                    return self._base.summary()
-                except Exception:
-                    return f"ClusteredResults for model with params:\n{self.params}"
 
-            # Provide a fallback repr
-            def __repr__(self):
-                return (f"<ClusteredResults: params={list(self.params.index)}, "
-                        f"n_params={len(self.params)}>")
-
-        clustered_res = ClusteredResults(res, cov)
-
-    return {
-        'glm_result': res,
-        'clustered_result': clustered_res
-    }

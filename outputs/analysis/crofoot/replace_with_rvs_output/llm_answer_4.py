@@ -1,93 +1,205 @@
 def extract_final_answer(model_output):
     """
-    Extract coefficients, clustered-robust standard errors, z-stats, p-values,
-    95% CIs, and odds-ratios for the key predictors:
-      - RelSize_z
-      - RelDist_z
-      - RelSize_x_RelDist
+    Extracts coefficients, robust SEs, p-values, 95% CIs, odds ratios and a short
+    interpretation for the effects of:
+      - rel_size_log (relative group size)
+      - focal_home (home advantage)
+      - rel_size_log:focal_home (interaction)
 
-    Returns a dict with:
-      - "object": dict of numeric results for each predictor
-      - "description": concise interpretation of those results in the study context
+    Returns:
+      {
+        "object": { term_name: {coef, se, pvalue, ci_lower, ci_upper, OR, OR_ci_lower, OR_ci_upper, significant}, ...,
+                   "marginal_rel_size_at_home0": {...}, "marginal_rel_size_at_home1": {...},
+                   "nobs": int
+                 }
+        "description": short human-readable interpretation string
+      }
     """
     import numpy as np
     import pandas as pd
+    from math import exp, sqrt
     from scipy import stats
 
     res = model_output
 
-    # Parameter estimates (expecting a pandas Series)
-    params = res.params.copy()
+    # Basic parameter table
+    try:
+        params = res.params  # pandas Series
+        bse = res.bse
+        pvals = res.pvalues
+        conf = res.conf_int()  # DataFrame or ndarray
+        cov = res.cov_params()
+    except Exception as e:
+        raise ValueError(f"Provided model_output does not expose expected attributes: {e}")
 
-    # Use the returned covariance matrix (should reflect clustered cov if fit used cov_type='cluster')
-    cov = res.cov_params()
+    # Ensure conf is DataFrame with index matching params
+    if not isinstance(conf, pd.DataFrame):
+        conf = pd.DataFrame(conf, index=params.index, columns=["ci_lower", "ci_upper"])
+    else:
+        # statsmodels sometimes returns columns named 0,1
+        conf.columns = ["ci_lower", "ci_upper"]
 
-    # Ensure covariance is a numpy array for diag; handle DataFrame or ndarray
-    cov_mat = np.asarray(cov)
+    def safe_get(name_variants):
+        """Return the exact parameter name found among params.index for any of the variants, else None."""
+        for v in name_variants:
+            if v in params.index:
+                return v
+        return None
 
-    # Standard errors from covariance matrix
-    se_arr = np.sqrt(np.diag(cov_mat))
-    se = pd.Series(se_arr, index=params.index)
+    # Common possible names for the interaction (patsy uses ':' for numeric*numeric)
+    term_rel = safe_get(["rel_size_log"])
+    term_home = safe_get(["focal_home"])
+    term_inter = safe_get(["rel_size_log:focal_home", "focal_home:rel_size_log", "rel_size_log*focal_home"])
 
-    # z-statistics (Wald z using Normal approx)
-    z_stats = params / se
+    results = {}
 
-    # two-sided p-values (ensure p_values is a Series with same index)
-    p_values = pd.Series(2 * (1 - stats.norm.cdf(np.abs(z_stats))), index=z_stats.index)
+    def make_term_entry(term_name):
+        if term_name is None:
+            return None
+        coef = float(params[term_name])
+        se = float(bse[term_name])
+        p = float(pvals[term_name])
+        ci_l = float(conf.loc[term_name, "ci_lower"])
+        ci_u = float(conf.loc[term_name, "ci_upper"])
+        OR = float(np.exp(coef))
+        OR_ci_l = float(np.exp(ci_l))
+        OR_ci_u = float(np.exp(ci_u))
+        signif = bool(p < 0.05)
+        return {
+            "term": term_name,
+            "coef": coef,
+            "se": se,
+            "pvalue": p,
+            "ci_lower": ci_l,
+            "ci_upper": ci_u,
+            "OR": OR,
+            "OR_ci_lower": OR_ci_l,
+            "OR_ci_upper": OR_ci_u,
+            "significant": signif,
+        }
 
-    # 95% confidence intervals on the log-odds scale using standard normal critical value
-    z_crit = stats.norm.ppf(0.975)
-    ci_lower = params - z_crit * se
-    ci_upper = params + z_crit * se
+    results["rel_size_log"] = make_term_entry(term_rel)
+    results["focal_home"] = make_term_entry(term_home)
+    results["interaction"] = make_term_entry(term_inter)
 
-    # Prepare outputs for the focal predictors
-    focal_predictors = ['RelSize_z', 'RelDist_z', 'RelSize_x_RelDist']
-    out = {}
-    for pred in focal_predictors:
-        if pred in params.index:
-            coef = float(params[pred])
-            se_val = float(se[pred])
-            z_val = float(z_stats[pred])
-            p_val = float(p_values[pred])
-            ci_l = float(ci_lower[pred])
-            ci_u = float(ci_upper[pred])
-            odds_ratio = float(np.exp(coef))
-            or_ci = (float(np.exp(ci_l)), float(np.exp(ci_u)))
+    # Marginal effect of rel_size_log when focal_home = 0 (just coef of rel_size_log)
+    # and when focal_home = 1 (coef_rel + coef_inter). For the latter, compute SE using covariance.
+    if term_rel is not None:
+        rel_coef = float(params[term_rel])
+        rel_se = float(bse[term_rel])
+    else:
+        rel_coef = None
+        rel_se = None
 
-            out[pred] = {
-                'coef_log_odds': coef,
-                'se': se_val,
-                'z': z_val,
-                'p_value': p_val,
-                '95%_CI_log_odds': (ci_l, ci_u),
-                'odds_ratio': odds_ratio,
-                '95%_CI_odds_ratio': or_ci
-            }
+    if term_inter is not None:
+        inter_coef = float(params[term_inter])
+    else:
+        inter_coef = 0.0  # if no interaction term, marginal at home1 equals rel_coef
+
+    # Marginal at home = 0
+    if rel_coef is not None:
+        me0_coef = rel_coef
+        me0_se = rel_se
+        me0_ci_l = me0_coef - 1.96 * me0_se
+        me0_ci_u = me0_coef + 1.96 * me0_se
+        me0_or = exp(me0_coef)
+        me0_or_ci = (exp(me0_ci_l), exp(me0_ci_u))
+        me0_p = float(pvals[term_rel])
+        results["marginal_rel_size_at_home0"] = {
+            "coef": me0_coef,
+            "se": me0_se,
+            "pvalue": me0_p,
+            "ci_lower": me0_ci_l,
+            "ci_upper": me0_ci_u,
+            "OR": me0_or,
+            "OR_ci_lower": me0_or_ci[0],
+            "OR_ci_upper": me0_or_ci[1],
+            "significant": bool(me0_p < 0.05),
+        }
+    else:
+        results["marginal_rel_size_at_home0"] = None
+
+    # Marginal at home = 1
+    if rel_coef is not None:
+        me1_coef = rel_coef + inter_coef
+        # Compute variance of sum using cov matrix if possible
+        try:
+            var_rel = cov.loc[term_rel, term_rel]
+            if term_inter is not None and term_inter in cov.index:
+                var_inter = cov.loc[term_inter, term_inter]
+                cov_rel_inter = cov.loc[term_rel, term_inter]
+            else:
+                var_inter = 0.0
+                cov_rel_inter = 0.0
+            me1_var = var_rel + var_inter + 2.0 * cov_rel_inter
+            me1_se = float(np.sqrt(max(me1_var, 0.0)))
+            me1_ci_l = me1_coef - 1.96 * me1_se
+            me1_ci_u = me1_coef + 1.96 * me1_se
+            me1_or = exp(me1_coef)
+            me1_or_ci = (exp(me1_ci_l), exp(me1_ci_u))
+            # approximate p-value for the sum using normal approx
+            z = me1_coef / me1_se if me1_se > 0 else np.nan
+            me1_p = float(2.0 * (1.0 - stats.norm.cdf(abs(z)))) if me1_se > 0 else np.nan
+        except Exception:
+            # fallback: cannot compute covariance; use naive sum of ses (conservative not correct)
+            me1_se = None
+            me1_ci_l = None
+            me1_ci_u = None
+            me1_or = exp(me1_coef)
+            me1_or_ci = (None, None)
+            me1_p = None
+
+        results["marginal_rel_size_at_home1"] = {
+            "coef": me1_coef,
+            "se": me1_se,
+            "pvalue": me1_p,
+            "ci_lower": me1_ci_l,
+            "ci_upper": me1_ci_u,
+            "OR": me1_or,
+            "OR_ci_lower": me1_or_ci[0],
+            "OR_ci_upper": me1_or_ci[1],
+            "significant": bool((me1_p is not None) and (me1_p < 0.05)),
+        }
+    else:
+        results["marginal_rel_size_at_home1"] = None
+
+    # Add sample size if available
+    nobs = None
+    try:
+        nobs = int(res.nobs)
+    except Exception:
+        try:
+            nobs = int(res.model.endog.shape[0])
+        except Exception:
+            nobs = None
+    results["nobs"] = nobs
+
+    # Short interpretation based on p-values
+    conclusions = []
+    if results["rel_size_log"] is not None:
+        if results["rel_size_log"]["significant"]:
+            conclusions.append("Relative group size (rel_size_log) has a statistically significant effect on the probability of winning (p < 0.05). Larger focal groups increase odds of winning (OR > 1 when coef > 0).")
         else:
-            out[pred] = None
+            conclusions.append("Relative group size (rel_size_log) is not statistically significant at the 0.05 level.")
+    else:
+        conclusions.append("rel_size_log term not present in the model output.")
 
-    # Build a concise interpretation string
-    interp_lines = []
-    for pred in focal_predictors:
-        info = out[pred]
-        if info is None:
-            interp_lines.append(f"{pred}: not present in model output.")
-            continue
-        sig = info['p_value'] < 0.05
-        direction = 'positive' if info['coef_log_odds'] > 0 else ('negative' if info['coef_log_odds'] < 0 else 'null')
-        interp = (f"{pred}: coef={info['coef_log_odds']:.3f}, p={info['p_value']:.3f} "
-                  f"({'significant' if sig else 'ns'}). Direction={direction}. "
-                  f"OR={info['odds_ratio']:.3f}, 95% CI OR=({info['95%_CI_odds_ratio'][0]:.3f}, {info['95%_CI_odds_ratio'][1]:.3f}).")
-        interp_lines.append(interp)
+    if results["focal_home"] is not None:
+        if results["focal_home"]["significant"]:
+            conclusions.append("Being closer to the group's home center (focal_home) has a statistically significant effect on winning (p < 0.05), indicating a home advantage.")
+        else:
+            conclusions.append("focal_home is not statistically significant at the 0.05 level.")
+    else:
+        conclusions.append("focal_home term not present in the model output.")
 
-    # Brief contextual summary
-    summary = (
-        "Interpretation: Positive coefficients indicate higher log-odds (and OR>1) of the focal group winning. "
-        "RelSize_z tests whether being larger than the opponent increases win probability. "
-        "RelDist_z tests whether being closer to the focal home-range center (i.e., contest in focal home range) increases win probability. "
-        "RelSize_x_RelDist tests whether the effect of relative size depends on contest location (a significant interaction means the size advantage differs depending on location)."
-    )
+    if results["interaction"] is not None:
+        if results["interaction"]["significant"]:
+            conclusions.append("The interaction between relative group size and home location is statistically significant, meaning the effect of size on winning differs depending on whether the focal group is at home.")
+        else:
+            conclusions.append("The interaction term is not statistically significant at the 0.05 level, suggesting the size effect does not change detectably with home status.")
+    else:
+        conclusions.append("No interaction term detected in the model output.")
 
-    description = "\n".join(interp_lines) + "\n\n" + summary
+    description = " ".join(conclusions)
 
-    return {"object": out, "description": description}
+    return {"object": results, "description": description}

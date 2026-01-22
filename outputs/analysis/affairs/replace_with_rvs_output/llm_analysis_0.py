@@ -13,120 +13,96 @@ df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/anal
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Transform the raw Fair (1978) affairs dataset for modeling.
+    Transform the raw Fair (1978) survey dataframe into the analysis dataframe.
 
-    Outputs a dataframe containing the following columns used in the model:
-      - affairs: integer count outcome (keeps original column name)
-      - Children: binary (1=yes, 0=no)
-      - GenderMale: binary (1=male, 0=female)
-      - Children_x_Male: interaction Children * GenderMale (for moderation)
-      - age_c, yearsmarried_c, religiousness_c, education_c, occupation_c, rating_c: mean-centered numeric controls
+    Output columns (exact names used in the model):
+      - Affairs: integer count of extramarital affairs
+      - Children: binary indicator 1 if children present, 0 otherwise
+      - Female: binary indicator 1 if respondent is female, 0 if male
+      - Age_c: age centered around sample mean
+      - Yearsmarried_c: yearsmarried centered around sample mean
+      - religiousness, education, occupation, rating: numeric controls
 
-    Steps:
-      - Drop rows missing key columns
-      - Map categorical flags to binary
-      - Ensure numeric columns are numeric
-      - Mean-center continuous controls
+    The function drops rows with missing values in the variables required for the model.
     """
     df = df.copy()
+    # Columns required for analysis
+    required_cols = [
+        'affairs', 'children', 'gender', 'age', 'yearsmarried',
+        'religiousness', 'education', 'occupation', 'rating'
+    ]
 
-    # Ensure required columns exist; if not, this will raise a KeyError so the user can inspect the dataset
-    required_cols = ['affairs', 'children', 'gender', 'age', 'yearsmarried', 'religiousness', 'education', 'occupation', 'rating']
-    missing = [c for c in required_cols if c not in df.columns]
-    if missing:
-        raise KeyError(f"Missing required columns for transform: {missing}")
+    # Drop rows with missing values in required columns
+    df = df.dropna(subset=required_cols)
 
-    # Drop rows missing the outcome or main IV or moderator
-    df = df.dropna(subset=['affairs', 'children', 'gender'])
+    # Dependent variable: integer count from 'affairs'
+    # The original encoding uses 0,1,2,3,7,12 etc.; keep numeric as-is
+    df['Affairs'] = pd.to_numeric(df['affairs'], errors='coerce').astype(int)
 
-    # Map children and gender to binary indicators
-    df['Children'] = df['children'].astype(str).str.strip().str.lower().map({'yes': 1, 'no': 0})
-    df['GenderMale'] = df['gender'].astype(str).str.strip().str.lower().map({'male': 1, 'female': 0})
+    # Independent variable: children present
+    # Original values are 'yes'/'no' (factor). Map to 1/0.
+    df['Children'] = df['children'].astype(str).str.lower().map({'yes': 1, 'no': 0})
 
-    # Drop rows where mapping failed
-    df = df.dropna(subset=['Children', 'GenderMale'])
-    df['Children'] = df['Children'].astype(int)
-    df['GenderMale'] = df['GenderMale'].astype(int)
+    # Gender -> Female binary
+    df['Female'] = (df['gender'].astype(str).str.lower() == 'female').astype(int)
 
-    # Ensure numeric controls are numeric; coerce non-numeric to NaN and drop such rows
-    numeric_cols = ['age', 'yearsmarried', 'religiousness', 'education', 'occupation', 'rating']
-    for col in numeric_cols:
-        df[col] = pd.to_numeric(df[col], errors='coerce')
+    # Ensure numeric types for controls and create centered versions where noted
+    df['age'] = pd.to_numeric(df['age'], errors='coerce')
+    df['yearsmarried'] = pd.to_numeric(df['yearsmarried'], errors='coerce')
+    df['religiousness'] = pd.to_numeric(df['religiousness'], errors='coerce')
+    df['education'] = pd.to_numeric(df['education'], errors='coerce')
+    df['occupation'] = pd.to_numeric(df['occupation'], errors='coerce')
+    df['rating'] = pd.to_numeric(df['rating'], errors='coerce')
 
-    # Drop any rows with missing numeric controls or missing outcome
-    df = df.dropna(subset=numeric_cols + ['affairs'])
+    # Drop any rows that became NA after coercion
+    df = df.dropna(subset=['Affairs', 'Children', 'Female', 'age', 'yearsmarried',
+                           'religiousness', 'education', 'occupation', 'rating'])
 
-    # Prepare the outcome as integer counts (keep original 'affairs' name)
-    # If any non-integer values exist, coerce to int (dataset already codes discrete counts)
-    df['affairs'] = pd.to_numeric(df['affairs'], errors='coerce').fillna(0).astype(int)
+    # Center age and years married to improve interpretability / numerical stability
+    df['Age_c'] = df['age'] - df['age'].mean()
+    df['Yearsmarried_c'] = df['yearsmarried'] - df['yearsmarried'].mean()
 
-    # Mean-center continuous controls for interpretability
-    df['age_c'] = df['age'] - df['age'].mean()
-    df['yearsmarried_c'] = df['yearsmarried'] - df['yearsmarried'].mean()
-    df['religiousness_c'] = df['religiousness'] - df['religiousness'].mean()
-    df['education_c'] = df['education'] - df['education'].mean()
-    df['occupation_c'] = df['occupation'] - df['occupation'].mean()
-    df['rating_c'] = df['rating'] - df['rating'].mean()
-
-    # Interaction for moderation test: does the effect of Children differ by gender?
-    df['Children_x_Male'] = df['Children'] * df['GenderMale']
-
-    # Return only the columns necessary for modeling (plus originals for reference)
-    keep_cols = ['affairs', 'Children', 'GenderMale', 'Children_x_Male', 'age_c', 'yearsmarried_c', 'religiousness_c', 'education_c', 'occupation_c', 'rating_c']
-    return df[keep_cols]
+    # Keep only columns required by the model (exact column names used below)
+    out_cols = ['Affairs', 'Children', 'Female', 'Age_c', 'Yearsmarried_c',
+                'religiousness', 'education', 'occupation', 'rating']
+    return df[out_cols].copy()
 
 
 # ======== MODEL CODE ========
 def model(df: pd.DataFrame):
     """
-    Fit a zero-inflated negative binomial regression predicting count of affairs.
+    Fit a zero-inflated negative binomial (ZINB) model for count data with excess zeros.
 
-    Count model (conditional mean) predictors:
-      - Children (main IV)
-      - GenderMale
-      - Children_x_Male (interaction)
-      - age_c, yearsmarried_c, religiousness_c, education_c, occupation_c, rating_c
+    Rationale:
+      - 'Affairs' is a count variable with many zeros (no extramarital sex); ZINB models a count process
+        and a separate logit process for excess zeros (structural zeros).
+      - The primary parameter of interest is the coefficient on 'Children' in the count equation
+        (and optionally in the inflation equation). We include the same covariates in both parts.
 
-    Inflation (logit) model predictors (predicting excess zeros):
-      - intercept, Children, GenderMale, age_c, yearsmarried_c
-
-    Returns:
-      - results object from statsmodels (ZeroInflatedNegativeBinomialPResults)
+    Returns the fitted statsmodels results object (so the caller can examine params, SEs, CI, etc.).
     """
     import statsmodels.api as sm
     from statsmodels.discrete.count_model import ZeroInflatedNegativeBinomialP
-    import numpy as np
 
-    df = df.copy()
+    # Ensure required columns exist
+    exog_cols = ['Children', 'Female', 'Age_c', 'Yearsmarried_c',
+                 'religiousness', 'education', 'occupation', 'rating']
 
-    # Verify required columns are present
-    model_cols = ['Children', 'GenderMale', 'Children_x_Male', 'age_c', 'yearsmarried_c', 'religiousness_c', 'education_c', 'occupation_c', 'rating_c']
-    missing = [c for c in model_cols + ['affairs'] if c not in df.columns]
-    if missing:
-        raise KeyError(f"Missing required columns for modeling: {missing}")
+    # Prepare exogenous variables (add constant)
+    exog = sm.add_constant(df[exog_cols], has_constant='add')
+    endog = df['Affairs']
 
-    # Prepare exogenous (count) and exogenous (inflation) matrices
-    exog_vars = ['Children', 'GenderMale', 'Children_x_Male', 'age_c', 'yearsmarried_c', 'religiousness_c', 'education_c', 'occupation_c', 'rating_c']
-    exog = sm.add_constant(df[exog_vars], has_constant='add')
+    # Fit Zero-Inflated Negative Binomial (logit inflation). Use same covariates for both parts.
+    zinb = ZeroInflatedNegativeBinomialP(endog, exog, exog_infl=exog, inflation='logit')
 
-    # Simpler inflation model: intercept + key covariates that predict structural zeros
-    exog_infl_vars = ['Children', 'GenderMale', 'age_c', 'yearsmarried_c']
-    exog_infl = sm.add_constant(df[exog_infl_vars], has_constant='add')
-
-    endog = df['affairs']
-
-    # Fit Zero-Inflated Negative Binomial (logit inflation)
-    zinb = ZeroInflatedNegativeBinomialP(endog, exog, exog_infl=exog_infl, inflation='logit')
-
-    # Fit the model. Use Newton and reasonable maxiter; fitting can occasionally require increasing maxiter.
+    # Fit with a robust optimizer and increased iterations if needed
     try:
-        results = zinb.fit(method='newton', maxiter=100, disp=False)
+        res = zinb.fit(method='bfgs', maxiter=200, disp=False)
     except Exception:
-        # fallback to default fit if newton fails
-        results = zinb.fit(disp=False)
+        # Fall back to default fit if bfgs fails
+        res = zinb.fit(disp=False)
 
-    # Print and return results for inspection
-    print(results.summary())
-    return results
+    # Return the full results object for inspection (params, pvalues, summary, etc.)
+    return res
 
 

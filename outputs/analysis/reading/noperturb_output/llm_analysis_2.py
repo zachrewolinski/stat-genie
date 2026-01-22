@@ -3,173 +3,158 @@ import numpy as np
 import pandas as pd
 import statsmodels.formula.api as smf
 
-df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/analysis/reading/noperturb_output/reading.csv')
 
-# ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Transform raw dataset into analysis-ready dataframe.
-
-    - Drops rows with missing critical values.
-    - Excludes retake trials (if retake_trial column exists).
-    - Filters out non-positive or implausibly small adjusted_running_time.
-    - Computes reading_speed_wpm from num_words and adjusted_running_time (ms -> minutes).
-    - Computes log_reading_speed = log(reading_speed_wpm).
-    - Encodes english_native into binary english_native_bin (Y->1, N->0).
-
-    Returns a dataframe containing at least the columns used in the model:
-      ['uuid','page_id','reader_view','dyslexia_bin','reading_speed_wpm','log_reading_speed',
-       'age','num_words','Flesch_Kincaid','correct_rate','english_native_bin','device']
-    """
+    # Make a copy to avoid side-effects
     df = df.copy()
 
-    # Ensure required columns exist; if not, raise informative error
-    required_cols = ['adjusted_running_time', 'num_words', 'reader_view', 'dyslexia_bin', 'uuid', 'page_id']
-    missing = [c for c in required_cols if c not in df.columns]
-    if missing:
-        raise ValueError(f"Input dataframe is missing required columns: {missing}")
+    # Drop rows missing essential identifiers and treatment/diagnosis variables
+    df = df.dropna(subset=['uuid', 'reader_view', 'dyslexia_bin', 'speed'])
 
-    # Convert core numeric columns safely
-    df['adjusted_running_time'] = pd.to_numeric(df['adjusted_running_time'], errors='coerce')
-    df['num_words'] = pd.to_numeric(df['num_words'], errors='coerce')
+    # Coerce numeric columns (if they come in as strings)
+    numeric_cols = [
+        'reader_view', 'dyslexia_bin', 'speed', 'age', 'num_words', 'Flesch_Kincaid',
+        'correct_rate', 'retake_trial', 'img_width'
+    ]
+    for c in numeric_cols:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors='coerce')
 
-    # Convert potential numeric covariates if present
-    if 'age' in df.columns:
-        df['age'] = pd.to_numeric(df['age'], errors='coerce')
-    if 'Flesch_Kincaid' in df.columns:
-        df['Flesch_Kincaid'] = pd.to_numeric(df['Flesch_Kincaid'], errors='coerce')
-    if 'correct_rate' in df.columns:
-        df['correct_rate'] = pd.to_numeric(df['correct_rate'], errors='coerce')
+    # After coercion, drop rows missing any numeric control required for the model
+    needed_after_coercion = ['speed', 'reader_view', 'dyslexia_bin', 'num_words', 'Flesch_Kincaid', 'age']
+    df = df.dropna(subset=needed_after_coercion)
 
-    # Convert reader_view and dyslexia_bin to numeric (regular numpy dtypes, not pandas' nullable Int64)
-    df['reader_view'] = pd.to_numeric(df['reader_view'], errors='coerce')
-    df['dyslexia_bin'] = pd.to_numeric(df['dyslexia_bin'], errors='coerce')
-
-    # Remove retake trials if present (retake_trial == 1 indicates a retake)
-    if 'retake_trial' in df.columns:
-        df = df[df['retake_trial'] == 0]
-
-    # Filter out rows with missing or non-positive adjusted_running_time or num_words or key indicators
-    df = df.dropna(subset=['adjusted_running_time', 'num_words', 'reader_view', 'dyslexia_bin', 'uuid', 'page_id'])
-    df = df[df['adjusted_running_time'] > 200]  # remove implausibly short durations (ms)
-    df = df[df['num_words'] > 0]
-
-    # Now safe to cast reader_view and dyslexia_bin to integer numpy dtypes
+    # Ensure binary encodings are integers
     df['reader_view'] = df['reader_view'].astype(int)
     df['dyslexia_bin'] = df['dyslexia_bin'].astype(int)
-
-    # Compute reading speed in words per minute (wpm). adjusted_running_time is in milliseconds.
-    df['reading_speed_wpm'] = df['num_words'] / (df['adjusted_running_time'] / 60000.0)
-
-    # Keep only positive speeds
-    df = df[df['reading_speed_wpm'] > 0]
-
-    # Log-transform the reading speed for modeling
-    df['log_reading_speed'] = np.log(df['reading_speed_wpm'])
-
-    # Encode english_native into binary indicator english_native_bin (Y -> 1, else 0)
-    if 'english_native' in df.columns:
-        df['english_native_bin'] = df['english_native'].map({'Y': 1, 'N': 0}).fillna(0).astype(int)
+    # Handle retake_trial whether present or not
+    if 'retake_trial' in df.columns:
+        df['retake_trial'] = df['retake_trial'].fillna(0).astype(int)
     else:
-        # Ensure column exists in final dataframe per contract
+        df['retake_trial'] = 0
+
+    # Create dependent variable: log-transformed speed to stabilize variance and reduce skew
+    # Add a small constant to avoid log(0)
+    df['log_speed'] = np.log(df['speed'].clip(lower=0) + 1)
+
+    # Center continuous covariates to improve interpretability of main effects
+    df['age_c'] = df['age'] - df['age'].mean()
+    df['num_words_c'] = df['num_words'] - df['num_words'].mean()
+    df['Flesch_c'] = df['Flesch_Kincaid'] - df['Flesch_Kincaid'].mean()
+    # img_width may be missing; handle gracefully
+    if 'img_width' in df.columns:
+        df['img_width_c'] = df['img_width'] - df['img_width'].mean()
+    else:
+        df['img_width_c'] = 0.0
+
+    # Map english_native to binary 1/0 if present
+    if 'english_native' in df.columns:
+        df['english_native_bin'] = (
+            df['english_native'].astype(str).str.upper().map({'Y': 1, 'N': 0})
+        )
+        # If there are other values or missing, treat them as 0 (not native)
+        df['english_native_bin'] = df['english_native_bin'].fillna(0).astype(int)
+    else:
         df['english_native_bin'] = 0
 
-    # Ensure Flesch_Kincaid and correct_rate numeric (already attempted above)
-    if 'Flesch_Kincaid' in df.columns:
-        df['Flesch_Kincaid'] = pd.to_numeric(df['Flesch_Kincaid'], errors='coerce')
-    if 'correct_rate' in df.columns:
-        df['correct_rate'] = pd.to_numeric(df['correct_rate'], errors='coerce')
+    # Coerce categorical columns to appropriate dtype for modeling (we will use C(...) in formula)
+    for c in ['device', 'gender', 'page_id', 'uuid']:
+        if c in df.columns:
+            df[c] = df[c].astype('category')
 
-    # Ensure all desired final columns exist (add as NaN/default if missing)
-    desired = ['uuid', 'page_id', 'reader_view', 'dyslexia_bin', 'reading_speed_wpm', 'log_reading_speed',
-               'age', 'num_words', 'Flesch_Kincaid', 'correct_rate', 'english_native_bin', 'device']
-    for col in desired:
-        if col not in df.columns:
-            # Add missing columns with appropriate default NA values.
-            # Keep types flexible; modeling will handle missingness by dropping rows if necessary.
-            df[col] = np.nan
+    # Ensure required categorical columns exist in final dataframe (create defaults if absent)
+    if 'device' not in df.columns:
+        df['device'] = pd.Categorical(['missing'] * len(df))
+    if 'gender' not in df.columns:
+        df['gender'] = pd.Categorical(['missing'] * len(df))
+    if 'page_id' not in df.columns:
+        df['page_id'] = pd.Categorical(['missing'] * len(df))
 
-    # Ensure device stays as object/string if present; leave NaN otherwise
-    if 'device' in df.columns:
-        df['device'] = df['device'].astype(object)
+    # Ensure correct_rate exists; if missing, fill with 0 (no correct responses)
+    if 'correct_rate' not in df.columns:
+        df['correct_rate'] = 0.0
+    else:
+        df['correct_rate'] = df['correct_rate'].fillna(0.0)
 
-    # Reset index and return only the desired columns in the specified order
-    df = df[desired].reset_index(drop=True)
+    # Ensure uuid is present and of appropriate type
+    df['uuid'] = df['uuid'].astype(str).astype('category')
 
+    # Drop rows with missing dependent variable
+    df = df.dropna(subset=['log_speed'])
+
+    # Reset index to ensure compatibility with statsmodels grouping internals
+    df = df.reset_index(drop=True)
+
+    # Return dataframe with columns needed for modeling (may contain other columns as well)
     return df
 
 
-# ======== MODEL CODE ========
 def model(df: pd.DataFrame) -> Any:
     """
-    Fit an OLS model testing whether Reader View improves reading speed for readers with dyslexia.
+    Fit a mixed-effects linear model testing whether Reader View (reader_view)
+    improves reading speed for individuals with dyslexia (dyslexia_bin). We
+    include an interaction reader_view * dyslexia_bin to test differential effects
+    and include participant random intercepts to account for repeated measures.
 
-    Model formula:
-      log_reading_speed ~ reader_view * dyslexia_bin + age + num_words + Flesch_Kincaid + correct_rate + english_native_bin + C(device) + C(page_id)
+    Model specification (formula):
+      log_speed ~ reader_view * dyslexia_bin + age_c + num_words_c + Flesch_c +
+                  correct_rate + retake_trial + english_native_bin + img_width_c +
+                  C(device) + C(gender) + C(page_id)
 
-    - Interaction reader_view * dyslexia_bin tests whether the Reader View effect differs for dyslexic readers.
-    - C(device) and C(page_id) add categorical controls (dummy variables) for device and page.
-    - Standard errors are clustered by participant UUID to account for within-subject dependence.
+    Random effects: random intercept for uuid (groups=df['uuid']).
 
-    Returns the fitted model results with cluster-robust standard errors.
+    Returns
+    -------
+    results : statsmodels mixedlm results object
     """
-    # Check the required dependent variable is present
-    if 'log_reading_speed' not in df.columns:
-        raise ValueError("Transformed dataframe must contain 'log_reading_speed' for modeling. Run transform() first.")
+    # Work on a copy and ensure integer/ categorical types are appropriate
+    df = df.copy().reset_index(drop=True)
 
-    # Ensure numeric covariates are numeric types (coerce if necessary)
-    df = df.copy()
-    df['num_words'] = pd.to_numeric(df['num_words'], errors='coerce')
-    if 'age' in df.columns:
-        df['age'] = pd.to_numeric(df['age'], errors='coerce')
-    if 'Flesch_Kincaid' in df.columns:
-        df['Flesch_Kincaid'] = pd.to_numeric(df['Flesch_Kincaid'], errors='coerce')
-    if 'correct_rate' in df.columns:
-        df['correct_rate'] = pd.to_numeric(df['correct_rate'], errors='coerce')
-    df['reader_view'] = pd.to_numeric(df['reader_view'], errors='coerce').astype(float)
-    df['dyslexia_bin'] = pd.to_numeric(df['dyslexia_bin'], errors='coerce').astype(float)
-    df['english_native_bin'] = pd.to_numeric(df['english_native_bin'], errors='coerce').astype(float)
+    # Ensure required columns exist
+    required = [
+        'log_speed', 'reader_view', 'dyslexia_bin', 'uuid', 'age_c', 'num_words_c',
+        'Flesch_c', 'correct_rate', 'retake_trial', 'english_native_bin', 'img_width_c',
+        'device', 'gender', 'page_id'
+    ]
+    for c in required:
+        if c not in df.columns:
+            raise ValueError(f"Required column {c} not present in dataframe")
 
-    # Build the formula. Use categorical controls for device and page_id if present.
-    formula_terms = ['reader_view * dyslexia_bin', 'age', 'num_words', 'Flesch_Kincaid', 'correct_rate', 'english_native_bin']
-    if 'device' in df.columns:
-        formula_terms.append('C(device)')
-    if 'page_id' in df.columns:
-        formula_terms.append('C(page_id)')
+    # Drop any rows with missing values in the required columns to avoid mismatches
+    df = df.dropna(subset=required).reset_index(drop=True)
 
-    formula = 'log_reading_speed ~ ' + ' + '.join(formula_terms)
+    # Ensure categorical columns are treated as categorical for the model
+    for c in ['device', 'gender', 'page_id', 'uuid']:
+        if not pd.api.types.is_categorical_dtype(df[c]):
+            df[c] = df[c].astype('category')
 
-    # Fit OLS; statsmodels/patsy will drop rows with missing data automatically
-    mod = smf.ols(formula=formula, data=df)
-    fit = mod.fit()
+    # Ensure reader_view and dyslexia_bin are numeric (0/1)
+    df['reader_view'] = pd.to_numeric(df['reader_view'], errors='coerce').fillna(0).astype(int)
+    df['dyslexia_bin'] = pd.to_numeric(df['dyslexia_bin'], errors='coerce').fillna(0).astype(int)
 
-    # Cluster-robust SEs by participant UUID if uuid column available.
-    # Need to align group labels with the rows actually used in the fitted model.
-    if 'uuid' in df.columns:
-        try:
-            # fit.model.data.row_labels are the original index labels for the rows used in the fit.
-            used_index = fit.model.data.row_labels
-            # Select group labels in the same order. Convert to integer codes required by some statsmodels implementations.
-            groups_series = df.loc[used_index, 'uuid']
-            groups = pd.Categorical(groups_series).codes
-            results = fit.get_robustcov_results(cov_type='cluster', groups=groups)
-        except Exception:
-            # As a fallback, try to compute groups from the fitted design's index in a safe way.
-            try:
-                used_index = fit.model.data.row_labels
-                groups_series = df.loc[used_index, 'uuid']
-                # If there is any problem converting to categorical codes above, try a numpy array of values.
-                groups = np.asarray(groups_series)
-                # Some statsmodels versions require integer group codes; attempt categorical codes if possible.
-                try:
-                    groups = pd.Categorical(groups_series).codes
-                except Exception:
-                    groups = np.asarray(groups_series)
-                results = fit.get_robustcov_results(cov_type='cluster', groups=groups)
-            except Exception:
-                # If everything fails, return the original fit (no clustering).
-                results = fit
-    else:
-        results = fit
+    # Define formula with interaction between reader_view and dyslexia_bin
+    formula = (
+        'log_speed ~ reader_view * dyslexia_bin + age_c + num_words_c + Flesch_c + '
+        'correct_rate + retake_trial + english_native_bin + img_width_c + '
+        'C(device) + C(gender) + C(page_id)'
+    )
 
-    return results
+    # Ensure DataFrame index is a simple RangeIndex (some statsmodels internals expect positional indices)
+    df.index = pd.RangeIndex(start=0, stop=len(df), step=1)
+
+    # Use string labels for groups to avoid categorical-internal code issues
+    groups = df['uuid'].astype(str).values
+
+    # Fit mixed effects model with random intercept for participant (uuid)
+    # Use REML=False for easier comparison with frequentist fixed-effect output
+    md = smf.mixedlm(formula, data=df, groups=groups, re_formula='1')
+    try:
+        mdf = md.fit(reml=False, method='lbfgs')
+    except Exception:
+        # fallback to default method if convergence issues
+        mdf = md.fit(reml=False)
+
+    # Print summary to help interpretation in interactive use
+    print(mdf.summary())
+
+    return mdf

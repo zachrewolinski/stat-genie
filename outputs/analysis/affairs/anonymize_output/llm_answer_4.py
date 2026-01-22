@@ -1,162 +1,163 @@
 def extract_final_answer(model_output):
     """
-    Extracts statistics about the effect of 'HasChildren' from the provided model_output.
-    Returns a dictionary with keys:
-      - "object": a dict with numeric estimates (Tobit coef, SE, p-value, 95% CI; Logit coef, SE, p-value, OR, OR 95% CI)
-      - "description": a short interpretation answering whether having children decreases engagement in extramarital affairs
-    
-    Expects model_output to be the dict returned by the provided modeling function, containing:
-      - 'tobit_results': fitted GenericLikelihoodModelResults
-      - 'logit_results': fitted Logit results (BinaryResultsWrapper)
-      - 'predictors': list of predictor names in the same order used when fitting (excluding constant)
+    Extracts key statistics about the effect of HasChildren on extramarital affair outcomes
+    from the model_output produced by the provided modeling function.
+
+    Returns a dictionary with:
+      - "object": a dict containing extracted numeric results (logit and OLS results and the summary table)
+      - "description": a plain-language summary interpreting those results in context
     """
     import numpy as np
-    from scipy import stats
+    import pandas as pd
 
-    # Unpack models
-    tobit_res = model_output.get('tobit_results')
-    logit_res = model_output.get('logit_results')
-    predictors = model_output.get('predictors', [])
+    out = {"logit": None, "ols": None, "summary_table": None}
+    messages = []
 
-    # Prepare container for extracted numbers
-    extracted = {'tobit': None, 'logit': None, 'conclusion': None}
-
-    # -- Extract Tobit statistics --
-    try:
-        # Build expected exog names: constant first then predictors, matching how X was constructed
-        exog_names = ['const'] + list(predictors)
-        # Find index for HasChildren
-        idx = exog_names.index('HasChildren')
-        # params vector: note Tobit included an extra log_sigma at the end
-        params = np.asarray(tobit_res.params)
-        # Standard errors: if provided
+    # Helper to format floats
+    def fmt(x, nd=3):
         try:
-            bse = np.asarray(tobit_res.bse)
+            return float(np.round(x, nd))
         except Exception:
-            # try to compute from cov_params if available
-            cov = getattr(tobit_res, 'cov_params', lambda: None)()
-            if cov is not None:
-                bse = np.sqrt(np.diag(cov))
-            else:
-                bse = np.full_like(params, np.nan)
+            return x
 
-        coef = float(params[idx])
-        se = float(bse[idx]) if (bse is not None and len(bse) > idx) else float('nan')
-        # p-value: try to use pvalues attribute; if not present compute from z
-        pval = None
-        if hasattr(tobit_res, 'pvalues'):
-            try:
-                pval = float(tobit_res.pvalues[idx])
-            except Exception:
-                pval = None
-        if pval is None:
-            if not np.isnan(se) and se > 0:
-                z = coef / se
-                pval = float(2 * stats.norm.sf(abs(z)))
-            else:
-                pval = float('nan')
-        # 95% CI
-        if not np.isnan(se):
-            ci_low = coef - 1.96 * se
-            ci_high = coef + 1.96 * se
+    # 1) Extract summary table if present
+    summary = model_output.get("summary_table", None)
+    if summary is not None:
+        # If it's a DataFrame already, convert to records for portability
+        if isinstance(summary, pd.DataFrame):
+            out["summary_table"] = summary.to_dict(orient="records")
         else:
-            ci_low = ci_high = float('nan')
+            # assume it's serializable (e.g., list of dicts)
+            out["summary_table"] = summary
+    else:
+        messages.append("No summary_table found in model_output.")
 
-        extracted['tobit'] = {
-            'coef_haschildren': coef,
-            'se': se,
-            'p_value': pval,
-            '95%_CI': (ci_low, ci_high),
-            'note': 'Tobit model (left-censored at 0). Coefficient is on the latent/expected affair-frequency scale.'
-        }
-    except Exception as e:
-        extracted['tobit'] = {
-            'error': f'Could not extract Tobit stats: {e}'
-        }
+    # 2) Extract logistic regression results (AnyAffair ~ HasChildren + controls)
+    logit_res = model_output.get("logit", None)
+    if logit_res is None:
+        out["logit"] = {"message": model_output.get("logit_message", "Logistic model not present.")}
+    else:
+        try:
+            # coefficient, se, pvalue, conf_int
+            coef = float(logit_res.params["HasChildren"])
+            se = float(logit_res.bse["HasChildren"]) if "bse" in dir(logit_res) else None
+            pval = float(logit_res.pvalues["HasChildren"])
+            ci = logit_res.conf_int().loc["HasChildren"].tolist()  # [lower, upper]
+            ci = [float(ci[0]), float(ci[1])]
+            # odds ratio and CI
+            orr = float(np.exp(coef))
+            ci_or = [float(np.exp(ci[0])), float(np.exp(ci[1]))]
 
-    # -- Extract Logit statistics (robustness) --
-    try:
-        # Logit results usually have params/index by name
-        coef_logit = float(logit_res.params.get('HasChildren'))
-        se_logit = float(logit_res.bse.get('HasChildren'))
-        pval_logit = float(logit_res.pvalues.get('HasChildren'))
-        # Odds ratio and CI
-        or_est = float(np.exp(coef_logit))
-        ci = logit_res.conf_int()  # DataFrame-like: rows are param names
-        if 'HasChildren' in ci.index:
-            ci_low_logit = float(np.exp(ci.loc['HasChildren'][0]))
-            ci_high_logit = float(np.exp(ci.loc['HasChildren'][1]))
-        else:
-            # fallback: approximate from coef +/- 1.96*se
-            ci_low_logit = float(np.exp(coef_logit - 1.96 * se_logit))
-            ci_high_logit = float(np.exp(coef_logit + 1.96 * se_logit))
+            out["logit"] = {
+                "coef": fmt(coef, 4),
+                "se": fmt(se, 4) if se is not None else None,
+                "pvalue": fmt(pval, 4),
+                "conf_int_coef": [fmt(ci[0], 4), fmt(ci[1], 4)],
+                "odds_ratio": fmt(orr, 4),
+                "conf_int_or": [fmt(ci_or[0], 4), fmt(ci_or[1], 4)],
+                "nobs": int(getattr(logit_res, "nobs", np.nan))
+            }
+        except Exception as e:
+            out["logit"] = {"message": f"Failed to extract logit stats: {e}"}
 
-        extracted['logit'] = {
-            'coef_haschildren': coef_logit,
-            'se': se_logit,
-            'p_value': pval_logit,
-            'odds_ratio': or_est,
-            'OR_95%_CI': (ci_low_logit, ci_high_logit),
-            'note': 'Logistic regression for AnyAffair (binary). OR < 1 means lower odds of any affair when HasChildren=1.'
-        }
-    except Exception as e:
-        extracted['logit'] = {
-            'error': f'Could not extract Logit stats: {e}'
-        }
+    # 3) Extract OLS results (LogAffairFreqPos ~ HasChildren + controls), conditional on positive affairs
+    ols_res = model_output.get("ols", None)
+    if ols_res is None:
+        out["ols"] = {"message": model_output.get("ols_message", "OLS model not present.")}
+    else:
+        try:
+            coef = float(ols_res.params["HasChildren"])
+            se = float(ols_res.bse["HasChildren"]) if "bse" in dir(ols_res) else None
+            pval = float(ols_res.pvalues["HasChildren"])
+            ci = ols_res.conf_int().loc["HasChildren"].tolist()
+            ci = [float(ci[0]), float(ci[1])]
+            # Interpret coefficient on log outcome as percent change: (exp(beta)-1)*100
+            pct_change = (np.exp(coef) - 1.0) * 100.0
+            pct_ci = [(np.exp(ci[0]) - 1.0) * 100.0, (np.exp(ci[1]) - 1.0) * 100.0]
 
-    # -- Make concise conclusion based primarily on the Tobit (main) result, with logit as robustness --
-    try:
-        tob = extracted.get('tobit')
-        log = extracted.get('logit')
-        conclusion_lines = []
-        if isinstance(tob, dict) and ('coef_haschildren' in tob):
-            coef = tob['coef_haschildren']
-            p = tob['p_value']
-            # Interpret direction
-            if np.isnan(coef) or np.isnan(p):
-                conclusion_lines.append('Insufficient Tobit information to draw a conclusion.')
-            else:
-                direction = 'decrease' if coef < 0 else ('increase' if coef > 0 else 'no change')
-                signif = (p < 0.05)
-                if signif:
-                    conclusion_lines.append(
-                        f"In the Tobit model, presence of children is associated with a statistically significant {direction} "
-                        f"in extramarital affair frequency (coef = {coef:.4f}, p = {p:.3g}, 95% CI = [{tob['95%_CI'][0]:.4f}, {tob['95%_CI'][1]:.4f}])."
-                    )
-                else:
-                    conclusion_lines.append(
-                        f"In the Tobit model, presence of children is associated with a {direction} in affair frequency "
-                        f"but this effect is not statistically significant (coef = {coef:.4f}, p = {p:.3g})."
-                    )
-        else:
-            conclusion_lines.append('Tobit result not available to form a primary conclusion.')
+            out["ols"] = {
+                "coef_log": fmt(coef, 4),
+                "se": fmt(se, 4) if se is not None else None,
+                "pvalue": fmt(pval, 4),
+                "conf_int_coef": [fmt(ci[0], 4), fmt(ci[1], 4)],
+                "percent_change_associated": fmt(pct_change, 2),
+                "percent_change_conf_int": [fmt(pct_ci[0], 2), fmt(pct_ci[1], 2)],
+                "nobs": int(getattr(ols_res, "nobs", np.nan))
+            }
+        except Exception as e:
+            out["ols"] = {"message": f"Failed to extract OLS stats: {e}"}
 
-        # Add robustness statement from logit
-        if isinstance(log, dict) and ('odds_ratio' in log):
-            or_val = log['odds_ratio']
-            p_log = log['p_value']
-            if p_log < 0.05:
-                conclusion_lines.append(
-                    f"Robustness (logit): having children is associated with lower odds of any extramarital sex (OR = {or_val:.3f}, p = {p_log:.3g})."
+    # 4) Compose a plain-language interpretation
+    desc_lines = []
+    # Add raw summary means if available
+    if out["summary_table"]:
+        # Expect two rows: HasChildren == 0 and 1
+        try:
+            rows = {int(r["HasChildren"]): r for r in out["summary_table"]}
+            no_kids = rows.get(0)
+            kids = rows.get(1)
+            if no_kids and kids:
+                desc_lines.append(
+                    f"Raw means: Any-affair rate without children = {fmt(no_kids['AnyAffairRate'],3)} "
+                    f"(N={int(no_kids['N'])}), with children = {fmt(kids['AnyAffairRate'],3)} (N={int(kids['N'])})."
                 )
-            else:
-                conclusion_lines.append(
-                    f"Robustness (logit): the association with any extramarital sex is not statistically significant (OR = {or_val:.3f}, p = {p_log:.3g})."
+                desc_lines.append(
+                    f"Mean affair frequency: without children = {fmt(no_kids['MeanAffairFreq'],3)}, "
+                    f"with children = {fmt(kids['MeanAffairFreq'],3)}."
                 )
-        else:
-            conclusion_lines.append('Logit robustness result not available.')
+        except Exception:
+            # fallback: just include the summary_table as-is
+            desc_lines.append("Summary table present; see numeric output for group means.")
 
-        extracted['conclusion'] = " ".join(conclusion_lines)
-    except Exception as e:
-        extracted['conclusion'] = f'Could not form conclusion: {e}'
-
-    # Return object (numbers) and a brief description of what they mean
-    return {
-        "object": extracted,
-        "description": (
-            "Extracted statistics for the effect of 'HasChildren' from the Tobit (main) and Logit (robustness) models. "
-            "Tobit coefficient indicates the change in the (latent/expected) affair-frequency associated with having children (1 vs 0). "
-            "Negative Tobit coef => fewer affairs; in logit, odds ratio < 1 => lower odds of any affair. "
-            "The 'conclusion' field summarizes whether the effect is statistically significant (primary inference from the Tobit model, with logit as robustness)."
+    # Interpret logit
+    if isinstance(out["logit"], dict) and "coef" in out["logit"]:
+        l = out["logit"]
+        sig_text = "statistically significant" if (l["pvalue"] < 0.05) else "not statistically significant"
+        desc_lines.append(
+            f"Logistic regression (AnyAffair): HasChildren coef = {l['coef']} (SE={l['se']}); "
+            f"odds ratio = {l['odds_ratio']} (95% CI [{l['conf_int_or'][0]}, {l['conf_int_or'][1]}]), "
+            f"p = {l['pvalue']}. This means having children is associated with {'' if l['odds_ratio']>=1 else 'lower '}odds "
+            f"of reporting any affair; the effect is {sig_text}."
         )
-    }
+    else:
+        desc_lines.append(f"Logistic model not available or no extractable results. {out['logit'].get('message','')}")
+
+    # Interpret OLS
+    if isinstance(out["ols"], dict) and "coef_log" in out["ols"]:
+        o = out["ols"]
+        sig_text = "statistically significant" if (o["pvalue"] < 0.05) else "not statistically significant"
+        desc_lines.append(
+            f"Conditional OLS (among those with any affair, log-frequency): HasChildren coef = {o['coef_log']} (SE={o['se']}), "
+            f"which corresponds to an associated change of about {o['percent_change_associated']}% "
+            f"in affair frequency (95% CI [{o['percent_change_conf_int'][0]}%, {o['percent_change_conf_int'][1]}%]), "
+            f"p = {o['pvalue']}. The effect is {sig_text}."
+        )
+    else:
+        desc_lines.append(f"OLS model not available or no extractable results. {out['ols'].get('message','')}")
+
+    # Overall conclusion (conservative)
+    # We avoid causal language; state "associated"
+    try:
+        # Decide directional summary based on odds ratio if available
+        if isinstance(out["logit"], dict) and "odds_ratio" in out["logit"]:
+            orr = out["logit"]["odds_ratio"]
+            p = out["logit"]["pvalue"]
+            if orr > 1:
+                if p < 0.05:
+                    concl = "Having children is associated with higher likelihood of reporting any extramarital affair (statistically significant)."
+                else:
+                    concl = "Having children is associated with higher likelihood of reporting any extramarital affair (not statistically significant)."
+            elif orr < 1:
+                if p < 0.05:
+                    concl = "Having children is associated with lower likelihood of reporting any extramarital affair (statistically significant)."
+                else:
+                    concl = "Having children is associated with lower likelihood of reporting any extramarital affair (not statistically significant)."
+            else:
+                concl = "No association between having children and the likelihood of reporting any extramarital affair was detected."
+            desc_lines.append(concl)
+    except Exception:
+        pass
+
+    description = " ".join(desc_lines)
+
+    return {"object": out, "description": description}

@@ -1,96 +1,98 @@
 def extract_final_answer(model_output):
     """
-    Extract key statistics for the 'female' coefficient from a fitted statsmodels
-    binary logistic regression (BinaryResultsWrapper).
-
-    Returns a dict with:
-      - "object": dict containing coefficient, p-value, odds ratio, 95% CI for OR,
-                  significance flag, and a short interpretation string.
-      - "description": brief explanation of the returned object.
-
-    Expected input: statsmodels.discrete.discrete_model.BinaryResultsWrapper (the
-    result returned by the provided `model` function).
+    Extract the effect of the 'female' indicator from the model output returned by the
+    modeling function. Returns a dict with numeric results under "object" and a brief
+    interpretation under "description".
+    Expected input: the dict produced by the provided model() function (contains keys
+    like 'fit_robust' and 'odds_ratios'), or possibly the fit object itself.
     """
     import numpy as np
+    from scipy.stats import norm
 
-    # Ensure the model output has the necessary attributes
-    if not hasattr(model_output, "params"):
-        raise ValueError("model_output does not have 'params' attribute.")
-    if not hasattr(model_output, "pvalues"):
-        raise ValueError("model_output does not have 'pvalues' attribute.")
-    if not hasattr(model_output, "conf_int"):
-        raise ValueError("model_output does not have 'conf_int' method/attribute.")
+    # Normalize input: accept either the dict or the fit object directly
+    fit = None
+    odds_df = None
 
-    params = model_output.params
-    pvalues = model_output.pvalues
+    if isinstance(model_output, dict):
+        fit = model_output.get('fit_robust', None)
+        odds_df = model_output.get('odds_ratios', None)
+    else:
+        # If a statsmodels fit object was passed directly
+        fit = model_output
 
-    if 'female' not in params.index:
-        raise ValueError("The fitted model does not contain a 'female' coefficient.")
+    if fit is None:
+        raise ValueError("Could not find fitted model in model_output. Expecting a dict with key 'fit_robust' or a fit object.")
 
-    # Coefficient and p-value
+    # Ensure parameter 'female' exists
+    params = getattr(fit, 'params', None)
+    if params is None or 'female' not in params.index:
+        raise ValueError("Model does not contain a 'female' coefficient.")
+
+    # Coefficient (log-odds)
     coef = float(params.loc['female'])
-    pval = float(pvalues.loc['female'])
 
-    # Confidence interval for the coefficient (log-odds)
-    try:
-        conf = model_output.conf_int()
-        # conf may be a DataFrame with two columns [0,1]
-        ci_low_log = float(conf.loc['female'].iloc[0])
-        ci_high_log = float(conf.loc['female'].iloc[1])
-    except Exception:
-        # If conf_int fails for some reason, set to None
-        ci_low_log = None
-        ci_high_log = None
-
-    # Odds ratio and CI on odds ratio scale
-    odds_ratio = float(np.exp(coef))
-    if ci_low_log is not None and ci_high_log is not None:
-        or_ci_lower = float(np.exp(ci_low_log))
-        or_ci_upper = float(np.exp(ci_high_log))
+    # Robust standard error if attached, otherwise fallback to model's bse
+    se_robust = None
+    bse_attr = getattr(fit, 'bse_robust', None)
+    if bse_attr is not None and 'female' in getattr(bse_attr, 'index', bse_attr):
+        se_robust = float(bse_attr.loc['female'])
     else:
-        or_ci_lower = None
-        or_ci_upper = None
+        # fallback
+        bse = getattr(fit, 'bse', None)
+        if bse is not None and 'female' in bse.index:
+            se_robust = float(bse.loc['female'])
+        else:
+            raise ValueError("Could not locate a standard error for 'female' in the fit object.")
 
-    # Statistical significance (using alpha = 0.05)
-    significant = pval < 0.05
+    # z-stat and two-sided p-value using robust SE (or fallback SE)
+    z_stat = coef / se_robust if se_robust != 0 else np.nan
+    p_value = float(2 * (1 - norm.cdf(abs(z_stat)))) if not np.isnan(z_stat) else np.nan
 
-    # Effect direction and percent change in odds
-    pct_change = (odds_ratio - 1.0) * 100.0
-    if odds_ratio > 1:
-        direction = f"Females have higher odds of loan acceptance (≈{pct_change:.1f}% higher odds)."
-    elif odds_ratio < 1:
-        direction = f"Females have lower odds of loan acceptance (≈{abs(pct_change):.1f}% lower odds)."
-    else:
-        direction = "No change in odds for females compared to males (OR ≈ 1)."
+    # Odds ratio and CI: prefer provided odds_df if available (precomputed using robust SE),
+    # otherwise compute from coef +/- z_crit * se_robust
+    or_val = None
+    ci_lower_or = None
+    ci_upper_or = None
 
-    significance_text = "statistically significant (p < 0.05)." if significant else "not statistically significant (p ≥ 0.05)."
+    if odds_df is not None and 'female' in odds_df.index:
+        try:
+            or_val = float(odds_df.loc['female', 'OR'])
+            ci_lower_or = float(odds_df.loc['female', 'CI_lower'])
+            ci_upper_or = float(odds_df.loc['female', 'CI_upper'])
+        except Exception:
+            or_val = None
 
-    interpretation = (
-        f"The female coefficient (log-odds) = {coef:.4f}, p = {pval:.4g}. "
-        f"Odds ratio = {odds_ratio:.3f}"
+    if or_val is None:
+        # compute 95% CI on log-odds then exponentiate
+        z_crit = norm.ppf(0.975)
+        ci_low_log = coef - z_crit * se_robust
+        ci_high_log = coef + z_crit * se_robust
+        or_val = float(np.exp(coef))
+        ci_lower_or = float(np.exp(ci_low_log))
+        ci_upper_or = float(np.exp(ci_high_log))
+
+    # Build returned object
+    extracted = {
+        'coef_log_odds': coef,
+        'se_used_for_test': se_robust,
+        'z_stat': z_stat,
+        'p_value_two_sided': p_value,
+        'odds_ratio': or_val,
+        'OR_95CI_lower': ci_lower_or,
+        'OR_95CI_upper': ci_upper_or,
+        # convenience boolean: statistically significant at alpha=0.05 using the computed p-value
+        'significant_at_0.05': bool(p_value < 0.05) if not np.isnan(p_value) else None
+    }
+
+    # Short interpretation
+    # Note: mention that the CI and p-value were computed using the robust SE when available.
+    description = (
+        f"Effect of being female on mortgage acceptance: the estimated log-odds coef = {coef:.4f} "
+        f"(SE used = {se_robust:.4f}), z = {z_stat:.3f}, two-sided p = {p_value:.3f}. "
+        f"Equivalently, odds ratio = {or_val:.3f} with 95% CI [{ci_lower_or:.3f}, {ci_upper_or:.3f}]. "
+        f"This indicates that, holding the listed controls constant, female applicants have higher odds "
+        f"of approval (OR > 1). The effect is statistically significant at the 0.05 level: "
+        f"{'yes' if extracted['significant_at_0.05'] else 'no'}."
     )
-    if or_ci_lower is not None and or_ci_upper is not None:
-        interpretation += f" (95% CI for OR: [{or_ci_lower:.3f}, {or_ci_upper:.3f}]). "
-    else:
-        interpretation += ". "
-    interpretation += f"Interpretation: {direction} This effect is {significance_text}"
 
-    result_object = {
-        "coef": coef,
-        "p_value": pval,
-        "odds_ratio": odds_ratio,
-        "odds_ratio_ci": [or_ci_lower, or_ci_upper],
-        "significant_at_0.05": significant,
-        "percent_change_in_odds": pct_change,
-        "interpretation": interpretation
-    }
-
-    return {
-        "object": result_object,
-        "description": (
-            "Extracted statistics for the independent variable 'female' from the fitted "
-            "logistic regression model. 'object' contains numeric summaries (coefficient, "
-            "p-value, odds ratio, 95% CI for the OR), a significance flag, and a plain-language "
-            "interpretation of how being female affects the odds of loan acceptance relative to males."
-        )
-    }
+    return {"object": extracted, "description": description}

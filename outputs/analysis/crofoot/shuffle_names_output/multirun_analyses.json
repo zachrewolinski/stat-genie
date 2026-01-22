@@ -6,256 +6,67 @@
       "cvars": {
         "ivs": [
           {
-            "description": "Relative group size: numeric difference in total group size (focal minus other). Positive values indicate focal group larger than the opponent. Used to test whether larger relative size increases probability of winning.",
+            "description": "Relative group size of the focal group compared to the other group. Captures both absolute difference and ratio of sizes. Used to test whether larger relative size increases the probability of winning.",
             "columns": [
-              "RelGroupSize"
+              "relative_size",
+              "size_ratio"
             ]
           },
           {
-            "description": "Contest location advantage: binary indicator equal to 1 when the contest location is closer to the focal group's home-center than to the other group's home-center (i.e., focal home advantage), 0 otherwise. Tests whether being 'at home' changes win probability.",
+            "description": "Contest location relative to group home ranges. Binary indicator equal to 1 if the focal group is closer to the center of its home range than the other group (i.e., 'home advantage' for focal). Also a text label 'location' records FocalHome / OtherHome / Neutral.",
             "columns": [
-              "LocFocal"
+              "focal_home_bin",
+              "location"
             ]
           }
         ],
         "dv": {
-          "description": "Contest outcome for the focal group: binary dependent variable equal to 1 if the focal group won the contest, 0 if the other group won (original column 'dyad').",
+          "description": "Outcome of the intergroup contest: 1 if the focal group won the contest, 0 if the other group won.",
           "columns": [
-            "ContestOutcome"
+            "Won"
           ]
         },
         "controls": [
           {
-            "description": "Absolute focal group size (total individuals). Included to control for absolute size effects in addition to relative size.",
+            "description": "Numerical advantage in number of adult males (focal minus other). Male composition can influence contest outcomes and is included as a control.",
             "is_moderator": false,
             "moderator_on": null,
             "columns": [
-              "FocalSize"
+              "male_adv"
             ]
           },
           {
-            "description": "Absolute other group size (total individuals). Included to control for absolute size effects in addition to relative size.",
+            "description": "Numerical advantage in number of adult females (focal minus other). Included as a control for demographic composition.",
             "is_moderator": false,
             "moderator_on": null,
             "columns": [
-              "OtherSize"
-            ]
-          },
-          {
-            "description": "Number of adult males in the focal group. Male composition may influence contest outcome independent of total size.",
-            "is_moderator": false,
-            "moderator_on": null,
-            "columns": [
-              "n_focal"
-            ]
-          },
-          {
-            "description": "Number of adult males in the other group. Male composition may influence contest outcome independent of total size.",
-            "is_moderator": false,
-            "moderator_on": null,
-            "columns": [
-              "other"
-            ]
-          },
-          {
-            "description": "Distance from the focal group's home-range center to the contest location (meters). Kept for diagnostics and possible alternative specifications.",
-            "is_moderator": false,
-            "moderator_on": null,
-            "columns": [
-              "DistFocalCenter"
-            ]
-          },
-          {
-            "description": "Distance from the other group's home-range center to the contest location (meters). Kept for diagnostics and possible alternative specifications.",
-            "is_moderator": false,
-            "moderator_on": null,
-            "columns": [
-              "DistOtherCenter"
+              "female_adv"
             ]
           }
         ]
       },
-      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform raw dataset into analysis-ready dataframe.\n\n    Steps:\n    - Ensure outcome is binary and numeric.\n    - Create clear/explicit columns for focal and other group sizes and distances.\n    - Compute relative size (focal - other) and a ratio.\n    - Define a binary location advantage indicator (LocFocal): 1 if contest location is closer to focal group's home-center than to other group's home-center, else 0.\n    - Provide a small set of controls (male counts) and drop rows with missing values in key variables.\n\n    Note: The original schema contains some ambiguous column descriptions (e.g., 'win' and 'm_focal' used for distances). Here we follow the convention used in the analysis: 'win' -> distance from focal group center; 'm_focal' -> distance from other group center.\n    \"\"\"\n    # Make a copy to avoid modifying in place\n    df = df.copy()\n\n    # Ensure binary outcome\n    if 'dyad' not in df.columns:\n        raise ValueError(\"Expected column 'dyad' in input dataframe\")\n    df['ContestOutcome'] = pd.to_numeric(df['dyad'], errors='coerce').astype('float')\n\n    # Create/rename distance columns (use documented mapping from schema)\n    # 'win' appears in the dataset as distance of focal group from its home-center\n    # 'm_focal' appears as distance of the other group from its home-center\n    df['DistFocalCenter'] = pd.to_numeric(df['win'], errors='coerce')\n    df['DistOtherCenter'] = pd.to_numeric(df['m_focal'], errors='coerce')\n\n    # Create clear size columns. The original schema is ambiguous about f_focal/f_other naming,\n    # but columns exist with these names. We preserve both and define FocalSize and OtherSize from them.\n    # Based on typical naming in many datasets we treat 'f_focal' as the focal group's total size and\n    # 'f_other' as the other group's total size. If this mapping is reversed in your version, swap them.\n    df['FocalSize'] = pd.to_numeric(df['f_focal'], errors='coerce')\n    df['OtherSize'] = pd.to_numeric(df['f_other'], errors='coerce')\n\n    # Relative size: focal minus other\n    df['RelGroupSize'] = df['FocalSize'] - df['OtherSize']\n\n    # Relative size ratio (for diagnostics / alternative models)\n    df['RelSizeRatio'] = df['FocalSize'] / df['OtherSize'].replace({0: np.nan})\n\n    # Create binary location indicator: 1 if contest location is closer to focal center than other center\n    # Use strict less-than; ties go to '0' (not focal advantage). If you want a neutral category, modify accordingly.\n    df['LocFocal'] = (df['DistFocalCenter'] < df['DistOtherCenter']).astype('int')\n\n    # Preserve male counts (controls). Ensure numeric.\n    df['n_focal'] = pd.to_numeric(df['n_focal'], errors='coerce')\n    df['other'] = pd.to_numeric(df['other'], errors='coerce')\n\n    # Optional derived controls\n    df['MaleDiff'] = df['n_focal'] - df['other']\n\n    # Drop rows with missing values in variables required for the main model\n    required_cols = ['ContestOutcome', 'RelGroupSize', 'LocFocal', 'n_focal', 'other', 'FocalSize', 'OtherSize', 'DistFocalCenter', 'DistOtherCenter']\n    df = df.dropna(subset=required_cols)\n\n    # Ensure ContestOutcome is integer 0/1\n    df['ContestOutcome'] = df['ContestOutcome'].astype(int)\n\n    return df\n",
-      "m_code": "def model(df: pd.DataFrame) -> Any:\n    \"\"\"\n    Fit a logistic regression (binomial) predicting the probability the focal group wins.\n\n    Main specification:\n      ContestOutcome ~ RelGroupSize * LocFocal + n_focal + other\n\n    - RelGroupSize: continuous independent variable (focal size - other size)\n    - LocFocal: binary indicator (1 = contest closer to focal group's center)\n    - Interaction tests whether effect of relative size depends on being at home\n    - Controls: number of adult males in focal and other groups\n\n    Returns the fitted model results object (statsmodels' result). Prints summary.\n    \"\"\"\n    import statsmodels.formula.api as smf\n\n    # Ensure the dataframe contains needed columns\n    for c in ['ContestOutcome', 'RelGroupSize', 'LocFocal', 'n_focal', 'other']:\n        if c not in df.columns:\n            raise ValueError(f\"Column {c} required for modeling but not found in dataframe\")\n\n    # Fit logistic regression using formula API\n    formula = 'ContestOutcome ~ RelGroupSize * LocFocal + n_focal + other'\n    logit_model = smf.logit(formula=formula, data=df)\n    results = logit_model.fit(disp=False)\n\n    # Print summary for quick inspection\n    print(results.summary())\n\n    # Also return the fitted results object for downstream inspection/diagnostics\n    return results\n"
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform raw Crofoot et al. contest data into analysis-ready columns.\n\n    Inputs (expected raw columns):\n      - dyad: 1 if focal won, 0 if other won (outcome)\n      - f_other: described in schema as 'Number of individuals in focal group'\n      - f_focal: described as 'Number of individuals in other group'\n      - win: described as 'Distance in meters of focal group from the center of its home range'\n      - m_focal: described as 'Distance in meters of other group from the center of its home range'\n      - n_focal: number of males in focal group\n      - other: number of males in other group\n      - dist_focal: described (in schema) as number of females in focal group\n      - focal: described as number of females in other group\n      - m_other: dyad ID (kept for clustering / grouping in modeling)\n\n    Outputs (new columns added):\n      - Won (0/1 outcome), focal_size, other_size, relative_size, size_ratio,\n        focal_dist, other_dist, focal_home_bin (0/1), location (text),\n        male_adv, female_adv\n    \"\"\"\n    df = df.copy()\n\n    # Ensure required columns exist\n    required = ['dyad', 'f_other', 'f_focal', 'win', 'm_focal', 'n_focal', 'other', 'dist_focal', 'focal', 'm_other']\n    missing = [c for c in required if c not in df.columns]\n    if len(missing) > 0:\n        raise ValueError(f\"Missing required columns for transform: {missing}\")\n\n    # Drop rows with missing essential information (outcome, sizes, distances)\n    df = df.dropna(subset=['dyad', 'f_other', 'f_focal', 'win', 'm_focal'])\n\n    # Outcome\n    df['Won'] = df['dyad'].astype(int)\n\n    # Derive focal and other group sizes (use schema descriptions):\n    # NOTE: schema indicates f_other contains number in focal group and f_focal contains number in other group\n    df['focal_size'] = pd.to_numeric(df['f_other'], errors='coerce')\n    df['other_size'] = pd.to_numeric(df['f_focal'], errors='coerce')\n\n    # Relative size measures\n    df['relative_size'] = df['focal_size'] - df['other_size']\n    # Ratio (avoid division by zero)\n    df['size_ratio'] = df['focal_size'] / df['other_size']\n    df.loc[~np.isfinite(df['size_ratio']), 'size_ratio'] = np.nan\n\n    # Distances from home-range centers (schema: 'win' -> focal distance; 'm_focal' -> other distance)\n    df['focal_dist'] = pd.to_numeric(df['win'], errors='coerce')\n    df['other_dist'] = pd.to_numeric(df['m_focal'], errors='coerce')\n\n    # Location / home advantage: focal_home_bin = 1 when focal is closer to its home-range center than the other group\n    df['focal_home_bin'] = (df['focal_dist'] < df['other_dist']).astype(int)\n    df['location'] = np.where(df['focal_dist'] < df['other_dist'], 'FocalHome',\n                              np.where(df['focal_dist'] > df['other_dist'], 'OtherHome', 'Neutral'))\n\n    # Controls: male and female numerical advantages (schema fields interpreted as follows):\n    # n_focal = number of males in focal; other = number of males in other\n    df['male_adv'] = pd.to_numeric(df['n_focal'], errors='coerce') - pd.to_numeric(df['other'], errors='coerce')\n\n    # dist_focal and focal columns in schema appear to refer to female counts (description mismatch in schema names)\n    df['female_adv'] = pd.to_numeric(df['dist_focal'], errors='coerce') - pd.to_numeric(df['focal'], errors='coerce')\n\n    # Keep the dyad ID (m_other) for clustering in the model\n    df['m_other'] = df['m_other']\n\n    # Final: drop rows with any remaining NA in model-relevant columns\n    model_cols = ['Won', 'relative_size', 'size_ratio', 'focal_home_bin', 'male_adv', 'female_adv', 'm_other']\n    df = df.dropna(subset=model_cols)\n\n    # Convert types to numeric / int where appropriate\n    df['Won'] = df['Won'].astype(int)\n    df['focal_home_bin'] = df['focal_home_bin'].astype(int)\n\n    # Return full df copy (includes derived cols)\n    return df",
+      "m_code": "def model(df: pd.DataFrame) -> Any:\n    \"\"\"\n    Fit a logistic regression predicting the probability that the focal group wins an intergroup contest\n    from relative group size and contest location (home advantage), controlling for male and female advantages.\n\n    Uses cluster-robust standard errors clustered on 'm_other' (dyad ID) to account for non-independence.\n\n    Returns the robust results object (or a lightweight wrapper providing clustered inference if the\n    statsmodels method is not available).\n    \"\"\"\n    # Ensure transformed columns exist\n    required = ['Won', 'relative_size', 'size_ratio', 'focal_home_bin', 'male_adv', 'female_adv', 'm_other']\n    missing = [c for c in required if c not in df.columns]\n    if len(missing) > 0:\n        raise ValueError(f\"Missing required columns for modeling: {missing}\")\n\n    # Build design matrix with interaction between relative_size and focal_home_bin\n    X = pd.DataFrame({\n        'relative_size': df['relative_size'].astype(float),\n        'size_ratio': df['size_ratio'].astype(float),\n        'focal_home_bin': df['focal_home_bin'].astype(float),\n        'male_adv': df['male_adv'].astype(float),\n        'female_adv': df['female_adv'].astype(float)\n    })\n\n    # Interaction term: does the effect of relative size differ when focal has home advantage?\n    X['relative_size_x_home'] = X['relative_size'] * X['focal_home_bin']\n\n    # Add constant\n    X = sm.add_constant(X, has_constant='add')\n\n    y = df['Won'].astype(int)\n\n    # Fit logistic regression (maximum likelihood)\n    logit = sm.Logit(y, X)\n    res = logit.fit(disp=False)\n\n    # Obtain cluster-robust standard errors clustered by dyad ID (m_other)\n    try:\n        # Preferred method if available\n        clustered_res = res.get_robustcov_results(cov_type='cluster', groups=df['m_other'])\n    except AttributeError:\n        # Fallback: compute clustered covariance matrix and create a lightweight results wrapper\n        cov = cov_cluster(res, df['m_other'])\n        bse = np.sqrt(np.diag(cov))\n        params = res.params\n        # z-statistics using normal approximation\n        zvals = params / bse\n        pvals = 2 * (1 - scipy.stats.norm.cdf(np.abs(zvals)))\n        conf_int = np.column_stack((params - 1.96 * bse, params + 1.96 * bse))\n\n        class ClusteredResultsWrapper:\n            def __init__(self, params, bse, zvalues, pvalues, conf_int):\n                self.params = params\n                self.bse = bse\n                self.zvalues = zvalues\n                self.pvalues = pvalues\n                self.conf_int = conf_int\n\n            def summary(self):\n                df_sum = pd.DataFrame({\n                    'coef': self.params,\n                    'std err': self.bse,\n                    'z': self.zvalues,\n                    'P>|z|': self.pvalues,\n                    '0.025': self.conf_int[:, 0],\n                    '0.975': self.conf_int[:, 1]\n                })\n                return df_sum\n\n        clustered_res = ClusteredResultsWrapper(params, bse, zvals, pvals, conf_int)\n\n    # Print a concise summary (caller can inspect the returned object for details)\n    try:\n        print(clustered_res.summary())\n    except Exception:\n        # If the summary can't be printed directly, attempt to display key attributes\n        try:\n            print(\"params:\\n\", clustered_res.params)\n            print(\"std err:\\n\", getattr(clustered_res, 'bse', None))\n        except Exception:\n            pass\n\n    return clustered_res"
     },
     "1": {
       "cvars": {
         "ivs": [
           {
-            "description": "Relative group size of the focal group compared to the other group. Computed as focal_size / other_size, then standardized (z-score). Used to test whether larger relative group size increases the probability that the focal group wins.",
+            "description": "Relative group size: focal group total size relative to the other group's total size. Computed as focal_total / other_total and then standardized (z-score) to aid interpretation and model convergence.",
             "columns": [
-              "RelSizeRatio_z"
+              "size_ratio_z",
+              "size_ratio",
+              "size_diff",
+              "focal_total",
+              "other_total"
             ]
           },
           {
-            "description": "Contest location relative to group home-centers. Categorical information encoded as two dummy variables indicating whether the contest occurred closer to the focal group's home center (FocalHome) or closer to the other group's home center (OtherHome). 'Neutral' (neither group closer) is the reference when both dummies are 0.",
+            "description": "Contest location: continuous measure of how much closer the contest was to the focal group's home-range center than to the other group's center (positive = contest nearer focal home). We provide both a continuous standardized variable and a binary indicator for whether the contest was closer to the focal group's center.",
             "columns": [
-              "ContestLocation_FocalHome",
-              "ContestLocation_OtherHome"
-            ]
-          }
-        ],
-        "dv": {
-          "description": "Binary outcome indicating whether the focal group won the intergroup contest (1 = focal won, 0 = focal lost). Original column name is 'dyad'.",
-          "columns": [
-            "dyad"
-          ]
-        },
-        "controls": [
-          {
-            "description": "Number of males in the focal group. Controls for sex-composition / fighting ability that may influence contest outcome.",
-            "is_moderator": false,
-            "moderator_on": null,
-            "columns": [
-              "focal_males"
-            ]
-          },
-          {
-            "description": "Distance (meters) of the focal group from the center of its home range at the time of contest. Controls for how deep in home-range (core vs periphery) the focal group was; can capture resource-defense advantage.",
-            "is_moderator": false,
-            "moderator_on": null,
-            "columns": [
-              "focal_home_dist"
-            ]
-          }
-        ]
-      },
-      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    # Make a copy to avoid modifying original\n    df = df.copy()\n\n    # Ensure required columns exist and convert to numeric when appropriate\n    # Original columns (based on provided schema descriptions):\n    # - dyad: 1 if focal won, 0 if other won (DV)\n    # - f_other: Number of individuals in focal group (per schema description)\n    # - f_focal: Number of individuals in other group (per schema description)\n    # - n_focal: Number of males in focal group\n    # - win: Distance (m) of focal group from center of its home range\n    # - m_focal: Distance (m) of other group from center of its home range\n\n    # Convert numeric-ish columns where possible\n    numeric_cols = ['f_other', 'f_focal', 'n_focal', 'win', 'm_focal']\n    for col in numeric_cols:\n        if col in df.columns:\n            df[col] = pd.to_numeric(df[col], errors='coerce')\n\n    # Handle dyad (the dependent variable) robustly so it's binary 0/1\n    def _to_binary_dyad(v):\n        if pd.isna(v):\n            return np.nan\n        # Booleans\n        if isinstance(v, (bool, np.bool_)):\n            return int(v)\n        # Numeric values\n        try:\n            num = float(v)\n            if num == 1.0:\n                return 1\n            if num == 0.0:\n                return 0\n            # If numeric but not 0/1, treat non-zero as 1, zero as 0 (conservative fallback)\n            return 1 if num != 0 else 0\n        except Exception:\n            pass\n        # Strings: common labels\n        s = str(v).strip().lower()\n        if s in {\n            '1', '1.0', 'true', 't', 'yes', 'y',\n            'focal', 'focal_win', 'focal_won', 'focal win', 'winner_focal', 'winner'\n        }:\n            return 1\n        if s in {\n            '0', '0.0', 'false', 'f', 'no', 'n',\n            'other', 'other_win', 'other_won', 'other win', 'loser', 'lost'\n        }:\n            return 0\n        # Containment checks\n        if 'focal' in s:\n            return 1\n        if 'other' in s:\n            return 0\n        # As a last resort, attempt numeric conversion of the string\n        try:\n            num = float(s)\n            return 1 if num != 0 else 0\n        except Exception:\n            return np.nan\n\n    if 'dyad' in df.columns:\n        df['dyad'] = df['dyad'].apply(_to_binary_dyad)\n    else:\n        # If dyad missing, create column filled with NaN so downstream code will drop rows\n        df['dyad'] = np.nan\n\n    # Drop rows with missing values in the core variables used to construct predictors/outcome\n    df = df.dropna(subset=['dyad', 'f_other', 'f_focal', 'win', 'm_focal'])\n\n    # Map and create clearer column names (final dataframe columns used in modeling):\n    # focal_size: number of individuals in focal group (from original f_other description)\n    # other_size: number of individuals in other group (from original f_focal description)\n    df['focal_size'] = df['f_other'].astype(float)\n    df['other_size'] = df['f_focal'].astype(float)\n\n    # Relative size (ratio) and standardized z-score\n    # Avoid division by zero\n    df['RelSizeRatio'] = df['focal_size'] / df['other_size'].replace({0: np.nan})\n    rel_mean = df['RelSizeRatio'].mean()\n    rel_std = df['RelSizeRatio'].std(ddof=0)\n    if pd.isna(rel_std) or rel_std == 0:\n        rel_std = 1.0\n    df['RelSizeRatio_z'] = (df['RelSizeRatio'] - rel_mean) / rel_std\n\n    # Focal males control\n    df['focal_males'] = df['n_focal'].astype(float)\n\n    # Distances of groups from their home-centers (contest location information)\n    # focal_home_dist: distance of focal group from its home center (original column 'win')\n    # other_home_dist: distance of other group from its home center (original column 'm_focal')\n    df['focal_home_dist'] = df['win'].astype(float)\n    df['other_home_dist'] = df['m_focal'].astype(float)\n\n    # Define contest location: which group's home center is the contest closer to?\n    def _loc_label(row):\n        if pd.isna(row['focal_home_dist']) or pd.isna(row['other_home_dist']):\n            return np.nan\n        if row['focal_home_dist'] < row['other_home_dist']:\n            return 'FocalHome'\n        elif row['focal_home_dist'] > row['other_home_dist']:\n            return 'OtherHome'\n        else:\n            return 'Neutral'\n\n    df['ContestLocation'] = df.apply(_loc_label, axis=1)\n\n    # Encode ContestLocation as two dummy variables with 'Neutral' as implicit reference (both 0 -> Neutral)\n    df['ContestLocation_FocalHome'] = (df['ContestLocation'] == 'FocalHome').astype(int)\n    df['ContestLocation_OtherHome'] = (df['ContestLocation'] == 'OtherHome').astype(int)\n\n    # Ensure outcome is integer 0/1\n    # Note: after dropna above, dyad should be non-missing; cast to int\n    df['dyad'] = df['dyad'].astype(int)\n\n    # Keep only columns necessary for modeling (but still return full df). The model will use:\n    # ['dyad', 'RelSizeRatio_z', 'ContestLocation_FocalHome', 'ContestLocation_OtherHome', 'focal_males', 'focal_home_dist']\n    return df",
-      "m_code": "def model(df: pd.DataFrame) -> Any:\n    # Build design matrix for logistic regression (binary outcome dyad)\n\n    # Select predictor columns - must exist in transformed df\n    predictors = ['RelSizeRatio_z', 'ContestLocation_FocalHome', 'ContestLocation_OtherHome', 'focal_males', 'focal_home_dist']\n\n    # Drop rows with missing values in predictors or outcome just in case\n    model_df = df.dropna(subset=['dyad'] + predictors).copy()\n\n    if model_df.shape[0] == 0:\n        raise ValueError(\"No data available after dropping missing values for model fitting.\")\n\n    X = model_df[predictors].copy()\n    X = sm.add_constant(X, has_constant='add')\n    y = model_df['dyad'].astype(float)\n\n    # Validate that endog is in [0,1] and only contains 0/1\n    unique_vals = np.unique(y.values)\n    if not np.all(np.isin(unique_vals, [0.0, 1.0])):\n        raise ValueError(f\"Dependent variable 'dyad' must be binary 0/1 after transform. Found values: {unique_vals}\")\n\n    # Ensure both classes are present\n    if not (0.0 in unique_vals and 1.0 in unique_vals):\n        # Instead of raising an error, return a simple results-like object that indicates\n        # that only a single class is present. This preserves downstream workflows\n        # that expect a 'results' object while avoiding a hard failure.\n        warnings.warn(f\"Dependent variable 'dyad' contains a single class {unique_vals}. Returning a placeholder results object.\")\n        params = pd.Series(np.nan, index=X.columns)\n        bse = pd.Series(np.nan, index=X.columns)\n        pvalues = pd.Series(np.nan, index=X.columns)\n        nobs = int(y.shape[0])\n        class_val = float(unique_vals[0])\n\n        def _predict(exog):\n            # exog may be a DataFrame, array, or number of rows\n            try:\n                if hasattr(exog, 'shape'):\n                    n = int(exog.shape[0])\n                else:\n                    n = int(len(exog))\n            except Exception:\n                n = 1\n            return np.full(n, class_val, dtype=float)\n\n        placeholder = SimpleNamespace(\n            params=params,\n            bse=bse,\n            pvalues=pvalues,\n            nobs=nobs,\n            llf=np.nan,\n            model=None,\n            converged=False,\n            predict=_predict\n        )\n        return placeholder\n\n    # Remove predictors that are constant (zero variance) because they cause singular matrix\n    tol = 1e-12\n    const_cols = []\n    for col in X.columns:\n        # variance computed with ddof=0\n        if X[col].var(ddof=0) <= tol:\n            const_cols.append(col)\n    if const_cols:\n        # Prefer to keep the intercept if present; drop other constant predictors\n        cols_to_drop = [c for c in const_cols if c != 'const']\n        if cols_to_drop:\n            warnings.warn(f\"Dropping constant predictor columns due to zero variance: {cols_to_drop}\")\n            X = X.drop(columns=cols_to_drop)\n        else:\n            # Only constant column is 'const'; that's fine to keep\n            pass\n\n    # Iteratively remove perfectly collinear predictors based on matrix rank and small-variance heuristic\n    def ensure_full_rank(exog: pd.DataFrame) -> pd.DataFrame:\n        exog_mat = exog.values\n        rank = np.linalg.matrix_rank(exog_mat)\n        cols = list(exog.columns)\n        # If full rank, return as is\n        while rank < exog_mat.shape[1]:\n            # Compute variances and drop the column with smallest variance (except prefer not to drop 'const' unless necessary)\n            variances = exog.var(ddof=0)\n            # prefer dropping non-const columns first\n            non_const = [c for c in cols if c != 'const']\n            if non_const:\n                # find non-const column with smallest variance\n                col_to_drop = min(non_const, key=lambda c: variances.get(c, 0.0))\n            else:\n                # must drop const if it's causing problem (rare)\n                col_to_drop = 'const'\n            warnings.warn(f\"Dropping column '{col_to_drop}' to remove linear dependence / singularity.\")\n            exog = exog.drop(columns=[col_to_drop])\n            cols = list(exog.columns)\n            exog_mat = exog.values\n            rank = np.linalg.matrix_rank(exog_mat)\n            if exog.shape[1] == 0:\n                raise RuntimeError(\"All predictors were dropped due to collinearity; cannot fit model.\")\n        return exog\n\n    X_clean = ensure_full_rank(X)\n\n    # Fit logistic regression (Logit)\n    logit_model = sm.Logit(y, X_clean)\n    try:\n        results = logit_model.fit(disp=False, maxiter=100)\n    except Exception as e:\n        # Attempt a penalized fit if perfect separation or convergence issues arise\n        try:\n            # Use L1 regularization as a fallback (statsmodels supports 'l1' methods for fit_regularized)\n            results = logit_model.fit_regularized(method='l1', alpha=1.0, maxiter=100)\n        except Exception as e2:\n            # Provide a clear error including both exceptions\n            raise RuntimeError(f\"Logistic regression failed. Initial error: {e}; regularized fit error: {e2}\")\n\n    # Return the fitted results object (contains parameters, standard errors, p-values, predictions, etc.)\n    return results"
-    },
-    "2": {
-      "cvars": {
-        "ivs": [
-          {
-            "description": "Relative group size between focal and other group, operationalized as the log ratio of focal total group size to other total group size (log(total_focal / total_other)). Computed from counts of adult females and adult males in each group.",
-            "columns": [
-              "log_rel_size",
-              "rel_size_ratio",
-              "rel_size_diff",
-              "total_focal",
-              "total_other"
-            ]
-          },
-          {
-            "description": "Contest location relative to group home-range centers. Categorical variable with values: 'Focal' (contest occurred closer to focal group's home-range center), 'Other' (closer to other group's center), or 'Neutral' (no strong proximity difference). Also provided as binary dummy columns for modeling.",
-            "columns": [
-              "ContestLocation",
-              "ContestLoc_Focal",
-              "ContestLoc_Other"
-            ]
-          }
-        ],
-        "dv": {
-          "description": "Outcome of the intergroup contest: binary indicator equal to 1 if the focal group won the contest and 0 if the other group won. (Same as original 'dyad' column).",
-          "columns": [
-            "dyad"
-          ]
-        },
-        "controls": [
-          {
-            "description": "Number of adult males in the focal group. Included as a numeric control since male number can influence contest outcome.",
-            "is_moderator": false,
-            "moderator_on": "",
-            "columns": [
-              "n_focal"
-            ]
-          },
-          {
-            "description": "Number of adult males in the other group. Included as a numeric control.",
-            "is_moderator": false,
-            "moderator_on": "",
-            "columns": [
-              "other"
-            ]
-          },
-          {
-            "description": "Identifier for dyad / pair of groups (used for clustering standard errors). Not a predictor but used to account for non-independence of observations within dyads.",
-            "is_moderator": false,
-            "moderator_on": "",
-            "columns": [
-              "m_other"
-            ]
-          }
-        ]
-      },
-      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    # Make a copy to avoid modifying original\n    df = df.copy()\n\n    # Required columns check - will raise if missing\n    required = ['dyad', 'win', 'm_focal', 'f_other', 'f_focal', 'n_focal', 'other', 'm_other']\n    missing = [c for c in required if c not in df.columns]\n    if missing:\n        raise KeyError(f\"Missing required columns for transformation: {missing}\")\n\n    # Drop rows with missing values in essential columns\n    df = df.dropna(subset=['dyad', 'win', 'm_focal', 'f_other', 'f_focal', 'n_focal', 'other', 'm_other'])\n\n    # Ensure integer/numeric types where appropriate\n    numeric_cols = ['dyad', 'win', 'm_focal', 'f_other', 'f_focal', 'n_focal', 'other']\n    for c in numeric_cols:\n        df[c] = pd.to_numeric(df[c], errors='coerce')\n    df = df.dropna(subset=numeric_cols)\n\n    # Derive total group sizes\n    # NOTE: field descriptions in the provided schema are inconsistent, so we assume\n    #   - f_other contains the number of adult females in the focal group\n    #   - f_focal contains the number of adult females in the other group\n    #   - n_focal contains the number of adult males in the focal group\n    #   - other contains the number of adult males in the other group\n    # These assumptions are documented above and used to compute totals below.\n    df['total_focal'] = df['f_other'] + df['n_focal']\n    df['total_other'] = df['f_focal'] + df['other']\n\n    # Guard against division by zero when computing ratios\n    eps = 1e-6\n    df['total_other'] = df['total_other'].replace({0: eps})\n    df['rel_size_ratio'] = df['total_focal'] / df['total_other']\n    df['rel_size_diff'] = df['total_focal'] - df['total_other']\n\n    # Log-transformed relative size (symmetric and interpretable)\n    # Add small epsilon to avoid log(0)\n    df['log_rel_size'] = np.log(df['rel_size_ratio'].replace(0, eps))\n\n    # Operationalize contest location using distances to group centers.\n    # We assume 'win' is the distance (m) from contest location to the focal group's home-range center\n    # and 'm_focal' is the distance (m) from contest location to the other group's home-range center\n    # (these names / descriptions were inconsistent in the schema; we adopt this mapping below).\n    df['dist_to_focal'] = df['win']\n    df['dist_to_other'] = df['m_focal']\n\n    # Define contest location categorical variable using a practical threshold.\n    # If focal is at least 50 m closer than other -> 'Focal'; if other is >=50 m closer -> 'Other'; else 'Neutral'\n    # (50 m threshold chosen as a reasonable buffer given meter-scale distances in the data; adjust if needed.)\n    df['ContestLocation'] = 'Neutral'\n    df.loc[df['dist_to_focal'] + 50 < df['dist_to_other'], 'ContestLocation'] = 'Focal'\n    df.loc[df['dist_to_other'] + 50 < df['dist_to_focal'], 'ContestLocation'] = 'Other'\n\n    # Binary dummy columns for modeling (Neutral is reference)\n    df['ContestLoc_Focal'] = (df['ContestLocation'] == 'Focal').astype(int)\n    df['ContestLoc_Other'] = (df['ContestLocation'] == 'Other').astype(int)\n\n    # Ensure dyad is integer 0/1\n    df['dyad'] = df['dyad'].astype(int)\n    df = df[df['dyad'].isin([0, 1])]\n\n    # Keep only columns needed for modeling and diagnostics\n    cols_keep = [\n        'dyad',\n        'total_focal', 'total_other', 'rel_size_ratio', 'rel_size_diff', 'log_rel_size',\n        'ContestLocation', 'ContestLoc_Focal', 'ContestLoc_Other',\n        'n_focal', 'other', 'm_other',\n        'dist_to_focal', 'dist_to_other'\n    ]\n    # Some of these columns may overlap with original columns; ensure we only return existing ones\n    cols_keep = [c for c in cols_keep if c in df.columns]\n\n    return df[cols_keep].reset_index(drop=True)",
-      "m_code": "def model(df: pd.DataFrame) -> Any:\n    # Build design matrix for logistic regression (Binomial GLM)\n    # Predictors: log_rel_size, Contest location dummies, controls (n_focal, other), and interactions between size and location\n    df = df.copy()\n\n    required = ['dyad', 'log_rel_size', 'ContestLoc_Focal', 'ContestLoc_Other', 'n_focal', 'other', 'm_other']\n    missing = [c for c in required if c not in df.columns]\n    if missing:\n        raise KeyError(f\"Missing required columns for modeling: {missing}\")\n\n    # Interaction terms: size x location\n    df['log_size_x_Focal'] = df['log_rel_size'] * df['ContestLoc_Focal']\n    df['log_size_x_Other'] = df['log_rel_size'] * df['ContestLoc_Other']\n\n    # Predictor matrix\n    predictors = [\n        'log_rel_size',\n        'ContestLoc_Focal', 'ContestLoc_Other',\n        'log_size_x_Focal', 'log_size_x_Other',\n        'n_focal', 'other'\n    ]\n\n    X = df[predictors]\n    X = sm.add_constant(X, has_constant='add')\n    y = df['dyad']\n\n    # Fit Binomial GLM (logit link)\n    model_glm = sm.GLM(y, X, family=sm.families.Binomial())\n    res = model_glm.fit()\n\n    # Obtain cluster-robust standard errors clustered by dyad pair identifier (m_other)\n    try:\n        res_clust = res.get_robustcov_results(cov_type='cluster', groups=df['m_other'])\n    except Exception:\n        # If clustering fails for any reason, fall back to the default results\n        res_clust = res\n\n    # Print a concise summary and return the robust result object\n    print(res_clust.summary())\n    return res_clust"
-    },
-    "3": {
-      "cvars": {
-        "ivs": [
-          {
-            "description": "Relative group size of the focal group compared to the other group (primary predictor). Calculated as focal_total / other_total (ratio). Values >1 indicate focal group larger than other group.",
-            "columns": [
-              "relative_size_ratio"
-            ]
-          },
-          {
-            "description": "Contest location / home-range advantage. A continuous metric 'adv_home' = (other_dist - focal_dist): positive values mean the focal group was closer to its own home-range center than the opponent (advantage to focal). Also represented categorically with dummy columns for where the contest occurred relative to home ranges.",
-            "columns": [
-              "adv_home",
-              "Location_FocalHome",
-              "Location_OtherHome"
-            ]
-          }
-        ],
-        "dv": {
-          "description": "Outcome of the intergroup contest: 1 = focal group won, 0 = focal group lost.",
-          "columns": [
-            "Win"
-          ]
-        },
-        "controls": [
-          {
-            "description": "Absolute size of the focal group (control for overall group size).",
-            "is_moderator": false,
-            "moderator_on": "",
-            "columns": [
-              "focal_total"
-            ]
-          },
-          {
-            "description": "Number of adult males in the focal group (control).",
-            "is_moderator": false,
-            "moderator_on": "",
-            "columns": [
-              "n_males_focal"
-            ]
-          },
-          {
-            "description": "Number of adult males in the other group (control).",
-            "is_moderator": false,
-            "moderator_on": "",
-            "columns": [
-              "n_males_other"
-            ]
-          },
-          {
-            "description": "Dyad/pair ID used for clustering of standard errors (not a predictor but used for robust inference). This is the original column m_other.",
-            "is_moderator": false,
-            "moderator_on": "",
-            "columns": [
-              "m_other"
-            ]
-          }
-        ]
-      },
-      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    # Work on a copy\n    df = df.copy()\n\n    # Ensure key input columns are numeric (coerce invalids to NaN)\n    df['f_focal'] = pd.to_numeric(df.get('f_focal'), errors='coerce')\n    df['f_other'] = pd.to_numeric(df.get('f_other'), errors='coerce')\n    df['win'] = pd.to_numeric(df.get('win'), errors='coerce')        # described in schema as focal distance\n    df['m_focal'] = pd.to_numeric(df.get('m_focal'), errors='coerce')# described as other distance\n    df['n_focal'] = pd.to_numeric(df.get('n_focal'), errors='coerce')\n    df['other'] = pd.to_numeric(df.get('other'), errors='coerce')    # number of males in other group\n    df['dyad'] = pd.to_numeric(df.get('dyad'), errors='coerce')\n\n    # Derive clear, consistently-named columns for modeling\n    # Total group sizes (use f_focal and f_other as total group sizes recorded in the dataset schema)\n    df['focal_total'] = df['f_focal']\n    df['other_total'] = df['f_other']\n\n    # Relative size measures\n    df['relative_size'] = df['focal_total'] - df['other_total']\n    # Ratio is typically more interpretable for contests: focal / other\n    df['relative_size_ratio'] = df['focal_total'] / df['other_total']\n\n    # Distances from home-range centers (as described in schema):\n    df['focal_dist'] = df['win']    # distance of focal group from center of its home range\n    df['other_dist'] = df['m_focal']\n\n    # Continuous location advantage: positive => focal nearer its center than other (advantage)\n    df['adv_home'] = df['other_dist'] - df['focal_dist']\n\n    # Categorical location: define an approximate neutral band (+/-10 m) to create categories\n    df['location'] = np.where(df['adv_home'] > 10, 'FocalHome',\n                              np.where(df['adv_home'] < -10, 'OtherHome', 'Neutral'))\n\n    # Make dummy variables for categorical location; drop the 'Neutral' column to use it as reference\n    loc_dummies = pd.get_dummies(df['location'], prefix='Location')\n    if 'Location_Neutral' in loc_dummies.columns:\n        loc_dummies = loc_dummies.drop(columns=['Location_Neutral'])\n    # If dataset lacks one of the categories, the corresponding dummy will simply be absent; downstream code handles that\n    df = pd.concat([df, loc_dummies], axis=1)\n\n    # Controls: number of males in each group (rename for clarity)\n    df['n_males_focal'] = df['n_focal']\n    df['n_males_other'] = df['other']\n\n    # Dependent variable: Win (1 = focal won, 0 = other won)\n    df['Win'] = df['dyad'].astype('Int64')\n\n    # Interaction term between relative size and home advantage (explicitly computed for modeling)\n    df['size_adv_interaction'] = df['relative_size_ratio'] * df['adv_home']\n\n    # Keep only rows with complete data for the variables used in the model\n    required_cols = [\n        'Win',\n        'relative_size_ratio',\n        'adv_home',\n        'size_adv_interaction',\n        'focal_total',\n        'n_males_focal',\n        'n_males_other',\n        'm_other'\n    ]\n    df = df.dropna(subset=required_cols)\n\n    # Reset index and return\n    df = df.reset_index(drop=True)\n    return df\n",
-      "m_code": "def model(df: pd.DataFrame) -> Any:\n    import statsmodels.api as sm\n\n    # Ensure required dummy columns exist (if a category was absent in this sample, create zero column)\n    for col in ['Location_FocalHome', 'Location_OtherHome']:\n        if col not in df.columns:\n            df[col] = 0\n\n    # Predictor columns: main effects, interaction, location dummies, and controls\n    X_cols = [\n        'relative_size_ratio',\n        'adv_home',\n        'size_adv_interaction',\n        'Location_FocalHome',\n        'Location_OtherHome',\n        'focal_total',\n        'n_males_focal',\n        'n_males_other'\n    ]\n\n    X = df[X_cols].astype(float)\n    X = sm.add_constant(X)\n    y = df['Win'].astype(float)\n\n    # Fit a logistic regression (binomial) predicting the probability focal group wins\n    logit = sm.Logit(y, X)\n    res = logit.fit(disp=False)\n\n    # Obtain cluster-robust standard errors clustered by dyad/pair id (m_other) if possible\n    try:\n        res_robust = res.get_robustcov_results(cov_type='cluster', groups=df['m_other'])\n    except Exception:\n        # Fall back to default results if clustering fails\n        res_robust = res\n\n    # Return the fitted model with robust covariances where available\n    return res_robust\n"
-    },
-    "4": {
-      "cvars": {
-        "ivs": [
-          {
-            "description": "Relative group size (primary independent variable). Computed as the ratio of the focal group's total number of individuals to the other group's total number of individuals. Higher values >1 mean the focal group is larger.",
-            "columns": [
-              "rel_size_ratio"
-            ]
-          },
-          {
-            "description": "Contest location (categorical independent variable). Indicates which group's home-range center is nearer to the contest location: 'FocalNear' if the focal group is nearer, 'OtherNear' if the other group is nearer, or 'Neutral' if distances are equal.",
-            "columns": [
-              "contest_location"
+              "location_advantage_z",
+              "location_advantage",
+              "focal_home"
             ]
           }
         ],
@@ -267,41 +78,250 @@
         },
         "controls": [
           {
-            "description": "Absolute difference in distances from each group's home-range center to the contest location (other_dist - focal_dist). Controls for continuous proximity difference beyond the categorical location indicator.",
+            "description": "Difference in number of adult males between focal and other group (focal - other). Male composition can affect contest outcomes and is included as a numeric control.",
             "is_moderator": false,
             "moderator_on": null,
             "columns": [
-              "dist_diff"
+              "male_diff",
+              "n_focal",
+              "other"
             ]
           },
           {
-            "description": "Number of adult males in the focal group (control for composition that may influence fighting ability).",
+            "description": "Dyad / encounter pair ID. Included as a categorical control (fixed effect) to account for non-independence or repeated pair-specific effects across observations.",
             "is_moderator": false,
             "moderator_on": null,
             "columns": [
-              "focal_males"
-            ]
-          },
-          {
-            "description": "Number of adult males in the other group (control).",
-            "is_moderator": false,
-            "moderator_on": null,
-            "columns": [
-              "other_males"
-            ]
-          },
-          {
-            "description": "Absolute difference in total group size (focal_total - other_total). Included as an additional control/alternate operationalization of relative size (keeps information on direction and magnitude).",
-            "is_moderator": false,
-            "moderator_on": null,
-            "columns": [
-              "rel_size_diff"
+              "m_other"
             ]
           }
         ]
       },
-      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Standardize and derive variables needed for modeling intergroup contest outcomes.\n\n    Assumptions/notes about original columns (based on provided schema descriptions):\n    - 'f_other' contains the total number of individuals in the focal group.\n    - 'f_focal' contains the total number of individuals in the other group.\n    - 'win' contains the focal group's distance (meters) from center of its home range.\n    - 'm_focal' contains the other group's distance (meters) from center of its home range.\n    - 'n_focal' contains number of males in focal group.\n    - 'other' contains number of males in other group.\n    - 'dist_focal' contains number of females in focal group (kept if needed, but not used directly here).\n    - 'focal' contains number of females in other group.\n    - 'dyad' is the binary contest outcome (1 if focal won, 0 if other won).\n\n    The function will create clear named columns used in the model: focal_total, other_total, rel_size_ratio,\n    rel_size_diff, focal_dist, other_dist, dist_diff, contest_location, focal_males, other_males.\n    \"\"\"\n    df = df.copy()\n\n    # Ensure dyad is binary integer\n    df['dyad'] = df['dyad'].astype(int)\n\n    # Map / derive clear columns (use descriptions from schema)\n    # Total group sizes\n    df['focal_total'] = df['f_other']\n    df['other_total'] = df['f_focal']\n\n    # Male counts\n    df['focal_males'] = df['n_focal']\n    df['other_males'] = df['other']\n\n    # Female counts (kept if needed later)\n    df['focal_females'] = df['dist_focal']\n    df['other_females'] = df['focal']\n\n    # Distances from home-range centers to contest location (per schema descriptions)\n    df['focal_dist'] = df['win']\n    df['other_dist'] = df['m_focal']\n\n    # Relative size (ratio and difference)\n    # Avoid division by zero by replacing zeros (unlikely given schema) with np.nan\n    df['other_total'] = df['other_total'].replace({0: np.nan})\n    df['rel_size_ratio'] = df['focal_total'] / df['other_total']\n    df['rel_size_diff'] = df['focal_total'] - df['other_total']\n\n    # Distance difference (other_dist - focal_dist): positive means other is farther from its center than focal\n    df['dist_diff'] = df['other_dist'] - df['focal_dist']\n\n    # Categorical contest location: which group is nearer to the contest location\n    # If focal_dist < other_dist => focal group's home is nearer to contest => 'FocalNear'\n    # If focal_dist > other_dist => other group's home is nearer => 'OtherNear'\n    # If equal (rare) => 'Neutral'\n    df['contest_location'] = np.where(df['focal_dist'] < df['other_dist'],\n                                      'FocalNear',\n                                      np.where(df['focal_dist'] > df['other_dist'], 'OtherNear', 'Neutral'))\n\n    # Drop rows missing any required modeling columns\n    required = [\n        'dyad',\n        'rel_size_ratio',\n        'rel_size_diff',\n        'contest_location',\n        'focal_males',\n        'other_males',\n        'dist_diff'\n    ]\n    df = df.dropna(subset=required)\n\n    # Reset index for cleanliness\n    df = df.reset_index(drop=True)\n    return df",
-      "m_code": "def model(df: pd.DataFrame) -> Any:\n    \"\"\"\n    Fit a logistic regression (binomial GLM / Logit) predicting the probability that the focal group wins\n    (dyad == 1) as a function of relative size, contest location, their interaction, and controls.\n\n    Model specification (final):\n      logit(P(dyad=1)) = const + rel_size_ratio + contest_location_dummies + rel_size_ratio:contest_location_dummies\n                          + focal_males + other_males + dist_diff + rel_size_diff\n\n    Interaction terms test whether the effect of relative size differs depending on contest location.\n    \"\"\"\n    df2 = df.copy()\n\n    # Prepare design matrix\n    # Create dummies for contest_location; drop_first=True to use one level as reference\n    loc_dummies = pd.get_dummies(df2['contest_location'], prefix='contest_loc', drop_first=True)\n\n    # Base predictors and controls\n    X = pd.concat([\n        df2[['rel_size_ratio', 'focal_males', 'other_males', 'dist_diff', 'rel_size_diff']].astype(float),\n        loc_dummies\n    ], axis=1)\n\n    # Add interaction terms: rel_size_ratio * each location dummy\n    for col in loc_dummies.columns:\n        X[f'rel_size_ratio:{col}'] = X['rel_size_ratio'] * X[col]\n\n    # Add constant\n    X = sm.add_constant(X, has_constant='add')\n\n    # Response\n    y = df2['dyad'].astype(int)\n\n    # Fit logistic regression (Logit). Use try/except to fall back to GLM if convergence issues.\n    try:\n        model_res = sm.Logit(y, X).fit(disp=False)\n    except Exception:\n        # fall back to GLM binomial with default freq weights if Logit fails\n        model_res = sm.GLM(y, X, family=sm.families.Binomial()).fit()\n\n    return model_res"
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform raw capuchin contest data to variables used in modeling.\n\n    Assumptions based on provided schema descriptions:\n      - 'dyad' is the binary outcome (1 if focal won, 0 if other won).\n      - 'f_other' and 'f_focal' are described as \"Number of individuals in focal group\" and\n        \"Number of individuals in other group\" respectively (descriptions in schema are inconsistent\n        with column names; here we follow the schema descriptions rather than rely solely on column names).\n      - 'win' = distance (m) of focal group from its home-range center.\n      - 'm_focal' = distance (m) of other group from its home-range center.\n\n    Produces the following new columns (which are used in the statistical model):\n      - focal_total, other_total, size_diff, size_ratio, size_ratio_z\n      - location_advantage = other_distance - focal_distance (positive if contest nearer focal home)\n      - location_advantage_z, focal_home (binary indicator)\n      - male_diff\n\n    Any rows with impossible or missing values needed for the model are dropped.\n    \"\"\"\n    df = df.copy()\n\n    # Ensure dyad is integer 0/1\n    df['dyad'] = df['dyad'].astype(float)\n    df = df.dropna(subset=['dyad'])\n    df['dyad'] = df['dyad'].astype(int)\n\n    # Create total group-size variables using the columns indicated in the schema descriptions\n    # f_other -> described as number of individuals in focal group\n    # f_focal -> described as number of individuals in other group\n    df['focal_total'] = pd.to_numeric(df['f_other'], errors='coerce')\n    df['other_total'] = pd.to_numeric(df['f_focal'], errors='coerce')\n\n    # If either total is missing or zero, mark as missing (can't compute ratio)\n    df.loc[df['other_total'] == 0, 'other_total'] = np.nan\n\n    # Size difference and ratio\n    df['size_diff'] = df['focal_total'] - df['other_total']\n    df['size_ratio'] = df['focal_total'] / df['other_total']\n\n    # Male counts: n_focal described as number of males in focal group; 'other' described as number of males in other group\n    df['n_focal'] = pd.to_numeric(df['n_focal'], errors='coerce')\n    df['other'] = pd.to_numeric(df['other'], errors='coerce')\n    df['male_diff'] = df['n_focal'] - df['other']\n\n    # Contest location: 'win' is focal distance from its home center; 'm_focal' is other group's distance\n    df['focal_dist_from_home'] = pd.to_numeric(df['win'], errors='coerce')\n    df['other_dist_from_home'] = pd.to_numeric(df['m_focal'], errors='coerce')\n\n    # location_advantage: positive means contest is relatively closer to focal group's center than the other group's center\n    df['location_advantage'] = df['other_dist_from_home'] - df['focal_dist_from_home']\n\n    # Binary indicator: contest is closer to focal home (1) vs not (0)\n    df['focal_home'] = (df['location_advantage'] > 0).astype(int)\n\n    # Drop rows missing the key predictors or outcome\n    df = df.dropna(subset=['focal_total', 'other_total', 'location_advantage', 'dyad'])\n\n    # Standardize continuous predictors (z-score) for model stability and interpretation\n    for col in ['size_ratio', 'location_advantage', 'size_diff', 'male_diff']:\n        if col in df.columns:\n            # compute z-score; if constant or all NaN, set to NaN\n            vals = pd.to_numeric(df[col], errors='coerce')\n            if vals.dropna().shape[0] > 1 and vals.std() > 0:\n                df[col + '_z'] = (vals - vals.mean()) / vals.std()\n            else:\n                df[col + '_z'] = np.nan\n\n    # Keep only columns relevant for modeling and diagnostics (plus original ids)\n    keep_cols = [\n        'dyad',\n        'focal_total', 'other_total', 'size_diff', 'size_ratio', 'size_ratio_z',\n        'location_advantage', 'location_advantage_z', 'focal_home',\n        'male_diff', 'n_focal', 'other',\n        'm_other',  # dyad / encounter id (categorical control)\n        'focal_dist_from_home', 'other_dist_from_home'\n    ]\n\n    # Some of these may not exist if conversion failed; filter\n    keep_cols = [c for c in keep_cols if c in df.columns]\n    df = df[keep_cols].reset_index(drop=True)\n\n    return df",
+      "m_code": "def model(df: pd.DataFrame):\n    \"\"\"\n    Fit a logistic regression (binomial GLM) predicting focal-group victory (dyad) from\n    relative group size, contest location, their interaction, and controls.\n\n    Model specification (primary):\n      dyad ~ size_ratio_z * location_advantage_z + male_diff + C(m_other)\n\n    - size_ratio_z: standardized focal/other group size ratio\n    - location_advantage_z: standardized continuous contest-location advantage (positive -> closer to focal home)\n    - male_diff: difference in number of adult males (focal - other)\n    - C(m_other): categorical dyad/encounter ID as a fixed-effect control\n\n    Returns the fitted model object (statsmodels result) so the caller can inspect coefficients, CIs, etc.\n    \"\"\"\n    import statsmodels.formula.api as smf\n    import statsmodels.api as sm\n\n    # Make a copy to avoid modifying input\n    df = df.copy()\n\n    # Ensure necessary columns exist\n    required = ['dyad', 'size_ratio_z', 'location_advantage_z', 'male_diff', 'm_other']\n    missing = [c for c in required if c not in df.columns]\n    if missing:\n        raise ValueError(f\"Missing required columns for modeling: {missing}\")\n\n    # Drop rows with missing predictors\n    model_df = df.dropna(subset=['dyad', 'size_ratio_z', 'location_advantage_z', 'male_diff'])\n\n    # Fit binomial GLM with robust (HC3) standard errors\n    formula = 'dyad ~ size_ratio_z * location_advantage_z + male_diff + C(m_other)'\n    glm_binom = smf.glm(formula=formula, data=model_df, family=sm.families.Binomial())\n    results = glm_binom.fit()\n\n    # Attach robust covariance (HC3) - supply clamped try/except in case of issues\n    try:\n        results_robust = results.get_robustcov_results(cov_type='HC3')\n    except Exception:\n        results_robust = results\n\n    # Return the robust-results object (has .summary(), .params, .bse, .conf_int(), etc.)\n    return results_robust"
+    },
+    "2": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Relative group size between the focal and the other group. Two numeric summaries are provided: size_ratio (= focal_size / other_size) and group_size_diff (= focal_size - other_size). These capture proportional and absolute advantages in group size.",
+            "columns": [
+              "size_ratio",
+              "group_size_diff"
+            ]
+          },
+          {
+            "description": "Location of the contest relative to group home-range centers. This is converted to dummy variables in the transform step. The model uses the generated dummy columns (reference category = FocalHome).",
+            "columns": [
+              "contest_location_OtherHome",
+              "contest_location_Neutral"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Binary contest outcome: 1 if the focal group won the intergroup contest, 0 if the other group won.",
+          "columns": [
+            "dyad"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Distance (meters) of the focal group from the center of its home range at the time of the contest. Used to help adjust for how far groups were from their home ranges.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "focal_dist"
+            ]
+          },
+          {
+            "description": "Distance (meters) of the other group from the center of its home range at the time of the contest.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "other_dist"
+            ]
+          },
+          {
+            "description": "Number of adult males in the focal group (control for aggressive potential).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "n_males_focal"
+            ]
+          },
+          {
+            "description": "Number of adult males in the other group (control for aggressive potential).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "n_males_other"
+            ]
+          },
+          {
+            "description": "Identifier of the dyad/pair (used for clustering standard errors).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "m_other"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw Crofoot intergroup contest data into an analysis-ready dataframe.\n\n    Produces the following new/renamed columns used in the model:\n      - focal_size: number of individuals in the focal group (from 'f_focal')\n      - other_size: number of individuals in the other group (from 'f_other')\n      - group_size_diff: focal_size - other_size\n      - size_ratio: focal_size / other_size\n      - focal_dist: distance (m) of focal group from its home-range center (from 'win')\n      - other_dist: distance (m) of other group from its home-range center (from 'm_focal')\n      - contest_location: categorical ('FocalHome', 'OtherHome', 'Neutral')\n      - contest_location_*: dummy columns for contest_location (drop_first=True)\n      - n_males_focal: number of males in focal group (from 'n_focal')\n      - n_males_other: number of males in other group (from 'other')\n\n    Notes/assumptions: variable names in the source file have inconsistent textual descriptions; this transform uses the numeric columns by name as provided.\n    \"\"\"\n    df = df.copy()\n\n    # Keep rows with the key variables present\n    req_cols = ['dyad', 'f_focal', 'f_other', 'win', 'm_focal', 'n_focal', 'other', 'm_other']\n    df = df.dropna(subset=req_cols)\n\n    # Create numeric group size variables. We interpret 'f_focal' as focal group size and 'f_other' as other group size.\n    df['focal_size'] = pd.to_numeric(df['f_focal'], errors='coerce')\n    df['other_size'] = pd.to_numeric(df['f_other'], errors='coerce')\n\n    # Absolute and relative size metrics\n    df['group_size_diff'] = df['focal_size'] - df['other_size']\n    # avoid division by zero\n    df['size_ratio'] = df['focal_size'] / df['other_size'].replace({0: np.nan})\n\n    # Distances from home-range centers: use 'win' as focal distance and 'm_focal' as other distance (as per dataset numeric ranges)\n    df['focal_dist'] = pd.to_numeric(df['win'], errors='coerce')\n    df['other_dist'] = pd.to_numeric(df['m_focal'], errors='coerce')\n\n    # Contest location: closer to focal group's center => FocalHome; closer to other group's center => OtherHome; equal (or near equal) => Neutral\n    # Use a small threshold (1 meter) to treat ties as Neutral.\n    df['contest_location'] = np.where(df['focal_dist'] + 1 < df['other_dist'], 'FocalHome',\n                                      np.where(df['other_dist'] + 1 < df['focal_dist'], 'OtherHome', 'Neutral'))\n\n    # Create dummies for contest_location and drop first to avoid multicollinearity (reference = first alphabetical or remaining category depending on presence).\n    dummies = pd.get_dummies(df['contest_location'], prefix='contest_location', drop_first=True)\n    df = pd.concat([df, dummies], axis=1)\n\n    # Ensure outcome is binary integer\n    df['dyad'] = pd.to_numeric(df['dyad'], errors='coerce').astype('Int64')\n\n    # Male counts controls\n    df['n_males_focal'] = pd.to_numeric(df['n_focal'], errors='coerce')\n    df['n_males_other'] = pd.to_numeric(df['other'], errors='coerce')\n\n    # Final drop of any rows that still have NA in required model columns\n    model_cols = ['dyad', 'size_ratio', 'group_size_diff', 'focal_dist', 'other_dist', 'n_males_focal', 'n_males_other', 'm_other']\n    # also include any contest dummy columns that were created\n    contest_dummy_cols = [c for c in df.columns if c.startswith('contest_location_')]\n    model_cols += contest_dummy_cols\n\n    df = df.dropna(subset=model_cols)\n\n    # Convert m_other to integer ID for clustering purposes\n    df['m_other'] = df['m_other'].astype(int)\n\n    # Return the transformed dataframe (keeps original columns plus the engineered variables)\n    return df",
+      "m_code": "def model(df: pd.DataFrame):\n    \"\"\"\n    Fit a binomial (logistic) regression predicting the probability the focal group wins (dyad == 1).\n\n    Model specification (primary):\n      dyad ~ size_ratio * contest_location + group_size_diff + focal_dist + other_dist + n_males_focal + n_males_other\n\n    contest_location enters via its dummy columns (prefix 'contest_location_'); interaction with size_ratio is included.\n    Standard errors are clustered by dyad-pair identifier 'm_other' when possible.\n\n    Returns the fitted statsmodels results object.\n    \"\"\"\n    import statsmodels.api as sm\n\n    df = df.copy()\n\n    # Response\n    y = df['dyad'].astype(int)\n\n    # Base predictors\n    predictors = ['size_ratio', 'group_size_diff', 'focal_dist', 'other_dist', 'n_males_focal', 'n_males_other']\n\n    # Add contest-location dummies (if any): e.g., contest_location_OtherHome, contest_location_Neutral\n    contest_cols = [c for c in df.columns if c.startswith('contest_location_')]\n    predictors += contest_cols\n\n    # Add interaction terms between size_ratio and each contest-location dummy\n    # Create interaction columns in the dataframe (explicitly) so they appear in the model results with clear names\n    for c in contest_cols:\n        inter_name = f'size_ratio_x_{c}'\n        df[inter_name] = df['size_ratio'] * df[c]\n        predictors.append(inter_name)\n\n    X = df[predictors]\n    X = sm.add_constant(X)\n\n    # Fit GLM with binomial family (logit link) and attempt clustered SE by 'm_other'\n    family = sm.families.Binomial()\n    glm_model = sm.GLM(y, X, family=family)\n\n    try:\n        # Clustered standard errors by dyad pair (m_other)\n        results = glm_model.fit(cov_type='cluster', cov_kwds={'groups': df['m_other']})\n    except Exception:\n        # Fallback to default fitting if clustering fails\n        results = glm_model.fit()\n\n    # Print summary for convenience and return the results object\n    print(results.summary())\n    return results"
+    },
+    "3": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Relative group size of the focal group compared to the other group. Represented both as an absolute difference (Focal - Other) and as a ratio (Focal / Other). These capture whether the focal group has more or fewer individuals than the rival.",
+            "columns": [
+              "RelSizeDiff",
+              "RelSizeRatio"
+            ]
+          },
+          {
+            "description": "Contest location: whether the contest occurred closer to the focal group's home-range center, closer to the other group's center, or at a neutral location. Derived from each group's distance to its home-range center.",
+            "columns": [
+              "ContestLocation"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Binary outcome indicating whether the focal group won the contest (1) or lost (0).",
+          "columns": [
+            "WinOutcome"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Absolute size (number of individuals) of the focal group. Used to control for absolute group size beyond the relative difference.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "FocalSize"
+            ]
+          },
+          {
+            "description": "Absolute size (number of individuals) of the other group. Used as a control.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "OtherSize"
+            ]
+          },
+          {
+            "description": "Number of adult/studied males in the focal group (used as a control for fighting ability).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "NumMalesFocal"
+            ]
+          },
+          {
+            "description": "Number of adult/studied males in the other group (used as a control for fighting ability).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "NumMalesOther"
+            ]
+          },
+          {
+            "description": "Distance of the focal group from the center of its home range at the time of contest (meters). Used as a continuous control in addition to categorical ContestLocation.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "FocalDist"
+            ]
+          },
+          {
+            "description": "Distance of the other group from the center of its home range at the time of contest (meters). Used as a continuous control.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "OtherDist"
+            ]
+          },
+          {
+            "description": "Identifier for the dyadic pair (pair of groups involved in the contest). Used for clustering standard errors (non-independence of repeated dyad observations).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "DyadID"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the original dataframe to produce variables for modeling.\n\n    Output columns used in the model:\n      - WinOutcome: binary 0/1 (from 'dyad')\n      - FocalDist: distance of focal group from its home-range center (from 'win')\n      - OtherDist: distance of other group from its home-range center (from 'm_focal')\n      - FocalSize, OtherSize: absolute group sizes (prefer 'f_focal' and 'f_other' if present, otherwise sum of males+females)\n      - NumMalesFocal, NumMalesOther: male counts (from 'n_focal' and 'other')\n      - RelSizeDiff: FocalSize - OtherSize\n      - RelSizeRatio: FocalSize / OtherSize (NaN if OtherSize == 0)\n      - ContestLocation: categorical ('FocalTerritory','OtherTerritory','Neutral') derived from FocalDist and OtherDist\n      - Location_*: dummy variables for contest location (Neutral is reference and therefore dropped)\n      - RelSizeDiff_c: mean-centered RelSizeDiff\n      - MaleDiff: NumMalesFocal - NumMalesOther\n      - DyadID: identifier for dyadic pair (from 'm_other') used for clustering\n    \"\"\"\n    df = df.copy()\n\n    # Ensure numeric where needed; distances are stored in 'win' and 'm_focal' in this dataset\n    df['FocalDist'] = pd.to_numeric(df['win'], errors='coerce')\n    df['OtherDist'] = pd.to_numeric(df['m_focal'], errors='coerce')\n\n    # Prefer explicit total group-size columns if present; else derive from male+female columns\n    if 'f_focal' in df.columns and 'f_other' in df.columns:\n        df['FocalSize'] = pd.to_numeric(df['f_focal'], errors='coerce')\n        df['OtherSize'] = pd.to_numeric(df['f_other'], errors='coerce')\n    else:\n        # Attempt to construct sizes from male and female counts using sensible column names present\n        # Many datasets have columns like n_focal (males), dist_focal or focal (females), other (males), etc.\n        males_focal = pd.to_numeric(df.get('n_focal'), errors='coerce')\n        females_focal = pd.to_numeric(df.get('dist_focal'), errors='coerce') if 'dist_focal' in df.columns else pd.to_numeric(df.get('focal'), errors='coerce')\n        males_other = pd.to_numeric(df.get('other'), errors='coerce')\n        females_other = pd.to_numeric(df.get('focal'), errors='coerce') if 'focal' in df.columns else pd.to_numeric(df.get('dist_other'), errors='coerce')\n\n        # If any component is missing, the sum will be NaN for that row\n        df['FocalSize'] = males_focal + females_focal\n        df['OtherSize'] = males_other + females_other\n\n    # Num males (explicit columns if present)\n    df['NumMalesFocal'] = pd.to_numeric(df.get('n_focal'), errors='coerce')\n    df['NumMalesOther'] = pd.to_numeric(df.get('other'), errors='coerce')\n\n    # Dyad id (used for clustering)\n    df['DyadID'] = df.get('m_other')\n\n    # Drop rows missing core variables required for modeling\n    df = df.dropna(subset=['dyad', 'FocalSize', 'OtherSize', 'FocalDist', 'OtherDist'])\n\n    # Dependent variable\n    df['WinOutcome'] = df['dyad'].astype(int)\n\n    # Relative size measures\n    df['RelSizeDiff'] = df['FocalSize'] - df['OtherSize']\n    # Avoid divide-by-zero\n    df['RelSizeRatio'] = df['FocalSize'] / df['OtherSize'].replace({0: np.nan})\n\n    # Contest location classification: compare distances to each group's home-range center\n    # If focal is substantially closer to its center than the other group (threshold), we call it focal territory\n    # If other is substantially closer, call it other territory. Otherwise call it Neutral.\n    # Use a threshold (in meters) to avoid tiny differences flipping the label. Use 50 m as a reasonable starting value.\n    df['_dist_diff'] = df['FocalDist'] - df['OtherDist']\n    threshold = 50.0\n    df['ContestLocation'] = np.where(df['_dist_diff'] < -threshold, 'FocalTerritory',\n                              np.where(df['_dist_diff'] > threshold, 'OtherTerritory', 'Neutral'))\n\n    # Create dummy columns for contest location; drop Neutral as reference\n    loc_dummies = pd.get_dummies(df['ContestLocation'], prefix='Location')\n    if 'Location_Neutral' in loc_dummies.columns:\n        loc_dummies = loc_dummies.drop(columns=['Location_Neutral'])\n    df = pd.concat([df, loc_dummies], axis=1)\n\n    # Center relative-size difference for interpretation and interaction\n    df['RelSizeDiff_c'] = df['RelSizeDiff'] - df['RelSizeDiff'].mean()\n\n    # Male difference control\n    df['MaleDiff'] = df['NumMalesFocal'] - df['NumMalesOther']\n\n    # Clean up helpers\n    df = df.drop(columns=['_dist_diff'], errors='ignore')\n\n    return df\n",
+      "m_code": "def model(df: pd.DataFrame):\n    \"\"\"\n    Fit a logistic regression predicting the probability that the focal group wins\n    using relative group size, contest location, their interaction, and controls.\n\n    Uses cluster-robust standard errors clustered by dyadic pair (DyadID) to account\n    for non-independence of repeated observations within the same dyad.\n\n    Returns the fitted statsmodels results object with clustered robust SEs.\n    \"\"\"\n    df = df.copy()\n\n    # Outcome\n    y = df['WinOutcome']\n\n    # Base covariates and controls\n    base_cols = [\n        'RelSizeDiff_c',   # centered relative size difference\n        'RelSizeRatio',\n        'FocalSize',\n        'OtherSize',\n        'NumMalesFocal',\n        'NumMalesOther',\n        'MaleDiff',\n        'FocalDist',\n        'OtherDist'\n    ]\n\n    # Location dummy columns (if present) - these were created in transform\n    loc_cols = [c for c in df.columns if c.startswith('Location_')]\n\n    X = df[base_cols + loc_cols].copy()\n\n    # Fill NaNs in predictors conservatively (could also impute more carefully depending on analysis plan)\n    X = X.fillna(0)\n\n    # Add interaction terms between relative size (centered) and each location dummy\n    for loc in loc_cols:\n        inter_name = f'{loc}:RelSizeDiff_c'\n        X[inter_name] = X[loc] * X['RelSizeDiff_c']\n\n    # Add constant\n    X = sm.add_constant(X, has_constant='add')\n\n    # Fit logistic regression\n    logit = sm.Logit(y, X)\n    try:\n        res = logit.fit(disp=False, maxiter=200)\n    except Exception:\n        # fall back to a more robust solver if needed\n        res = logit.fit(disp=False, method='bfgs', maxiter=200)\n\n    # Cluster-robust standard errors by DyadID (m_other)\n    # If DyadID is missing or all NaN, this will fail; ensure existence\n    if 'DyadID' in df.columns and df['DyadID'].notna().any():\n        clustered = res.get_robustcov_results(cov_type='cluster', groups=df['DyadID'], use_correction=True)\n    else:\n        # If clustering info not available, return standard results\n        clustered = res\n\n    # Print a concise summary (users can inspect clustered.summary() or clustered.params as needed)\n    print(clustered.summary())\n\n    return clustered\n"
+    },
+    "4": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Relative group size: log ratio of focal group's total adult size to other group's total adult size (positive -> focal larger). Computed from males + females counts for focal and other groups. Used to capture the numerical advantage of one group over the other.",
+            "columns": [
+              "log_size_ratio_c"
+            ]
+          },
+          {
+            "description": "Contest location relative to the focal group's home-range center: distance (meters) of the focal group from the center of its home range at the time of contest. Smaller distance indicates the contest is closer to focal group's core area (home advantage).",
+            "columns": [
+              "focal_dist_m_c"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Binary outcome indicating whether the focal group won the intergroup contest (1 = focal won, 0 = other won).",
+          "columns": [
+            "dyad_win"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Number of adult males in the focal group (control for fighting power contributed by adult males).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "n_focal"
+            ]
+          },
+          {
+            "description": "Number of adult males in the other group (control for fighting power of opponent).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "other"
+            ]
+          },
+          {
+            "description": "Identifier for the specific dyad (pair) of groups that interacted. Used for clustering standard errors (non-independence of observations within dyads).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "pair_id"
+            ]
+          },
+          {
+            "description": "Derived total size of the focal group (males + females). Provided for interpretability/diagnostics (not required in the main specification but kept in the final dataframe).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "total_focal"
+            ]
+          },
+          {
+            "description": "Derived total size of the other group (males + females). Provided for interpretability/diagnostics (not required in the main specification but kept in the final dataframe).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "total_other"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw DataFrame into the final DataFrame used for modeling.\n\n    Produced columns (used in model):\n      - dyad_win: binary outcome (1 focal won, 0 other won)\n      - total_focal: total adults in focal group (n_focal + dist_focal)\n      - total_other: total adults in other group (other + focal)\n      - log_size_ratio: log(total_focal / total_other)\n      - log_size_ratio_c: standardized (z-scored) log_size_ratio\n      - focal_dist_m: distance (m) of focal group from center of its home range (column 'win' per metadata)\n      - focal_dist_m_c: standardized focal_dist_m\n      - other_dist_m: distance (m) of other group from center of its home range (column 'm_focal' per metadata)\n      - size_x_focaldist: interaction (log_size_ratio_c * focal_dist_m_c)\n      - pair_id: dyad pair id (m_other)\n      - focal_id: focal group id (n_other)\n      - other_id: other group id (dist_other)\n\n    Notes on mappings: the provided metadata labels are inconsistent with column names; the code below follows the dataset column names and uses the descriptive metadata to interpret which columns represent counts and distances.\n    \"\"\"\n\n    df = df.copy()\n\n    # Required raw columns - ensure they exist\n    required_cols = ['dyad', 'n_focal', 'other', 'dist_focal', 'focal', 'win', 'm_focal', 'm_other', 'n_other', 'dist_other']\n    missing = [c for c in required_cols if c not in df.columns]\n    if len(missing) > 0:\n        raise ValueError(f\"The following required columns are missing from the input dataframe: {missing}\")\n\n    # Outcome\n    df['dyad_win'] = df['dyad'].astype(int)\n\n    # Compute total group sizes using male + female counts (per metadata descriptions):\n    # total_focal: males in focal (n_focal) + females in focal (dist_focal per metadata)\n    # total_other: males in other (other) + females in other (focal per metadata)\n    df['total_focal'] = df['n_focal'] + df['dist_focal']\n    df['total_other'] = df['other'] + df['focal']\n\n    # Remove impossible rows (zero or missing totals) to avoid division-by-zero\n    df = df.dropna(subset=['total_focal', 'total_other', 'win', 'm_focal', 'dyad'])\n    df = df[(df['total_other'] > 0) & (df['total_focal'] > 0)]\n\n    # Relative group size: log ratio (focal / other). Add small epsilon for numerical safety.\n    eps = 1e-6\n    df['log_size_ratio'] = np.log((df['total_focal'] + eps) / (df['total_other'] + eps))\n\n    # Contest location distances (per metadata):\n    # 'win' described as distance (m) of focal group from center of its home range\n    # 'm_focal' described as distance (m) of other group from the center of its home range\n    df['focal_dist_m'] = df['win'].astype(float)\n    df['other_dist_m'] = df['m_focal'].astype(float)\n\n    # IDs for clustering and bookkeeping\n    df['pair_id'] = df['m_other'].astype(int)\n    df['focal_id'] = df['n_other'].astype(int)\n    df['other_id'] = df['dist_other'].astype(int)\n\n    # Standardize (z-score) the main continuous predictors for interpretability and to help model convergence\n    # Use ddof=0 to match population std as typical in ML; statsmodels is fine with either.\n    df['log_size_ratio_c'] = (df['log_size_ratio'] - df['log_size_ratio'].mean()) / (df['log_size_ratio'].std(ddof=0) + eps)\n    df['focal_dist_m_c'] = (df['focal_dist_m'] - df['focal_dist_m'].mean()) / (df['focal_dist_m'].std(ddof=0) + eps)\n\n    # Interaction term: relative size x focal distance (standardized interaction)\n    df['size_x_focaldist'] = df['log_size_ratio_c'] * df['focal_dist_m_c']\n\n    # Keep only columns necessary for modeling and diagnostics (but preserve in df to return)\n    # Ensure integer columns are int dtype\n    df['n_focal'] = df['n_focal'].astype(int)\n    df['other'] = df['other'].astype(int)\n\n    # Final returned dataframe includes both raw and derived columns for transparency\n    return df",
+      "m_code": "def model(df: pd.DataFrame) -> Any:\n    \"\"\"\n    Fit a logistic (binomial) regression predicting focal-group win (dyad_win) from\n    relative group size, contest location, their interaction, and controls.\n\n    The function uses cluster-robust standard errors clustered on the dyad pair id (pair_id)\n    to account for non-independence of observations within the same group pair.\n\n    Returns the fitted GLMResults object.\n    \"\"\"\n\n    # Columns expected in transformed dataframe\n    expected = ['dyad_win', 'log_size_ratio_c', 'focal_dist_m_c', 'size_x_focaldist', 'n_focal', 'other', 'pair_id']\n    missing = [c for c in expected if c not in df.columns]\n    if len(missing) > 0:\n        raise ValueError(f\"The following required columns are missing from the transformed dataframe: {missing}\")\n\n    # Design matrix\n    X_cols = ['log_size_ratio_c', 'focal_dist_m_c', 'size_x_focaldist', 'n_focal', 'other']\n    X = df[X_cols].astype(float)\n    X = sm.add_constant(X, has_constant='add')\n    y = df['dyad_win'].astype(float)\n\n    # Fit GLM with binomial family (logistic regression) and cluster-robust SEs by pair_id\n    model = sm.GLM(y, X, family=sm.families.Binomial())\n    try:\n        results = model.fit(cov_type='cluster', cov_kwds={'groups': df['pair_id']})\n    except Exception:\n        # Fallback to default fit if cluster covariance fails for small sample reasons\n        results = model.fit()\n\n    # Print a concise summary (caller can inspect results further)\n    print(results.summary())\n\n    return results"
     }
   }
 }

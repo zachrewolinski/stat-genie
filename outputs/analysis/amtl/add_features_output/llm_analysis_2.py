@@ -1,87 +1,148 @@
-from typing import Dict, FrozenSet, List, Literal, Optional, Set, Tuple, Any
+from typing import Any
 import numpy as np
 import pandas as pd
-import sklearn
-import scipy
 import statsmodels.api as sm
 import statsmodels.formula.api as smf
-import matplotlib.pyplot as plt
-import pickle
-  
+from statsmodels.stats.sandwich_covariance import cov_cluster, cov_hc3
+from scipy import stats
+
 df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/analysis/amtl/add_features_output/amtl.csv')
 
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
-    # Work on a copy
+    """
+    Transform raw AMTL dataset into analysis-ready dataframe.
+
+    Outputs (columns used in modeling):
+      - AMTL_successes: integer, number of missing teeth for the row
+      - AMTL_trials: integer, number of observable sockets for the row (trials)
+      - AMTL_rate: float, AMTL_successes / AMTL_trials (proportion)
+      - IsHuman: binary indicator (1 if genus == 'Homo sapiens', else 0)
+      - age: numeric (copied, ensures numeric dtype)
+      - prob_male: numeric (copied, ensures numeric dtype)
+      - tooth_class: categorical with preserved levels
+      - specimen: identifier (kept for possible clustering)
+    """
     df = df.copy()
 
-    # Required columns for analysis
-    required = ['num_amtl', 'sockets', 'age', 'prob_male', 'genus', 'tooth_class', 'specimen']
-    # Drop rows with missing values in required fields
-    df = df.dropna(subset=required)
+    # Keep only columns we need (but preserve others if present)
+    required_cols = ['num_amtl', 'sockets', 'age', 'prob_male', 'genus', 'tooth_class', 'specimen']
+    missing = [c for c in required_cols if c not in df.columns]
+    if len(missing) > 0:
+        raise ValueError(f"Input dataframe is missing required columns: {missing}")
 
-    # Keep only rows with at least one observable socket (trials must be > 0)
-    df = df[df['sockets'] > 0]
+    # Ensure numeric types for key columns
+    df['num_amtl'] = pd.to_numeric(df['num_amtl'], errors='coerce')
+    df['sockets'] = pd.to_numeric(df['sockets'], errors='coerce')
+    df['age'] = pd.to_numeric(df['age'], errors='coerce')
+    df['prob_male'] = pd.to_numeric(df['prob_male'], errors='coerce')
 
-    # Standardize/clean and create modeling columns
-    # Counts and trials
-    df['NumMissing'] = df['num_amtl'].astype(int)
-    df['Sockets'] = df['sockets'].astype(int)
+    # Drop rows with missing critical information
+    df = df.dropna(subset=['num_amtl', 'sockets', 'age', 'prob_male', 'genus', 'tooth_class', 'specimen'])
 
-    # Proportion of teeth missing (for GLM with binomial family using trial weights)
-    df['prop'] = df['NumMissing'] / df['Sockets']
+    # Ensure integer counts and valid trials
+    # Remove rows where sockets <= 0 (no observable trials)
+    df = df[df['sockets'] > 0].copy()
 
-    # Binary indicator for Homo sapiens (1 if genus contains 'Homo' or exact 'Homo sapiens')
-    # Use case-insensitive matching to be robust to formatting
-    df['Genus_Homo'] = df['genus'].astype(str).str.contains('Homo', case=False, na=False).astype(int)
+    # Round counts to integers (if float) and clip num_amtl to [0, sockets]
+    df['AMTL_trials'] = df['sockets'].round().astype(int)
+    df['AMTL_successes'] = df['num_amtl'].round().astype(int)
+    df['AMTL_successes'] = df['AMTL_successes'].clip(lower=0, upper=df['AMTL_trials'])
 
-    # Tooth class as a clean categorical column
-    df['ToothClass'] = df['tooth_class'].astype(str)
+    # Proportion for binomial modeling; will use trials as weights
+    # Avoid division by zero (AMTL_trials already filtered >0)
+    df['AMTL_rate'] = df['AMTL_successes'] / df['AMTL_trials']
 
-    # Standardize continuous controls (z-scores). Use ddof=0 for population-style standardization.
-    df['Age_z'] = (df['age'] - df['age'].mean()) / (df['age'].std(ddof=0) if df['age'].std(ddof=0) != 0 else 1.0)
-    df['ProbMale_z'] = (df['prob_male'] - df['prob_male'].mean()) / (df['prob_male'].std(ddof=0) if df['prob_male'].std(ddof=0) != 0 else 1.0)
+    # Create binary human indicator (explicit string match)
+    # Accept common spelling in dataset: 'Homo sapiens'
+    df['IsHuman'] = (df['genus'].astype(str).str.strip() == 'Homo sapiens').astype(int)
 
-    # Ensure specimen is a string for clustering
-    df['specimen'] = df['specimen'].astype(str)
+    # Normalize/clean tooth_class values and set as categorical
+    df['tooth_class'] = df['tooth_class'].astype(str).str.strip()
+    # Optionally standardize capitalization
+    df['tooth_class'] = df['tooth_class'].str.capitalize()
+    # Ensure expected categories appear (if there are variants, they will still be treated as levels)
+    df['tooth_class'] = pd.Categorical(df['tooth_class'], categories=['Anterior', 'Premolar', 'Posterior'])
 
-    # Return only columns needed for modeling (plus originals if desired)
-    keep_cols = ['NumMissing', 'Sockets', 'prop', 'Genus_Homo', 'Age_z', 'ProbMale_z', 'ToothClass', 'specimen']
-    # Also preserve original columns in case downstream checks are needed
-    for c in df.columns:
-        if c not in keep_cols:
-            pass
-    return df[keep_cols]
+    # Keep only columns needed for modeling (plus specimen for clustering)
+    keep_cols = ['AMTL_successes', 'AMTL_trials', 'AMTL_rate', 'IsHuman', 'age', 'prob_male', 'tooth_class', 'specimen']
+    df = df[keep_cols].reset_index(drop=True)
+
+    return df
 
 
 # ======== MODEL CODE ========
 def model(df: pd.DataFrame) -> Any:
-    import statsmodels.api as sm
-    import statsmodels.formula.api as smf
+    """
+    Fit a binomial (logistic) GLM to test whether modern humans have higher AMTL rates than
+    non-human primates, controlling for age, sex (prob_male), and tooth class.
 
-    # Work on a copy
-    df = df.copy()
+    Modeling approach:
+      - Outcome: AMTL_rate (proportion) with Binomial family and weights=AMTL_trials
+      - Predictor of interest: IsHuman (1 = Homo sapiens, 0 = non-human)
+      - Controls: age (continuous), prob_male (continuous), tooth_class (categorical)
+      - Clustered (robust) standard errors at the specimen level to account for repeated measures
+        or non-independence within specimens.
 
-    # Ensure categorical coding of ToothClass
-    df['ToothClass'] = df['ToothClass'].astype('category')
+    Returns:
+      - results_robust: an object exposing params, bse, cov_params, tvalues/zvalues, pvalues and a summary() method.
+    """
+    # Basic formula: proportion outcome with categorical tooth_class
+    formula = 'AMTL_rate ~ IsHuman + age + prob_male + C(tooth_class)'
 
-    # Formula: model the observed proportion with binomial family and use 'Sockets' as frequency weights
-    # This is equivalent to modeling NumMissing ~ covariates with Binomial trials = Sockets
-    formula = 'prop ~ Genus_Homo + Age_z + ProbMale_z + C(ToothClass)'
+    # Fit GLM with Binomial family; use AMTL_trials as weights so the model treats observations
+    # as proportions with differing denominators.
+    model_glm = smf.glm(formula=formula, data=df, family=sm.families.Binomial(), weights=df['AMTL_trials'])
+    results = model_glm.fit()
 
-    # Fit GLM for binomial data using proportions with freq_weights = number of trials
-    # Note: using freq_weights (Socket counts) tells the model how many Bernoulli trials each observation represents
-    glm_mod = smf.glm(formula=formula, data=df, family=sm.families.Binomial())
-    glm_res = glm_mod.fit(freq_weights=df['Sockets'])
-
-    # Obtain cluster-robust standard errors clustered by specimen to account for non-independence
+    # Compute cluster-robust standard errors clustered by specimen if possible,
+    # otherwise fall back to HC3 robust SEs.
     try:
-        clustered_res = glm_res.get_robustcov_results(cov_type='cluster', groups=df['specimen'])
+        cov = cov_cluster(results, df['specimen'])
     except Exception:
-        # If clustering fails for any reason, fall back to the original fit
-        clustered_res = glm_res
+        cov = cov_hc3(results)
 
-    # Return the clustered results object (has .summary())
-    return clustered_res
+    # Build a lightweight wrapper around the original results that exposes
+    # the robust covariance, standard errors, z/t-values, p-values, and a summary method.
+    class RobustResultsWrapper:
+        def __init__(self, orig_res, cov_matrix):
+            self._orig = orig_res
+            self.cov_params = cov_matrix
+            # Ensure cov is a numpy array
+            self.cov_params = np.asarray(self.cov_params)
+            # Align dimensions in case of mismatch
+            self.params = orig_res.params
+            # Compute standard errors from robust covariance
+            self.bse = np.sqrt(np.diag(self.cov_params))
+            # Protect against zeros
+            self.bse = np.where(self.bse == 0, np.nan, self.bse)
+            # z (or t) values and two-sided p-values using normal approx
+            self.zvalues = self.params / self.bse
+            self.pvalues = 2 * (1 - stats.norm.cdf(np.abs(self.zvalues)))
 
+        def summary(self):
+            # Create a concise table similar to statsmodels' coef table
+            try:
+                coef_table = pd.DataFrame({
+                    'coef': self.params,
+                    'std err': self.bse,
+                    'z': self.zvalues,
+                    'P>|z|': self.pvalues
+                })
+                # include original model's index order
+                coef_table.index = self.params.index
+                header = f"Model: {self._orig.model.__class__.__name__}\n"
+                return header + coef_table.to_string(float_format=lambda x: f"{x:0.4f}")
+            except Exception:
+                # Fallback to original results summary if anything unexpected happens
+                return str(self._orig.summary())
 
+        # Expose repr to allow printing directly
+        def __repr__(self):
+            return self.summary()
+
+    results_robust = RobustResultsWrapper(results, cov)
+
+    # Print a short summary and return the robust results object
+    print(results_robust.summary())
+    return results_robust

@@ -1,279 +1,190 @@
 def extract_final_answer(model_output):
     """
-    Extracts statistics about the effect of ChildrenYes on extramarital affairs
-    from the provided model_output dict (expected keys: 'logit' or 'logit_glm_binomial',
-    and 'neg_binomial' or 'poisson' as fallbacks).
+    Extracts and interprets the effect of having children on extramarital affairs
+    from two fitted Negative Binomial GLM models contained in model_output:
+      - 'nb_main': main-effects model (Children effect for reference group, Female=0)
+      - 'nb_with_interaction': model with Children x Female interaction
 
-    Returns:
-      {
-        "object": {
-          "logit": { ... } or None,
-          "count": { ... } or None
-        },
-        "description": "Plain-language interpretation of the extracted stats."
-      }
-    The "logit" and "count" dicts contain coefficients, p-values, confidence intervals,
-    transformed effect measures (odds ratios or incidence-rate ratios), and separate
-    marginal effects for women (gender_male=0) and men (gender_male=1) when interaction
-    term is present.
+    Returns a dict with:
+      - "object": dictionary of numeric results (coefficients, SEs, p-values,
+                  95% CIs, incidence rate ratios and percent change)
+      - "description": brief plain-language interpretation about whether having
+                       children decreases engagement in extramarital affairs,
+                       overall and by gender (based on the interaction model).
     """
     import numpy as np
+    from scipy.stats import norm
 
-    out = {"logit": None, "count": None}
+    # Helper to safe-get model
+    if not isinstance(model_output, dict):
+        raise TypeError("model_output must be a dict containing 'nb_main' and 'nb_with_interaction' keys.")
+
+    if 'nb_main' not in model_output or 'nb_with_interaction' not in model_output:
+        raise KeyError("model_output must contain keys 'nb_main' and 'nb_with_interaction'.")
+
+    m_main = model_output['nb_main']
+    m_int = model_output['nb_with_interaction']
+
+    # Extract main-model Children effect (this represents effect when Female=0)
+    params_main = m_main.params
+    b_children_main = float(params_main.get('Children', np.nan))
+    try:
+        se_children_main = float(m_main.bse['Children'])
+    except Exception:
+        se_children_main = float(np.nan)
+    # two-sided p-value (statsmodels already has pvalues)
+    p_children_main = float(m_main.pvalues.get('Children', np.nan))
+    # 95% CI
+    try:
+        ci_main = m_main.conf_int().loc['Children'].astype(float).tolist()
+    except Exception:
+        ci_main = [np.nan, np.nan]
+
+    irr_children_main = float(np.exp(b_children_main))
+    irr_children_main_ci = [float(np.exp(ci_main[0])), float(np.exp(ci_main[1]))]
+    pct_change_main = (irr_children_main - 1.0) * 100.0
+
+    # Interaction model: extract components
+    params_int = m_int.params
+    b_children_int = float(params_int.get('Children', np.nan))  # effect for males (Female=0)
+    b_children_female_inter = float(params_int.get('Children_Female', np.nan))  # difference for females
+    # Standard errors
+    try:
+        se_children_int = float(m_int.bse['Children'])
+    except Exception:
+        se_children_int = float(np.nan)
+    try:
+        se_children_fem_int = float(m_int.bse['Children_Female'])
+    except Exception:
+        se_children_fem_int = float(np.nan)
+    # p-values for individual terms
+    p_children_int = float(m_int.pvalues.get('Children', np.nan))
+    p_children_fem_int = float(m_int.pvalues.get('Children_Female', np.nan))
+
+    # Combined effect for females: beta_children + beta_children_female
+    b_children_female = b_children_int + b_children_female_inter
+
+    # Compute SE for combined effect using covariance matrix
+    try:
+        cov = m_int.cov_params()
+        var_children = cov.loc['Children', 'Children']
+        var_children_fem = cov.loc['Children_Female', 'Children_Female']
+        cov_term = cov.loc['Children', 'Children_Female']
+        se_children_female = float(np.sqrt(var_children + var_children_fem + 2.0 * cov_term))
+    except Exception:
+        se_children_female = float(np.nan)
+
+    # z and p for combined female effect
+    if not np.isnan(se_children_female) and se_children_female > 0:
+        z_female = b_children_female / se_children_female
+        p_children_female = 2.0 * norm.sf(abs(z_female))
+    else:
+        z_female = float('nan')
+        p_children_female = float(np.nan)
+
+    # 95% CI for combined female effect (on log scale) and IRR
+    try:
+        ci_low_f = b_children_female - 1.96 * se_children_female
+        ci_high_f = b_children_female + 1.96 * se_children_female
+        irr_children_female = float(np.exp(b_children_female))
+        irr_children_female_ci = [float(np.exp(ci_low_f)), float(np.exp(ci_high_f))]
+        pct_change_female = (irr_children_female - 1.0) * 100.0
+    except Exception:
+        irr_children_female = float(np.nan)
+        irr_children_female_ci = [float(np.nan), float(np.nan)]
+        pct_change_female = float(np.nan)
+
+    # Summary decision logic: consider effect "decrease" if IRR < 1 and p < .05
+    def interpret(irr, p):
+        if np.isnan(irr) or np.isnan(p):
+            return "insufficient information"
+        if (irr < 1.0) and (p < 0.05):
+            return "statistically significant decrease"
+        if (irr < 1.0) and (p >= 0.05):
+            return "decrease (not statistically significant)"
+        if (irr > 1.0) and (p < 0.05):
+            return "statistically significant increase"
+        if (irr > 1.0) and (p >= 0.05):
+            return "increase (not statistically significant)"
+        return "no change detected"
+
+    interpretation_main = interpret(irr_children_main, p_children_main)
+    interpretation_males_int = interpret(float(np.exp(b_children_int)), p_children_int)
+    interpretation_females_int = interpret(irr_children_female, p_children_female)
+
+    # Build result object
+    result_object = {
+        'main_model_children': {
+            'coef_log': b_children_main,
+            'se': se_children_main,
+            'p_value': p_children_main,
+            '95ci_log': ci_main,
+            'incidence_rate_ratio': irr_children_main,
+            '95ci_irr': irr_children_main_ci,
+            'percent_change': pct_change_main,
+            'interpretation': interpretation_main,
+            'note': "In the main model this coefficient represents the effect of Children for the reference group (Female=0)."
+        },
+        'interaction_model': {
+            'coef_children_males_log': b_children_int,
+            'se_children_males': se_children_int,
+            'p_children_males': p_children_int,
+            'irr_children_males': float(np.exp(b_children_int)) if not np.isnan(b_children_int) else float('nan'),
+            'coef_children_female_diff_log': b_children_female_inter,
+            'se_children_female_diff': se_children_fem_int,
+            'p_children_female_diff': p_children_fem_int,
+            'combined_coef_children_fem_log': b_children_female,
+            'se_combined_children_fem': se_children_female,
+            'p_combined_children_fem': p_children_female,
+            'irr_children_female': irr_children_female,
+            '95ci_irr_children_female': irr_children_female_ci,
+            'percent_change_female': pct_change_female,
+            'interpretation_males': interpretation_males_int,
+            'interpretation_females': interpretation_females_int,
+            'note': "In the interaction model, 'Children' is the effect for males (Female=0); 'Children_Female' is the difference in effect for females. Combined female effect = Children + Children_Female."
+        }
+    }
+
+    # Plain-language description
     desc_lines = []
+    desc_lines.append("Main model (no interaction):")
+    desc_lines.append(
+        f"  - Coef (log) for Children = {b_children_main:.4f}, SE = {se_children_main:.4f}, p = {p_children_main:.3g}."
+        f" IRR = {irr_children_main:.3f} (95% CI [{irr_children_main_ci[0]:.3f}, {irr_children_main_ci[1]:.3f}]),"
+        f" change = {pct_change_main:.1f}%."
+    )
+    desc_lines.append(f"  - Interpretation: {interpretation_main} for the reference group (usually males).")
 
-    # Helper to find a model result by possible keys
-    def find_model(keys):
-        for k in keys:
-            if k in model_output and model_output[k] is not None:
-                return model_output[k]
-        return None
+    desc_lines.append("Interaction model (Children x Female):")
+    desc_lines.append(
+        f"  - For males (Female=0): Coef (log) = {b_children_int:.4f}, p = {p_children_int:.3g}, IRR = {np.exp(b_children_int):.3f}."
+    )
+    desc_lines.append(
+        f"  - Difference for females (Children_Female): Coef = {b_children_female_inter:.4f}, p = {p_children_fem_int:.3g}."
+    )
+    desc_lines.append(
+        f"  - Combined effect for females: Coef (log) = {b_children_female:.4f}, SE = {se_children_female:.4f}, p = {p_children_female:.3g},"
+        f" IRR = {irr_children_female:.3f} (95% CI [{irr_children_female_ci[0]:.3f}, {irr_children_female_ci[1]:.3f}]), change = {pct_change_female:.1f}%."
+    )
+    desc_lines.append(f"  - Interpretations: males -> {interpretation_males_int}; females -> {interpretation_females_int}.")
 
-    # Locate logistic result (Logit or GLM binomial)
-    logit_res = find_model(['logit', 'logit_glm_binomial'])
-    # Locate count result (Negative binomial, otherwise Poisson)
-    count_res = find_model(['neg_binomial', 'neg_binomial_res', 'poisson'])
+    # Final summary statement
+    # Decide overall: if either group shows statistically significant decrease, note it
+    overall_findings = []
+    if interpretation_males_int == "statistically significant decrease":
+        overall_findings.append("For males, having children is associated with a statistically significant decrease in affairs.")
+    if interpretation_females_int == "statistically significant decrease":
+        overall_findings.append("For females, having children is associated with a statistically significant decrease in affairs.")
+    if (interpretation_males_int.startswith("decrease") or interpretation_females_int.startswith("decrease")) and not overall_findings:
+        overall_findings.append("There is some evidence of decreased affairs with children, but effects are not statistically significant.")
+    if not overall_findings and not (interpretation_males_int.startswith("decrease") or interpretation_females_int.startswith("decrease")):
+        overall_findings.append("No evidence that having children decreases engagement in extramarital affairs; effects are absent or indicate increase/non-significance.")
 
-    var = 'ChildrenYes'
-    interaction = 'Children_gender_interaction'
-    gender_var = 'gender_male'
-    alpha = 0.05
-    z = 1.96  # approx 95% CI
+    desc_lines.append("Overall conclusion: " + " ".join(overall_findings))
 
-    if logit_res is not None:
-        try:
-            params = logit_res.params
-            pvalues = logit_res.pvalues
-            conf = logit_res.conf_int()
-            cov = logit_res.cov_params()
+    description = "\n".join(desc_lines)
 
-            if var in params.index:
-                coef = float(params[var])
-                pval = float(pvalues[var]) if var in pvalues.index else None
-                ci_low = float(conf.loc[var, 0])
-                ci_high = float(conf.loc[var, 1])
-                or_val = float(np.exp(coef))
-                or_ci = (float(np.exp(ci_low)), float(np.exp(ci_high)))
-
-                logit_dict = {
-                    "coef_children": coef,
-                    "pvalue_children": pval,
-                    "ci_children": (ci_low, ci_high),
-                    "odds_ratio_children": or_val,
-                    "odds_ratio_children_ci": or_ci
-                }
-
-                # If interaction and gender variable present, compute marginal effects for men and women
-                if (interaction in params.index) and (gender_var in params.index):
-                    coef_int = float(params[interaction])
-                    # women's effect (gender_male = 0): coef
-                    # men's effect (gender_male = 1): coef + coef_int
-                    coef_men = coef + coef_int
-
-                    # compute p-value for interaction if available
-                    pval_int = float(pvalues[interaction]) if interaction in pvalues.index else None
-
-                    # compute CI for men's combined coef using covariance matrix
-                    try:
-                        var_sum = cov.loc[var, var] + cov.loc[interaction, interaction] + 2 * cov.loc[var, interaction]
-                        se_sum = float(np.sqrt(var_sum))
-                        ci_men_low = coef_men - z * se_sum
-                        ci_men_high = coef_men + z * se_sum
-                    except Exception:
-                        # fallback if cov not available
-                        se_men = None
-                        ci_men_low = None
-                        ci_men_high = None
-
-                    or_women = float(np.exp(coef))
-                    or_women_ci = (float(np.exp(ci_low)), float(np.exp(ci_high)))
-                    or_men = float(np.exp(coef_men)) if coef_men is not None else None
-                    or_men_ci = (float(np.exp(ci_men_low)), float(np.exp(ci_men_high))) if (ci_men_low is not None) else (None, None)
-
-                    logit_dict.update({
-                        "coef_interaction": coef_int,
-                        "pvalue_interaction": pval_int,
-                        "coef_children_men": coef_men,
-                        "ci_children_men": (ci_men_low, ci_men_high),
-                        "odds_ratio_children_women": or_women,
-                        "odds_ratio_children_women_ci": or_women_ci,
-                        "odds_ratio_children_men": or_men,
-                        "odds_ratio_children_men_ci": or_men_ci
-                    })
-                out["logit"] = logit_dict
-
-                # Add human-readable summary about statistical significance
-                sig = (pval is not None) and (pval < alpha)
-                sign = "decrease" if coef < 0 else ("increase" if coef > 0 else "no change")
-                desc_lines.append(
-                    "Logistic model (any affair): ChildrenYes coef = {:.4f}, p = {:.4g}. "
-                    "This corresponds to an odds ratio = {:.3f} (95% CI [{:.3f}, {:.3f}]). "
-                    "Coefficient sign suggests a {} in odds of any affair for the reference gender (gender_male=0).{}".format(
-                        coef, pval if pval is not None else float('nan'),
-                        or_val, or_ci[0], or_ci[1],
-                        sign,
-                        "" if not ((interaction in params.index) and (gender_var in params.index)) else
-                        " A gender interaction is present; see male/female marginal effects below."
-                    )
-                )
-                if (interaction in params.index) and (gender_var in params.index):
-                    # describe men effect
-                    coef_men = logit_dict.get("coef_children_men")
-                    pval_int = logit_dict.get("pvalue_interaction")
-                    or_men = logit_dict.get("odds_ratio_children_men")
-                    ci_men = logit_dict.get("odds_ratio_children_men_ci")
-                    # For men, statistical significance of combined effect is not directly available as a p-value here,
-                    # but we can note significance of main and interaction terms.
-                    desc_lines.append(
-                        "For women (gender_male=0): OR = {:.3f} (95% CI [{:.3f}, {:.3f}]).".format(
-                            logit_dict["odds_ratio_children_women"],
-                            logit_dict["odds_ratio_children_women_ci"][0],
-                            logit_dict["odds_ratio_children_women_ci"][1]
-                        )
-                    )
-                    desc_lines.append(
-                        "For men (gender_male=1): combined OR = {:.3f} (approx 95% CI [{:.3f}, {:.3f}]). "
-                        "Interaction term p = {}.".format(
-                            or_men,
-                            ci_men[0] if ci_men[0] is not None else float('nan'),
-                            ci_men[1] if ci_men[1] is not None else float('nan'),
-                            pval_int if pval_int is not None else "NA"
-                        )
-                    )
-            else:
-                desc_lines.append("Logistic model present but variable '{}' not found in model.".format(var))
-        except Exception as e:
-            desc_lines.append("Error extracting from logistic model: {}".format(e))
-
-    else:
-        desc_lines.append("No logistic/binomial model found in model_output.")
-
-    if count_res is not None:
-        try:
-            params = count_res.params
-            pvalues = count_res.pvalues
-            conf = count_res.conf_int()
-            cov = count_res.cov_params()
-
-            if var in params.index:
-                coef = float(params[var])
-                pval = float(pvalues[var]) if var in pvalues.index else None
-                ci_low = float(conf.loc[var, 0])
-                ci_high = float(conf.loc[var, 1])
-                irr = float(np.exp(coef))
-                irr_ci = (float(np.exp(ci_low)), float(np.exp(ci_high)))
-
-                count_dict = {
-                    "coef_children": coef,
-                    "pvalue_children": pval,
-                    "ci_children": (ci_low, ci_high),
-                    "irr_children": irr,
-                    "irr_children_ci": irr_ci,
-                    "model_family": getattr(count_res, "model", None).family.__class__.__name__ if getattr(count_res, "model", None) is not None else None
-                }
-
-                # Interaction handling for count model
-                if (interaction in params.index) and (gender_var in params.index):
-                    coef_int = float(params[interaction])
-                    coef_men = coef + coef_int
-                    pval_int = float(pvalues[interaction]) if interaction in pvalues.index else None
-                    try:
-                        var_sum = cov.loc[var, var] + cov.loc[interaction, interaction] + 2 * cov.loc[var, interaction]
-                        se_sum = float(np.sqrt(var_sum))
-                        ci_men_low = coef_men - z * se_sum
-                        ci_men_high = coef_men + z * se_sum
-                    except Exception:
-                        ci_men_low = None
-                        ci_men_high = None
-
-                    irr_women = float(np.exp(coef))
-                    irr_women_ci = (float(np.exp(ci_low)), float(np.exp(ci_high)))
-                    irr_men = float(np.exp(coef_men)) if coef_men is not None else None
-                    irr_men_ci = (float(np.exp(ci_men_low)), float(np.exp(ci_men_high))) if (ci_men_low is not None) else (None, None)
-
-                    count_dict.update({
-                        "coef_interaction": coef_int,
-                        "pvalue_interaction": pval_int,
-                        "coef_children_men": coef_men,
-                        "ci_children_men": (ci_men_low, ci_men_high),
-                        "irr_children_women": irr_women,
-                        "irr_children_women_ci": irr_women_ci,
-                        "irr_children_men": irr_men,
-                        "irr_children_men_ci": irr_men_ci
-                    })
-
-                out["count"] = count_dict
-
-                sig = (pval is not None) and (pval < alpha)
-                sign = "decrease" if coef < 0 else ("increase" if coef > 0 else "no change")
-                desc_lines.append(
-                    "Count model (frequency of affairs, {}): ChildrenYes coef = {:.4f}, p = {:.4g}. "
-                    "This corresponds to an IRR = {:.3f} (95% CI [{:.3f}, {:.3f}]). "
-                    "Coefficient sign suggests a {} in the expected count of affairs for the reference gender.".format(
-                        count_dict.get("model_family", "count model"),
-                        coef, pval if pval is not None else float('nan'),
-                        irr, irr_ci[0], irr_ci[1],
-                        sign
-                    )
-                )
-                if (interaction in params.index) and (gender_var in params.index):
-                    desc_lines.append(
-                        "See male/female marginal IRRs in the 'object' field returned."
-                    )
-            else:
-                desc_lines.append("Count model present but variable '{}' not found in model.".format(var))
-        except Exception as e:
-            desc_lines.append("Error extracting from count model: {}".format(e))
-    else:
-        desc_lines.append("No count model (negative binomial / poisson) found in model_output.")
-
-    # Construct a concise conclusion sentence about whether having children decreases engagement in affairs.
-    conclusion = "Conclusion: "
-    # Prefer logistic model for binary outcome evidence
-    if out["logit"] is not None:
-        coef = out["logit"].get("coef_children")
-        pval = out["logit"].get("pvalue_children")
-        if coef is None:
-            conclusion += "No usable coefficient for ChildrenYes in logistic model."
-        else:
-            if (pval is not None) and (pval < alpha):
-                if coef < 0:
-                    conclusion += "Having children is associated with a statistically significant decrease in the odds of having any extramarital affair (logistic model: coef = {:.4f}, p = {:.3g}, OR = {:.3f}).".format(coef, pval, out["logit"]["odds_ratio_children"])
-                elif coef > 0:
-                    conclusion += "Having children is associated with a statistically significant increase in the odds of having any extramarital affair (logistic model: coef = {:.4f}, p = {:.3g}, OR = {:.3f}).".format(coef, pval, out["logit"]["odds_ratio_children"])
-                else:
-                    conclusion += "No association in logistic model (coef = 0)."
-            else:
-                # not significant
-                if coef < 0:
-                    conclusion += "Point estimate indicates a decrease in odds (coef = {:.4f}, OR = {:.3f}), but this is not statistically significant (p = {}).".format(coef, out["logit"]["odds_ratio_children"], pval)
-                elif coef > 0:
-                    conclusion += "Point estimate indicates an increase in odds (coef = {:.4f}, OR = {:.3f}), but this is not statistically significant (p = {}).".format(coef, out["logit"]["odds_ratio_children"], pval)
-                else:
-                    conclusion += "No association in logistic model (coef = 0)."
-    elif out["count"] is not None:
-        coef = out["count"].get("coef_children")
-        pval = out["count"].get("pvalue_children")
-        if coef is None:
-            conclusion += "No usable coefficient for ChildrenYes in count model."
-        else:
-            if (pval is not None) and (pval < alpha):
-                if coef < 0:
-                    conclusion += "Having children is associated with a statistically significant decrease in the frequency of affairs (count model: coef = {:.4f}, p = {:.3g}, IRR = {:.3f}).".format(coef, pval, out["count"]["irr_children"])
-                elif coef > 0:
-                    conclusion += "Having children is associated with a statistically significant increase in the frequency of affairs (count model: coef = {:.4f}, p = {:.3g}, IRR = {:.3f}).".format(coef, pval, out["count"]["irr_children"])
-                else:
-                    conclusion += "No association in count model (coef = 0)."
-            else:
-                if coef < 0:
-                    conclusion += "Point estimate indicates a decrease in frequency (coef = {:.4f}, IRR = {:.3f}), but this is not statistically significant (p = {}).".format(coef, out["count"]["irr_children"], pval)
-                elif coef > 0:
-                    conclusion += "Point estimate indicates an increase in frequency (coef = {:.4f}, IRR = {:.3f}), but this is not statistically significant (p = {}).".format(coef, out["count"]["irr_children"], pval)
-                else:
-                    conclusion += "No association in count model (coef = 0)."
-    else:
-        conclusion += "No relevant models were available to form a conclusion."
-
-    desc_lines.append(conclusion)
-
-    return {"object": out, "description": " ".join(desc_lines)}
+    return {
+        "object": result_object,
+        "description": description
+    }

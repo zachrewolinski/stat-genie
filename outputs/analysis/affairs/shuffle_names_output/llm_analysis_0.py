@@ -12,137 +12,227 @@ df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/anal
 
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
-    # Work on a copy to avoid side-effects
+    # Work on a copy
     df = df.copy()
 
-    # NOTES ON DATASET MAPPING (the provided schema has several mislabelings):
-    # - The column 'education' in this dataset contains the reported extramarital frequency coding (0,1,2,3,7,12 etc.).
-    # - The column 'affairs' contains the education level codes (9,12,14,16,17,18,20).
-    # - The column 'age' contains the 'Are there children in the marriage?' factor ("yes"/"no").
-    # - The column 'children' contains gender labels ("male"/"female").
-    # - The column 'gender' contains years married coding (numeric).
-    # We'll derive clean variables for analysis.
+    # 1) Identify which column in the raw data encodes the frequency of extramarital intercourse.
+    #    The provided schema is inconsistent; the column named 'education' appears to have values 0..12 which
+    #    correspond to the typical coding for frequency of affairs. Use a heuristic: choose a numeric column
+    #    with min >= 0 and max <= 12 as Affair frequency if present.
+    affair_candidate = None
+    for col in df.columns:
+        if pd.api.types.is_numeric_dtype(df[col]):
+            col_min = pd.to_numeric(df[col], errors='coerce').min()
+            col_max = pd.to_numeric(df[col], errors='coerce').max()
+            if pd.notnull(col_min) and pd.notnull(col_max) and (col_min >= 0) and (col_max <= 12):
+                # candidate for frequency-of-affair coding (0..12 typical)
+                affair_candidate = col
+                break
+    # fallback: if no candidate found, but column literally named 'education' exists, use it
+    if affair_candidate is None and 'education' in df.columns:
+        affair_candidate = 'education'
 
-    # 1) AffairCount: use the column 'education' which in this file actually holds the extramarital frequency codes.
-    # Coerce to numeric; keep original coded values as-is (they represent frequency categories used in Fair's dataset).
-    df['AffairCount'] = pd.to_numeric(df['education'], errors='coerce')
+    if affair_candidate is None:
+        raise ValueError('Could not reliably detect a column encoding affair frequency. Check raw data columns.')
 
-    # 2) Binary indicator: AffairAny
-    df['AffairAny'] = (df['AffairCount'].fillna(0) > 0).astype(int)
+    # Create AffairFreq and AnyAffair
+    df['AffairFreq'] = pd.to_numeric(df[affair_candidate], errors='coerce')
+    # AnyAffair: 1 if AffairFreq > 0, 0 if AffairFreq == 0, missing if AffairFreq missing
+    df['AnyAffair'] = (df['AffairFreq'] > 0).astype('Int64')
 
-    # 3) HasChildren: derive from column 'age' which contains 'yes'/'no' per the provided schema
-    # Normalize strings and map
-    if 'age' in df.columns:
-        df['HasChildren'] = df['age'].astype(str).str.strip().str.lower().map({'yes': 1, 'y': 1, 'no': 0, 'n': 0})
+    # 2) Identify children indicator column. Heuristics: look for a column with yes/no values; otherwise
+    #    look for a column named 'children' or 'age' (schema confusion). We will attempt to detect common text markers.
+    children_col = None
+    text_yesno = set(['yes','no','y','n','Yes','No','Y','N','TRUE','FALSE','True','False'])
+    for col in df.columns:
+        if df[col].dtype == object or pd.api.types.is_string_dtype(df[col]):
+            uniques = set([str(x).strip() for x in df[col].dropna().unique()])
+            if {'yes','no'}.issubset({u.lower() for u in uniques}):
+                children_col = col
+                break
+    if children_col is None:
+        # prefer a column literally named 'children' if present
+        if 'children' in df.columns:
+            children_col = 'children'
+        elif 'age' in df.columns:
+            # schema suggests 'age' sometimes encodes children yes/no
+            # if age column contains yes/no-like values use that
+            if df['age'].dropna().astype(str).str.lower().isin(['yes','no']).any():
+                children_col = 'age'
+    if children_col is None:
+        # fallback: if a column contains only 0/1 values and name suggests children, use it
+        if 'children' in df.columns and df['children'].dropna().isin([0,1]).all():
+            children_col = 'children'
+    if children_col is None:
+        # last resort: create HasChildren from a column named 'age' if it only contains 'yes'/'no'
+        pass
+
+    # Make HasChildren column
+    if children_col is not None:
+        colvals = df[children_col].astype(str).str.strip()
+        # standardize common encodings
+        df['HasChildren'] = pd.NA
+        df.loc[colvals.str.lower().isin(['yes','y','true','t']), 'HasChildren'] = 1
+        df.loc[colvals.str.lower().isin(['no','n','false','f']), 'HasChildren'] = 0
+        # if column is numeric 0/1
+        if pd.api.types.is_numeric_dtype(df[children_col]):
+            df.loc[df[children_col] == 1, 'HasChildren'] = 1
+            df.loc[df[children_col] == 0, 'HasChildren'] = 0
+        # coerce to integer nullable
+        df['HasChildren'] = df['HasChildren'].astype('Int64')
     else:
-        df['HasChildren'] = np.nan
+        # If we could not detect a children column, attempt to infer from a column named 'age' or 'children'
+        # If none is detected, create HasChildren as missing so downstream code will fail explicitly.
+        df['HasChildren'] = pd.NA
 
-    # 4) Gender: from column 'children' (which contains 'male'/'female' in this dataset)
-    if 'children' in df.columns:
-        df['IsFemale'] = df['children'].astype(str).str.strip().str.lower().map({'female': 1, 'f': 1, 'male': 0, 'm': 0})
+    # 3) Controls: create standardized control columns where possible.
+    # Age: the schema shows 'rating' contains age codes; convert to numeric
+    if 'rating' in df.columns:
+        df['Age'] = pd.to_numeric(df['rating'], errors='coerce')
+    elif 'Age' in df.columns:
+        df['Age'] = pd.to_numeric(df['Age'], errors='coerce')
     else:
-        df['IsFemale'] = np.nan
+        df['Age'] = pd.NA
 
-    # 5) Age in years: column 'rating' uses age midpoints; coerce to numeric and keep
-    df['Age'] = pd.to_numeric(df['rating'], errors='coerce')
+    # YearsMarried: prefer 'yearsmarried' column
+    if 'yearsmarried' in df.columns:
+        df['YearsMarried'] = pd.to_numeric(df['yearsmarried'], errors='coerce')
+    else:
+        df['YearsMarried'] = pd.NA
 
-    # 6) EducationYears: column 'affairs' actually contains education codes in this dataset
-    df['EducationYears'] = pd.to_numeric(df['affairs'], errors='coerce')
+    # Education: as discussed, in this schema the column named 'affairs' appears to contain education codes (9..20)
+    # So if 'affairs' values are > 8 we will map that to Education.
+    if 'affairs' in df.columns:
+        tmp_min = pd.to_numeric(df['affairs'], errors='coerce').min()
+        if pd.notnull(tmp_min) and tmp_min >= 8:
+            df['Education'] = pd.to_numeric(df['affairs'], errors='coerce')
+        else:
+            # otherwise try to use a column explicitly named 'education' if present and it doesn't look like affair-frequency
+            if 'education' in df.columns and not (pd.to_numeric(df['education'], errors='coerce').min() >= 0 and pd.to_numeric(df['education'], errors='coerce').max() <= 12):
+                df['Education'] = pd.to_numeric(df['education'], errors='coerce')
+            else:
+                df['Education'] = pd.NA
+    else:
+        df['Education'] = pd.NA
 
-    # 7) Religiousness: keep as provided
-    df['Religiousness'] = pd.to_numeric(df['religiousness'], errors='coerce')
+    # Religiousness - if present
+    if 'religiousness' in df.columns:
+        df['Religiousness'] = pd.to_numeric(df['religiousness'], errors='coerce')
+    else:
+        df['Religiousness'] = pd.NA
 
-    # 8) YearsMarried: use column 'gender' which the schema indicates contains years married coding
-    df['YearsMarried'] = pd.to_numeric(df['gender'], errors='coerce')
+    # Occupation - keep raw numeric code if present
+    if 'occupation' in df.columns:
+        df['Occupation'] = pd.to_numeric(df['occupation'], errors='coerce')
+    else:
+        df['Occupation'] = pd.NA
 
-    # 9) MarriageHappiness: use 'rownames' column which encodes self-rated marriage happiness
-    df['MarriageHappiness'] = pd.to_numeric(df['rownames'], errors='coerce')
+    # Marital satisfaction / rownames
+    if 'rownames' in df.columns:
+        df['MaritalSatisfaction'] = pd.to_numeric(df['rownames'], errors='coerce')
+    else:
+        df['MaritalSatisfaction'] = pd.NA
 
-    # 10) Drop rows with missing key variables for our primary analysis
-    # We require: AffairCount (DV) and HasChildren (IV) and at least basic controls Age and EducationYears.
-    df = df.dropna(subset=['AffairCount', 'HasChildren', 'Age', 'EducationYears'])
-
-    # 11) If IsFemale or other controls have missing values we keep row but will handle missingness in model by dropping there or imputing.
-    # For convenience, ensure the important control columns exist (create if missing, filled with NaN)
-    for col in ['IsFemale', 'Religiousness', 'YearsMarried', 'MarriageHappiness']:
+    # Gender: try to detect a column containing 'male'/'female' labels. Many schemas are inconsistent; check 'children' or 'gender' columns.
+    df['IsFemale'] = pd.NA
+    # candidate columns to check for male/female labels
+    for col in ['children','gender'] + [c for c in df.columns if c not in ['children','gender']]:
         if col not in df.columns:
-            df[col] = np.nan
+            continue
+        if df[col].dropna().astype(str).str.lower().isin(['male','female','m','f']).any():
+            vals = df[col].astype(str).str.strip().str.lower()
+            df.loc[vals.isin(['female','f']), 'IsFemale'] = 1
+            df.loc[vals.isin(['male','m']), 'IsFemale'] = 0
+            break
+    # fallback: if a numeric gender column exists with small integer codes, try to map (this is risky but helpful if data encoded 1/2)
+    if df['IsFemale'].isna().all():
+        # look for a numeric column with only two unique values that might encode gender
+        for col in df.columns:
+            if pd.api.types.is_numeric_dtype(df[col]):
+                unique_vals = pd.Series(df[col].dropna().unique())
+                if unique_vals.nunique() == 2:
+                    # adopt as gender indicator if plausible
+                    # choose mapping so the larger mean indicates female if not sure: leave as NA if ambiguous
+                    u = sorted(unique_vals.tolist())
+                    df.loc[df[col] == u[0], 'IsFemale'] = 0
+                    df.loc[df[col] == u[1], 'IsFemale'] = 1
+                    break
+    df['IsFemale'] = df['IsFemale'].astype('Int64')
 
-    # 12) Final type enforcement
-    df['AffairCount'] = pd.to_numeric(df['AffairCount'], errors='coerce')
-    df['AffairAny'] = df['AffairAny'].astype(int)
-    df['HasChildren'] = pd.to_numeric(df['HasChildren'], errors='coerce')
-    df['IsFemale'] = pd.to_numeric(df['IsFemale'], errors='coerce')
-    df['EducationYears'] = pd.to_numeric(df['EducationYears'], errors='coerce')
-    df['Religiousness'] = pd.to_numeric(df['Religiousness'], errors='coerce')
-    df['YearsMarried'] = pd.to_numeric(df['YearsMarried'], errors='coerce')
-    df['MarriageHappiness'] = pd.to_numeric(df['MarriageHappiness'], errors='coerce')
+    # 4) Final cleaning: drop rows without a valid AnyAffair or HasChildren (these are necessary for the main analysis)
+    df_model = df.copy()
+    df_model = df_model.dropna(subset=['AnyAffair', 'HasChildren'])
 
-    # 13) Return the transformed dataframe containing only the columns needed for modeling (plus originals kept implicitly)
-    keep_cols = [
-        'AffairCount', 'AffairAny', 'HasChildren', 'IsFemale', 'Age', 'EducationYears',
-        'Religiousness', 'YearsMarried', 'MarriageHappiness'
-    ]
-    # Ensure we return all columns that may be needed; if some are missing because of earlier drops they will not error here
-    existing_keep = [c for c in keep_cols if c in df.columns]
-    return df[existing_keep]
+    # Keep only the columns we will use in modeling to make the downstream model function simple
+    keep_cols = ['HasChildren', 'AnyAffair', 'AffairFreq', 'Age', 'YearsMarried', 'Education', 'Religiousness', 'IsFemale', 'Occupation', 'MaritalSatisfaction']
+    for col in keep_cols:
+        if col not in df_model.columns:
+            df_model[col] = pd.NA
+
+    # Return the dataframe to be used for modeling
+    return df_model
 
 
 # ======== MODEL CODE ========
 def model(df: pd.DataFrame) -> dict:
-    # df is the transformed dataframe produced by transform()
-    # We'll run two models:
-    # 1) Primary: logistic regression for the probability of any extramarital affair (AffairAny) ~ HasChildren + controls
-    # 2) Robustness: negative binomial GLM for AffairCount ~ HasChildren + controls (appropriate for overdispersed counts)
-
+    # df is expected to be the output of transform()
     results = {}
+    # Prepare design matrix for controls
+    controls = ['Age', 'YearsMarried', 'Education', 'Religiousness', 'IsFemale', 'Occupation', 'MaritalSatisfaction']
+    # Keep only those controls that exist and have at least some non-missing data
+    controls = [c for c in controls if c in df.columns]
 
-    # Prepare modeling dataframe: drop rows with missing values in the variables used for each model
-    # Define common predictors
-    predictors = ['HasChildren', 'IsFemale', 'Age', 'EducationYears', 'Religiousness', 'YearsMarried', 'MarriageHappiness']
-    # Keep only predictors that exist in the df
-    predictors = [p for p in predictors if p in df.columns]
+    # Build X and drop rows with missing predictor data
+    X = df[['HasChildren'] + controls].copy()
+    # For statsmodels, convert Int64 nullable integers to numeric (float) with missing -> drop
+    X = X.apply(pd.to_numeric, errors='coerce')
+    y_logit = df['AnyAffair'].astype(float)
 
-    # 1) Logistic regression (occurrence)
-    if 'AffairAny' in df.columns:
-        mod_df = df.dropna(subset=['AffairAny'] + predictors)
-        if mod_df.shape[0] >= 10:
-            X = mod_df[predictors]
-            X = sm.add_constant(X, has_constant='add')
-            y = mod_df['AffairAny']
+    dat = pd.concat([y_logit, X], axis=1).dropna()
+    if dat.shape[0] == 0:
+        raise ValueError('No rows with complete data for modelling after dropping missing values.')
+
+    y = dat['AnyAffair']
+    Xmat = dat.drop(columns=['AnyAffair'])
+    Xmat = sm.add_constant(Xmat)
+
+    # 1) Primary model: logistic regression for probability of any affair
+    try:
+        logit_model = sm.Logit(y, Xmat).fit(disp=False)
+        results['logit_model'] = logit_model
+    except Exception as e:
+        results['logit_model_error'] = str(e)
+
+    # 2) Robustness: model AffairFreq as a count-like outcome (negative binomial GLM)
+    #    Use the same controls but only on rows with valid AffairFreq
+    if 'AffairFreq' in df.columns:
+        df_nb = pd.concat([df['AffairFreq'], X], axis=1).apply(pd.to_numeric, errors='coerce').dropna()
+        if df_nb.shape[0] > 0:
+            y_nb = df_nb['AffairFreq']
+            Xnb = df_nb.drop(columns=['AffairFreq'])
+            Xnb = sm.add_constant(Xnb)
             try:
-                logit_model = sm.Logit(y, X).fit(disp=False)
-                results['logit'] = logit_model
+                # Fit negative binomial as a flexible count model (robust to overdispersion)
+                nb_model = sm.GLM(y_nb, Xnb, family=sm.families.NegativeBinomial()).fit()
+                results['neg_binom_model'] = nb_model
             except Exception as e:
-                # fallback to GLM with binomial family if Logit has convergence issues
-                try:
-                    glm_binom = sm.GLM(y, X, family=sm.families.Binomial()).fit()
-                    results['logit_glm'] = glm_binom
-                except Exception as e2:
-                    results['logit_error'] = str(e2)
+                results['neg_binom_model_error'] = str(e)
         else:
-            results['logit_error'] = 'Not enough observations after dropping missing for logistic model.'
+            results['neg_binom_model_error'] = 'No complete rows for negative binomial model.'
+    else:
+        results['neg_binom_model_error'] = 'AffairFreq column not present.'
 
-    # 2) Negative binomial (count) for AffairCount as robustness
-    if 'AffairCount' in df.columns:
-        mod_df2 = df.dropna(subset=['AffairCount'] + predictors)
-        if mod_df2.shape[0] >= 10:
-            X2 = mod_df2[predictors]
-            X2 = sm.add_constant(X2, has_constant='add')
-            y2 = mod_df2['AffairCount']
-            # If AffairCount has many zeros, NB is appropriate; use GLM NegativeBinomial family
-            try:
-                nb_model = sm.GLM(y2, X2, family=sm.families.NegativeBinomial()).fit()
-                results['neg_binom'] = nb_model
-            except Exception as e:
-                # fallback to Poisson if NB fails
-                try:
-                    pois_model = sm.GLM(y2, X2, family=sm.families.Poisson()).fit()
-                    results['poisson'] = pois_model
-                except Exception as e2:
-                    results['count_error'] = str(e2)
-        else:
-            results['count_error'] = 'Not enough observations after dropping missing for count model.'
+    # 3) Report sample sizes and descriptive comparison
+    try:
+        total_n = df.shape[0]
+        n_model = dat.shape[0]
+        results['n_total'] = int(total_n)
+        results['n_logit'] = int(n_model)
+        # crude difference in means for AnyAffair by HasChildren for descriptive context
+        descript = df.groupby('HasChildren')['AnyAffair'].agg(['mean','count']).to_dict()
+        results['descriptive'] = descript
+    except Exception:
+        pass
 
     return results
 

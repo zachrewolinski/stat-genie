@@ -1,132 +1,135 @@
-from typing import Any
+from typing import Dict, FrozenSet, List, Literal, Optional, Set, Tuple, Any
 import numpy as np
 import pandas as pd
 import sklearn
 import scipy
 import statsmodels.api as sm
 import statsmodels.formula.api as smf
-from statsmodels.stats.sandwich_covariance import cov_cluster
 import matplotlib.pyplot as plt
 import pickle
-
+  
 df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/analysis/crofoot/noperturb_output/crofoot.csv')
 
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Transform the raw capuchin contest dataframe into the analysis-ready dataframe.
+    Transform the raw dataset to the analysis-ready dataframe.
 
-    Produces the following new columns used in the model:
-      - SizeAdv_z: standardized (z) of (n_focal - n_other)
-      - DistDiff_z: standardized (z) of (dist_other - dist_focal)
-      - MaleAdv_z: standardized (z) of (m_focal - m_other)
-      - TotalSize_z: standardized (z) of (n_focal + n_other)
-      - LocationCat: categorical label of contest location: 'FocalHome', 'OtherHome', or 'Neutral'
+    Produces the following analysis columns (all required by the model):
+      - win (kept as-is)                    : dependent binary outcome
+      - RelSize_log                         : log(n_focal / n_other)
+      - LocationAdv                         : dist_other - dist_focal (positive => nearer focal)
+      - LocationNearFocal                   : binary indicator (1 if dist_focal < dist_other)
+      - RelMales                            : m_focal - m_other
+      - TotalSize                           : n_focal + n_other
+      - z_RelSize_log, z_LocationAdv, z_RelMales, z_TotalSize : standardized versions used in the model
+      - dyad                                : kept for clustering of SEs
 
-    Keeps original 'win' and 'dyad' columns.
+    The function drops rows with missing values in essential columns.
     """
-    # Make a copy to avoid modifying original
     df = df.copy()
 
+    # Required columns for analysis
+    required = ['win', 'n_focal', 'n_other', 'dist_focal', 'dist_other', 'm_focal', 'm_other', 'dyad']
+    missing_required = [c for c in required if c not in df.columns]
+    if len(missing_required) > 0:
+        raise ValueError(f"Missing required columns: {missing_required}")
+
+    # Drop rows with NA in required columns
+    df = df.dropna(subset=required)
+
     # Ensure numeric types
-    numeric_cols = ['dist_focal', 'dist_other', 'n_focal', 'n_other', 'm_focal', 'm_other']
+    numeric_cols = ['win', 'n_focal', 'n_other', 'dist_focal', 'dist_other', 'm_focal', 'm_other', 'dyad']
     for c in numeric_cols:
         df[c] = pd.to_numeric(df[c], errors='coerce')
 
-    # Drop rows with missing values in key columns
-    df = df.dropna(subset=['win', 'dist_focal', 'dist_other', 'n_focal', 'n_other', 'm_focal', 'm_other', 'dyad'])
+    # Drop rows that turned NA after coercion
+    df = df.dropna(subset=numeric_cols)
 
-    # Basic derived variables
-    df['SizeAdv'] = df['n_focal'] - df['n_other']
-    # A positive DistDiff means dist_other > dist_focal -> contest is closer to focal group's home center
-    df['DistDiff'] = df['dist_other'] - df['dist_focal']
-    df['MaleAdv'] = df['m_focal'] - df['m_other']
+    # Create relative size: log ratio (use raw counts; counts here are >=5 so no zero issue)
+    df['RelSize_log'] = np.log(df['n_focal'] / df['n_other'])
+
+    # Location advantage: positive => contest closer to focal group's home center (dist_other > dist_focal)
+    df['LocationAdv'] = df['dist_other'] - df['dist_focal']
+
+    # Binary indicator: contest occurs nearer focal group's home center
+    df['LocationNearFocal'] = (df['dist_focal'] < df['dist_other']).astype(int)
+
+    # Relative number of adult males (could be important in contests)
+    df['RelMales'] = df['m_focal'] - df['m_other']
+
+    # Total size of participants (control)
     df['TotalSize'] = df['n_focal'] + df['n_other']
 
-    # Create a simple categorical location label to capture nonlinearity / thresholds
-    # If the distances are very similar (within 20 meters) we label as 'Neutral'
-    # Otherwise, DistDiff > 20 -> 'FocalHome' (contest closer to focal center)
-    # DistDiff < -20 -> 'OtherHome' (contest closer to other group's center)
-    def categorize_location(x, tol=20.0):
-        if pd.isna(x):
-            return pd.NA
-        if abs(x) <= tol:
-            return 'Neutral'
-        return 'FocalHome' if x > 0 else 'OtherHome'
-
-    df['LocationCat'] = df['DistDiff'].apply(categorize_location)
-
-    # Standardize (z-score) the continuous predictors used in models
-    for raw_col, z_col in [('SizeAdv', 'SizeAdv_z'), ('DistDiff', 'DistDiff_z'), ('MaleAdv', 'MaleAdv_z'), ('TotalSize', 'TotalSize_z')]:
-        col = df[raw_col]
-        # Use population std (ddof=0) to be explicit; fall back safely when constant
-        std = col.std(ddof=0)
-        mean = col.mean()
-        if std == 0 or pd.isna(std):
-            df[z_col] = 0.0
+    # Standardize continuous predictors (z-scoring). Use population std (ddof=0) to be explicit.
+    for col in ['RelSize_log', 'LocationAdv', 'RelMales', 'TotalSize']:
+        mean = df[col].mean()
+        std = df[col].std(ddof=0)
+        if std == 0 or np.isnan(std):
+            # If no variation, create zero column to avoid division by zero
+            df['z_' + col] = 0.0
         else:
-            df[z_col] = (col - mean) / std
+            df['z_' + col] = (df[col] - mean) / std
 
-    # Ensure win is integer (0/1)
+    # Ensure win is integer 0/1
     df['win'] = df['win'].astype(int)
 
-    # Ensure dyad is integer/categorical for clustering
-    df['dyad'] = df['dyad'].astype(int)
-
-    # Drop any rows that may have become NA in categorical LocationCat
-    df = df.dropna(subset=['LocationCat'])
-
-    # Final columns required for modeling: keep them and return
-    required_cols = ['win', 'SizeAdv_z', 'DistDiff_z', 'MaleAdv_z', 'TotalSize_z', 'LocationCat', 'dyad']
-    # If any required column missing for a row, drop that row
-    df = df.dropna(subset=required_cols)
+    # Keep columns necessary for modeling and diagnostics
+    keep_cols = ['win', 'RelSize_log', 'LocationAdv', 'LocationNearFocal', 'RelMales', 'TotalSize',
+                 'z_RelSize_log', 'z_LocationAdv', 'z_RelMales', 'z_TotalSize', 'dyad',
+                 'n_focal', 'n_other', 'm_focal', 'm_other', 'dist_focal', 'dist_other']
+    # Some of these may already exist; return a dataframe with at least these columns (if any missing, they will be added above)
+    df = df[keep_cols].reset_index(drop=True)
 
     return df
 
 
 # ======== MODEL CODE ========
-def model(df: pd.DataFrame) -> Any:
+def model(df: pd.DataFrame):
     """
-    Fit a logistic regression predicting the probability that the focal group wins.
+    Fit a logistic regression (binomial GLM) predicting probability focal wins (win)
+    from relative group size, location advantage, their interaction, and the control covariates.
 
-    Model specification:
-      win ~ SizeAdv_z * DistDiff_z + MaleAdv_z + TotalSize_z + C(LocationCat)
+    Uses cluster-robust standard errors clustered by 'dyad' to account for non-independence
+    of contests within the same dyad.
 
-    We also compute cluster-robust standard errors clustered on dyad to account for repeated contests
-    between the same pair of groups.
+    Model formula (Patsy-compatible):
+      win ~ z_RelSize_log * z_LocationAdv + z_RelMales + z_TotalSize
 
-    Returns a dictionary with the fitted results and the cluster-robust results.
+    Returns the fitted model results with cluster-robust covariances.
     """
-    # Ensure required columns exist
-    needed = ['win', 'SizeAdv_z', 'DistDiff_z', 'MaleAdv_z', 'TotalSize_z', 'LocationCat', 'dyad']
-    missing = [c for c in needed if c not in df.columns]
+    # Check required columns
+    required_model_cols = ['win', 'z_RelSize_log', 'z_LocationAdv', 'z_RelMales', 'z_TotalSize', 'dyad']
+    missing = [c for c in required_model_cols if c not in df.columns]
     if missing:
-        raise ValueError(f"Missing required columns for modeling: {missing}")
+        raise ValueError(f"Dataframe is missing columns required for modeling: {missing}")
 
-    # Fit a logistic regression (use discrete Logit as an equivalent to GLM(binomial))
-    formula = 'win ~ SizeAdv_z * DistDiff_z + MaleAdv_z + TotalSize_z + C(LocationCat)'
-    logit_res = smf.logit(formula=formula, data=df).fit(disp=False)
+    # Build model using formula interface
+    formula = 'win ~ z_RelSize_log * z_LocationAdv + z_RelMales + z_TotalSize'
 
-    # Compute cluster-robust covariance matrix clustered by dyad
-    clustered_cov = cov_cluster(logit_res, df['dyad'])
+    # Fit binomial GLM
+    model_glm = sm.GLM.from_formula(formula, data=df, family=sm.families.Binomial())
+    res = model_glm.fit()
 
-    # Derive clustered standard errors, z-stats, and p-values (normal approximation)
-    params = logit_res.params
-    clustered_se = np.sqrt(np.diag(clustered_cov))
-    with np.errstate(divide='ignore', invalid='ignore'):
-        z_cluster = params / clustered_se
-    p_cluster = 2 * (1 - scipy.stats.norm.cdf(np.abs(z_cluster)))
+    # Obtain cluster-robust covariance (clustered by dyad)
+    # .get_robustcov_results is used to adapt the covariance matrix
+    try:
+        res_cluster = res.get_robustcov_results(cov_type='cluster', groups=df['dyad'])
+    except Exception:
+        # Fallback: if clustering fails, return the original fit but warn the user
+        import warnings
+        warnings.warn('Clustered SE computation failed; returning the original GLM results without clustering.')
+        res_cluster = res
 
-    clustered_summary = pd.DataFrame({
-        'coef': params,
-        'se_cluster': clustered_se,
-        'z_cluster': z_cluster,
-        'p_cluster': p_cluster
-    })
+    # Optionally, attach predicted probabilities and marginal effects for interpretation
+    df = df.copy()
+    df['pred_prob'] = res_cluster.predict(df)
 
-    # Return both objects so the analyst can inspect coefficients and robust summaries
+    # Return a dictionary with useful objects
     return {
-        'glm_results': logit_res,
-        'clustered_cov': clustered_cov,
-        'clustered_summary': clustered_summary
+        'results_clustered': res_cluster,
+        'predicted_dataframe': df,
+        'formula': formula
     }
+
+

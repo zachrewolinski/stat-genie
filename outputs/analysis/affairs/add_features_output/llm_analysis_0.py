@@ -12,127 +12,135 @@ df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/anal
 
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
-    # Make a copy to avoid modifying original
+    """
+    Transform the raw Fair (affairs) dataset into a dataframe suitable for modeling.
+
+    Produces the following new/clean columns used in modeling:
+      - children_yes: binary indicator (1=yes, 0=no)
+      - gender_female: binary indicator (1=female, 0=male)
+      - AnyAffair: binary indicator (1 if affairs > 0, else 0)
+      - age_centered: age minus sample mean
+      - yearsmarried_centered: yearsmarried minus sample mean
+      - retains original 'affairs' count column for count models
+
+    Rows with missing values in columns required for the primary analyses are dropped.
+    """
+    # Make a copy to avoid side effects
     df = df.copy()
 
-    # Keep only rows with non-missing outcome and the primary IV
-    required_cols = ['affairs', 'children', 'gender', 'age', 'yearsmarried', 'education', 'religiousness', 'rating', 'occupation']
-    df = df.dropna(subset=required_cols)
+    # Standardize column names (if necessary) - assume they are as described in the schema
+    # Map children to binary
+    if 'children' in df.columns:
+        df['children_yes'] = df['children'].map({
+            'yes': 1,
+            'no': 0,
+        })
+    else:
+        # if dataset already numeric 0/1 under another name, try to preserve it
+        df['children_yes'] = df.get('children_yes', np.nan)
 
-    # Ensure numeric types for affairs
-    df['affairs'] = pd.to_numeric(df['affairs'], errors='coerce')
+    # Map gender to binary female indicator
+    if 'gender' in df.columns:
+        # Accept common variations in case
+        df['gender_female'] = df['gender'].astype(str).str.lower().map(lambda x: 1 if x == 'female' else (0 if x == 'male' else np.nan))
+    else:
+        df['gender_female'] = df.get('gender_female', np.nan)
 
-    # Encode children: expected values 'yes'/'no' (case-insensitive). Create HasChildren binary column.
-    df['children'] = df['children'].astype(str).str.strip().str.lower()
-    df['HasChildren'] = df['children'].map({'yes': 1, 'no': 0})
-    # If mapping produced NaN (unexpected values), fallback: treat any non-'no' as 1 when non-empty
-    mask_unknown_children = df['HasChildren'].isna() & df['children'].notna()
-    if mask_unknown_children.any():
-        df.loc[mask_unknown_children, 'HasChildren'] = df.loc[mask_unknown_children, 'children'].apply(lambda x: 0 if x == 'no' else 1)
-    df['HasChildren'] = df['HasChildren'].astype(int)
+    # Binary outcome: any affair
+    df['AnyAffair'] = (df['affairs'] > 0).astype(int)
 
-    # Encode gender: create IsFemale (1 = female, 0 = male). Accept common string forms.
-    df['gender'] = df['gender'].astype(str).str.strip().str.lower()
-    df['IsFemale'] = df['gender'].map({'female': 1, 'male': 0})
-    # If missing mapping, try to infer from single-letter coding
-    mask_gender_na = df['IsFemale'].isna() & df['gender'].notna()
-    if mask_gender_na.any():
-        df.loc[mask_gender_na, 'IsFemale'] = df.loc[mask_gender_na, 'gender'].apply(lambda x: 1 if x.startswith('f') else (0 if x.startswith('m') else np.nan))
-    df['IsFemale'] = df['IsFemale'].astype(float)
-
-    # Convert numeric covariates to numeric types
-    for col in ['age', 'yearsmarried', 'education', 'religiousness', 'rating', 'occupation']:
-        df[col] = pd.to_numeric(df[col], errors='coerce')
-
-    # Drop rows with any remaining missing values in modelling columns
-    model_cols = ['affairs', 'HasChildren', 'IsFemale', 'age', 'yearsmarried', 'education', 'religiousness', 'rating', 'occupation']
-    df = df.dropna(subset=model_cols)
-
-    # Standardize continuous controls for easier interpretation in the regression
-    # Create standardized columns with suffix _s
-    for col in ['age', 'yearsmarried', 'education', 'religiousness', 'rating', 'occupation']:
-        mean = df[col].mean()
-        std = df[col].std(ddof=0)
-        # Avoid division by zero
-        if std == 0 or np.isnan(std):
-            df[f'{col}_s'] = 0.0
+    # Center continuous covariates to aid interpretation
+    for col in ['age', 'yearsmarried']:
+        if col in df.columns:
+            mean_val = df[col].mean()
+            df[col + '_centered'] = df[col] - mean_val
         else:
-            df[f'{col}_s'] = (df[col] - mean) / std
+            df[col + '_centered'] = np.nan
 
-    # Keep only columns required for the model (but do not remove original raw columns)
-    final_cols = ['affairs', 'HasChildren', 'IsFemale', 'age_s', 'yearsmarried_s', 'education_s', 'religiousness_s', 'rating_s', 'occupation_s']
-    # Ensure final columns exist (they should); select and return dataframe with these plus originals
-    # Return full df (with new columns). Caller/model will use these specific columns.
+    # Ensure control numeric columns exist; if not, create with NaN to keep column list stable
+    for col in ['religiousness', 'education', 'occupation', 'rating']:
+        if col not in df.columns:
+            df[col] = np.nan
+
+    # Select only the columns needed for modeling (keeps original 'affairs' count as well)
+    model_cols = [
+        'affairs',
+        'AnyAffair',
+        'children_yes',
+        'gender_female',
+        'age_centered',
+        'yearsmarried_centered',
+        'religiousness',
+        'education',
+        'occupation',
+        'rating'
+    ]
+
+    # Drop rows with missing values in core variables used by the primary models
+    df = df.dropna(subset=['affairs', 'children_yes', 'gender_female', 'age_centered', 'yearsmarried_centered', 'religiousness', 'education', 'occupation', 'rating'])
+
+    # Keep only needed columns (but preserve index)
+    df = df[model_cols].reset_index(drop=True)
+
     return df
 
 
 # ======== MODEL CODE ========
-def model(df: pd.DataFrame):
-    # Import model class
-    from statsmodels.discrete.count_model import ZeroInflatedNegativeBinomialP
-    import statsmodels.api as sm
+def model(df: pd.DataFrame) -> dict:
+    """
+    Run primary statistical models to answer: Does having children decrease engagement in extramarital affairs?
 
-    # Ensure required columns are present
-    required = ['affairs', 'HasChildren', 'IsFemale', 'age_s', 'yearsmarried_s', 'education_s', 'religiousness_s', 'rating_s', 'occupation_s']
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        raise ValueError(f"Missing required columns for modeling: {missing}")
+    Approaches provided:
+      1) Logistic regression on AnyAffair (probability of any extramarital affair).
+      2) Negative binomial regression on the positive-count subsample (affairs > 0) to examine frequency conditional on any affair.
 
-    # Prepare endogenous and exogenous matrices
-    endog = df['affairs'].astype(float)
+    The logistic model is the primary model for the research question (whether children reduce the likelihood of any affair).
+    We include an interaction between children_yes and gender_female to test whether the association differs by gender.
 
-    exog_vars = ['HasChildren', 'IsFemale', 'age_s', 'yearsmarried_s', 'education_s', 'religiousness_s', 'rating_s', 'occupation_s']
-    exog = sm.add_constant(df[exog_vars], has_constant='add')
+    Returns a dict with fitted model result objects.
+    """
+    import statsmodels.api as _sm
+    import statsmodels.formula.api as smf
 
-    # For the zero-inflation (logit) part, use a subset of predictors; here use the same covariates excluding occupation (to keep inflation model more parsimonious)
-    exog_infl_vars = ['HasChildren', 'IsFemale', 'age_s', 'yearsmarried_s', 'education_s', 'religiousness_s', 'rating_s']
-    exog_infl = sm.add_constant(df[exog_infl_vars], has_constant='add')
+    results = {}
 
-    # Fit a Zero-Inflated Negative Binomial model to account for excess zeros and overdispersion
-    zinb = ZeroInflatedNegativeBinomialP(endog, exog, exog_infl=exog_infl, inflation='logit')
+    # Formula for both models: main effect of children, interaction with gender, and controls
+    formula = (
+        'AnyAffair ~ children_yes * gender_female + age_centered + yearsmarried_centered '
+        '+ religiousness + education + occupation + rating'
+    )
 
-    # Fit model with default start params; increase maxiter for convergence if needed
+    # 1) Logistic regression for probability of any affair
     try:
-        results = zinb.fit(method='bfgs', maxiter=1000, disp=False)
-    except Exception:
-        # fallback to default optimization if BFGS fails
-        results = zinb.fit(disp=False)
+        logit_res = smf.logit(formula, data=df).fit(disp=False)
+        results['logit_any_affair'] = logit_res
+    except Exception as e:
+        results['logit_any_affair'] = None
+        results['logit_error'] = str(e)
 
-    # Compute and display a compact summary and the marginal effect of HasChildren on expected count
-    # (average marginal effect estimated numerically)
-    try:
-        summary_text = results.summary().as_text()
-    except Exception:
-        summary_text = str(results.summary())
-
-    # Average marginal effect for HasChildren on expected number of affairs
-    # We'll compute predicted expected counts at HasChildren=1 and HasChildren=0 holding other covariates at their observed values,
-    # then take the mean difference (average treatment effect)
-    df_model = exog.copy()
-    df_model_zero = df_model.copy()
-    df_model_one = df_model.copy()
-    df_model_zero['HasChildren'] = 0
-    df_model_one['HasChildren'] = 1
-
-    # Predictions: use results.predict with exog and exog_infl provided
-    try:
-        mu_zero = results.predict(exog=df_model_zero, exog_infl=exog_infl.loc[df_model_zero.index], which='mean')
-        mu_one = results.predict(exog=df_model_one, exog_infl=exog_infl.loc[df_model_one.index], which='mean')
-        avg_effect = (mu_one - mu_zero).mean()
-    except Exception:
-        # If the predict signature differs, fallback to using exog only
+    # 2) Negative binomial regression on positive counts (affairs > 0)
+    df_pos = df[df['affairs'] > 0].copy()
+    if df_pos.shape[0] >= 30:
+        # Use count model only if we have a reasonable number of positive observations
+        nb_formula = (
+            'affairs ~ children_yes * gender_female + age_centered + yearsmarried_centered '
+            '+ religiousness + education + occupation + rating'
+        )
         try:
-            mu_zero = results.predict(df_model_zero)
-            mu_one = results.predict(df_model_one)
-            avg_effect = (mu_one - mu_zero).mean()
-        except Exception:
-            avg_effect = np.nan
+            nb_res = smf.glm(nb_formula, data=df_pos, family=_sm.families.NegativeBinomial()).fit()
+            results['negbin_pos_affairs'] = nb_res
+        except Exception as e:
+            results['negbin_pos_affairs'] = None
+            results['negbin_error'] = str(e)
+    else:
+        results['negbin_pos_affairs'] = None
+        results['negbin_error'] = 'Not enough positive-affair observations for reliable count model (n={}).'.format(df_pos.shape[0])
 
-    # Attach an interpretation attribute to results for convenience
-    results.ame_HasChildren = avg_effect
-    results.model_summary_text = summary_text
+    # Attach metadata about sample sizes
+    results['n_total'] = df.shape[0]
+    results['n_positive_affairs'] = int((df['affairs'] > 0).sum())
+    results['n_children'] = int(df['children_yes'].sum())
 
-    # Return the fitted results object (with added attributes ame_HasChildren and model_summary_text)
     return results
 
 

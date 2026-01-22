@@ -1,4 +1,4 @@
-from typing import Dict, FrozenSet, List, Literal, Optional, Set, Tuple, Any
+from typing import Any
 import numpy as np
 import pandas as pd
 import sklearn
@@ -7,107 +7,104 @@ import statsmodels.api as sm
 import statsmodels.formula.api as smf
 import matplotlib.pyplot as plt
 import pickle
-  
+
 df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/analysis/crofoot/add_features_output/crofoot.csv')
 
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Transform the raw dataset to create the variables used in the statistical model.
+    Transform the raw dataset to create the variables used in the model.
 
-    Produced columns used in the model:
-    - RelSize_Ratio: n_focal / n_other (continuous)
-    - RelSize_Diff: n_focal - n_other (derived, kept for diagnostics)
-    - DistDiff: dist_other - dist_focal (continuous signed distance difference)
-    - ContestLoc: categorical ('FocalTerritory', 'OtherTerritory', 'Neutral') derived from DistDiff
-    - RelMales: m_focal - m_other (control)
-    - TotalSize: n_focal + n_other (control)
-    - win, dyad remain as in the raw data
-    
-    Notes: We drop observations with missing values in the core variables required for these derivations.
-    A threshold of 50 meters is used to categorize a location as decisively in one group's territory vs neutral.
+    Adds:
+    - size_diff: n_focal - n_other
+    - size_ratio: n_focal / n_other (kept for diagnostics)
+    - rel_dist: dist_other - dist_focal (positive => favorable for focal)
+    - focal_home: binary indicator (1 if dist_focal < dist_other)
+    - m_diff: m_focal - m_other
+    - f_diff: f_focal - f_other
+    - z standardized versions as helper columns: z_size_diff, z_rel_dist, z_m_diff, z_f_diff
+    - ensures dyad is categorical
+
+    Drops rows with missing values in required columns.
     """
     df = df.copy()
 
-    # Required columns for analysis
-    required_cols = ['win', 'dist_focal', 'dist_other', 'n_focal', 'n_other', 'm_focal', 'm_other', 'dyad']
-    df = df.dropna(subset=required_cols)
+    # Required columns for the analysis
+    required_cols = ['win', 'n_focal', 'n_other', 'dist_focal', 'dist_other', 'm_focal', 'm_other', 'f_focal', 'f_other', 'dyad']
+    missing = [c for c in required_cols if c not in df.columns]
+    if len(missing) > 0:
+        raise KeyError(f"Missing required columns in input dataframe: {missing}")
 
-    # Relative group size: ratio and difference
-    # Use float division
-    df['RelSize_Ratio'] = df['n_focal'].astype(float) / df['n_other'].astype(float)
-    df['RelSize_Diff'] = df['n_focal'] - df['n_other']
+    # Drop rows with NA in key columns
+    df = df.dropna(subset=required_cols).reset_index(drop=True)
 
-    # Distance difference: positive => contest relatively closer to focal's center (other farther)
-    df['DistDiff'] = df['dist_other'] - df['dist_focal']
+    # Numeric transforms
+    df['size_diff'] = df['n_focal'] - df['n_other']
+    # Keep ratio for diagnostics if desired
+    # Guard division by zero (shouldn't happen given schema, but be safe)
+    df['size_ratio'] = df['n_focal'] / df['n_other'].replace(0, np.nan)
 
-    # Define contest location category using a threshold (50 meters) for a decisive advantage in territory
-    # If dist_other - dist_focal > 50 => focal is relatively closer to its center -> 'FocalTerritory'
-    # If dist_other - dist_focal < -50 => other is relatively closer to its center -> 'OtherTerritory'
-    # Otherwise -> 'Neutral'
-    threshold = 50.0
-    df['ContestLoc'] = df['DistDiff'].apply(
-        lambda x: 'FocalTerritory' if x > threshold else ('OtherTerritory' if x < -threshold else 'Neutral')
-    )
+    # Location: positive means contest is deeper in focal's home-range (other is farther from its center)
+    df['rel_dist'] = df['dist_other'] - df['dist_focal']
+    # Binary home indicator (1 if closer to focal group's center)
+    df['focal_home'] = (df['dist_focal'] < df['dist_other']).astype(int)
 
-    # Composition control: difference in males
-    df['RelMales'] = df['m_focal'] - df['m_other']
+    # Sex composition differences
+    df['m_diff'] = df['m_focal'] - df['m_other']
+    df['f_diff'] = df['f_focal'] - df['f_other']
 
-    # Total size control
-    df['TotalSize'] = df['n_focal'] + df['n_other']
+    # Standardize continuous predictors (z-scores) for diagnostics/model stability if desired
+    def zscore(s: pd.Series) -> pd.Series:
+        s = s.astype(float)
+        mu = s.mean()
+        sd = s.std(ddof=0)
+        if sd == 0 or np.isnan(sd):
+            return s - mu
+        return (s - mu) / sd
 
-    # Ensure categorical types for modeling
-    df['ContestLoc'] = pd.Categorical(df['ContestLoc'], categories=['FocalTerritory', 'Neutral', 'OtherTerritory'])
+    # Helper standardized columns (allowed as internal helpers)
+    df['z_size_diff'] = zscore(df['size_diff'])
+    df['z_rel_dist'] = zscore(df['rel_dist'])
+    df['z_m_diff'] = zscore(df['m_diff'])
+    df['z_f_diff'] = zscore(df['f_diff'])
+
+    # Make dyad a categorical column (keeps original values, but cast to category)
     df['dyad'] = df['dyad'].astype('category')
 
-    # Return only the columns necessary for modeling plus a few diagnostics
-    keep_cols = ['win', 'RelSize_Ratio', 'RelSize_Diff', 'DistDiff', 'ContestLoc', 'RelMales', 'TotalSize', 'dyad', 'focal', 'other', 'n_focal', 'n_other']
-    # If any keep column missing (e.g. focal/other may be absent), fall back to available columns
-    available_keep = [c for c in keep_cols if c in df.columns]
-    return df[available_keep]
+    # Ensure win is integer 0/1
+    df['win'] = df['win'].astype(int)
+
+    # Return transformed dataframe with all columns that may be used in modeling
+    return df
 
 
 # ======== MODEL CODE ========
-def model(df: pd.DataFrame) -> any:
+def model(df: pd.DataFrame) -> Any:
     """
-    Fit a logistic regression (binomial GLM) predicting the probability that the focal group wins (win == 1)
-    as a function of relative group size, contest location, and controls. We include the interaction between
-    relative size and contest location to test whether the effect of relative size depends on location.
+    Fit a logistic regression (binomial GLM) predicting probability that the focal group wins.
 
-    Model formula:
-    win ~ RelSize_Ratio * C(ContestLoc) + RelMales + TotalSize + C(dyad)
+    Primary specification:
+    - DV: win
+    - IVs: size_diff (difference in group size), focal_home (binary moderator)
+    - Interaction: size_diff * focal_home (tests whether home advantage modifies effect of size)
+    - Additional covariates: rel_dist (continuous location measure), m_diff, f_diff
+    - Controls: dyad fixed effects via C(dyad)
 
-    Returns the fitted model results object (statsmodels GLMResultsWrapper).
+    Returns the fitted statsmodels result object (GLM).
     """
-    import statsmodels.formula.api as smf
-    import statsmodels.api as sm
+    # Check that required transformed columns exist
+    required = ['win', 'size_diff', 'focal_home', 'rel_dist', 'm_diff', 'f_diff', 'dyad']
+    missing = [c for c in required if c not in df.columns]
+    if len(missing) > 0:
+        raise KeyError(f"Missing required transformed columns for modeling: {missing}")
 
-    # Make a local copy to avoid modifying the input
-    dfm = df.copy()
+    # Formula: interaction between size_diff and focal_home (moderator),
+    # plus continuous rel_dist and sex-composition controls and dyad fixed effects
+    formula = 'win ~ size_diff * focal_home + rel_dist + m_diff + f_diff + C(dyad)'
 
-    # Ensure dependent is numeric 0/1
-    dfm['win'] = dfm['win'].astype(float)
+    # Fit the logistic regression (binomial family) using statsmodels GLM.
+    # Use families from statsmodels.api (imported as sm).
+    result = smf.glm(formula=formula, data=df, family=sm.families.Binomial()).fit()
 
-    # Formula with interaction between relative size and contest location; dyad as fixed effect
-    formula = 'win ~ RelSize_Ratio * C(ContestLoc) + RelMales + TotalSize + C(dyad)'
-
-    # Fit binomial GLM (logit link)
-    # Use GLM with Binomial family so we can later request robust covariances if desired
-    results = smf.glm(formula=formula, data=dfm, family=sm.families.Binomial()).fit()
-
-    # Optionally compute cluster-robust SEs by dyad if there are enough clusters
-    # We'll attach a convenience attribute with cluster-robust results if dyad present
-    try:
-        if 'dyad' in dfm.columns:
-            clusters = dfm['dyad']
-            # Use cov_type='cluster' with groups=clusters
-            robust = results.get_robustcov_results(cov_type='cluster', groups=clusters)
-            # store both
-            results.cluster_robust = robust
-    except Exception:
-        # if robust cov computation fails, skip quietly
-        results.cluster_robust = None
-
-    return results
-
-
+    # Return the fitted result object (has .summary(), .params, .predict, etc.)
+    return result

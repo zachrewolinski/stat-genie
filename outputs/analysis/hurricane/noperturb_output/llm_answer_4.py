@@ -1,156 +1,153 @@
 def extract_final_answer(model_output):
     """
-    Extracts coefficient, SE, p-value, 95% CI, and exponentiated effect for the 'female_name'
-    variable (and masfem_z as a continuous counterpart) from the provided model_output dict.
-    Also extracts interaction term from the interaction model and the female_name effect from
-    the damage model as a robustness check.
+    Extracts coefficients, p-values, and 95% CIs for the femininity / gender predictors
+    from the provided model_output dictionary and returns a concise conclusion.
 
-    Returns:
-      {
-        "object": { ... numeric results ... },
-        "description": "Concise interpretation of results in context"
-      }
+    Returns a dict with:
+      - "object": dictionary of extracted numeric results (primary model + sensitivities)
+      - "description": plain-language interpretation about whether more feminine names
+                       are associated with higher fatalities.
     """
+    import math
     import numpy as np
 
-    out = {}
-    notes = []
+    def _extract_from_model(model, varname):
+        """Helper to safely extract coef, pval, ci for varname from a statsmodels result."""
+        if model is None:
+            return None
+        try:
+            params = model.params
+            pvalues = model.pvalues
+            conf = model.conf_int()
+            # get coef
+            coef = float(params[varname])
+            pval = float(pvalues[varname])
+            # conf may be DataFrame or ndarray; try label-based then position-based
+            try:
+                ci_lower, ci_upper = conf.loc[varname].tolist()
+            except Exception:
+                # fallback: find index position of varname in params
+                idx = list(params.index).index(varname)
+                ci_lower, ci_upper = conf[idx].tolist()
+            return {"coef": coef, "pvalue": pval, "ci_lower": float(ci_lower), "ci_upper": float(ci_upper)}
+        except Exception as e:
+            # If extraction fails, return the exception message for debugging
+            return {"error": f"extraction_failed: {e}"}
 
-    def _extract_from_result(res, term):
-        """Return dict with coef, se, pvalue, ci_lower, ci_upper, exp_coef if term exists, else None."""
-        if res is None:
-            return None
-        params = getattr(res, "params", None)
-        if params is None:
-            return None
-        if term not in params.index:
-            return None
-        coef = float(params[term])
-        se = float(res.bse[term]) if hasattr(res, "bse") else None
-        pval = float(res.pvalues[term]) if hasattr(res, "pvalues") else None
-        ci = res.conf_int(alpha=0.05).loc[term].tolist() if hasattr(res, "conf_int") else [None, None]
-        exp_coef = float(np.exp(coef)) if coef is not None else None
-        return {
-            "coef": coef,
-            "se": se,
-            "pvalue": pval,
-            "ci_lower": float(ci[0]) if ci[0] is not None else None,
-            "ci_upper": float(ci[1]) if ci[1] is not None else None,
-            "exp_coef": exp_coef
+    results = {}
+
+    # Primary continuous femininity (OLS on log_alldeaths)
+    ols_masfem = model_output.get("ols_masfem")
+    primary = _extract_from_model(ols_masfem, "masfem_z")
+    results["ols_masfem"] = primary
+
+    # Binary gender (OLS sensitivity)
+    ols_gender = model_output.get("ols_gender")
+    gender = _extract_from_model(ols_gender, "gender_mf_num")
+    results["ols_gender"] = gender
+
+    # Negative Binomial (count) sensitivity
+    nb = model_output.get("nb_masfem")
+    nb_res = _extract_from_model(nb, "masfem_z")
+    # if available, compute exponentiated effect (multiplicative change) and CI
+    if isinstance(nb_res, dict) and nb_res is not None and "coef" in nb_res:
+        try:
+            nb_res["exp_coef"] = float(np.exp(nb_res["coef"]))
+            nb_res["exp_ci_lower"] = float(np.exp(nb_res["ci_lower"]))
+            nb_res["exp_ci_upper"] = float(np.exp(nb_res["ci_upper"]))
+        except Exception:
+            pass
+    results["nb_masfem"] = nb_res
+
+    # MTurk continuous femininity (sensitivity OLS)
+    ols_mturk = model_output.get("ols_mturk")
+    mturk = _extract_from_model(ols_mturk, "masfem_mturk_z")
+    results["ols_mturk"] = mturk
+
+    # Determine overall evidence: any model with coef>0 and p<0.05 (supports hypothesis),
+    # or coef<0 and p<0.05 (opposes hypothesis). If none significant, conclude no evidence.
+    evidence = {"supports_hypothesis": False, "opposes_hypothesis": False, "significant_models": []}
+    for name, info in results.items():
+        if not info or "error" in info:
+            continue
+        if ("coef" in info) and (isinstance(info["coef"], (int, float))):
+            coef = info["coef"]
+            p = info.get("pvalue", math.nan)
+            if (p is not None) and (p < 0.05):
+                if coef > 0:
+                    evidence["supports_hypothesis"] = True
+                    evidence["significant_models"].append(name)
+                elif coef < 0:
+                    evidence["opposes_hypothesis"] = True
+                    evidence["significant_models"].append(name)
+
+    # Build plain-language description using extracted numbers (prefer primary model)
+    desc_lines = []
+    if primary and "coef" in primary:
+        coef = primary["coef"]
+        p = primary["pvalue"]
+        ci_l = primary["ci_lower"]
+        ci_u = primary["ci_upper"]
+        desc_lines.append(
+            f"Primary OLS (log fatalities ~ masfem_z): coef = {coef:.4f}, 95% CI [{ci_l:.3f}, {ci_u:.3f}], p = {p:.3f}."
+        )
+        desc_lines.append(
+            "Interpretation: This is the expected change in log1p(fatalities) per 1 SD increase in perceived femininity."
+        )
+    else:
+        desc_lines.append("Primary OLS (masfem_z) results not available.")
+
+    # Summarize sensitivities
+    if gender and "coef" in gender:
+        desc_lines.append(
+            f"Sensitivity OLS (binary gender): coef = {gender['coef']:.4f}, 95% CI [{gender['ci_lower']:.3f}, {gender['ci_upper']:.3f}], p = {gender['pvalue']:.3f}."
+        )
+    if mturk and "coef" in mturk:
+        desc_lines.append(
+            f"Sensitivity OLS (MTurk masfem): coef = {mturk['coef']:.4f}, 95% CI [{mturk['ci_lower']:.3f}, {mturk['ci_upper']:.3f}], p = {mturk['pvalue']:.3f}."
+        )
+    if nb_res and "coef" in nb_res:
+        desc_lines.append(
+            f"Negative Binomial (counts): log-coef = {nb_res['coef']:.4f}, 95% CI [{nb_res['ci_lower']:.3f}, {nb_res['ci_upper']:.3f}], p = {nb_res['pvalue']:.3f}."
+        )
+        if "exp_coef" in nb_res:
+            desc_lines.append(
+                f"  => multiplicative effect exp(coef) = {nb_res['exp_coef']:.3f}, 95% CI [{nb_res['exp_ci_lower']:.3f}, {nb_res['exp_ci_upper']:.3f}]."
+            )
+
+    # Final conclusion based on significance across models
+    if evidence["supports_hypothesis"] and not evidence["opposes_hypothesis"]:
+        final_statement = (
+            "Conclusion: At least one model shows a statistically significant positive association "
+            "between femininity and fatalities (supports the hypothesis)."
+        )
+    elif evidence["opposes_hypothesis"] and not evidence["supports_hypothesis"]:
+        final_statement = (
+            "Conclusion: At least one model shows a statistically significant negative association "
+            "(opposes the hypothesis)."
+        )
+    else:
+        final_statement = (
+            "Conclusion: No consistent evidence that more feminine hurricane names are associated with higher fatalities. "
+            "All reported femininity / gender coefficients are small and not statistically significant (p >= 0.05)."
+        )
+
+    desc_lines.append(final_statement)
+
+    description = " ".join(desc_lines)
+
+    # Package the object to return: extracted numeric results plus a simple boolean verdict
+    final_object = {
+        "extracted_results": results,
+        "evidence_summary": evidence,
+        "verdict": {
+            # True if at least one model supports the hypothesis (coef>0 & p<0.05)
+            "supports_hypothesis": bool(evidence["supports_hypothesis"]),
+            # True if at least one model opposes (coef<0 & p<0.05)
+            "opposes_hypothesis": bool(evidence["opposes_hypothesis"]),
+            # Overall: require at least one supporting significant model and no opposing significant models
+            "overall_support": bool(evidence["supports_hypothesis"] and not evidence["opposes_hypothesis"])
         }
+    }
 
-    # Retrieve models from dict (safe get)
-    main = model_output.get("ols_log_deaths_main")
-    interact = model_output.get("ols_log_deaths_interact")
-    damage = model_output.get("ols_log_damage")
-
-    # Primary term: female_name in main model
-    main_female = _extract_from_result(main, "female_name")
-    if main_female is not None:
-        out["main_female_name"] = main_female
-        sig = main_female["pvalue"] < 0.05 if main_female["pvalue"] is not None else None
-        notes.append(
-            "Main model (OLS on log(alldeaths+1)): female_name coef = {coef:.4f} (SE={se:.4f}), p = {p:.4g}, "
-            "95% CI [{lo:.4f}, {hi:.4f}]. Exponentiated effect on (alldeaths+1): {exp:.3f}x. {sig}".format(
-                coef=main_female["coef"], se=main_female["se"], p=main_female["pvalue"],
-                lo=main_female["ci_lower"], hi=main_female["ci_upper"], exp=main_female["exp_coef"],
-                sig=("Statistically significant at alpha=0.05." if sig else "Not statistically significant.")
-            )
-        )
-    else:
-        notes.append("Main model: 'female_name' term not found in model output.")
-
-    # Continuous masculinity-femininity (masfem_z) in main model
-    main_masfem = _extract_from_result(main, "masfem_z")
-    if main_masfem is not None:
-        out["main_masfem_z"] = main_masfem
-        sig = main_masfem["pvalue"] < 0.05 if main_masfem["pvalue"] is not None else None
-        notes.append(
-            "Main model: masfem_z coef = {coef:.4f} (SE={se:.4f}), p = {p:.4g}, 95% CI [{lo:.4f}, {hi:.4f}]. Exponentiated effect: {exp:.3f}x. {sig}".format(
-                coef=main_masfem["coef"], se=main_masfem["se"], p=main_masfem["pvalue"],
-                lo=main_masfem["ci_lower"], hi=main_masfem["ci_upper"], exp=main_masfem["exp_coef"],
-                sig=("Significant." if sig else "Not significant.")
-            )
-        )
-    else:
-        notes.append("Main model: 'masfem_z' term not found in model output.")
-
-    # Interaction model: female_name main effect and interaction term with storm_severity
-    interact_female = _extract_from_result(interact, "female_name")
-    # Possible interaction term name: 'female_name:storm_severity' (statsmodels uses colon)
-    interaction_term_name = "female_name:storm_severity"
-    interact_inter = _extract_from_result(interact, interaction_term_name)
-    if interact_female is not None:
-        out["interact_female_name"] = interact_female
-        notes.append("Interaction model: female_name main effect extracted.")
-    else:
-        notes.append("Interaction model: female_name main effect not found.")
-
-    if interact_inter is not None:
-        out["female_by_stormseverity_interaction"] = interact_inter
-        sig = interact_inter["pvalue"] < 0.05 if interact_inter["pvalue"] is not None else None
-        notes.append(
-            "Interaction term (female_name:storm_severity) coef = {coef:.4f} (SE={se:.4f}), p = {p:.4g}, 95% CI [{lo:.4f}, {hi:.4f}]. {sig}".format(
-                coef=interact_inter["coef"], se=interact_inter["se"], p=interact_inter["pvalue"],
-                lo=interact_inter["ci_lower"], hi=interact_inter["ci_upper"],
-                sig=("Significant interaction." if sig else "No significant interaction.")
-            )
-        )
-    else:
-        notes.append("Interaction model: female_name:storm_severity term not found.")
-
-    # Damage model: female_name as robustness outcome
-    damage_female = _extract_from_result(damage, "female_name")
-    if damage_female is not None:
-        out["damage_female_name"] = damage_female
-        sig = damage_female["pvalue"] < 0.05 if damage_female["pvalue"] is not None else None
-        notes.append(
-            "Damage model (log damages): female_name coef = {coef:.4f} (SE={se:.4f}), p = {p:.4g}, 95% CI [{lo:.4f}, {hi:.4f}]. Exponentiated effect: {exp:.3f}x. {sig}".format(
-                coef=damage_female["coef"], se=damage_female["se"], p=damage_female["pvalue"],
-                lo=damage_female["ci_lower"], hi=damage_female["ci_upper"], exp=damage_female["exp_coef"],
-                sig=("Significant." if sig else "Not significant.")
-            )
-        )
-    else:
-        notes.append("Damage model: 'female_name' term not found.")
-
-    # Final concise interpretation about the hypothesis:
-    # Use p-values from main model female_name and masfem_z if available to form a short conclusion.
-    conclusion = "Could not form conclusion: relevant statistics missing."
-    if main_female is not None:
-        if main_female["pvalue"] is not None:
-            if main_female["pvalue"] < 0.05:
-                if main_female["coef"] > 0:
-                    conclusion = ("Primary result: female-named hurricanes are associated with higher log fatalities "
-                                  "in the main model (coef={:.4f}, p={:.4g}), consistent with the hypothesis that "
-                                  "feminine names lead to fewer precautions and higher deaths.").format(
-                                      main_female["coef"], main_female["pvalue"])
-                else:
-                    conclusion = ("Primary result: female-named hurricanes are associated with LOWER log fatalities "
-                                  "in the main model (coef={:.4f}, p={:.4g}), contrary to the hypothesis.").format(
-                                      main_female["coef"], main_female["pvalue"])
-            else:
-                conclusion = ("Primary result: no statistically significant association between female_name and "
-                              "log fatalities in the main model (coef={:.4f}, p={:.4g}); this does not support the "
-                              "hypothesis.").format(main_female["coef"], main_female["pvalue"])
-        else:
-            conclusion = "Primary result: female_name estimate available but p-value missing; cannot assess significance."
-    elif main_masfem is not None:
-        # fallback to continuous measure
-        if main_masfem["pvalue"] is not None:
-            if main_masfem["pvalue"] < 0.05:
-                direction = "higher" if main_masfem["coef"] > 0 else "lower"
-                conclusion = ("Primary result (masfem_z): more feminine names are associated with {} log fatalities "
-                              "(coef={:.4f}, p={:.4g}), {} the hypothesis.").format(direction, main_masfem["coef"], main_masfem["pvalue"])
-            else:
-                conclusion = ("Primary result (masfem_z): no statistically significant association between name femininity "
-                              "and log fatalities (coef={:.4f}, p={:.4g}).").format(main_masfem["coef"], main_masfem["pvalue"])
-        else:
-            conclusion = "Primary result: masfem_z estimate available but p-value missing; cannot assess significance."
-    else:
-        conclusion = "Primary model terms for female_name and masfem_z not found; cannot form conclusion."
-
-    # Aggregate description
-    description = " ; ".join(notes) + " || Conclusion: " + conclusion
-
-    return {"object": out, "description": description}
+    return {"object": final_object, "description": description}

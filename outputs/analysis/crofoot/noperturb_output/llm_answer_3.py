@@ -1,273 +1,356 @@
 def extract_final_answer(model_output):
     """
-    Extracts key statistics from the fitted (clustered) logistic regression result and returns:
-      - "object": a dictionary with coefficients, SEs, p-values, odds ratios and 95% CIs
-                  for the main predictors (RelSize_z, DistDiff_z), their interaction, and Location dummies;
-                  plus simple-slope estimates for the effect of RelSize_z at DistDiff_z = -1, 0, +1 (SD).
-      - "description": a short plain-language interpretation of those results in the context of the task.
-    
-    The function is robust to either a statsmodels results object with get_robustcov_results OR the
-    ClusteredResults-like wrapper returned by the modeling function in the prompt.
+    Extracts key statistics from a fitted statsmodels binary-logit results object
+    (optionally with cluster-robust covariance already applied) and interprets
+    the effects of:
+      - RelSize_diff_z (and its interaction with FocalCloser)
+      - dist_diff_z
+
+    Returns:
+      {
+        "object": <dict of extracted numeric results and derived quantities>,
+        "description": <text summary interpretation in the context of the task>
+      }
+
+    The function is defensive about parameter naming and will try a couple of
+    plausible interaction-term name variants.
     """
     import numpy as np
     import pandas as pd
-    from math import exp
     try:
-        # prefer scipy for p-values if we need to compute them
-        from scipy.stats import norm as _norm
-        norm_cdf = _norm.cdf
+        from scipy.stats import norm
     except Exception:
-        # fallback to an approximation using numpy (less ideal); this path is unlikely
-        def _erf(x):
-            # approximate normal cdf via error function
-            return 0.5 * (1.0 + np.math.erf(x / np.sqrt(2.0)))
-        norm_cdf = _erf
+        # approximate normal CDF if scipy is not available
+        def _phi(x):
+            return (1.0 + np.math.erf(x / np.sqrt(2.0))) / 2.0
+        class _norm:
+            @staticmethod
+            def cdf(x): return _phi(x)
+        norm = _norm()
 
-    # Helper: obtain params, bse, pvalues, cov matrix (if available)
-    # model_output may already be a wrapper providing .params, .bse, .pvalues, .cov_params()
-    # or a statsmodels object with get_robustcov_results applied.
-    # We'll attempt to access attributes defensively.
-    # Params
-    if hasattr(model_output, 'params'):
-        params = model_output.params
-    else:
-        raise ValueError("model_output has no 'params' attribute.")
+    res = model_output
 
+    # Helper to safely get attributes
+    params = getattr(res, "params", None)
+    if params is None:
+        raise ValueError("Provided model_output does not have .params attribute (not a statsmodels results object).")
     # ensure params is a pandas Series
     if not isinstance(params, pd.Series):
-        try:
-            params = pd.Series(params)
-        except Exception:
-            raise ValueError("Could not coerce model_output.params into a pandas Series.")
+        params = pd.Series(params)
 
-    # Standard errors
-    if hasattr(model_output, 'bse'):
-        bse = model_output.bse
-        if not isinstance(bse, pd.Series):
-            try:
-                bse = pd.Series(bse, index=params.index)
-            except Exception:
-                bse = None
-    else:
-        bse = None
-
-    # p-values
-    if hasattr(model_output, 'pvalues'):
-        pvalues = model_output.pvalues
-        if not isinstance(pvalues, pd.Series):
-            try:
-                pvalues = pd.Series(pvalues, index=params.index)
-            except Exception:
-                pvalues = None
-    else:
-        pvalues = None
-
-    # covariance matrix (for joint variance / delta method)
-    cov_df = None
+    # Attempt to get covariance matrix
+    cov = None
     try:
-        cov_raw = model_output.cov_params()
-        # cov_raw may be DataFrame or ndarray; convert to DataFrame aligned with params
-        if isinstance(cov_raw, pd.DataFrame):
-            cov_df = cov_raw.reindex(index=params.index, columns=params.index)
-        else:
-            cov_df = pd.DataFrame(cov_raw, index=params.index, columns=params.index)
+        cov = res.cov_params()
     except Exception:
-        cov_df = None
+        cov = None
 
-    # If bse or pvalues missing, compute from cov_df if available
-    if (bse is None or any(pd.isnull(bse))) and cov_df is not None:
-        bse = pd.Series(np.sqrt(np.diag(cov_df.values)), index=params.index)
-    if pvalues is None:
-        # compute z and two-sided normal p-values
-        if bse is None:
-            raise ValueError("Cannot compute p-values: both pvalues and bse/covariance are unavailable.")
-        z = params.values / bse.values
-        pvals = 2 * (1 - norm_cdf(np.abs(z)))
-        pvalues = pd.Series(pvals, index=params.index)
-
-    # prepare results container
-    results = {}
-
-    def collect_term(name):
-        """Return dict with coef, se, z, p, OR, 95% CI (on OR scale) for term if present, else None."""
-        if name not in params.index:
-            return None
-        coef = float(params.loc[name])
-        se = float(bse.loc[name]) if (bse is not None and name in bse.index) else None
-        z = float(coef / se) if (se is not None) else None
-        p = float(pvalues.loc[name]) if (pvalues is not None and name in pvalues.index) else None
-        or_val = float(np.exp(coef))
-        # compute 95% CI on log-odds then exponentiate
-        if se is not None:
-            lo = coef - 1.96 * se
-            hi = coef + 1.96 * se
-            or_lo = float(np.exp(lo))
-            or_hi = float(np.exp(hi))
+    # Try to obtain confidence intervals and standard errors robustly
+    try:
+        conf_int = res.conf_int()
+        conf_int = pd.DataFrame(conf_int)  # ensure DataFrame
+        # If number of rows matches params, align index
+        if conf_int.shape[0] == len(params):
+            conf_int.index = params.index
+        # Standardize column names to ["2.5%", "97.5%"] if possible
+        if conf_int.shape[1] >= 2:
+            # Replace first two column names
+            other_cols = list(conf_int.columns[2:]) if conf_int.shape[1] > 2 else []
+            conf_int.columns = ["2.5%", "97.5%"] + other_cols
         else:
-            or_lo = or_hi = None
+            # Unexpected shape; raise to go to fallback
+            raise Exception("conf_int has unexpected shape")
+    except Exception:
+        # fallback: compute using normal approximation from bse if available
+        bse_attr = getattr(res, "bse", None)
+        if bse_attr is None:
+            raise ValueError("Cannot obtain confidence intervals or standard errors from model_output.")
+        # Ensure bse is a Series aligned with params
+        if isinstance(bse_attr, pd.Series):
+            bse_series = bse_attr.reindex(params.index)
+        else:
+            bse_series = pd.Series(bse_attr, index=params.index)
+        ci_lower = params - 1.96 * bse_series
+        ci_upper = params + 1.96 * bse_series
+        conf_int = pd.DataFrame(np.vstack([ci_lower, ci_upper]).T, index=params.index, columns=["2.5%", "97.5%"])
+
+    # pvalues
+    pvalues = getattr(res, "pvalues", None)
+    if pvalues is None:
+        # cannot compute p-values without bse/cov
+        bse_attr = getattr(res, "bse", None)
+        if bse_attr is None:
+            raise ValueError("Cannot obtain p-values or standard errors from model_output.")
+        if isinstance(bse_attr, pd.Series):
+            bse_series = bse_attr.reindex(params.index)
+        else:
+            bse_series = pd.Series(bse_attr, index=params.index)
+        z = params / bse_series
+        pvalues = 2 * (1 - norm.cdf(np.abs(z)))
+        pvalues = pd.Series(pvalues, index=params.index)
+    else:
+        # ensure Series and aligned with params
+        if not isinstance(pvalues, pd.Series):
+            pvalues = pd.Series(pvalues, index=params.index)
+        else:
+            pvalues = pvalues.reindex(params.index)
+
+    # Ensure bse_series exists for later use
+    bse_attr = getattr(res, "bse", None)
+    if bse_attr is None:
+        bse_series = None
+    else:
+        if isinstance(bse_attr, pd.Series):
+            bse_series = bse_attr.reindex(params.index)
+        else:
+            bse_series = pd.Series(bse_attr, index=params.index)
+
+    # Identify coefficient names
+    def find_name(possible_names):
+        for n in possible_names:
+            if n in params.index:
+                return n
+        return None
+
+    name_size = find_name(['RelSize_diff_z'])
+    name_dist = find_name(['dist_diff_z'])
+    name_focalcloser = find_name(['FocalCloser'])
+    # Interaction name variants
+    name_inter = find_name(['RelSize_diff_z:FocalCloser', 'RelSize_diff_z: FocalCloser',
+                            'RelSize_diff_z*FocalCloser', 'RelSize_diff_z:FocalCloser[T.1]',
+                            'RelSize_diff_z:FocalCloser[T.True]'])
+
+    if name_size is None or name_dist is None:
+        raise ValueError("Could not find expected predictor names in model coefficients. Found: " + ", ".join(map(str, params.index)))
+
+    # Basic extracted stats for main predictors and interaction (if present)
+    def make_term_dict(term_name):
+        if term_name is None or term_name not in params.index:
+            return {
+                'coef': None,
+                'se': None,
+                'pvalue': None,
+                'ci_2.5%': None,
+                'ci_97.5%': None,
+                'odds_ratio': None,
+                'or_ci_lower': None,
+                'or_ci_upper': None,
+            }
+        coef = float(params.loc[term_name])
+        se = None
+        if bse_series is not None and term_name in bse_series.index:
+            se = float(bse_series.loc[term_name])
+        pval = float(pvalues.loc[term_name]) if term_name in pvalues.index else None
+        ci_lower = None
+        ci_upper = None
+        if term_name in conf_int.index:
+            # conf_int columns are standardized to "2.5%" and "97.5%"
+            if "2.5%" in conf_int.columns and "97.5%" in conf_int.columns:
+                ci_lower = float(conf_int.loc[term_name, "2.5%"])
+                ci_upper = float(conf_int.loc[term_name, "97.5%"])
+            else:
+                # fallback to first two columns
+                ci_lower = float(conf_int.iloc[conf_int.index.get_loc(term_name), 0])
+                ci_upper = float(conf_int.iloc[conf_int.index.get_loc(term_name), 1])
+        # use numpy.exp to avoid math.exp OverflowError on large values
+        oratio = float(np.exp(coef)) if np.isfinite(coef) else float('inf')
+        try:
+            or_ci_lower = float(np.exp(ci_lower)) if ci_lower is not None and np.isfinite(ci_lower) else (float('inf') if ci_lower is not None and np.isposinf(ci_lower) else None)
+        except Exception:
+            or_ci_lower = None
+        try:
+            or_ci_upper = float(np.exp(ci_upper)) if ci_upper is not None and np.isfinite(ci_upper) else (float('inf') if ci_upper is not None and np.isposinf(ci_upper) else None)
+        except Exception:
+            or_ci_upper = None
         return {
             'coef': coef,
-            'std_err': se,
-            'z': z,
-            'p_value': p,
-            'odds_ratio': or_val,
-            'odds_ratio_95ci': (or_lo, or_hi)
+            'se': se,
+            'pvalue': pval,
+            'ci_2.5%': ci_lower,
+            'ci_97.5%': ci_upper,
+            'odds_ratio': oratio,
+            'or_ci_lower': or_ci_lower,
+            'or_ci_upper': or_ci_upper,
         }
 
-    # Identify parameter names robustly.
-    idx = list(params.index)
-
-    # likely names
-    name_rel = None
-    name_dist = None
-    name_inter = None
-
-    # exact matches first
-    if 'RelSize_z' in idx:
-        name_rel = 'RelSize_z'
-    if 'DistDiff_z' in idx:
-        name_dist = 'DistDiff_z'
-
-    # find interaction: typically 'RelSize_z:DistDiff_z' or 'DistDiff_z:RelSize_z'
-    for nm in idx:
-        if (('RelSize_z' in nm) and ('DistDiff_z' in nm) and (':' in nm or '*' in nm or '.' in nm or '/' in nm)):
-            name_inter = nm
-            break
-    # fallback: if no ':' but some other form, try any name containing both substrings
-    if name_inter is None:
-        for nm in idx:
-            if ('RelSize_z' in nm) and ('DistDiff_z' in nm) and nm != 'RelSize_z' and nm != 'DistDiff_z':
-                name_inter = nm
-                break
-
-    # fallback names if not found by exact match: try to find by containment
-    if name_rel is None:
-        for nm in idx:
-            if 'RelSize' in nm and 'RelSize_z' not in nm:
-                name_rel = nm
-                break
-    if name_dist is None:
-        for nm in idx:
-            if 'DistDiff' in nm and 'DistDiff_z' not in nm:
-                name_dist = nm
-                break
-
-    # collect main predictors
-    results['RelSize'] = collect_term(name_rel) if name_rel else None
-    results['DistDiff'] = collect_term(name_dist) if name_dist else None
-    results['Interaction'] = collect_term(name_inter) if name_inter else None
-
-    # Collect location dummies (any parameter name starting with "C(Location)" or similar)
-    loc_terms = {nm: collect_term(nm) for nm in idx if ('C(Location)' in nm) or ('Location' in nm and 'C(Location)' not in nm and 'dyad' not in nm and ('T.' in nm or '[' in nm))}
-    results['Location_terms'] = loc_terms
-
-    # Simple slopes: effect of RelSize_z at DistDiff_z = -1, 0, +1
-    simple_slopes = {}
-    if name_rel:
-        # coefficient names for RelSize and interaction must be present to compute slope at nonzero DistDiff
-        b_rel = params.get(name_rel, np.nan)
-        b_inter = params.get(name_inter, 0.0) if name_inter else 0.0
-        # For slope se, we need var(b_rel) + d^2 var(b_inter) + 2 d cov(b_rel,b_inter)
-        for d in [-1.0, 0.0, 1.0]:
-            slope = float(b_rel + b_inter * d)
-            slope_dict = {'slope_logodds': slope}
-            # compute SE if cov available
-            slope_se = None
-            if cov_df is not None and name_rel in cov_df.index:
-                var_rel = cov_df.loc[name_rel, name_rel]
-                var_inter = cov_df.loc[name_inter, name_inter] if (name_inter in cov_df.index) else 0.0
-                cov_rel_inter = cov_df.loc[name_rel, name_inter] if (name_inter in cov_df.index) else 0.0
-                var_s = var_rel + (d ** 2) * var_inter + 2 * d * cov_rel_inter
-                if var_s < 0:
-                    # numerical issues; avoid negative var
-                    var_s = max(var_s, 0.0)
-                slope_se = float(np.sqrt(var_s))
-                slope_dict['std_err'] = slope_se
-                # 95% CI on log-odds
-                lo = slope - 1.96 * slope_se
-                hi = slope + 1.96 * slope_se
-                slope_dict['odds_ratio'] = float(np.exp(slope))
-                slope_dict['odds_ratio_95ci'] = (float(np.exp(lo)), float(np.exp(hi)))
-            else:
-                # fallback: if only bse for the RelSize exists (no cov), approximate using bse of RelSize (valid only for d=0)
-                if (d == 0) and (bse is not None) and (name_rel in bse.index):
-                    slope_se = float(bse.loc[name_rel])
-                    slope_dict['std_err'] = slope_se
-                    lo = slope - 1.96 * slope_se
-                    hi = slope + 1.96 * slope_se
-                    slope_dict['odds_ratio'] = float(np.exp(slope))
-                    slope_dict['odds_ratio_95ci'] = (float(np.exp(lo)), float(np.exp(hi)))
-                else:
-                    slope_dict['std_err'] = None
-                    slope_dict['odds_ratio'] = float(np.exp(slope))
-                    slope_dict['odds_ratio_95ci'] = (None, None)
-            simple_slopes[f'DistDiff_z={d}'] = slope_dict
-    results['Simple_slopes_RelSize_at_DistDiff'] = simple_slopes
-
-    # Build a short textual interpretation
-    lines = []
-    # RelSize
-    rel = results['RelSize']
-    if rel is not None:
-        sig = '(p < 0.05)' if rel['p_value'] is not None and rel['p_value'] < 0.05 else '(ns)'
-        lines.append(f"Relative group size (RelSize_z): coef={rel['coef']:.3f}, SE={rel['std_err']:.3f}, p={rel['p_value']:.3g} -> OR={rel['odds_ratio']:.3f} {sig}.")
-        if rel['p_value'] is not None and rel['p_value'] < 0.05:
-            lines.append("  Interpretation: Larger focal groups are more likely to win; a 1-SD increase in relative size multiplies the odds of winning by the OR above.")
+    results = {}
+    results['RelSize_diff_z'] = make_term_dict(name_size)
+    results['dist_diff_z'] = make_term_dict(name_dist)
+    if name_focalcloser is not None:
+        results['FocalCloser'] = make_term_dict(name_focalcloser)
+    if name_inter is not None:
+        results['RelSize_x_FocalCloser'] = make_term_dict(name_inter)
     else:
-        lines.append("Relative group size (RelSize_z) not found in model output.")
+        results['RelSize_x_FocalCloser'] = None
 
-    # DistDiff
-    dist = results['DistDiff']
-    if dist is not None:
-        sig = '(p < 0.05)' if dist['p_value'] is not None and dist['p_value'] < 0.05 else '(ns)'
-        lines.append(f"Distance difference (DistDiff_z: contest closer to focal = positive): coef={dist['coef']:.3f}, SE={dist['std_err']:.3f}, p={dist['p_value']:.3g} -> OR={dist['odds_ratio']:.3f} {sig}.")
-        if dist['p_value'] is not None and dist['p_value'] < 0.05:
-            lines.append("  Interpretation: Contests closer to the focal group's center (positive DistDiff_z) increase the focal group's probability of winning.")
-    else:
-        lines.append("Distance difference (DistDiff_z) not found in model output.")
+    # Compute marginal effect of RelSize_diff_z when FocalCloser = 0 and =1
+    coef_size = float(params.loc[name_size])
+    coef_inter = float(params.loc[name_inter]) if name_inter is not None and name_inter in params.index else 0.0
 
-    # Interaction
-    inter = results['Interaction']
-    if inter is not None:
-        sig = '(p < 0.05)' if inter['p_value'] is not None and inter['p_value'] < 0.05 else '(ns)'
-        lines.append(f"Interaction (RelSize_z x DistDiff_z): coef={inter['coef']:.3f}, SE={inter['std_err']:.3f}, p={inter['p_value']:.3g} {sig}.")
-        if inter['p_value'] is not None and inter['p_value'] < 0.05:
-            lines.append("  Interpretation: The effect of relative group size on winning depends on contest location (the slope of RelSize_z changes with DistDiff_z).")
-            # include simple slopes
-            for key, val in results['Simple_slopes_RelSize_at_DistDiff'].items():
-                orv = val.get('odds_ratio')
-                ci = val.get('odds_ratio_95ci')
-                if ci[0] is not None:
-                    lines.append(f"   - At {key}: OR={orv:.3f}, 95%CI=({ci[0]:.3f}, {ci[1]:.3f}).")
-                else:
-                    lines.append(f"   - At {key}: OR={orv:.3f} (CI unavailable).")
+    marg0_coef = coef_size
+    marg1_coef = coef_size + coef_inter
+
+    # Compute standard errors for marginals using covariance matrix if available
+    def lincomb_var(names, coefs):
+        """
+        Var(sum_i c_i * beta_i) using cov matrix.
+        names: list of param names
+        coefs: list of multipliers (1 or so)
+        """
+        if cov is None:
+            return None
+        cov_df = cov if isinstance(cov, pd.DataFrame) else pd.DataFrame(cov, index=params.index, columns=params.index)
+        var = 0.0
+        for i, ni in enumerate(names):
+            for j, nj in enumerate(names):
+                # if any name missing from cov_df, cannot compute
+                if ni not in cov_df.index or nj not in cov_df.columns:
+                    return None
+                var += coefs[i] * coefs[j] * float(cov_df.loc[ni, nj])
+        return var
+
+    var_marg0 = lincomb_var([name_size], [1.0]) if name_size in params.index else None
+    var_marg1 = None
+    if name_inter is not None and name_inter in params.index:
+        var_marg1 = lincomb_var([name_size, name_inter], [1.0, 1.0])
+    elif name_inter is None:
+        # no interaction term; marg1 same as marg0
+        var_marg1 = var_marg0
+
+    def make_marginal_entry(coef, var):
+        if var is None:
+            se = None
+            z = None
+            p = None
+            ci_low = None
+            ci_high = None
+            or_ci_low = None
+            or_ci_high = None
         else:
-            lines.append("  Interpretation: No strong evidence that the effect of relative size depends on contest location (interaction not statistically significant).")
-            # still provide simple slopes (useful even if ns)
-            for key, val in results['Simple_slopes_RelSize_at_DistDiff'].items():
-                orv = val.get('odds_ratio')
-                ci = val.get('odds_ratio_95ci')
-                if ci[0] is not None:
-                    lines.append(f"   - At {key}: OR={orv:.3f}, 95%CI=({ci[0]:.3f}, {ci[1]:.3f}).")
-                else:
-                    lines.append(f"   - At {key}: OR={orv:.3f} (CI unavailable).")
-    else:
-        lines.append("Interaction term not found in model output.")
+            se = np.sqrt(var)
+            # protect division by zero
+            if se == 0:
+                z = None
+                p = None
+                ci_low = coef
+                ci_high = coef
+            else:
+                z = coef / se
+                p = 2 * (1 - norm.cdf(abs(z)))
+                ci_low = coef - 1.96 * se
+                ci_high = coef + 1.96 * se
+            try:
+                or_ci_low = float(np.exp(ci_low)) if ci_low is not None and np.isfinite(ci_low) else (float('inf') if ci_low is not None and np.isposinf(ci_low) else None)
+            except Exception:
+                or_ci_low = None
+            try:
+                or_ci_high = float(np.exp(ci_high)) if ci_high is not None and np.isfinite(ci_high) else (float('inf') if ci_high is not None and np.isposinf(ci_high) else None)
+            except Exception:
+                or_ci_high = None
+        try:
+            odds_ratio = float(np.exp(coef)) if np.isfinite(coef) else float('inf')
+        except Exception:
+            odds_ratio = None
+        return {
+            'logit_coef': float(coef),
+            'se': float(se) if se is not None else None,
+            'z': float(z) if z is not None else None,
+            'pvalue': float(p) if p is not None else None,
+            'ci_2.5%': float(ci_low) if ci_low is not None else None,
+            'ci_97.5%': float(ci_high) if ci_high is not None else None,
+            'odds_ratio': odds_ratio,
+            'or_ci_lower': float(or_ci_low) if or_ci_low is not None else None,
+            'or_ci_upper': float(or_ci_high) if or_ci_high is not None else None,
+        }
 
-    # Location dummies
-    if results['Location_terms']:
-        lines.append("Location dummy coefficients (contrasts vs. reference level):")
-        for nm, t in results['Location_terms'].items():
-            if t is None:
-                continue
-            sig = '(p < 0.05)' if (t['p_value'] is not None and t['p_value'] < 0.05) else '(ns)'
-            lines.append(f"  {nm}: coef={t['coef']:.3f}, SE={t['std_err']:.3f}, p={t['p_value']:.3g} -> OR={t['odds_ratio']:.3f} {sig}")
-        lines.append("  Interpretation: These coefficients are contrasts relative to the (omitted) reference Location level; positive coef -> higher odds of focal winning compared to reference.")
-    else:
-        lines.append("No Location dummy terms were identified in the model output.")
+    marg0 = make_marginal_entry(marg0_coef, var_marg0)
+    marg1 = make_marginal_entry(marg1_coef, var_marg1)
 
-    # Join description
-    description = " ".join(lines)
+    results['marginal_effects_of_RelSize'] = {
+        'when_FocalCloser_0': marg0,
+        'when_FocalCloser_1': marg1,
+        'interaction_term_name': name_inter
+    }
+
+    # Simple decision statements about significance (alpha=0.05) for primary terms
+    def significance(p):
+        if p is None:
+            return 'unknown'
+        return 'significant' if p < 0.05 else 'not_significant'
+
+    size_p = results['RelSize_diff_z']['pvalue']
+    dist_p = results['dist_diff_z']['pvalue']
+    inter_p = results['RelSize_x_FocalCloser']['pvalue'] if results['RelSize_x_FocalCloser'] is not None else None
+
+    # Build a concise text description (guard formatting if values missing)
+    lines = []
+    # Rel size main effect (when FocalCloser=0)
+    lines.append("Relative group size (RelSize_diff_z):")
+    coef_v = results['RelSize_diff_z']['coef']
+    or_v = results['RelSize_diff_z']['odds_ratio']
+    or_low = results['RelSize_diff_z']['or_ci_lower']
+    or_high = results['RelSize_diff_z']['or_ci_upper']
+    lines.append(" - Coefficient (log-odds) = {}, OR = {}, 95% CI OR = [{}, {}].".format(
+        f"{coef_v:.4f}" if coef_v is not None else "NA",
+        f"{or_v:.3f}" if or_v is not None else "NA",
+        f"{or_low:.3f}" if or_low is not None else "NA",
+        f"{or_high:.3f}" if or_high is not None else "NA",
+    ))
+    lines.append(" - p-value = {} -> {} (this is the effect when FocalCloser=0).".format(
+        f"{size_p:.3g}" if size_p is not None else "NA",
+        significance(size_p)
+    ))
+
+    # Interaction interpretation
+    if name_inter is not None:
+        inter_coef = results['RelSize_x_FocalCloser']['coef']
+        lines.append("")
+        lines.append("Interaction (RelSize_diff_z x FocalCloser):")
+        lines.append(" - Interaction coef (log-odds) = {}, p = {} -> {}.".format(
+            f"{inter_coef:.4f}" if inter_coef is not None else "NA",
+            f"{inter_p:.3g}" if inter_p is not None else "NA",
+            significance(inter_p)
+        ))
+        lines.append(" - Marginal effect of RelSize when FocalCloser=0: logit = {}, OR = {}.".format(
+            f"{marg0['logit_coef']:.4f}" if marg0.get('logit_coef') is not None else "NA",
+            f"{marg0['odds_ratio']:.3f}" if marg0.get('odds_ratio') is not None else "NA"
+        ))
+        if marg0.get('pvalue') is not None:
+            lines.append("   p = {}".format(f"{marg0['pvalue']:.3g}"))
+        lines.append(" - Marginal effect of RelSize when FocalCloser=1: logit = {}, OR = {}.".format(
+            f"{marg1['logit_coef']:.4f}" if marg1.get('logit_coef') is not None else "NA",
+            f"{marg1['odds_ratio']:.3f}" if marg1.get('odds_ratio') is not None else "NA"
+        ))
+        if marg1.get('pvalue') is not None:
+            lines.append("   p = {}".format(f"{marg1['pvalue']:.3g}"))
+        if inter_p is not None and inter_p < 0.05:
+            lines.append(" -> Interpretation: The effect of being relatively larger on the odds of winning depends on whether the focal group is closer to its home-range center.")
+        else:
+            lines.append(" -> Interpretation: No strong evidence that the size advantage differs by whether the focal group is closer to home (interaction not significant).")
+    else:
+        lines.append("")
+        lines.append("No interaction term was found in the fitted model, so the reported RelSize_diff_z effect applies regardless of FocalCloser status.")
+
+    # Dist (location) effect
+    lines.append("")
+    coef_v = results['dist_diff_z']['coef']
+    or_v = results['dist_diff_z']['odds_ratio']
+    or_low = results['dist_diff_z']['or_ci_lower']
+    or_high = results['dist_diff_z']['or_ci_upper']
+    lines.append("Relative contest location (dist_diff_z):")
+    lines.append(" - Coefficient (log-odds) = {}, OR = {}, 95% CI OR = [{}, {}].".format(
+        f"{coef_v:.4f}" if coef_v is not None else "NA",
+        f"{or_v:.3f}" if or_v is not None else "NA",
+        f"{or_low:.3f}" if or_low is not None else "NA",
+        f"{or_high:.3f}" if or_high is not None else "NA",
+    ))
+    lines.append(" - p-value = {} -> {}.".format(
+        f"{dist_p:.3g}" if dist_p is not None else "NA",
+        significance(dist_p)
+    ))
+    lines.append(" -> Interpretation: Positive dist_diff_z means the focal group is closer to its home center relative to the other; a OR > 1 indicates greater odds of winning when focal is closer.")
+
+    description = "\n".join(lines)
 
     return {
         "object": results,

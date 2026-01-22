@@ -1,116 +1,203 @@
 def extract_final_answer(model_output):
     """
-    Extract the effect of IsHuman from a fitted statsmodels GLM result dict (as returned by the model function).
-    Returns a dict with:
-      - "object": dict of numeric results (coef, se, z, p, 95% CI on coef scale, odds ratio and its 95% CI)
-      - "description": brief plain-language interpretation answering whether modern humans have higher AMTL.
+    Extracts statistics comparing Homo sapiens to non-human genera (Pan, Pongo, Papio)
+    from a binomial (logit) GLM stored in model_output.
+
+    Returns a dict with keys:
+      - "object": dict of comparisons (Homo vs Pan/Pongo/Papio) with:
+          estimate_log_odds, se_log_odds, z, p_value, ci_log_odds, odds_ratio, ci_odds_ratio,
+          param_names_used (the parameter names in the model)
+      - "description": human-readable interpretation of each comparison (direction and
+                       statistical significance at alpha=0.05), and notes about model
+                       used (clustered vs conventional SE).
     """
+    import re
+    import math
     import numpy as np
-    import pandas as pd
+    try:
+        from scipy.stats import norm
+    except Exception:
+        # If scipy is unavailable, approximate using math.erfc for tail-probabilities
+        def _norm_sf(x):
+            # survival function using approximation
+            return 0.5 * math.erfc(x / math.sqrt(2))
+        class _NormApprox:
+            @staticmethod
+            def sf(x): return _norm_sf(x)
+            @staticmethod
+            def cdf(x): return 1.0 - _norm_sf(x)
+        norm = _NormApprox()
 
-    # Choose clustered result if available, otherwise fall back to glm_result
+    # Choose clustered results if available, otherwise fall back to conventional GLM result
     result = None
-    if isinstance(model_output, dict):
-        result = model_output.get('glm_result_clustered') or model_output.get('glm_result')
-    else:
-        result = model_output
-
-    if result is None:
-        raise ValueError("No model result found in model_output. Expected keys 'glm_result_clustered' or 'glm_result'.")
-
-    # Helper to pull a named value from result, with fallbacks
-    def _get_series_or_attr(attr_name):
-        val = getattr(result, attr_name, None)
-        return val
-
-    # Try to extract coefficient, se, z, p-value
-    try:
-        params = _get_series_or_attr('params')
-        pvalues = _get_series_or_attr('pvalues')
-        bse = _get_series_or_attr('bse')
-    except Exception:
-        params = pvalues = bse = None
-
-    # Ensure we have pandas Series-like objects; if not, try result.summary2 or result.summary
-    if params is None or 'IsHuman' not in params:
-        # try to parse from conf_int or index positions
+    covmat = None
+    used_cov_type = None
+    if model_output is None or not isinstance(model_output, dict):
+        raise ValueError("model_output must be the dict returned by the modeling function.")
+    if model_output.get('glm_result_clustered') is not None:
+        result = model_output['glm_result_clustered']
         try:
-            params = pd.Series(result.params)
-            pvalues = pd.Series(result.pvalues)
-            bse = pd.Series(result.bse)
+            covmat = result.cov_params()
+            used_cov_type = 'clustered'
         except Exception:
-            raise ValueError("Could not extract params/pvalues/bse from the model result.")
-
-    if 'IsHuman' not in params.index:
-        raise KeyError("Model does not contain a coefficient named 'IsHuman'.")
-
-    coef = float(params.loc['IsHuman'])
-    se = float(bse.loc['IsHuman']) if bse is not None and 'IsHuman' in bse.index else None
-    pval = float(pvalues.loc['IsHuman']) if pvalues is not None and 'IsHuman' in pvalues.index else None
-
-    # Confidence interval (default 95%)
-    try:
-        conf = result.conf_int()
-        if isinstance(conf, (pd.DataFrame, pd.Series)):
-            ci_lower = float(conf.loc['IsHuman'].iloc[0])
-            ci_upper = float(conf.loc['IsHuman'].iloc[1])
-        else:
-            # conf_int returned ndarray; find index of IsHuman in params.index
-            idx = list(params.index).index('IsHuman')
-            ci_lower = float(conf[idx, 0])
-            ci_upper = float(conf[idx, 1])
-    except Exception:
-        # If conf_int fails, approximate using coef +/- 1.96*se if se available
-        if se is not None:
-            ci_lower = float(coef - 1.96 * se)
-            ci_upper = float(coef + 1.96 * se)
-        else:
-            ci_lower = ci_upper = None
-
-    # Odds ratio and its CI
-    or_val = float(np.exp(coef))
-    or_ci_lower = float(np.exp(ci_lower)) if ci_lower is not None else None
-    or_ci_upper = float(np.exp(ci_upper)) if ci_upper is not None else None
-
-    # Build the object to return
-    obj = {
-        'coef_logit': coef,
-        'std_err': se,
-        'z_or_na': float(coef / se) if (se is not None and se != 0) else None,
-        'p_value': pval,
-        'ci_95_logit': [ci_lower, ci_upper],
-        'odds_ratio': or_val,
-        'odds_ratio_95_ci': [or_ci_lower, or_ci_upper],
-        # also include a short numeric summary string for quick display
-        'summary_str': (
-            f"IsHuman coef = {coef:.4f} (SE={se:.4f}), p={pval:.3g}; "
-            f"OR={or_val:.3f}, 95% CI for OR = [{or_ci_lower:.3f}, {or_ci_upper:.3f}]"
-            if (se is not None and pval is not None and or_ci_lower is not None)
-            else "Incomplete numeric summary"
-        )
-    }
-
-    # Interpretation: answer the yes/no question, with context
-    if pval is not None:
-        if pval < 0.05:
-            conclusion = (
-                "Yes — controlling for tooth class, age, and ProbMale (and clustering SEs by specimen), "
-                "modern humans (Homo sapiens) have a statistically significantly higher frequency of AMTL. "
-                f"The model coefficient on the logit scale is {coef:.4f} (p = {pval:.3g}), corresponding to "
-                f"an odds ratio of {or_val:.3f} (95% CI {or_ci_lower:.3f}–{or_ci_upper:.3f}). "
-                "This indicates about a "
-                f"{(or_val - 1) * 100:.1f}% higher odds of a missing tooth in modern humans vs the non-human genera in the sample, "
-                "after adjustment. The effect size is modest."
-            )
-        else:
-            conclusion = (
-                "No — there is not evidence of a statistically significant difference in AMTL frequency between modern humans "
-                f"and non-human primates after adjustment (IsHuman coef = {coef:.4f}, p = {pval:.3g})."
-            )
+            # fallback
+            result = model_output.get('glm_result')
+            covmat = result.cov_params()
+            used_cov_type = 'conventional (cluster requested but failed)'
     else:
-        conclusion = "Could not determine statistical significance because the p-value was not available."
+        result = model_output.get('glm_result')
+        if result is None:
+            raise ValueError("No glm_result found in model_output.")
+        covmat = result.cov_params()
+        used_cov_type = 'conventional'
+
+    params = result.params  # pandas Series
+    param_index = list(params.index)
+
+    # Build mapping from genus level -> parameter name (for parameters of form C(genus)[T.<LEVEL>])
+    genus_param_map = {}
+    genus_param_pattern = re.compile(r"C\(genus\)\[T\.(.+)\]")  # captures the level text
+    for pname in param_index:
+        m = genus_param_pattern.match(pname)
+        if m:
+            level = m.group(1)
+            genus_param_map[level] = pname
+
+    # Determine whether Homo level is present (may be 'Homo sapiens' or similar)
+    homo_level = None
+    for level in genus_param_map:
+        if re.search(r'homo|sapiens', level, flags=re.I):
+            homo_level = level
+            break
+
+    # If Homo level is not present among parameters, homo may be the reference level
+    homo_is_reference = False
+    if homo_level is None:
+        # If no explicit Homo param, assume Homo is reference (i.e., its effect is absorbed in intercept)
+        homo_is_reference = True
+
+    # Prepare list of non-human genera to compare
+    compare_genera = ['Pan', 'Pongo', 'Papio']
+
+    comparisons = {}
+    for gen in compare_genera:
+        # find best matching param name for this genus (case-insensitive match)
+        gen_param = None
+        for level, pname in genus_param_map.items():
+            if level.strip().lower() == gen.strip().lower():
+                gen_param = pname
+                matched_level = level
+                break
+        if gen_param is None:
+            # try partial match (e.g., underscores, spacing differences)
+            for level, pname in genus_param_map.items():
+                if gen.strip().lower() in level.strip().lower():
+                    gen_param = pname
+                    matched_level = level
+                    break
+
+        # Determine beta_homo and beta_gen (on log-odds scale)
+        if homo_is_reference:
+            beta_homo = 0.0
+            homo_param_name = None
+            var_homo = 0.0
+        else:
+            homo_param_name = genus_param_map[homo_level]
+            beta_homo = float(params[homo_param_name])
+            var_homo = float(covmat.loc[homo_param_name, homo_param_name])
+
+        if gen_param is None:
+            # genus is likely the reference level (no parameter)
+            beta_gen = 0.0
+            gen_param_name = None
+            var_gen = 0.0
+        else:
+            gen_param_name = gen_param
+            beta_gen = float(params[gen_param_name])
+            var_gen = float(covmat.loc[gen_param_name, gen_param_name])
+
+        # Estimate difference Homo - Genus on log-odds scale
+        est = beta_homo - beta_gen
+
+        # Compute variance of the contrast:
+        if (homo_param_name is not None) and (gen_param_name is not None):
+            cov_hg = float(covmat.loc[homo_param_name, gen_param_name])
+            var_diff = var_homo + var_gen - 2.0 * cov_hg
+        elif (homo_param_name is None) and (gen_param_name is not None):
+            # Homo reference, var(homo)=0, cov=0
+            var_diff = var_gen
+        elif (homo_param_name is not None) and (gen_param_name is None):
+            # Genus reference, var(genus)=0, cov=0
+            var_diff = var_homo
+        else:
+            # both are reference? unlikely (would mean only one genus in data)
+            var_diff = 0.0
+
+        # numerical safety
+        se = math.sqrt(max(var_diff, 0.0))
+
+        # z and two-sided p-value
+        z = est / se if se > 0 else float('nan')
+        if se > 0:
+            p_value = 2.0 * norm.sf(abs(z))
+        else:
+            p_value = float('nan')
+
+        # 95% CI on log-odds
+        z_crit = 1.96
+        ci_low = est - z_crit * se
+        ci_high = est + z_crit * se
+
+        # convert to odds ratio scale
+        or_est = math.exp(est)
+        or_ci_low = math.exp(ci_low)
+        or_ci_high = math.exp(ci_high)
+
+        comparisons[f"Homo_vs_{gen}"] = {
+            "log_odds_difference": est,
+            "se_log_odds_difference": se,
+            "z": z,
+            "p_value": p_value,
+            "ci_log_odds": (ci_low, ci_high),
+            "odds_ratio": or_est,
+            "ci_odds_ratio": (or_ci_low, or_ci_high),
+            "param_homo": homo_param_name,
+            "param_genus": gen_param_name,
+            "genus_level_matched": matched_level if 'matched_level' in locals() else None
+        }
+        # clear matched_level for next loop
+        if 'matched_level' in locals():
+            del matched_level
+
+    # Build description: interpret direction and significance
+    desc_lines = []
+    desc_lines.append(f"Using GLM results with {used_cov_type} standard errors.")
+    for key, stats in comparisons.items():
+        gen = key.replace("Homo_vs_", "")
+        est = stats["log_odds_difference"]
+        p = stats["p_value"]
+        or_est = stats["odds_ratio"]
+        ci_or = stats["ci_odds_ratio"]
+
+        if math.isnan(est):
+            interpretation = f"Comparison Homo vs {gen}: could not compute (missing parameters)."
+        else:
+            direction = "higher" if est > 0 else ("lower" if est < 0 else "no difference")
+            signif = ""
+            if not math.isnan(p):
+                signif = "statistically significant (p < 0.05)" if p < 0.05 else "not statistically significant (p >= 0.05)"
+            interpretation = (f"Homo sapiens has {direction} AMTL odds compared to {gen} "
+                              f"(OR = {or_est:.3f}, 95% CI = [{ci_or[0]:.3f}, {ci_or[1]:.3f}], p = {p:.3g}). "
+                              f"This is {signif}.")
+        desc_lines.append(interpretation)
+
+    description = " ".join(desc_lines)
 
     return {
-        "object": obj,
-        "description": conclusion
+        "object": {
+            "used_cov_type": used_cov_type,
+            "comparisons": comparisons,
+            "raw_params": params.to_dict()
+        },
+        "description": description
     }

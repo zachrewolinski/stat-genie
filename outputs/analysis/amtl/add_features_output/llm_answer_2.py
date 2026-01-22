@@ -1,133 +1,263 @@
 def extract_final_answer(model_output):
     """
-    Extracts the coefficient, uncertainty, and inference for the Genus_Homo effect
-    from a fitted statsmodels GLM (or clustered robust results) object and returns
-    a short interpretation about whether modern humans have higher AMTL.
+    Extracts and interprets the effect of IsHuman from the fitted model output.
 
-    Returns:
-      {
-        "object": { ... numeric results and conclusion ... },
-        "description": "Short textual interpretation in context"
-      }
+    Returns a dict with:
+      - "object": dict with numeric results (coef, se, z, p, 95% CI on log-odds,
+                  odds ratio and its 95% CI, boolean 'significant', and a short conclusion)
+      - "description": brief plain-English explanation of what the numbers mean.
+
+    Accepts either the RobustResultsWrapper used in the modeling code (has .params,
+    .bse, .zvalues, .pvalues, .cov_params) or a statsmodels results object.
     """
     import numpy as np
-    from math import exp
+    from scipy import stats
+
+    # Helper to safely format numbers
+    def _fmt(x, ndigits=4, none_str="NA"):
+        if x is None:
+            return none_str
+        try:
+            return f"{x:.{ndigits}f}"
+        except Exception:
+            return str(x)
+
+    # Helper to safely get parameter names and values
+    params = None
+    bse = None
+    z = None
+    p = None
+    cov = None
+
+    # Try to extract commonly available attributes
     try:
-        # Try to access parameter names and values
         params = model_output.params
     except Exception:
-        raise ValueError("model_output does not expose .params")
+        params = getattr(model_output, 'params', None)
 
-    # Identify the parameter name for Genus_Homo (allow small flexibility)
-    param_name = None
-    if 'Genus_Homo' in params.index:
-        param_name = 'Genus_Homo'
-    else:
-        # try to find any parameter that contains the substring
-        matches = [n for n in params.index if 'Genus_Homo' in n]
-        if len(matches) >= 1:
-            param_name = matches[0]
+    try:
+        bse = model_output.bse
+    except Exception:
+        bse = getattr(model_output, 'bse', None)
 
-    if param_name is None:
-        raise KeyError("Could not find a parameter named 'Genus_Homo' in model_output.params")
+    try:
+        z = model_output.zvalues
+    except Exception:
+        z = getattr(model_output, 'tvalues', None) or getattr(model_output, 'zvalues', None)
 
-    # Extract coefficient
-    coef = float(params[param_name])
+    try:
+        p = model_output.pvalues
+    except Exception:
+        p = getattr(model_output, 'pvalues', None)
 
-    # Standard error: try .bse then fallback to sqrt of diagonal of cov_params()
+    # Covariance matrix (robust cov if provided)
+    cov = getattr(model_output, 'cov_params', None)
+    # If cov is a method, call it
+    if callable(cov):
+        try:
+            cov = cov()
+        except Exception:
+            cov = None
+
+    # Ensure params can be indexed by name; handle pandas Series or dict-like
+    param_names = None
+    if params is None:
+        raise ValueError("model_output has no 'params' attribute accessible.")
+    # If params is a pandas Series, get index; otherwise try keys
+    try:
+        param_names = list(params.index)
+    except Exception:
+        try:
+            param_names = list(params.keys())
+        except Exception:
+            # fallback to treating params as array and try to get names from model object
+            param_names = None
+
+    # Determine where 'IsHuman' is located
+    target_name = 'IsHuman'
+    loc = None
+    coef = None
     se = None
-    try:
-        se = float(model_output.bse[param_name])
-    except Exception:
-        # fallback
-        try:
-            cov = model_output.cov_params()
-            se = float(np.sqrt(np.diag(cov))[list(params.index).index(param_name)])
-        except Exception:
-            raise ValueError("Could not obtain standard error for parameter '{}'".format(param_name))
+    zval = None
+    pval = None
 
-    # z-statistic and two-sided p-value: prefer model's pvalues if available
-    try:
-        p_value = float(model_output.pvalues[param_name])
-        # compute z from coef/se for reporting consistency
-        z_stat = float(coef / se) if se != 0 else float('nan')
-    except Exception:
-        # fallback: compute z and p using normal approximation
-        z_stat = float(coef / se) if se != 0 else float('nan')
+    if param_names is not None and target_name in param_names:
+        loc = param_names.index(target_name)
+        # extract numeric values
         try:
-            # Use normal distribution survival function for two-sided p
-            from math import erf, sqrt
-            # use scipy-style normal cdf if available
+            coef = float(params[target_name])
+        except Exception:
             try:
-                from scipy import stats as _scistats
-                p_value = float(2.0 * (1.0 - _scistats.norm.cdf(abs(z_stat))))
+                coef = float(params.iloc[loc]) if hasattr(params, 'iloc') else float(params[loc])
             except Exception:
-                # approximate with error function
-                # cdf = 0.5*(1+erf(z/sqrt(2)))
-                p_value = float(2.0 * (1.0 - (0.5 * (1.0 + erf(abs(z_stat) / sqrt(2.0))))))
+                coef = None
+        # standard error: preferentially from bse, else from cov matrix diag
+        if bse is not None:
+            try:
+                se = float(bse[target_name])
+            except Exception:
+                try:
+                    se = float(bse.iloc[loc])
+                except Exception:
+                    se = None
+        else:
+            se = None
+        if se is None and cov is not None:
+            # try to take sqrt of diag element
+            cov_arr = np.asarray(cov)
+            try:
+                se = float(np.sqrt(np.abs(cov_arr[loc, loc])))
+            except Exception:
+                se = None
+        # z and p
+        if z is not None:
+            try:
+                zval = float(z[target_name])
+            except Exception:
+                try:
+                    zval = float(z.iloc[loc])
+                except Exception:
+                    zval = None
+        else:
+            zval = None
+        if p is not None:
+            try:
+                pval = float(p[target_name])
+            except Exception:
+                try:
+                    pval = float(p.iloc[loc])
+                except Exception:
+                    pval = None
+        else:
+            pval = None
+    else:
+        # If param names not available, try positional extraction
+        # Try to get params as numpy array
+        try:
+            params_arr = np.asarray(params)
         except Exception:
-            p_value = float('nan')
+            raise ValueError("Could not determine parameter names or extract 'IsHuman'.")
+        # Try to find 'IsHuman' in model's exog names if available
+        loc = None
+        try:
+            exog_names = model_output._orig.model.exog_names
+            if target_name in exog_names:
+                loc = list(exog_names).index(target_name)
+        except Exception:
+            pass
+        if loc is None:
+            # As a last resort, raise error
+            raise ValueError("Could not locate parameter 'IsHuman' in model output.")
+        try:
+            coef = float(params_arr[loc])
+        except Exception:
+            coef = None
+        se = None
+        if bse is not None:
+            try:
+                se = float(np.asarray(bse)[loc])
+            except Exception:
+                se = None
+        elif cov is not None:
+            try:
+                cov_arr = np.asarray(cov)
+                se = float(np.sqrt(np.abs(cov_arr[loc, loc])))
+            except Exception:
+                se = None
+        try:
+            zval = float(np.asarray(z)[loc]) if z is not None else None
+        except Exception:
+            zval = None
+        try:
+            pval = float(np.asarray(p)[loc]) if p is not None else None
+        except Exception:
+            pval = None
 
-    # 95% confidence interval for coefficient: try model's conf_int()
-    try:
-        ci = model_output.conf_int().loc[param_name].astype(float).tolist()
-        ci_low, ci_high = float(ci[0]), float(ci[1])
-    except Exception:
-        # fallback normal approx
-        z_crit = 1.959963984540054  # approx for 95% two-sided
+    # If any of se, z, p are missing, compute from available pieces
+    if se is None and cov is not None and loc is not None:
+        try:
+            cov_arr = np.asarray(cov)
+            se = float(np.sqrt(np.abs(cov_arr[loc, loc])))
+        except Exception:
+            se = None
+    if zval is None and se is not None and coef is not None:
+        try:
+            zval = coef / se
+        except Exception:
+            zval = None
+    if pval is None and zval is not None:
+        try:
+            pval = 2 * (1 - stats.norm.cdf(abs(zval)))
+        except Exception:
+            pval = None
+
+    # Compute 95% CI on log-odds and odds ratio
+    z_crit = stats.norm.ppf(0.975)
+    if se is not None and coef is not None:
         ci_low = coef - z_crit * se
         ci_high = coef + z_crit * se
-
-    # Transform to odds ratio scale (logit link)
-    try:
-        or_val = float(exp(coef))
-        or_ci_low = float(exp(ci_low))
-        or_ci_high = float(exp(ci_high))
-    except Exception:
-        or_val = or_ci_low = or_ci_high = float('nan')
-
-    # Form conclusion: positive coefficient and p < 0.05 means evidence of higher AMTL in Homo
-    alpha = 0.05
-    if np.isfinite(p_value):
-        if (coef > 0) and (p_value < alpha):
-            conclusion = ("Yes: The Genus_Homo coefficient is positive (coef = {coef:.4f}), "
-                          "and statistically significant (p = {p:.3g}), indicating higher "
-                          "probability (odds ratio = {or_: .3f}, 95% CI [{or_lo:.3f}, {or_hi:.3f}]) "
-                          "of AMTL in Homo sapiens compared to the non-human primates, "
-                          "after adjusting for age, sex, and tooth class.").format(
-                              coef=coef, p=p_value, or_=or_val, or_lo=or_ci_low, or_hi=or_ci_high)
-        else:
-            conclusion = ("No strong evidence: The Genus_Homo coefficient is {sign} (coef = {coef:.4f}), "
-                          "with p = {p:.3g}, so we cannot conclude a statistically significant higher "
-                          "AMTL frequency in Homo sapiens after adjusting for the covariates. "
-                          "On the odds ratio scale: OR = {or_: .3f}, 95% CI [{or_lo:.3f}, {or_hi:.3f}].").format(
-                              sign="positive" if coef > 0 else "negative or null", coef=coef, p=p_value,
-                              or_=or_val, or_lo=or_ci_low, or_hi=or_ci_high)
     else:
-        conclusion = ("Could not compute p-value reliably for the Genus_Homo effect; "
-                      "reporting estimates without a formal significance decision.")
+        ci_low = ci_high = None
 
-    # Prepare object to return
+    # Odds ratio and its CI
+    try:
+        odds_ratio = float(np.exp(coef)) if coef is not None else None
+    except Exception:
+        odds_ratio = None
+    if ci_low is not None and ci_high is not None:
+        try:
+            or_ci = (float(np.exp(ci_low)), float(np.exp(ci_high)))
+        except Exception:
+            or_ci = (None, None)
+    else:
+        or_ci = (None, None)
+
+    significant = (pval is not None) and (pval < 0.05)
+
+    # Build concise conclusion text
+    if significant:
+        if coef is not None:
+            direction = 'positive' if coef > 0 else ('negative' if coef < 0 else 'zero')
+        else:
+            direction = 'directional'
+        concl = (f"The IsHuman coefficient is {direction} and statistically significant "
+                 f"(coef = {_fmt(coef,4)}, SE = {_fmt(se,4)}, z = {_fmt(zval,3)}, p = {_fmt(pval,4)}). "
+                 "After controlling for age, prob_male, and tooth_class, modern humans "
+                 "have higher AMTL compared with the reference group.")
+    else:
+        concl = (f"The IsHuman coefficient is not statistically significant "
+                 f"(coef = {_fmt(coef,4)}, SE = {_fmt(se,4)}, z = {_fmt(zval,3)}, p = {_fmt(pval,4)}). "
+                 "No evidence that modern humans differ from non-human primates in AMTL "
+                 "after controls.")
+
+    # Full interpretation with odds ratio
+    if (odds_ratio is not None) and (or_ci[0] is not None):
+        concl += (f" The estimated odds ratio is {_fmt(odds_ratio,2)} "
+                  f"(95% CI: {_fmt(or_ci[0],2)}–{_fmt(or_ci[1],2)}), meaning modern humans have about "
+                  f"{_fmt(odds_ratio,2)} times the odds of AMTL compared with non-human primates "
+                  "holding other variables constant.")
+
     result_object = {
-        "parameter": param_name,
-        "coef": coef,
-        "se": se,
-        "z": z_stat,
-        "p_value": p_value,
-        "ci_95_coef": [ci_low, ci_high],
-        "odds_ratio": or_val,
-        "ci_95_odds_ratio": [or_ci_low, or_ci_high],
-        "alpha": alpha,
-        "conclusion": conclusion
+        'parameter': 'IsHuman',
+        'coef_log_odds': coef,
+        'std_error': se,
+        'z_value': zval,
+        'p_value': pval,
+        'ci_log_odds_95': (ci_low, ci_high),
+        'odds_ratio': odds_ratio,
+        'odds_ratio_95_ci': or_ci,
+        'significant': bool(significant),
+        'conclusion': concl
     }
 
     description = (
-        "Extracted the Genus_Homo regression coefficient from the fitted binomial GLM (logit link). "
-        "The coefficient is on the log-odds scale; exponentiated to give the odds ratio. "
-        "The conclusion states whether Homo sapiens show a statistically significantly higher "
-        "probability of antemortem tooth loss (AMTL) compared to the pooled non-human primate genera, "
-        "after adjusting for age (Age_z), probabilistic sex (ProbMale_z), and tooth class, "
-        "using a two-sided test at alpha = {alpha}."
-    ).format(alpha=alpha)
+        "Extracted effect of IsHuman from the fitted binomial GLM (logit link). "
+        "A positive coefficient indicates higher log-odds (and thus higher probability) "
+        "of antemortem tooth loss in Homo sapiens relative to the non-human primate "
+        "reference, after controlling for age, prob_male, and tooth_class. "
+        "The returned 'object' contains the coefficient, robust SE (if available), z and p "
+        "values, 95% CI on the log-odds scale and on the odds-ratio scale, and a short "
+        "conclusion about statistical significance."
+    )
 
-    return {"object": result_object, "description": description}
+    return {'object': result_object, 'description': description}

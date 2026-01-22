@@ -1,0 +1,486 @@
+{
+  "dataset_name": "teachingratings",
+  "n": 5,
+  "analyses": {
+    "0": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Instructor physical appearance (average beauty rating across 6 judges), standardized (z-score). Hypothesized to positively influence student evaluations.",
+            "columns": [
+              "beauty_z"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Course overall teaching evaluation score (student instructional rating) on a 1-5 scale.",
+          "columns": [
+            "eval"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Instructor age in years (continuous). Controls for experience/age effects on evaluations.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "age"
+            ]
+          },
+          {
+            "description": "Instructor gender (categorical: 'male' or 'female'). Controls for gender differences in ratings.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "gender"
+            ]
+          },
+          {
+            "description": "Whether the instructor is a minority (categorical: 'yes'/'no'). Controls for demographic effects on ratings.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "minority"
+            ]
+          },
+          {
+            "description": "Tenure status (categorical: 'yes'/'no'). Controls for job status effects.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "tenure"
+            ]
+          },
+          {
+            "description": "Native English speaker status (categorical: 'yes'/'no'). Controls for language effects on evaluations.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "native"
+            ]
+          },
+          {
+            "description": "Course division (categorical: 'lower'/'upper'). Controls for course level differences.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "division"
+            ]
+          },
+          {
+            "description": "Course credits indicator (categorical: 'single' [single-credit elective] vs 'more'). Controls for course type.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "credits"
+            ]
+          },
+          {
+            "description": "Log of the number of students who participated in the evaluation (log-transformed class size). Controls for class-size effects and stabilizes skew.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "students_log"
+            ]
+          },
+          {
+            "description": "Professor identifier. Used as grouping variable for a random intercept to account for multiple course observations per instructor.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "prof"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Prepares the dataset for modeling. Key steps:\n    - Keep only rows with non-missing values for variables used in the model.\n    - Coerce categorical columns to pandas.Categorical dtype.\n    - Standardize the beauty variable to a z-score (beauty_z).\n    - Create a log transform of students (students_log).\n    - Return a dataframe containing only the columns used in the statistical model.\n    \"\"\"\n    df = df.copy()\n\n    # Required raw columns\n    required_cols = ['beauty', 'eval', 'age', 'gender', 'minority', 'tenure', 'native', 'division', 'credits', 'students', 'prof']\n\n    # Drop rows with missing values in required columns\n    df = df.dropna(subset=required_cols)\n\n    # Ensure correct dtypes for categorical variables\n    for c in ['gender', 'minority', 'tenure', 'native', 'division', 'credits', 'prof']:\n        # If any of these are numeric codes, treat them as strings first\n        df[c] = df[c].astype('category')\n\n    # Standardize the beauty rating (z-score). Use population std (ddof=0) for interpretability.\n    df['beauty_z'] = (df['beauty'] - df['beauty'].mean()) / (df['beauty'].std(ddof=0) if df['beauty'].std(ddof=0) != 0 else 1.0)\n\n    # Log-transform the number of students who participated to reduce skew\n    # Add a small constant guard in case of zeros (shouldn't occur given schema min=5)\n    df['students_log'] = np.log(df['students'].astype(float) + 1e-6)\n\n    # Keep only the columns needed for modeling\n    out_cols = ['beauty_z', 'eval', 'age', 'gender', 'minority', 'tenure', 'native', 'division', 'credits', 'students_log', 'prof']\n    df = df[out_cols].reset_index(drop=True)\n\n    return df",
+      "m_code": "def model(df: pd.DataFrame) -> dict:\n    \"\"\"\n    Fits two complementary models to estimate the association between instructor beauty and student evaluations:\n    1) Mixed-effects linear model with a random intercept for professor (accounts for multiple courses per instructor).\n    2) OLS with standard errors clustered by professor (robustness check).\n\n    Returns a dictionary with the fitted model results objects.\n    \"\"\"\n    import statsmodels.formula.api as smf\n    import statsmodels.api as sm\n\n    # Ensure incoming df contains required columns\n    required = ['beauty_z', 'eval', 'age', 'gender', 'minority', 'tenure', 'native', 'division', 'credits', 'students_log', 'prof']\n    missing = [c for c in required if c not in df.columns]\n    if len(missing) > 0:\n        raise ValueError(f\"Transformed dataframe is missing required columns: {missing}\")\n\n    # Formula: main effect of beauty plus controls; categorical controls are wrapped with C(...)\n    formula = (\n        \"eval ~ beauty_z + age + C(gender) + C(minority) + C(tenure) + C(native) + \"\n        \"C(division) + C(credits) + students_log\"\n    )\n\n    results = {}\n\n    # 1) Mixed effects model with random intercept for professor\n    try:\n        md = smf.mixedlm(formula, df, groups=df['prof'])\n        mdf = md.fit(reml=False)\n        results['mixedlm'] = mdf\n    except Exception as e:\n        results['mixedlm_error'] = str(e)\n\n    # 2) OLS with clustered standard errors by professor (robustness)\n    try:\n        ols = smf.ols(formula, df).fit()\n        # clustered SEs by 'prof'\n        ols_cluster = ols.get_robustcov_results(cov_type='cluster', groups=df['prof'])\n        results['ols_clustered'] = ols_cluster\n    except Exception as e:\n        results['ols_error'] = str(e)\n\n    return results"
+    },
+    "1": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Instructor physical attractiveness rating (panel average), mean-centered. Primary independent variable capturing perceived instructor beauty.",
+            "columns": [
+              "beauty_c"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Student instructional rating for the course (overall evaluation score). Higher = better teaching productivity as reflected in student evaluations.",
+          "columns": [
+            "eval"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Instructor gender coded as female = 1, male = 0. Used as a control and also tested as a moderator of the beauty effect.",
+            "is_moderator": true,
+            "moderator_on": "Instructor beauty",
+            "columns": [
+              "female"
+            ]
+          },
+          {
+            "description": "Instructor age in years (numeric). Control for experience/age-related effects on evaluations.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "age"
+            ]
+          },
+          {
+            "description": "Instructor minority status coded yes = 1, no = 0. Controls for effects of minority status on evaluations.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "minority_yes"
+            ]
+          },
+          {
+            "description": "Course credit type: more credits (=1) vs single-credit (=0). Controls for course type differences.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "credits_more"
+            ]
+          },
+          {
+            "description": "Course division: upper-division (=1) vs lower-division (=0). Controls for course level.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "division_upper"
+            ]
+          },
+          {
+            "description": "Instructor native English speaker coded yes = 1, no = 0. Controls for language-related evaluation differences.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "native_yes"
+            ]
+          },
+          {
+            "description": "Instructor tenure status coded yes = 1, no = 0. Controls for job security / seniority effects.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "tenure_yes"
+            ]
+          },
+          {
+            "description": "Log of number of students who participated in the evaluation (log-transformed class size). Controls for class-size effects on mean evaluation scores.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "ln_students"
+            ]
+          },
+          {
+            "description": "Instructor identifier. Used for clustering standard errors and for fitting a random intercept (mixed) model to account for multiple courses per professor.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "prof"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw Hamermesh & Parker classroom dataset into analysis-ready variables.\n\n    Outputs (added/modified columns):\n      - beauty_c: mean-centered beauty score (float)\n      - female: binary (1=female, 0=male)\n      - minority_yes: binary (1=yes, 0=no)\n      - credits_more: binary (1='more', 0='single')\n      - division_upper: binary (1='upper', 0='lower')\n      - native_yes: binary (1=yes, 0=no)\n      - tenure_yes: binary (1=yes, 0=no)\n      - ln_students: natural log of 'students'\n      - prof: integer professor id (kept for clustering / random effects)\n\n    Notes: Drops rows missing the primary outcome (eval) or primary predictor (beauty).\n    \"\"\"\n    df = df.copy()\n\n    # Drop rows missing key variables\n    df = df.dropna(subset=['eval', 'beauty'])\n\n    # Center beauty for interpretability (keeps original 'beauty' column too)\n    df['beauty_c'] = df['beauty'].astype(float) - float(df['beauty'].astype(float).mean())\n\n    # Binary encodings for categorical controls; robust to capitalization / stray whitespace\n    df['female'] = (df['gender'].astype(str).str.strip().str.lower() == 'female').astype(int)\n    df['minority_yes'] = (df['minority'].astype(str).str.strip().str.lower() == 'yes').astype(int)\n    df['credits_more'] = (df['credits'].astype(str).str.strip().str.lower() == 'more').astype(int)\n    df['division_upper'] = (df['division'].astype(str).str.strip().str.lower() == 'upper').astype(int)\n    df['native_yes'] = (df['native'].astype(str).str.strip().str.lower() == 'yes').astype(int)\n    df['tenure_yes'] = (df['tenure'].astype(str).str.strip().str.lower() == 'yes').astype(int)\n\n    # Log-transform of student count to reduce skew / large-class influence\n    # Ensure numeric type first; students has min > 0 in schema\n    df['ln_students'] = np.log(df['students'].astype(float))\n\n    # Ensure professor id is integer (used for clustering and random effects)\n    # If 'prof' has missing or non-integer values this will raise; keep original otherwise\n    df['prof'] = df['prof'].astype(int)\n\n    # Return only the columns necessary for modeling plus original eval/beauty if desired\n    # but keep the entire dataframe to preserve other metadata\n    return df",
+      "m_code": "def model(df: pd.DataFrame) -> dict:\n    \"\"\"\n    Fit models to estimate the effect of instructor beauty on student evaluation scores.\n\n    Models returned:\n      - OLS with controls and an interaction between beauty and gender; cluster-robust SEs by professor id.\n      - Linear mixed-effects model (random intercept by professor) using the same controls (no interaction in mixed model by default).\n\n    Returns a dictionary with keys 'ols' and 'mixedlm' containing the fitted results objects.\n    \"\"\"\n    import statsmodels.formula.api as smf\n\n    df = df.copy()\n\n    # Ensure required columns exist\n    required_cols = ['eval', 'beauty_c', 'female', 'age', 'minority_yes', 'credits_more',\n                     'division_upper', 'native_yes', 'tenure_yes', 'ln_students', 'prof']\n    missing = [c for c in required_cols if c not in df.columns]\n    if missing:\n        raise ValueError(f\"Missing required columns for modeling: {missing}\")\n\n    # OLS with interaction: beauty effect and whether it differs for female instructors\n    formula = (\n        'eval ~ beauty_c * female + age + minority_yes + credits_more + '\n        'division_upper + native_yes + tenure_yes + ln_students'\n    )\n\n    # Fit OLS and obtain cluster-robust standard errors clustered on 'prof'\n    ols_res = smf.ols(formula, data=df).fit(cov_type='cluster', cov_kwds={'groups': df['prof']})\n\n    # Fit a mixed-effects model with a random intercept by professor as a complementary approach\n    # This accounts for multiple courses taught by the same professor\n    try:\n        md = sm.MixedLM.from_formula(\n            'eval ~ beauty_c + female + age + minority_yes + credits_more + division_upper + native_yes + tenure_yes + ln_students',\n            groups=df['prof'],\n            data=df\n        )\n        mdf = md.fit(reml=False)\n    except Exception as e:\n        # If the mixed model fails to converge or errors, return None for mixedlm and keep OLS\n        mdf = None\n\n    # Return results objects. Users can call .summary() on ols_res and mdf (if not None).\n    return {'ols': ols_res, 'mixedlm': mdf}"
+    },
+    "2": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Instructor physical attractiveness (panel average beauty rating). For interpretability the variable is mean-centered in the transformed dataframe and that centered column is used in the model.",
+            "columns": [
+              "beauty_c"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Course-level student instructional evaluation score (overall teaching evaluation, numeric, 1-5).",
+          "columns": [
+            "eval"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Instructor gender (categorical; used as a moderator of the beauty effect).",
+            "is_moderator": true,
+            "moderator_on": "Instructor beauty",
+            "columns": [
+              "gender"
+            ]
+          },
+          {
+            "description": "Instructor age in years (numeric).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "age"
+            ]
+          },
+          {
+            "description": "Whether instructor belongs to a minority group (categorical: 'yes'/'no').",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "minority"
+            ]
+          },
+          {
+            "description": "Tenure status (categorical: 'yes'/'no').",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "tenure"
+            ]
+          },
+          {
+            "description": "Whether instructor is a native English speaker (categorical: 'yes'/'no').",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "native"
+            ]
+          },
+          {
+            "description": "Course division (categorical: 'lower'/'upper').",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "division"
+            ]
+          },
+          {
+            "description": "Course credits indicator (categorical: 'single'/'more').",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "credits"
+            ]
+          },
+          {
+            "description": "Log-transformed number of students participating in the evaluation (log1p of 'students') to capture class size.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "log_students"
+            ]
+          },
+          {
+            "description": "Professor identifier included as a categorical fixed effect and used for clustering standard errors.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "prof"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw Hamermesh & Parker (2005) course-evaluation dataset into a dataframe\n    suitable for OLS modeling of the effect of instructor beauty on student evaluations.\n\n    Steps performed:\n    - Make a defensive copy of the dataframe.\n    - Drop observations missing the key outcome ('eval') or the key predictor ('beauty').\n    - Ensure categorical columns are cast to category dtype.\n    - Create a mean-centered beauty variable 'beauty_c' (used in the model).\n    - Create a log-transformed class-size variable 'log_students' from 'students'.\n    - Coerce 'age' to numeric and drop rows missing any column required for the model.\n\n    Returns the transformed dataframe containing the columns referenced in the modeling code.\n    \"\"\"\n    df = df.copy()\n\n    # Required columns for modeling\n    required_cols = ['beauty', 'eval']\n    for c in required_cols:\n        if c not in df.columns:\n            raise KeyError(f\"Required column '{c}' not in input dataframe\")\n\n    # Drop rows missing the main variables\n    df = df.dropna(subset=['beauty', 'eval'])\n\n    # Ensure categorical columns exist before casting\n    categorical_cols = ['gender', 'minority', 'credits', 'division', 'native', 'tenure', 'prof']\n    for col in categorical_cols:\n        if col in df.columns:\n            df[col] = df[col].astype('category')\n\n    # Center beauty for interpretability of main effect and interactions\n    df['beauty_c'] = df['beauty'] - df['beauty'].mean()\n\n    # Coerce age to numeric if present\n    if 'age' in df.columns:\n        df['age'] = pd.to_numeric(df['age'], errors='coerce')\n\n    # Create log-transformed students variable to capture class size (log1p to be safe)\n    if 'students' in df.columns:\n        # coerce to numeric then log transform; keep zero-safe\n        df['students'] = pd.to_numeric(df['students'], errors='coerce')\n        df['log_students'] = np.log1p(df['students'])\n    else:\n        # If 'students' not present create a placeholder with NaNs\n        df['log_students'] = np.nan\n\n    # Final set of columns the model uses; drop rows missing any of these\n    model_cols = ['eval', 'beauty_c', 'gender', 'age', 'minority', 'tenure', 'native', 'division', 'credits', 'log_students', 'prof']\n    # Keep only columns that actually exist in df when deciding to dropna\n    model_cols_in_df = [c for c in model_cols if c in df.columns]\n\n    df = df.dropna(subset=model_cols_in_df)\n\n    # Return transformed dataframe (contains the exact column names used in the model)\n    return df",
+      "m_code": "def model(df: pd.DataFrame) -> dict:\n    \"\"\"\n    Fit an OLS regression estimating the effect of instructor beauty on student evaluations.\n\n    Model specification:\n    - Dependent variable: eval\n    - Independent variable: beauty_c (mean-centered beauty)\n    - Moderator: gender (interaction beauty_c * gender)\n    - Controls: age, minority, tenure, native, division, credits, log_students\n    - Professor fixed effects: C(prof)\n    - Robust standard errors clustered by professor id\n\n    Returns a dict with the raw OLS fit and the clustered-robust covariance fit.\n    \"\"\"\n    import statsmodels.formula.api as smf\n\n    # Build formula. We explicitly use categorical encoding via C() for factors.\n    formula = (\n        'eval ~ beauty_c * C(gender) + age + C(minority) + C(tenure) + '\n        'C(native) + C(division) + C(credits) + log_students + C(prof)'\n    )\n\n    # Fit the baseline OLS model (with dummy fixed effects included via C(prof))\n    ols_result = smf.ols(formula, data=df).fit()\n\n    # Obtain clustered (by prof) robust covariance results\n    # Use get_robustcov_results to apply cluster-robust standard errors\n    clustered_result = ols_result.get_robustcov_results(cov_type='cluster', groups=df['prof'])\n\n    # Print summaries for quick inspection (user can inspect returned objects programmatically)\n    try:\n        print('\\n--- OLS summary (conventional SEs) ---')\n        print(ols_result.summary())\n    except Exception:\n        pass\n    try:\n        print('\\n--- OLS summary (cluster-robust SEs clustered by prof) ---')\n        print(clustered_result.summary())\n    except Exception:\n        pass\n\n    # Return both results so downstream code can inspect coefficients and robust SEs\n    return {'ols': ols_result, 'clustered': clustered_result}"
+    },
+    "3": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Instructor physical attractiveness rating (panel average), standardized (z-score). Primary independent variable. A standardized measure improves interpretability and numerical stability. Also include a squared term to test for nonlinearity.",
+            "columns": [
+              "beauty_z",
+              "beauty_z_sq"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Student overall teaching evaluation score (course-level average). This is the dependent variable reflecting teaching productivity as perceived by students.",
+          "columns": [
+            "eval"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Instructor minority status indicator (1 = yes, 0 = no). Controls for potential systematic differences in evaluations by minority status.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "minority_yes"
+            ]
+          },
+          {
+            "description": "Instructor age in years (continuous). Older or younger instructors might receive systematically different evaluations.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "age"
+            ]
+          },
+          {
+            "description": "Instructor gender indicator (1 = female, 0 = male). Controls for gender differences in evaluations.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "gender_female"
+            ]
+          },
+          {
+            "description": "Course credit indicator (1 = 'more' credits, 0 = 'single' credit). Controls for course type differences (single-credit recreational courses vs. others).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "credits_more"
+            ]
+          },
+          {
+            "description": "Course division indicator (1 = upper-division, 0 = lower-division). Controls for differences between lower- and upper-division course evaluations.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "division_upper"
+            ]
+          },
+          {
+            "description": "Native English speaker indicator (1 = yes, 0 = no). Controls for language-related evaluation differences.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "native_yes"
+            ]
+          },
+          {
+            "description": "Tenure status indicator (1 = yes, 0 = no). Controls for differences associated with job status.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "tenure_yes"
+            ]
+          },
+          {
+            "description": "Number of students who participated in the evaluation (continuous). Controls for sampling variation in the evaluation mean.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "students"
+            ]
+          },
+          {
+            "description": "Total number of students enrolled in the course (continuous). Controls for course enrollment size.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "allstudents"
+            ]
+          },
+          {
+            "description": "Instructor identifier (used for clustering standard errors by professor). Not a covariate but used for robust inference.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "prof"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw Hamermesh & Parker classroom dataset into a dataframe with\n    variables used in the regression models.\n\n    Produces the following columns required by the model:\n      - eval: dependent variable (kept as-is)\n      - beauty_z, beauty_z_sq: standardized beauty and its square\n      - age, students, allstudents: numeric controls\n      - minority_yes, gender_female, credits_more, division_upper, native_yes, tenure_yes: binary dummies\n      - prof: instructor id (kept for clustering)\n\n    Rows with missing values in any of these columns are dropped.\n    \"\"\"\n    df = df.copy()\n\n    # Keep only required raw columns if present (avoid KeyError later)\n    required_raw = ['beauty', 'eval', 'age', 'students', 'allstudents', 'minority', 'gender', 'credits', 'division', 'native', 'tenure', 'prof']\n    missing_cols = [c for c in required_raw if c not in df.columns]\n    if missing_cols:\n        raise KeyError(f\"Input dataframe is missing required columns: {missing_cols}\")\n\n    # Drop rows missing the core columns beauty or eval\n    df = df.dropna(subset=['beauty', 'eval'])\n\n    # Ensure numeric columns are numeric\n    df['age'] = pd.to_numeric(df['age'], errors='coerce')\n    df['students'] = pd.to_numeric(df['students'], errors='coerce')\n    df['allstudents'] = pd.to_numeric(df['allstudents'], errors='coerce')\n    df['prof'] = pd.to_numeric(df['prof'], errors='coerce')\n\n    # Binary encodings for categorical controls (map expected categories to 1/0). If unexpected values appear, they become NaN.\n    df['minority_yes'] = df['minority'].map({'yes': 1, 'no': 0})\n    df['gender_female'] = df['gender'].map({'female': 1, 'male': 0})\n    df['credits_more'] = df['credits'].map({'more': 1, 'single': 0})\n    df['division_upper'] = df['division'].map({'upper': 1, 'lower': 0})\n    df['native_yes'] = df['native'].map({'yes': 1, 'no': 0})\n    df['tenure_yes'] = df['tenure'].map({'yes': 1, 'no': 0})\n\n    # Standardize beauty (z-score). Use population std (ddof=0) for interpretability; small-sample choice won't change conclusions materially.\n    beauty_mean = df['beauty'].mean()\n    beauty_std = df['beauty'].std(ddof=0)\n    if beauty_std == 0 or np.isnan(beauty_std):\n        raise ValueError('beauty column has zero or NaN standard deviation; cannot standardize')\n    df['beauty_z'] = (df['beauty'] - beauty_mean) / beauty_std\n    df['beauty_z_sq'] = df['beauty_z'] ** 2\n\n    # Drop rows with missing values in any variable used by the model\n    model_cols = ['eval', 'beauty_z', 'beauty_z_sq', 'age', 'students', 'allstudents',\n                  'minority_yes', 'gender_female', 'credits_more', 'division_upper', 'native_yes', 'tenure_yes', 'prof']\n    df = df.dropna(subset=model_cols)\n\n    # Reset index and return only relevant columns (keeps original columns too but ensures required ones exist)\n    df = df.reset_index(drop=True)\n    return df",
+      "m_code": "def model(df: pd.DataFrame) -> dict:\n    \"\"\"\n    Run OLS regressions to estimate the association between instructor beauty and\n    student evaluations. Two specifications are returned:\n      - model1: simple bivariate regression of eval on beauty_z (clustered SE by prof)\n      - model2: full model with controls and quadratic beauty term (clustered SE by prof)\n\n    Returns a dict with keys 'model1' and 'model2' containing statsmodels result objects\n    with clustered robust covariance matrices (clustered by 'prof').\n    \"\"\"\n    import statsmodels.api as sm\n\n    # Ensure the dataframe has necessary columns\n    required = ['eval', 'beauty_z', 'beauty_z_sq', 'age', 'students', 'allstudents',\n                'minority_yes', 'gender_female', 'credits_more', 'division_upper', 'native_yes', 'tenure_yes', 'prof']\n    missing = [c for c in required if c not in df.columns]\n    if missing:\n        raise KeyError(f\"Dataframe missing required columns for modeling: {missing}\")\n\n    df = df.copy()\n\n    # Dependent and independent sets\n    y = df['eval']\n\n    # Model 1: beauty only (with intercept)\n    X1 = sm.add_constant(df[['beauty_z']])\n    ols1 = sm.OLS(y, X1).fit()\n    # Clustered SE by professor\n    model1_clust = ols1.get_robustcov_results(cov_type='cluster', groups=df['prof'])\n\n    # Model 2: beauty (quadratic) + controls\n    X2_cols = ['beauty_z', 'beauty_z_sq', 'age', 'students', 'allstudents',\n               'minority_yes', 'gender_female', 'credits_more', 'division_upper', 'native_yes', 'tenure_yes']\n    X2 = sm.add_constant(df[X2_cols])\n    ols2 = sm.OLS(y, X2).fit()\n    model2_clust = ols2.get_robustcov_results(cov_type='cluster', groups=df['prof'])\n\n    # Return fitted result objects (clustered) so callers can print summaries or extract coefficients.\n    return {\n        'model1': model1_clust,\n        'model2': model2_clust\n    }"
+    },
+    "4": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Instructor average beauty rating (centered). Primary independent variable capturing perceived instructor attractiveness as rated by a panel (mean-centered to aid interpretation). A quadratic term is also included to allow non-linear effects.",
+            "columns": [
+              "beauty_c",
+              "beauty_sq"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Student overall course evaluation score (continuous). This is the outcome variable reflecting teaching productivity as perceived by students.",
+          "columns": [
+            "eval"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Instructor gender (female = 1). Included as a control and specified as a moderator to test whether the effect of beauty differs by instructor gender.",
+            "is_moderator": true,
+            "moderator_on": "Instructor average beauty rating (centered)",
+            "columns": [
+              "gender_female"
+            ]
+          },
+          {
+            "description": "Instructor age in years (continuous). Control for experience / cohort differences.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "age"
+            ]
+          },
+          {
+            "description": "Minority status indicator (1 = instructor is non-Caucasian). Control for demographic differences.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "minority_yes"
+            ]
+          },
+          {
+            "description": "Course credit indicator (1 = single-credit elective). Controls for course type differences that may affect evaluations.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "credits_single"
+            ]
+          },
+          {
+            "description": "Course division indicator (1 = upper-division). Controls for course level differences.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "division_upper"
+            ]
+          },
+          {
+            "description": "Native English speaker indicator (1 = yes). Controls for perceived language fluency effects on evaluations.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "native_yes"
+            ]
+          },
+          {
+            "description": "Tenure status indicator (1 = on tenure track). Controls for job-status differences that may covary with evaluations.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "tenure_yes"
+            ]
+          },
+          {
+            "description": "Log of number of students who participated in the evaluation (continuous). Controls for class size effects on mean evaluation scores.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "students_log"
+            ]
+          },
+          {
+            "description": "Instructor identifier (used to include instructor fixed effects or cluster standard errors by instructor).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "prof"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Prepare data for modeling:\n    - Drop rows missing the dependent variable (eval), the main independent variable (beauty), or required controls.\n    - Create binary indicator controls from categorical fields.\n    - Center beauty and add quadratic term to allow non-linear effect.\n    - Log-transform students (number of respondents) to reduce skew.\n\n    Returns a dataframe that contains all columns named in the conceptual variables.\n    \"\"\"\n\n    # Make a copy to avoid modifying the original passed DF\n    df = df.copy()\n\n    # Ensure required columns exist\n    required_cols = [\n        'eval', 'beauty', 'gender', 'age', 'minority', 'credits',\n        'division', 'native', 'tenure', 'students', 'prof'\n    ]\n    missing = [c for c in required_cols if c not in df.columns]\n    if missing:\n        raise KeyError(f\"Missing required columns for transform: {missing}\")\n\n    # Drop rows with NA in key modeling columns\n    df = df.dropna(subset=['eval', 'beauty', 'gender', 'age', 'students', 'prof'])\n\n    # Encode categorical controls as binary indicators\n    # Note: we treat the string values exactly as in the schema (e.g., 'female', 'yes', 'single', 'upper')\n    df['gender_female'] = (df['gender'] == 'female').astype(int)\n    df['minority_yes'] = (df['minority'] == 'yes').astype(int)\n    df['credits_single'] = (df['credits'] == 'single').astype(int)\n    df['division_upper'] = (df['division'] == 'upper').astype(int)\n    df['native_yes'] = (df['native'] == 'yes').astype(int)\n    df['tenure_yes'] = (df['tenure'] == 'yes').astype(int)\n\n    # Numeric controls: convert to numeric types if necessary\n    df['age'] = pd.to_numeric(df['age'], errors='coerce')\n    df['students'] = pd.to_numeric(df['students'], errors='coerce')\n\n    # After conversions, drop rows where numeric controls became NA\n    df = df.dropna(subset=['age', 'students'])\n\n    # Center beauty around its sample mean and add squared term for nonlinearity\n    beauty_mean = df['beauty'].mean()\n    df['beauty_c'] = df['beauty'] - beauty_mean\n    df['beauty_sq'] = df['beauty_c'] ** 2\n\n    # Log-transform number of students to reduce skew (add small constant for safety)\n    df['students_log'] = np.log(df['students'].clip(lower=1))\n\n    # Keep only columns needed for modeling plus any others the user might want\n    required_model_cols = [\n        'eval', 'beauty', 'beauty_c', 'beauty_sq',\n        'gender_female', 'age', 'minority_yes', 'credits_single',\n        'division_upper', 'native_yes', 'tenure_yes', 'students_log', 'prof'\n    ]\n\n    # If additional columns exist, leave them; return DF with all transformed columns present\n    return df",
+      "m_code": "def model(df: pd.DataFrame):\n    \"\"\"\n    Fit an OLS model of student evaluations on instructor beauty and controls.\n\n    Model specification:\n      eval ~ beauty_c + beauty_sq + gender_female + beauty_c:gender_female\n           + age + minority_yes + credits_single + division_upper + native_yes + tenure_yes\n           + students_log + C(prof)\n\n    We include C(prof) (instructor fixed effects) to absorb unobserved, time-invariant instructor characteristics.\n    Standard errors are clustered by instructor ('prof') to account for non-independence of observations for the same instructor.\n\n    Returns the robust (clustered) results object.\n    \"\"\"\n    import statsmodels.formula.api as smf\n\n    # Verify required transformed columns exist\n    required = [\n        'eval', 'beauty_c', 'beauty_sq', 'gender_female', 'age', 'minority_yes',\n        'credits_single', 'division_upper', 'native_yes', 'tenure_yes', 'students_log', 'prof'\n    ]\n    missing = [c for c in required if c not in df.columns]\n    if missing:\n        raise KeyError(f\"Missing required columns for modeling: {missing}\")\n\n    # Define formula with an interaction between beauty and gender\n    formula = (\n        'eval ~ beauty_c + beauty_sq + gender_female + beauty_c:gender_female '\n        '+ age + minority_yes + credits_single + division_upper + native_yes + tenure_yes '\n        '+ students_log + C(prof)'\n    )\n\n    # Fit OLS via formula API\n    ols_res = smf.ols(formula, data=df).fit()\n\n    # Compute cluster-robust standard errors clustered on instructor id (prof)\n    # If 'prof' has many unique values clustering is appropriate; ensure it's integer or categorical\n    try:\n        clustered_res = ols_res.get_robustcov_results(cov_type='cluster', groups=df['prof'])\n    except Exception:\n        # Fall back to heteroskedasticity-robust (HC3) if clustering fails\n        clustered_res = ols_res.get_robustcov_results(cov_type='HC3')\n\n    # Print summary and return the robust-results object for further inspection\n    print(clustered_res.summary())\n    return clustered_res"
+    }
+  }
+}

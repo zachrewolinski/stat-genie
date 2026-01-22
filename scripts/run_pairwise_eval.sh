@@ -7,7 +7,7 @@
 #SBATCH --mail-type=FAIL,TIME_LIMIT
 #
 #SBATCH -p yugroup
-#SBATCH --cpus-per-task=10
+#SBATCH --cpus-per-task=30
 #SBATCH --mem=64G
 #SBATCH --ntasks=1
 
@@ -48,7 +48,7 @@ DATASET="$1"
 NUM_MULTIRUNS=5
 LLM_PROVIDER="openai"
 LLM_MODEL="gpt-5-mini"
-ANALYSIS_BASE_DIR="corrected_outputs/analysis"
+ANALYSIS_BASE_DIR="outputs/analysis"
 echo "Job ID: ${SLURM_JOB_ID}"
 
 START_TIME=$(date +%s)

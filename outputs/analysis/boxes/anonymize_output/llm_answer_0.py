@@ -1,204 +1,184 @@
 def extract_final_answer(model_output):
     """
-    Extract key statistics about age effects on reliance on the majority from the
-    model_output produced by the modeling function.
+    Extracts age-related coefficients, p-values, confidence intervals, and odds ratios
+    from the fitted models returned in model_output.
 
-    Returns a dictionary with:
-      - "object": a dict with extracted numeric results (or None if unavailable)
-      - "description": a plain-language summary of what the extracted numbers mean
+    Inputs:
+      model_output: dict with keys:
+        - 'social_model': fitted statsmodels Logit/GLM results object (required)
+        - 'majority_model': fitted statsmodels Logit/GLM results object or None
+        - 'n_total': int (optional)
+        - 'n_social_users': int (optional)
+
+    Returns:
+      dict with keys:
+        - "object": dictionary with extracted statistics for Age_c (main effect)
+                    and Age_c x Site interaction terms for both models (when present),
+                    plus sample sizes.
+        - "description": short plain-language interpretation of what these numbers mean
+                         for whether children's reliance on majority preference develops
+                         with age and whether that developmental trajectory differs by site.
     """
     import numpy as np
-    import pandas as pd
 
-    # Basic validation of input
-    if not isinstance(model_output, dict):
-        return {
-            "object": None,
-            "description": "model_output is not a dictionary. Expected dict with keys 'results' and 'predictions_df'."
-        }
+    def summarize_model(res):
+        """Return dict of summaries for Age_c main effect and Age_c x Site interactions."""
+        if res is None:
+            return None
 
-    results = model_output.get('results', None)
-    preds = model_output.get('predictions_df', None)
+        params = res.params
+        pvalues = res.pvalues
+        conf = res.conf_int()
+        bse = getattr(res, 'bse', None)
 
-    # Case: no fitted results (this matches the provided run where results is None)
-    if results is None:
-        # Try to give any useful information from predictions_df if present
-        if preds is None:
-            return {
-                "object": None,
-                "description": (
-                    "No fitted model found (model_output['results'] is None) and no predictions_df present. "
-                    "Cannot extract coefficients, p-values, or draw conclusions about how reliance on the majority "
-                    "changes with age across sites. This usually means the model was not fit because the input data "
-                    "was empty or insufficient."
-                )
-            }
-        # predictions_df exists: check if it's empty
-        try:
-            empty = bool(getattr(preds, "empty", False))
-        except Exception:
-            empty = False
-        if empty:
-            return {
-                "object": None,
-                "description": (
-                    "No fitted model found (model_output['results'] is None) and predictions_df is empty. "
-                    "No information available to determine the developmental trajectory of majority reliance."
-                )
+        summary = {}
+        # Find the main Age_c coefficient
+        age_name = None
+        for n in params.index:
+            if n == 'Age_c':
+                age_name = n
+                break
+        if age_name is None:
+            # sometimes interaction-only parameterization could occur, but we expect Age_c
+            # if not found, try to find any parameter that equals exactly 'Age_c' ignoring case
+            for n in params.index:
+                if n.lower() == 'age_c'.lower():
+                    age_name = n
+                    break
+
+        if age_name is not None:
+            coef = float(params[age_name])
+            p = float(pvalues[age_name])
+            ci_low, ci_high = map(float, conf.loc[age_name])
+            se = float(bse[age_name]) if bse is not None else None
+            or_coef = float(np.exp(coef))
+            or_ci = (float(np.exp(ci_low)), float(np.exp(ci_high)))
+            summary['Age_c'] = {
+                'param_name': age_name,
+                'coef': coef,
+                'se': se,
+                'p_value': p,
+                '95CI': [ci_low, ci_high],
+                'odds_ratio': or_coef,
+                'odds_ratio_95CI': list(or_ci),
+                'significant_p05': p < 0.05
             }
         else:
-            # Provide a brief summary of available predictions (non-empty case)
-            try:
-                summary = preds['pred_prob'].describe().to_dict()
-            except Exception:
-                summary = None
-            return {
-                "object": {"pred_prob_summary": summary},
-                "description": (
-                    "No fitted model object available, but predictions_df was present. "
-                    "Returned a summary of predicted probabilities (pred_prob). "
-                    "Because the model results are missing, we cannot extract coefficients, p-values, or test Age x Site effects."
-                )
-            }
+            summary['Age_c'] = None
 
-    # If we have a fitted model object, attempt to extract relevant statistics
-    # Expecting a statsmodels results object (has params, bse, pvalues, conf_int)
-    try:
-        params = getattr(results, "params", None)
-        pvalues = getattr(results, "pvalues", None)
-        bse = getattr(results, "bse", None)
-        conf = None
-        if hasattr(results, "conf_int"):
-            try:
-                conf = results.conf_int()
-            except Exception:
-                conf = None
+        # Find interaction terms that include Age_c and Site
+        interaction_entries = {}
+        for n in params.index:
+            # typical interaction naming: 'Age_c:C(Site)[T.Site_2]' or 'Age_c:C(Site)[T.xyz]'
+            if ('Age_c' in n) and ('Site' in n):
+                coef = float(params[n])
+                p = float(pvalues[n])
+                ci_low, ci_high = map(float, conf.loc[n])
+                se = float(bse[n]) if bse is not None else None
+                or_coef = float(np.exp(coef))
+                or_ci = (float(np.exp(ci_low)), float(np.exp(ci_high)))
+                interaction_entries[n] = {
+                    'param_name': n,
+                    'coef': coef,
+                    'se': se,
+                    'p_value': p,
+                    '95CI': [ci_low, ci_high],
+                    'odds_ratio': or_coef,
+                    'odds_ratio_95CI': list(or_ci),
+                    'significant_p05': p < 0.05
+                }
+        # If none found, set empty dict
+        summary['Age_c_by_Site_interactions'] = interaction_entries
 
-        if params is None:
-            return {
-                "object": None,
-                "description": "The results object does not expose .params; cannot extract coefficients."
-            }
+        return summary
 
-        # Helper to safely pull numeric summary for a given parameter name
-        def param_info(name):
-            if name in params.index:
-                coef = float(params.loc[name])
-                se = float(bse.loc[name]) if (bse is not None and name in bse.index) else None
-                p = float(pvalues.loc[name]) if (pvalues is not None and name in pvalues.index) else None
-                ci = None
-                if conf is not None and name in conf.index:
-                    ci = (float(conf.loc[name, 0]), float(conf.loc[name, 1]))
-                return {"coef": coef, "se": se, "p_value": p, "conf_int": ci}
-            else:
-                return None
+    output = {}
+    # sample sizes if present
+    if 'n_total' in model_output:
+        output['n_total'] = int(model_output.get('n_total'))
+    if 'n_social_users' in model_output:
+        output['n_social_users'] = int(model_output.get('n_social_users'))
 
-        # Extract main terms of interest
-        extracted = {}
-        # Main linear and quadratic age terms
-        extracted['Age_centered'] = param_info('Age_centered')
-        extracted['Age_sq'] = param_info('Age_sq')
+    # Extract summaries
+    social_res = model_output.get('social_model', None)
+    majority_res = model_output.get('majority_model', None)
 
-        # Interactions: parameters that include 'Age_centered' but are not the main effect
-        interaction_terms = [name for name in params.index if ('Age_centered' in name and name != 'Age_centered')]
-        interactions_info = {}
-        for name in interaction_terms:
-            interactions_info[name] = param_info(name)
-        if interactions_info:
-            extracted['Age_centered_interactions'] = interactions_info
+    output['social_model_summary'] = summarize_model(social_res)
+    output['majority_model_summary'] = summarize_model(majority_res) if majority_res is not None else None
 
-        # Controls (for context)
-        extracted['Female'] = param_info('Female')
-        extracted['MajorityFirst'] = param_info('MajorityFirst')
-
-        # Simple significance summary: check whether Age terms are statistically significant
-        sig_summary = {}
-        for term in ['Age_centered', 'Age_sq']:
-            info = extracted.get(term)
-            if info is None:
-                sig_summary[term] = "not in model"
-            else:
-                p = info.get('p_value')
-                if p is None:
-                    sig_summary[term] = "p-value unavailable"
-                else:
-                    sig_summary[term] = ("significant (p < 0.05)" if p < 0.05 else f"not significant (p = {p:.3f})")
-
-        # For interactions, report any that are significant
-        interaction_summary = {}
-        for name, info in interactions_info.items():
-            if info is None:
-                interaction_summary[name] = "no estimate"
-            else:
-                p = info.get('p_value')
-                if p is None:
-                    interaction_summary[name] = "p-value unavailable"
-                else:
-                    interaction_summary[name] = ("significant (p < 0.05)" if p < 0.05 else f"not significant (p = {p:.3f})")
-
-        # Build plain-language interpretation
-        interpretation_parts = []
-        # Age linear/quadratic
-        if extracted['Age_centered'] is None and extracted['Age_sq'] is None:
-            interpretation_parts.append(
-                "Model does not include Age_centered or Age_sq terms, so no inference about age-related change can be made."
-            )
+    # Build a short plain-language description
+    desc_lines = []
+    desc_lines.append(f"Sample sizes: total n = {output.get('n_total', 'NA')}, "
+                      f"social-users n = {output.get('n_social_users', 'NA')}.")
+    # Social model interpretation
+    ssum = output['social_model_summary']
+    if ssum is None:
+        desc_lines.append("No social model results available.")
+    else:
+        age_info = ssum.get('Age_c')
+        if age_info is None:
+            desc_lines.append("No main Age_c coefficient found in social model.")
         else:
-            # Linear
-            if extracted['Age_centered'] is not None:
-                coef = extracted['Age_centered']['coef']
-                p = extracted['Age_centered']['p_value']
-                sign = "increase" if coef > 0 else "decrease"
-                if p is None:
-                    interpretation_parts.append(
-                        f"The linear age term (Age_centered) has coefficient {coef:.3f} (p unavailable); sign suggests a {sign} in log-odds of choosing the majority with age."
-                    )
-                else:
-                    interpretation_parts.append(
-                        f"The linear age term (Age_centered) has coefficient {coef:.3f} ({'p < 0.05' if p < 0.05 else f'p = {p:.3f}'}), indicating a {sign} in log-odds of choosing the majority with age."
-                    )
-            # Quadratic
-            if extracted['Age_sq'] is not None:
-                coef = extracted['Age_sq']['coef']
-                p = extracted['Age_sq']['p_value']
-                if p is None:
-                    interpretation_parts.append(
-                        f"The quadratic age term (Age_sq) has coefficient {coef:.3f} (p unavailable), suggesting nonlinear (curvilinear) change if meaningful."
-                    )
-                else:
-                    interpretation_parts.append(
-                        f"The quadratic age term (Age_sq) has coefficient {coef:.3f} ({'p < 0.05' if p < 0.05 else f'p = {p:.3f}'}), indicating a statistically detectable curvature in the age trajectory."
-                    )
-
-        # Interactions interpretation
-        if interactions_info:
-            any_sig = any(
-                (info is not None and info.get('p_value') is not None and info.get('p_value') < 0.05)
-                for info in interactions_info.values()
+            p = age_info['p_value']
+            orv = age_info['odds_ratio']
+            desc_lines.append(
+                f"SocialReliance model: Age (Age_c) coef = {age_info['coef']:.3f}, "
+                f"p = {p:.3f}. Odds ratio per year = {orv:.3f} "
+                f"(95% CI {age_info['odds_ratio_95CI'][0]:.3f}–{age_info['odds_ratio_95CI'][1]:.3f})."
             )
-            if any_sig:
-                interpretation_parts.append(
-                    "At least one Age x Site interaction is statistically significant, which suggests that the developmental trajectory of reliance on the majority differs across cultural sites."
-                )
+            if age_info['significant_p05']:
+                desc_lines.append("This indicates a statistically significant change in reliance on social information with age (p < 0.05).")
             else:
-                interpretation_parts.append(
-                    "No Age x Site interactions reached conventional significance, suggesting similar developmental trajectories across sites (no strong evidence of site moderation)."
-                )
+                desc_lines.append("No statistically significant evidence that reliance on social information changes with age (p >= 0.05).")
 
-        # Compose description
-        description = (
-            "Extracted parameter estimates (coefficients, SEs, p-values, and CIs when available) for the linear and quadratic age terms, "
-            "Age x Site interactions, and controls. Interpretation: "
-            + " ".join(interpretation_parts)
-        )
+        inters = ssum.get('Age_c_by_Site_interactions', {})
+        if inters:
+            # summarize how many interactions significant
+            n_inters = len(inters)
+            n_sig = sum(1 for v in inters.values() if v['significant_p05'])
+            desc_lines.append(f"SocialReliance model: found {n_inters} Age-by-Site interaction term(s); {n_sig} are individually significant (p < 0.05).")
+            if n_sig > 0:
+                sig_sites = [v['param_name'] for v in inters.values() if v['significant_p05']]
+                desc_lines.append("Significant interaction parameters: " + ", ".join(sig_sites) + ". This suggests age-related change differs for those site(s).")
+            else:
+                desc_lines.append("No individual Age-by-Site interaction terms were significant; no strong evidence that age trajectories differ across sites based on individual tests.")
+        else:
+            desc_lines.append("No Age-by-Site interaction terms found in social model; no evidence from interactions that developmental change differs by site.")
 
-        return {
-            "object": extracted,
-            "description": description
-        }
+    # Majority model interpretation (conditional on using social information)
+    msum = output['majority_model_summary']
+    if msum is None:
+        desc_lines.append("MajorityChoice model: Not available or not fitted (too few social learners or model missing).")
+    else:
+        age_info = msum.get('Age_c')
+        if age_info is None:
+            desc_lines.append("MajorityChoice model: No main Age_c coefficient found.")
+        else:
+            p = age_info['p_value']
+            orv = age_info['odds_ratio']
+            desc_lines.append(
+                f"MajorityChoice (among social users) model: Age (Age_c) coef = {age_info['coef']:.3f}, "
+                f"p = {p:.3f}. Odds ratio per year = {orv:.3f} "
+                f"(95% CI {age_info['odds_ratio_95CI'][0]:.3f}–{age_info['odds_ratio_95CI'][1]:.3f})."
+            )
+            if age_info['significant_p05']:
+                desc_lines.append("This indicates a statistically significant change in preference for the majority with age among social learners (p < 0.05).")
+            else:
+                desc_lines.append("No statistically significant evidence that majority preference changes with age among social learners (p >= 0.05).")
 
-    except Exception as e:
-        return {
-            "object": None,
-            "description": f"An error occurred while extracting statistics from the fitted results object: {e}"
-        }
+        inters = msum.get('Age_c_by_Site_interactions', {})
+        if inters:
+            n_inters = len(inters)
+            n_sig = sum(1 for v in inters.values() if v['significant_p05'])
+            desc_lines.append(f"MajorityChoice model: found {n_inters} Age-by-Site interaction term(s); {n_sig} are individually significant.")
+            if n_sig > 0:
+                sig_sites = [v['param_name'] for v in inters.values() if v['significant_p05']]
+                desc_lines.append("Significant interaction parameters: " + ", ".join(sig_sites) + ". This suggests site-specific age trends in majority preference.")
+            else:
+                desc_lines.append("No individual Age-by-Site interaction terms were significant in the MajorityChoice model.")
+        else:
+            desc_lines.append("No Age-by-Site interaction terms found in MajorityChoice model.")
+
+    description = " ".join(desc_lines)
+
+    return {"object": output, "description": description}

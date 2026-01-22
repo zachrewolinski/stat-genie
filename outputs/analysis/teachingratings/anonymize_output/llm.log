@@ -1,0 +1,3082 @@
+
+===================[PROMPT (API Time: 66.38176155090332, Cache Time: None)]=====================
+=====[SYSTEM]=====:
+You are an AI Data Analysis Assistant who is an expert at writing an end-to-end scientific analysis given a research question and a dataset. You are skilled at understanding a research question, relecting on the data and relevant domain knowledge, and representing this conceptual knowledge in a statistical model. Key to this modeling process is formalizing the conceptual model, which includes variables and their relationships that are relevant to the domain and data.
+=====[USER]=====:
+<Instruction> 
+Given the research question, dataset formulate the conceptual model and write an analysis including all necessary data transformations and a statistical model to answer the research question. 
+</Instruction>
+
+<Format Instructions>
+You will return 3 things:
+1. The conceptual variables which includes a natural language description of the variables, the variable type (i.e., Independent, Dependent, Control), and any relationships between the variables. Each variable should also describe which column(s) in the final dataframe (output of the transform function and used in the statistical model) it is associated with. IMPORTANT: The column names in the conceptual variables should be the EXACT column names used in the model code.     
+2. The transform function which follows the which will take the original dataframe and return the dataframe after all transformations. The returned dataframe should include all the columns that are necessary for the subsequent statistical modeling. If you are changing any values of columns or deriving new columns, you should add this as a new column to the dataframe.     
+3. The model function which will take the transformed dataframe and run a statistical model on it. The model function should return the results of the model.
+
+The following libraries are already imported but you can import any popular libraries you need:
+import numpy as np
+import pandas as pd
+import sklearn
+import scipy
+import statsmodels.api as sm
+import matplotlib.pyplot as plt
+
+You are also allowed to use common machine learning libraries, including but not limited to:
+- xgboost
+- lightgbm
+- catboost
+- tensorflow / keras
+- torch (PyTorch)
+- pytorch-lightning
+- sklearn.experimental modules
+- imbalanced-learn (imblearn)
+
+Here is the code template for the transform function:
+```python
+def transform(df: pd.DataFrame) -> pd.DataFrame:
+    # Your code here
+    return df
+```
+Here is the code template for the model function:
+```python
+def model(df: pd.DataFrame) -> Any:
+    # Your code here
+    return results
+```
+
+Please return the conceptual variables, the transform function, and the model function in the format specified below:
+The output should be formatted as a JSON instance that conforms to the JSON schema below.
+
+As an example, for the schema {"properties": {"foo": {"title": "Foo", "description": "a list of strings", "type": "array", "items": {"type": "string"}}}, "required": ["foo"]}
+the object {"foo": ["bar", "baz"]} is a well-formatted instance of the schema. The object {"properties": {"foo": ["bar", "baz"]}} is not well-formatted.
+
+Here is the output schema:
+```
+{"$defs": {"AgentCVarsWithCol": {"properties": {"ivs": {"items": {"$ref": "#/$defs/IVarWithCol"}, "title": "Independent variables", "type": "array"}, "dv": {"allOf": [{"$ref": "#/$defs/DVarWithCol"}], "title": "Dependent variable"}, "controls": {"items": {"$ref": "#/$defs/ControlVarWithCol"}, "title": "Control variables", "type": "array"}}, "required": ["ivs", "dv", "controls"], "title": "AgentCVarsWithCol", "type": "object"}, "ControlVarWithCol": {"properties": {"description": {"title": "Description of the control variable variable", "type": "string"}, "is_moderator": {"title": "Whether the variable is a moderator.", "type": "boolean"}, "moderator_on": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": "", "title": "The variable that the control variable is moderating. Only applicable for control variables that are moderators."}, "columns": {"items": {"type": "string"}, "title": "The column(s) in the FINAL dataframe used in the STATISTICAL MODEL that corresponds to the control variable", "type": "array"}}, "required": ["description", "is_moderator", "columns"], "title": "ControlVarWithCol", "type": "object"}, "DVarWithCol": {"properties": {"description": {"title": "Description of the dependent variable variable", "type": "string"}, "columns": {"items": {"type": "string"}, "title": "The column(s) in the FINAL dataframe used in the STATISTICAL MODEL that corresponds to the dependent variable", "type": "array"}}, "required": ["description", "columns"], "title": "DVarWithCol", "type": "object"}, "IVarWithCol": {"properties": {"description": {"title": "Description of the independent variable variable", "type": "string"}, "columns": {"items": {"type": "string"}, "title": "The column(s) in the FINAL dataframe used in the STATISTICAL MODEL that corresponds to the independent variable", "type": "array"}}, "required": ["description", "columns"], "title": "IVarWithCol", "type": "object"}}, "properties": {"cvars": {"allOf": [{"$ref": "#/$defs/AgentCVarsWithCol"}], "title": "Conceptual variables"}, "transform_code": {"title": "The code that transforms the data", "type": "string"}, "m_code": {"title": "The code for the statistical modeling", "type": "string"}}, "required": ["cvars", "transform_code", "m_code"]}
+```
+</Format Instructions>
+<Example>
+Research Question: What is the effect of hormonal fluctuations associated with fertility on women's religiosity?
+Dataset Schema: {
+  "dataset_description": "A total of 275 women participated in the study for this dataset. Each participant was asked to answer three religiosity items using a 9-point scale. Further, each participant was asked to indicate the typical length of her menstrual cycle, the start date of her last menstrual period, and the start date of her previous menstrual period. In addition, each woman indicated how sure she was about these two start dates, using a 9-point scale. Finally, each woman was asked to indicate her current romantic relationship status with the following four response options: (1) not dating/romantically involved with anyone, (2) dating or involved with only one partner, (3) engaged or living with my partner, and (4) married.",
+  "fields": [
+    {
+      "column": "WorkerID",
+      "properties": {
+        "dtype": "number",
+        "std": 79.52986860293433,
+        "min": 1,
+        "max": 275,
+        "samples": [
+          31,
+          140,
+          196
+        ],
+        "num_unique_values": 275,
+        "description": "The unique identifier of a participant."
+      }
+    },
+    {
+      "column": "Rel1",
+      "properties": {
+        "dtype": "number",
+        "std": 3.284246850080361,
+        "min": 1,
+        "max": 9,
+        "samples": [
+          4,
+          1,
+          9
+        ],
+        "num_unique_values": 9,
+        "description": "'How much do you believe in God?' 1 \u2013 9"
+      }
+    },
+    {
+      "column": "Rel2",
+      "properties": {
+        "dtype": "number",
+        "std": 3.087872913331648,
+        "min": 1.0,
+        "max": 9.0,
+        "samples": [
+          4.0,
+          2.0,
+          6.0
+        ],
+        "num_unique_values": 9,
+        "description": "'I see myself as a religiously oriented person.' 1 \u2013 9"
+      }
+    },
+    {
+      "column": "Rel3",
+      "properties": {
+        "dtype": "number",
+        "std": 3.333610823065186,
+        "min": 1.0,
+        "max": 9.0,
+        "samples": [
+          3.0,
+          1.0,
+          7.0
+        ],
+        "num_unique_values": 9,
+        "description": "'I believe that God or a Higher Power is responsible for my existence.' 1 \u2013 9"
+      }
+    },
+    {
+      "column": "Sure1",
+      "properties": {
+        "dtype": "number",
+        "std": 1.5732501786909676,
+        "min": 1,
+        "max": 9,
+        "samples": [
+          4,
+          7,
+          9
+        ],
+        "num_unique_values": 8,
+        "description": "In reference to `StartDateofLastPeriod`,  'How sure are you about that date?' 1 \u2013 9."
+      }
+    },
+    {
+      "column": "Sure2",
+      "properties": {
+        "dtype": "number",
+        "std": 2.221975065515302,
+        "min": 1,
+        "max": 9,
+        "samples": [
+          6,
+          3,
+          7
+        ],
+        "num_unique_values": 9,
+        "description": "In reference to `StartDateofPeriodBeforeLast`,  'How sure are you about that date?' 1 \u2013 9."
+      }
+    },
+    {
+      "column": "Relationship",
+      "properties": {
+        "dtype": "number",
+        "std": 1.167327837424664,
+        "min": 1,
+        "max": 4,
+        "samples": [
+          1,
+          2,
+          3
+        ],
+        "num_unique_values": 4,
+        "description": "Answer to 'What is your current romantic relationship status?' (1) not dating/romantically involved with anyone, (2) dating or involved with only one partner, (3) engaged or living with my partner, (4) married"
+      }
+    },
+    {
+      "column": "ReportedCycleLength",
+      "properties": {
+        "dtype": "number",
+        "std": 2.6714983210492633,
+        "min": 21.0,
+        "max": 38.0,
+        "samples": [
+          21.0,
+          22.0,
+          26.0
+        ],
+        "num_unique_values": 17,
+        "description": "Answer to 'How many days long are your menstrual cycles? (for most women, the range is between 25-35 days) Keep in mind this is the number of days from the start of one menstrual period to the start of the next menstrual period and NOT the length of your menstrual bleeding.'"
+      }
+    },
+    {
+      "column": "DateTesting",
+      "properties": {
+        "dtype": "date",
+        "min": "03/12/12",
+        "max": "04/27/12",
+        "samples": [
+          "04/06/12",
+          "04/26/12",
+          "03/12/12"
+        ],
+        "num_unique_values": 13,
+        "description": "Date of participant filling in the questionnaire"
+      }
+    },
+    {
+      "column": "StartDateofLastPeriod",
+      "properties": {
+        "dtype": "date",
+        "min": "02/06/12",
+        "max": "04/26/12",
+        "samples": [
+          "02/16/12",
+          "03/01/12",
+          "04/25/12"
+        ],
+        "num_unique_values": 61,
+        "description": "Answer to 'Please give your best estimate of the date on which you started your last period (please be as precise as possible). This date was probably within the last few weeks. Sometimes thinking of where you were when you started your last period helps. For instance, was it on a weekend?, were you at work, was it during a football game?, etc. Please write the date in mm/dd/yyyy format (e.g., 8/18/2012).'"
+      }
+    },
+    {
+      "column": "StartDateofPeriodBeforeLast",
+      "properties": {
+        "dtype": "date",
+        "min": "01/03/12",
+        "max": "03/29/12",
+        "samples": [
+          "01/15/12",
+          "02/04/12",
+          "03/24/12"
+        ],
+        "num_unique_values": 61,
+        "description": "Answer to 'Please give your best estimate of the date on which you started the period before your last period (please be as precise as possible). Please write the date in mm/dd/yyyy format (e.g., 7/18/2012).'"
+      }
+    }
+  ],
+  "num_rows": 275,
+  "field_names": [
+    "WorkerID",
+    "Rel1",
+    "Rel2",
+    "Rel3",
+    "Sure1",
+    "Sure2",
+    "Relationship",
+    "ReportedCycleLength",
+    "DateTesting",
+    "StartDateofLastPeriod",
+    "StartDateofPeriodBeforeLast"
+  ]
+}
+Result: {
+  "cvars": {
+    "ivs": [
+      {
+        "description": "Women's fertility",
+        "columns": [
+          "FertilityGroup"
+        ]
+      }
+    ],
+    "dv": {
+      "description": "Women's religiosity",
+      "columns": [
+        "AvgReligiosity"
+      ]
+    },
+    "controls": [
+      {
+        "description": "Relationship status of the individual",
+        "is_moderator": true,
+        "moderator_on": "Women's fertility",
+        "columns": [
+          "InRelationship"
+        ]
+      }
+    ]
+  },
+  "transform_code": "# drop the rows with missing values in the ReportedCycleLength, Rel1, Rel2, and Rel3 columns\ndf = df.dropna(subset=['ReportedCycleLength'])\ndf = df.dropna(subset=['Rel1', 'Rel2', 'Rel3'])\n\ndf['AvgReligiosity'] = df[['Rel1', 'Rel2', 'Rel3']].mean(axis=1)\n\n\n# Convert date columns to datetime format\ndf['DateTesting'] = pd.to_datetime(df['DateTesting'], format='%m/%d/%y')\ndf['StartDateofLastPeriod'] = pd.to_datetime(df['StartDateofLastPeriod'], format='%m/%d/%y')\ndf['StartDateofPeriodBeforeLast'] = pd.to_datetime(df['StartDateofPeriodBeforeLast'], format='%m/%d/%y')\n\n# Calculate the cycle length based on provided dates\ndf['ReportedCycleLength'] = (df['StartDateofLastPeriod'] - df['StartDateofPeriodBeforeLast']).dt.days\n# Calculate the expected start date of the next menstrual period\n\ndf['ExpectedNextPeriod'] = df['StartDateofLastPeriod'] + pd.to_timedelta(df['ReportedCycleLength'], unit='d')\n\n# Calculate the day of ovulation by subtracting 14 days from the expected start date of the next period\n# since ovulation typically occurs around 14 days before the start of the next period\ndf['OvulationDate'] = df['ExpectedNextPeriod'] - pd.to_timedelta(14, unit='d')\n# Calculate the cycle day on the date of testing\ndf['CycleDay'] = (df['DateTesting'] - df['OvulationDate']).dt.days + 14\n# Define high-fertility (cycle days 6-14) and low-fertility (cycle days 17-27) groups\ndf['FertilityGroup'] = df['CycleDay'].apply(lambda x: 'High-Fertility' if 6 <= x <= 14 else ('Low-Fertility' if 17 <= x <= 27 else 'Other'))\n# Filter out the 'Other' group to focus on the high and low fertility groups\ndf = df[df['FertilityGroup'].isin(['High-Fertility', 'Low-Fertility'])]\n\n\ndf['IsIncommittedRelationship'] = df['Relationship'].apply(lambda x: 0 if x in [1,2] else 1)\ndf['InRelationship'] = df['Relationship'].apply(lambda x: 0 if x == 1 else 1)\ndf['IsInRelationship'] = df['Relationship'].apply(lambda x: 0 if x == 1 else 1)\n",
+  "m_code": "model = smf.ols('AvgReligiosity ~ InRelationship * FertilityGroup', data=df).fit()\n# Display the regression results\nprint(model.summary())\n"
+}
+</Example>
+Research Question: Does instructor beauty affect teaching productivity as reflected in student instructional ratings?
+Dataset Schema: {
+  "dataset_description": "This data contains course evaluations, course characteristics, and professor characteristics for 463 courses for the academic years 2000\u20132002 at the University of Texas at Austin. It specifically resulted from a sample of student instructional ratings for a group of university teachers along with beauty rating (average from six independent judges) and a number of other characteristics.\n\nPaper reference: Hamermesh, D.S., and Parker, A. (2005). Beauty in the Classroom: Instructors\u2019 Pulchritude and Putative Pedagogical Productivity. Economics of Education Review, 24, 369\u2013376.",
+  "fields": [
+    {
+      "column": "feature1",
+      "properties": {
+        "dtype": "number",
+        "std": 133.8008470326951,
+        "min": 1,
+        "max": 463,
+        "samples": [
+          226,
+          31,
+          40
+        ],
+        "num_unique_values": 463,
+        "semantic_type": "",
+        "description": ""
+      }
+    },
+    {
+      "column": "feature2",
+      "properties": {
+        "dtype": "category",
+        "samples": [
+          "no",
+          "yes"
+        ],
+        "num_unique_values": 2,
+        "semantic_type": "",
+        "description": "factor. Does the instructor belong to a minority (non-Caucasian)?"
+      }
+    },
+    {
+      "column": "feature3",
+      "properties": {
+        "dtype": "number",
+        "std": 9.802742037864817,
+        "min": 29,
+        "max": 73,
+        "samples": [
+          39,
+          56,
+          41
+        ],
+        "num_unique_values": 35,
+        "semantic_type": "",
+        "description": "the professor's age."
+      }
+    },
+    {
+      "column": "feature4",
+      "properties": {
+        "dtype": "category",
+        "samples": [
+          "male",
+          "female"
+        ],
+        "num_unique_values": 2,
+        "semantic_type": "",
+        "description": "factor indicating instructor's gender."
+      }
+    },
+    {
+      "column": "feature5",
+      "properties": {
+        "dtype": "category",
+        "samples": [
+          "single",
+          "more"
+        ],
+        "num_unique_values": 2,
+        "semantic_type": "",
+        "description": "factor. Is the course a single-credit elective (e.g., yoga, aerobics, dance)?"
+      }
+    },
+    {
+      "column": "feature6",
+      "properties": {
+        "dtype": "number",
+        "std": 0.7886476673278039,
+        "min": -1.450494,
+        "max": 1.970023,
+        "samples": [
+          -0.2377786,
+          -0.7330914,
+          -0.3260148
+        ],
+        "num_unique_values": 94,
+        "semantic_type": "",
+        "description": "rating of the instructor's physical appearance by a panel of six students, averaged across the six panelists, shifted to have a mean of zero."
+      }
+    },
+    {
+      "column": "feature7",
+      "properties": {
+        "dtype": "number",
+        "std": 0.5548655656195951,
+        "min": 2.1,
+        "max": 5.0,
+        "samples": [
+          2.8,
+          4.1,
+          4.6
+        ],
+        "num_unique_values": 29,
+        "semantic_type": "",
+        "description": "course overall teaching evaluation score, on a scale of 1 (very unsatisfactory) to 5 (excellent)."
+      }
+    },
+    {
+      "column": "feature8",
+      "properties": {
+        "dtype": "category",
+        "samples": [
+          "lower",
+          "upper"
+        ],
+        "num_unique_values": 2,
+        "semantic_type": "",
+        "description": "factor. Is the course an upper or lower division course? (Lower division courses are mainly large freshman and sophomore courses)?"
+      }
+    },
+    {
+      "column": "feature9",
+      "properties": {
+        "dtype": "category",
+        "samples": [
+          "no",
+          "yes"
+        ],
+        "num_unique_values": 2,
+        "semantic_type": "",
+        "description": "factor. Is the instructor a native English speaker?"
+      }
+    },
+    {
+      "column": "feature10",
+      "properties": {
+        "dtype": "category",
+        "samples": [
+          "no",
+          "yes"
+        ],
+        "num_unique_values": 2,
+        "semantic_type": "",
+        "description": "factor. Is the instructor on tenure track?"
+      }
+    },
+    {
+      "column": "feature11",
+      "properties": {
+        "dtype": "number",
+        "std": 45.01848127156701,
+        "min": 5,
+        "max": 380,
+        "samples": [
+          46,
+          65,
+          120
+        ],
+        "num_unique_values": 104,
+        "semantic_type": "",
+        "description": "number of students that participated in the evaluation."
+      }
+    },
+    {
+      "column": "feature12",
+      "properties": {
+        "dtype": "number",
+        "std": 75.07279983847907,
+        "min": 8,
+        "max": 581,
+        "samples": [
+          15,
+          100,
+          149
+        ],
+        "num_unique_values": 127,
+        "semantic_type": "",
+        "description": "number of students enrolled in the course."
+      }
+    },
+    {
+      "column": "feature13",
+      "properties": {
+        "dtype": "number",
+        "std": 27.508902172681815,
+        "min": 1,
+        "max": 94,
+        "samples": [
+          41,
+          23,
+          56
+        ],
+        "num_unique_values": 94,
+        "semantic_type": "",
+        "description": "factor indicating instructor identifier."
+      }
+    }
+  ],
+  "num_rows": 463,
+  "field_names": [
+    "feature1",
+    "feature2",
+    "feature3",
+    "feature4",
+    "feature5",
+    "feature6",
+    "feature7",
+    "feature8",
+    "feature9",
+    "feature10",
+    "feature11",
+    "feature12",
+    "feature13"
+  ]
+}
+Result: 
+
+===================[gpt-5-mini RESPONSE (4532)]=====================
+{
+  "cvars": {
+    "ivs": [
+      {
+        "description": "Instructor physical attractiveness (average beauty rating from 6 judges, mean-shifted). We include the linear term and a quadratic term to allow for nonlinear effects.",
+        "columns": [
+          "Beauty",
+          "Beauty_sq"
+        ]
+      }
+    ],
+    "dv": {
+      "description": "Course overall teaching evaluation (student instructional rating), on a 1-5 scale.",
+      "columns": [
+        "Eval"
+      ]
+    },
+    "controls": [
+      {
+        "description": "Instructor gender, coded 1 = female, 0 = male. Treated as a moderator on the effect of Beauty (we include an interaction Beauty:Female).",
+        "is_moderator": true,
+        "moderator_on": "Instructor physical attractiveness (Beauty)",
+        "columns": [
+          "Female"
+        ]
+      },
+      {
+        "description": "Instructor age in years (continuous).",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "Age"
+        ]
+      },
+      {
+        "description": "Instructor minority status indicator (1 = minority/non-Caucasian, 0 = non-minority).",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "Minority"
+        ]
+      },
+      {
+        "description": "Indicator that the course is a single-credit elective (1 = single-credit elective, 0 = otherwise).",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "SingleCourse"
+        ]
+      },
+      {
+        "description": "Course division (1 = upper-division, 0 = lower-division).",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "UpperDivision"
+        ]
+      },
+      {
+        "description": "Instructor native English speaker (1 = yes, 0 = no).",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "NativeSpeaker"
+        ]
+      },
+      {
+        "description": "Instructor on tenure track indicator (1 = yes, 0 = no).",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "Tenure"
+        ]
+      },
+      {
+        "description": "Number of students who participated in the evaluation (used in log form to control for response-sample size).",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "NResponses",
+          "LogNResponses"
+        ]
+      },
+      {
+        "description": "Number of students enrolled in the course (used in log form to control for class size).",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "Enrollment",
+          "LogEnrollment"
+        ]
+      },
+      {
+        "description": "Instructor identifier (used for clustering standard errors at the instructor level).",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "InstructorID"
+        ]
+      }
+    ]
+  },
+  "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transforms raw Hamermesh classroom dataset (feature1..feature13) into an analysis-ready dataframe.\n\n    Produces these columns (at minimum) used in modeling:\n      - Eval (dependent variable)\n      - Beauty, Beauty_sq (independent variables)\n      - Female, Age, Minority, SingleCourse, UpperDivision, NativeSpeaker, Tenure\n      - NResponses, Enrollment, LogNResponses, LogEnrollment\n      - InstructorID (for clustering)\n\n    Notes:\n      - Renames feature* columns to readable names.\n      - Coerces numeric columns and drops rows missing Beauty, Eval, or InstructorID.\n      - Creates binary dummies from categorical indicators.\n    \"\"\"\n    df = df.copy()\n\n    # Rename columns to meaningful names\n    rename_map = {\n        'feature1': 'RowID',\n        'feature2': 'Minority',\n        'feature3': 'Age',\n        'feature4': 'Gender',\n        'feature5': 'SingleCourse',\n        'feature6': 'Beauty',\n        'feature7': 'Eval',\n        'feature8': 'Division',\n        'feature9': 'NativeSpeaker',\n        'feature10': 'Tenure',\n        'feature11': 'NResponses',\n        'feature12': 'Enrollment',\n        'feature13': 'InstructorID'\n    }\n    df = df.rename(columns=rename_map)\n\n    # Coerce to numeric where appropriate\n    numeric_cols = ['Age', 'Beauty', 'Eval', 'NResponses', 'Enrollment', 'InstructorID']\n    for c in numeric_cols:\n        if c in df.columns:\n            df[c] = pd.to_numeric(df[c], errors='coerce')\n\n    # Drop rows with missing key variables (dependent, main independent, clustering id)\n    df = df.dropna(subset=['Beauty', 'Eval', 'InstructorID'])\n\n    # Standardize textual categorical columns to lower-case strings to map reliably\n    for c in ['Minority', 'Gender', 'SingleCourse', 'Division', 'NativeSpeaker', 'Tenure']:\n        if c in df.columns:\n            df[c] = df[c].astype(str).str.strip().str.lower()\n\n    # Create binary dummies\n    # Gender: 'female' -> 1, else 0\n    df['Female'] = df['Gender'].map(lambda x: 1 if x == 'female' else 0).fillna(0).astype(int)\n\n    # Minority: 'yes' -> 1 else 0\n    df['Minority'] = df['Minority'].map(lambda x: 1 if x == 'yes' else 0).fillna(0).astype(int)\n\n    # SingleCourse: 'single' -> 1 else 0\n    df['SingleCourse'] = df['SingleCourse'].map(lambda x: 1 if x == 'single' else 0).fillna(0).astype(int)\n\n    # UpperDivision: Division 'upper' -> 1 else 0\n    df['UpperDivision'] = df['Division'].map(lambda x: 1 if x == 'upper' else 0).fillna(0).astype(int)\n\n    # NativeSpeaker and Tenure: 'yes' -> 1 else 0\n    df['NativeSpeaker'] = df['NativeSpeaker'].map(lambda x: 1 if x == 'yes' else 0).fillna(0).astype(int)\n    df['Tenure'] = df['Tenure'].map(lambda x: 1 if x == 'yes' else 0).fillna(0).astype(int)\n\n    # Log transforms for enrollment and number of responses (class size controls)\n    # Enrollment and NResponses should be > 0; dataset's min suggests they are positive\n    df['LogEnrollment'] = np.log(df['Enrollment'].replace({0: np.nan}))\n    df['LogNResponses'] = np.log(df['NResponses'].replace({0: np.nan}))\n\n    # Quadratic term for beauty and an interaction with female for moderation test\n    df['Beauty_sq'] = df['Beauty'] ** 2\n    df['Beauty_Female'] = df['Beauty'] * df['Female']\n\n    # Optionally drop rows with problematic logs (if Enrollment or NResponses missing/zero)\n    # We'll keep rows with missing logs but modelling code may drop them automatically\n\n    # Ensure InstructorID is integer for clustering\n    df['InstructorID'] = pd.to_numeric(df['InstructorID'], errors='coerce').astype('Int64')\n\n    # Return transformed dataframe (keeps all original columns plus new ones)\n    return df\n",
+  "m_code": "def model(df: pd.DataFrame):\n    \"\"\"\n    Runs an OLS regression of student evaluations on instructor beauty and controls.\n\n    Model specification (linear OLS with clustered standard errors at the instructor level):\n      Eval ~ Beauty + Beauty_sq + Female + Age + Minority + SingleCourse + UpperDivision + NativeSpeaker + Tenure + LogEnrollment + LogNResponses + Beauty:Female\n\n    We cluster standard errors by InstructorID to account for non-independence of observations from the same instructor.\n\n    Returns the fitted statsmodels result object (RegressionResultsWrapper).\n    Also prints the model summary.\n    \"\"\"\n    import statsmodels.formula.api as smf\n\n    # Defensive copy\n    df = df.copy()\n\n    # Drop rows with missing values in covariates used by the model\n    required_cols = ['Eval', 'Beauty', 'Beauty_sq', 'Female', 'Age', 'Minority', 'SingleCourse', 'UpperDivision', 'NativeSpeaker', 'Tenure', 'LogEnrollment', 'LogNResponses', 'InstructorID']\n    missing_req = [c for c in required_cols if c not in df.columns]\n    if len(missing_req) > 0:\n        raise ValueError(f\"Missing required columns for modeling: {missing_req}\")\n\n    model_df = df.dropna(subset=required_cols)\n\n    # Specify formula\n    formula = (\n        'Eval ~ Beauty + Beauty_sq + Female + Age + Minority + SingleCourse + '\n        'UpperDivision + NativeSpeaker + Tenure + LogEnrollment + LogNResponses + Beauty:Female'\n    )\n\n    # Fit OLS with clustering by InstructorID\n    # cov_kwds groups expects the grouping array\n    results = smf.ols(formula=formula, data=model_df).fit(cov_type='cluster', cov_kwds={'groups': model_df['InstructorID']})\n\n    # Print summary for quick inspection\n    print(results.summary())\n\n    return results\n"
+}
+===================[TOKENS]=====================
+Number of prompt tokens: 5141
+Number of total tokens: 9673
+
+===================[PROMPT (API Time: 91.56784510612488, Cache Time: None)]=====================
+=====[SYSTEM]=====:
+You are an AI Data Analysis Assistant who is an expert at writing an end-to-end scientific analysis given a research question and a dataset. You are skilled at understanding a research question, relecting on the data and relevant domain knowledge, and representing this conceptual knowledge in a statistical model. Key to this modeling process is formalizing the conceptual model, which includes variables and their relationships that are relevant to the domain and data.
+=====[USER]=====:
+<Instruction> 
+Given the research question, dataset formulate the conceptual model and write an analysis including all necessary data transformations and a statistical model to answer the research question. 
+</Instruction>
+
+<Format Instructions>
+You will return 3 things:
+1. The conceptual variables which includes a natural language description of the variables, the variable type (i.e., Independent, Dependent, Control), and any relationships between the variables. Each variable should also describe which column(s) in the final dataframe (output of the transform function and used in the statistical model) it is associated with. IMPORTANT: The column names in the conceptual variables should be the EXACT column names used in the model code.     
+2. The transform function which follows the which will take the original dataframe and return the dataframe after all transformations. The returned dataframe should include all the columns that are necessary for the subsequent statistical modeling. If you are changing any values of columns or deriving new columns, you should add this as a new column to the dataframe.     
+3. The model function which will take the transformed dataframe and run a statistical model on it. The model function should return the results of the model.
+
+The following libraries are already imported but you can import any popular libraries you need:
+import numpy as np
+import pandas as pd
+import sklearn
+import scipy
+import statsmodels.api as sm
+import matplotlib.pyplot as plt
+
+You are also allowed to use common machine learning libraries, including but not limited to:
+- xgboost
+- lightgbm
+- catboost
+- tensorflow / keras
+- torch (PyTorch)
+- pytorch-lightning
+- sklearn.experimental modules
+- imbalanced-learn (imblearn)
+
+Here is the code template for the transform function:
+```python
+def transform(df: pd.DataFrame) -> pd.DataFrame:
+    # Your code here
+    return df
+```
+Here is the code template for the model function:
+```python
+def model(df: pd.DataFrame) -> Any:
+    # Your code here
+    return results
+```
+
+Please return the conceptual variables, the transform function, and the model function in the format specified below:
+The output should be formatted as a JSON instance that conforms to the JSON schema below.
+
+As an example, for the schema {"properties": {"foo": {"title": "Foo", "description": "a list of strings", "type": "array", "items": {"type": "string"}}}, "required": ["foo"]}
+the object {"foo": ["bar", "baz"]} is a well-formatted instance of the schema. The object {"properties": {"foo": ["bar", "baz"]}} is not well-formatted.
+
+Here is the output schema:
+```
+{"$defs": {"AgentCVarsWithCol": {"properties": {"ivs": {"items": {"$ref": "#/$defs/IVarWithCol"}, "title": "Independent variables", "type": "array"}, "dv": {"allOf": [{"$ref": "#/$defs/DVarWithCol"}], "title": "Dependent variable"}, "controls": {"items": {"$ref": "#/$defs/ControlVarWithCol"}, "title": "Control variables", "type": "array"}}, "required": ["ivs", "dv", "controls"], "title": "AgentCVarsWithCol", "type": "object"}, "ControlVarWithCol": {"properties": {"description": {"title": "Description of the control variable variable", "type": "string"}, "is_moderator": {"title": "Whether the variable is a moderator.", "type": "boolean"}, "moderator_on": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": "", "title": "The variable that the control variable is moderating. Only applicable for control variables that are moderators."}, "columns": {"items": {"type": "string"}, "title": "The column(s) in the FINAL dataframe used in the STATISTICAL MODEL that corresponds to the control variable", "type": "array"}}, "required": ["description", "is_moderator", "columns"], "title": "ControlVarWithCol", "type": "object"}, "DVarWithCol": {"properties": {"description": {"title": "Description of the dependent variable variable", "type": "string"}, "columns": {"items": {"type": "string"}, "title": "The column(s) in the FINAL dataframe used in the STATISTICAL MODEL that corresponds to the dependent variable", "type": "array"}}, "required": ["description", "columns"], "title": "DVarWithCol", "type": "object"}, "IVarWithCol": {"properties": {"description": {"title": "Description of the independent variable variable", "type": "string"}, "columns": {"items": {"type": "string"}, "title": "The column(s) in the FINAL dataframe used in the STATISTICAL MODEL that corresponds to the independent variable", "type": "array"}}, "required": ["description", "columns"], "title": "IVarWithCol", "type": "object"}}, "properties": {"cvars": {"allOf": [{"$ref": "#/$defs/AgentCVarsWithCol"}], "title": "Conceptual variables"}, "transform_code": {"title": "The code that transforms the data", "type": "string"}, "m_code": {"title": "The code for the statistical modeling", "type": "string"}}, "required": ["cvars", "transform_code", "m_code"]}
+```
+</Format Instructions>
+<Example>
+Research Question: What is the effect of hormonal fluctuations associated with fertility on women's religiosity?
+Dataset Schema: {
+  "dataset_description": "A total of 275 women participated in the study for this dataset. Each participant was asked to answer three religiosity items using a 9-point scale. Further, each participant was asked to indicate the typical length of her menstrual cycle, the start date of her last menstrual period, and the start date of her previous menstrual period. In addition, each woman indicated how sure she was about these two start dates, using a 9-point scale. Finally, each woman was asked to indicate her current romantic relationship status with the following four response options: (1) not dating/romantically involved with anyone, (2) dating or involved with only one partner, (3) engaged or living with my partner, and (4) married.",
+  "fields": [
+    {
+      "column": "WorkerID",
+      "properties": {
+        "dtype": "number",
+        "std": 79.52986860293433,
+        "min": 1,
+        "max": 275,
+        "samples": [
+          31,
+          140,
+          196
+        ],
+        "num_unique_values": 275,
+        "description": "The unique identifier of a participant."
+      }
+    },
+    {
+      "column": "Rel1",
+      "properties": {
+        "dtype": "number",
+        "std": 3.284246850080361,
+        "min": 1,
+        "max": 9,
+        "samples": [
+          4,
+          1,
+          9
+        ],
+        "num_unique_values": 9,
+        "description": "'How much do you believe in God?' 1 \u2013 9"
+      }
+    },
+    {
+      "column": "Rel2",
+      "properties": {
+        "dtype": "number",
+        "std": 3.087872913331648,
+        "min": 1.0,
+        "max": 9.0,
+        "samples": [
+          4.0,
+          2.0,
+          6.0
+        ],
+        "num_unique_values": 9,
+        "description": "'I see myself as a religiously oriented person.' 1 \u2013 9"
+      }
+    },
+    {
+      "column": "Rel3",
+      "properties": {
+        "dtype": "number",
+        "std": 3.333610823065186,
+        "min": 1.0,
+        "max": 9.0,
+        "samples": [
+          3.0,
+          1.0,
+          7.0
+        ],
+        "num_unique_values": 9,
+        "description": "'I believe that God or a Higher Power is responsible for my existence.' 1 \u2013 9"
+      }
+    },
+    {
+      "column": "Sure1",
+      "properties": {
+        "dtype": "number",
+        "std": 1.5732501786909676,
+        "min": 1,
+        "max": 9,
+        "samples": [
+          4,
+          7,
+          9
+        ],
+        "num_unique_values": 8,
+        "description": "In reference to `StartDateofLastPeriod`,  'How sure are you about that date?' 1 \u2013 9."
+      }
+    },
+    {
+      "column": "Sure2",
+      "properties": {
+        "dtype": "number",
+        "std": 2.221975065515302,
+        "min": 1,
+        "max": 9,
+        "samples": [
+          6,
+          3,
+          7
+        ],
+        "num_unique_values": 9,
+        "description": "In reference to `StartDateofPeriodBeforeLast`,  'How sure are you about that date?' 1 \u2013 9."
+      }
+    },
+    {
+      "column": "Relationship",
+      "properties": {
+        "dtype": "number",
+        "std": 1.167327837424664,
+        "min": 1,
+        "max": 4,
+        "samples": [
+          1,
+          2,
+          3
+        ],
+        "num_unique_values": 4,
+        "description": "Answer to 'What is your current romantic relationship status?' (1) not dating/romantically involved with anyone, (2) dating or involved with only one partner, (3) engaged or living with my partner, (4) married"
+      }
+    },
+    {
+      "column": "ReportedCycleLength",
+      "properties": {
+        "dtype": "number",
+        "std": 2.6714983210492633,
+        "min": 21.0,
+        "max": 38.0,
+        "samples": [
+          21.0,
+          22.0,
+          26.0
+        ],
+        "num_unique_values": 17,
+        "description": "Answer to 'How many days long are your menstrual cycles? (for most women, the range is between 25-35 days) Keep in mind this is the number of days from the start of one menstrual period to the start of the next menstrual period and NOT the length of your menstrual bleeding.'"
+      }
+    },
+    {
+      "column": "DateTesting",
+      "properties": {
+        "dtype": "date",
+        "min": "03/12/12",
+        "max": "04/27/12",
+        "samples": [
+          "04/06/12",
+          "04/26/12",
+          "03/12/12"
+        ],
+        "num_unique_values": 13,
+        "description": "Date of participant filling in the questionnaire"
+      }
+    },
+    {
+      "column": "StartDateofLastPeriod",
+      "properties": {
+        "dtype": "date",
+        "min": "02/06/12",
+        "max": "04/26/12",
+        "samples": [
+          "02/16/12",
+          "03/01/12",
+          "04/25/12"
+        ],
+        "num_unique_values": 61,
+        "description": "Answer to 'Please give your best estimate of the date on which you started your last period (please be as precise as possible). This date was probably within the last few weeks. Sometimes thinking of where you were when you started your last period helps. For instance, was it on a weekend?, were you at work, was it during a football game?, etc. Please write the date in mm/dd/yyyy format (e.g., 8/18/2012).'"
+      }
+    },
+    {
+      "column": "StartDateofPeriodBeforeLast",
+      "properties": {
+        "dtype": "date",
+        "min": "01/03/12",
+        "max": "03/29/12",
+        "samples": [
+          "01/15/12",
+          "02/04/12",
+          "03/24/12"
+        ],
+        "num_unique_values": 61,
+        "description": "Answer to 'Please give your best estimate of the date on which you started the period before your last period (please be as precise as possible). Please write the date in mm/dd/yyyy format (e.g., 7/18/2012).'"
+      }
+    }
+  ],
+  "num_rows": 275,
+  "field_names": [
+    "WorkerID",
+    "Rel1",
+    "Rel2",
+    "Rel3",
+    "Sure1",
+    "Sure2",
+    "Relationship",
+    "ReportedCycleLength",
+    "DateTesting",
+    "StartDateofLastPeriod",
+    "StartDateofPeriodBeforeLast"
+  ]
+}
+Result: {
+  "cvars": {
+    "ivs": [
+      {
+        "description": "Women's fertility",
+        "columns": [
+          "FertilityGroup"
+        ]
+      }
+    ],
+    "dv": {
+      "description": "Women's religiosity",
+      "columns": [
+        "AvgReligiosity"
+      ]
+    },
+    "controls": [
+      {
+        "description": "Relationship status of the individual",
+        "is_moderator": true,
+        "moderator_on": "Women's fertility",
+        "columns": [
+          "InRelationship"
+        ]
+      }
+    ]
+  },
+  "transform_code": "# drop the rows with missing values in the ReportedCycleLength, Rel1, Rel2, and Rel3 columns\ndf = df.dropna(subset=['ReportedCycleLength'])\ndf = df.dropna(subset=['Rel1', 'Rel2', 'Rel3'])\n\ndf['AvgReligiosity'] = df[['Rel1', 'Rel2', 'Rel3']].mean(axis=1)\n\n\n# Convert date columns to datetime format\ndf['DateTesting'] = pd.to_datetime(df['DateTesting'], format='%m/%d/%y')\ndf['StartDateofLastPeriod'] = pd.to_datetime(df['StartDateofLastPeriod'], format='%m/%d/%y')\ndf['StartDateofPeriodBeforeLast'] = pd.to_datetime(df['StartDateofPeriodBeforeLast'], format='%m/%d/%y')\n\n# Calculate the cycle length based on provided dates\ndf['ReportedCycleLength'] = (df['StartDateofLastPeriod'] - df['StartDateofPeriodBeforeLast']).dt.days\n# Calculate the expected start date of the next menstrual period\n\ndf['ExpectedNextPeriod'] = df['StartDateofLastPeriod'] + pd.to_timedelta(df['ReportedCycleLength'], unit='d')\n\n# Calculate the day of ovulation by subtracting 14 days from the expected start date of the next period\n# since ovulation typically occurs around 14 days before the start of the next period\ndf['OvulationDate'] = df['ExpectedNextPeriod'] - pd.to_timedelta(14, unit='d')\n# Calculate the cycle day on the date of testing\ndf['CycleDay'] = (df['DateTesting'] - df['OvulationDate']).dt.days + 14\n# Define high-fertility (cycle days 6-14) and low-fertility (cycle days 17-27) groups\ndf['FertilityGroup'] = df['CycleDay'].apply(lambda x: 'High-Fertility' if 6 <= x <= 14 else ('Low-Fertility' if 17 <= x <= 27 else 'Other'))\n# Filter out the 'Other' group to focus on the high and low fertility groups\ndf = df[df['FertilityGroup'].isin(['High-Fertility', 'Low-Fertility'])]\n\n\ndf['IsIncommittedRelationship'] = df['Relationship'].apply(lambda x: 0 if x in [1,2] else 1)\ndf['InRelationship'] = df['Relationship'].apply(lambda x: 0 if x == 1 else 1)\ndf['IsInRelationship'] = df['Relationship'].apply(lambda x: 0 if x == 1 else 1)\n",
+  "m_code": "model = smf.ols('AvgReligiosity ~ InRelationship * FertilityGroup', data=df).fit()\n# Display the regression results\nprint(model.summary())\n"
+}
+</Example>
+Research Question: Does instructor beauty affect teaching productivity as reflected in student instructional ratings?
+Dataset Schema: {
+  "dataset_description": "This data contains course evaluations, course characteristics, and professor characteristics for 463 courses for the academic years 2000\u20132002 at the University of Texas at Austin. It specifically resulted from a sample of student instructional ratings for a group of university teachers along with beauty rating (average from six independent judges) and a number of other characteristics.\n\nPaper reference: Hamermesh, D.S., and Parker, A. (2005). Beauty in the Classroom: Instructors\u2019 Pulchritude and Putative Pedagogical Productivity. Economics of Education Review, 24, 369\u2013376.",
+  "fields": [
+    {
+      "column": "feature1",
+      "properties": {
+        "dtype": "number",
+        "std": 133.8008470326951,
+        "min": 1,
+        "max": 463,
+        "samples": [
+          226,
+          31,
+          40
+        ],
+        "num_unique_values": 463,
+        "semantic_type": "",
+        "description": ""
+      }
+    },
+    {
+      "column": "feature2",
+      "properties": {
+        "dtype": "category",
+        "samples": [
+          "no",
+          "yes"
+        ],
+        "num_unique_values": 2,
+        "semantic_type": "",
+        "description": "factor. Does the instructor belong to a minority (non-Caucasian)?"
+      }
+    },
+    {
+      "column": "feature3",
+      "properties": {
+        "dtype": "number",
+        "std": 9.802742037864817,
+        "min": 29,
+        "max": 73,
+        "samples": [
+          39,
+          56,
+          41
+        ],
+        "num_unique_values": 35,
+        "semantic_type": "",
+        "description": "the professor's age."
+      }
+    },
+    {
+      "column": "feature4",
+      "properties": {
+        "dtype": "category",
+        "samples": [
+          "male",
+          "female"
+        ],
+        "num_unique_values": 2,
+        "semantic_type": "",
+        "description": "factor indicating instructor's gender."
+      }
+    },
+    {
+      "column": "feature5",
+      "properties": {
+        "dtype": "category",
+        "samples": [
+          "single",
+          "more"
+        ],
+        "num_unique_values": 2,
+        "semantic_type": "",
+        "description": "factor. Is the course a single-credit elective (e.g., yoga, aerobics, dance)?"
+      }
+    },
+    {
+      "column": "feature6",
+      "properties": {
+        "dtype": "number",
+        "std": 0.7886476673278039,
+        "min": -1.450494,
+        "max": 1.970023,
+        "samples": [
+          -0.2377786,
+          -0.7330914,
+          -0.3260148
+        ],
+        "num_unique_values": 94,
+        "semantic_type": "",
+        "description": "rating of the instructor's physical appearance by a panel of six students, averaged across the six panelists, shifted to have a mean of zero."
+      }
+    },
+    {
+      "column": "feature7",
+      "properties": {
+        "dtype": "number",
+        "std": 0.5548655656195951,
+        "min": 2.1,
+        "max": 5.0,
+        "samples": [
+          2.8,
+          4.1,
+          4.6
+        ],
+        "num_unique_values": 29,
+        "semantic_type": "",
+        "description": "course overall teaching evaluation score, on a scale of 1 (very unsatisfactory) to 5 (excellent)."
+      }
+    },
+    {
+      "column": "feature8",
+      "properties": {
+        "dtype": "category",
+        "samples": [
+          "lower",
+          "upper"
+        ],
+        "num_unique_values": 2,
+        "semantic_type": "",
+        "description": "factor. Is the course an upper or lower division course? (Lower division courses are mainly large freshman and sophomore courses)?"
+      }
+    },
+    {
+      "column": "feature9",
+      "properties": {
+        "dtype": "category",
+        "samples": [
+          "no",
+          "yes"
+        ],
+        "num_unique_values": 2,
+        "semantic_type": "",
+        "description": "factor. Is the instructor a native English speaker?"
+      }
+    },
+    {
+      "column": "feature10",
+      "properties": {
+        "dtype": "category",
+        "samples": [
+          "no",
+          "yes"
+        ],
+        "num_unique_values": 2,
+        "semantic_type": "",
+        "description": "factor. Is the instructor on tenure track?"
+      }
+    },
+    {
+      "column": "feature11",
+      "properties": {
+        "dtype": "number",
+        "std": 45.01848127156701,
+        "min": 5,
+        "max": 380,
+        "samples": [
+          46,
+          65,
+          120
+        ],
+        "num_unique_values": 104,
+        "semantic_type": "",
+        "description": "number of students that participated in the evaluation."
+      }
+    },
+    {
+      "column": "feature12",
+      "properties": {
+        "dtype": "number",
+        "std": 75.07279983847907,
+        "min": 8,
+        "max": 581,
+        "samples": [
+          15,
+          100,
+          149
+        ],
+        "num_unique_values": 127,
+        "semantic_type": "",
+        "description": "number of students enrolled in the course."
+      }
+    },
+    {
+      "column": "feature13",
+      "properties": {
+        "dtype": "number",
+        "std": 27.508902172681815,
+        "min": 1,
+        "max": 94,
+        "samples": [
+          41,
+          23,
+          56
+        ],
+        "num_unique_values": 94,
+        "semantic_type": "",
+        "description": "factor indicating instructor identifier."
+      }
+    }
+  ],
+  "num_rows": 463,
+  "field_names": [
+    "feature1",
+    "feature2",
+    "feature3",
+    "feature4",
+    "feature5",
+    "feature6",
+    "feature7",
+    "feature8",
+    "feature9",
+    "feature10",
+    "feature11",
+    "feature12",
+    "feature13"
+  ]
+}
+Result: 
+
+===================[gpt-5-mini RESPONSE (4203)]=====================
+{
+  "cvars": {
+    "ivs": [
+      {
+        "description": "Instructor physical attractiveness: average of six independent judges' ratings (mean-centered). We include both the linear term and a squared term to allow for nonlinear effects.",
+        "columns": [
+          "beauty",
+          "beauty_sq"
+        ]
+      }
+    ],
+    "dv": {
+      "description": "Course teaching evaluation score (student instructional rating), on a 1-5 scale (higher = better).",
+      "columns": [
+        "eval_score"
+      ]
+    },
+    "controls": [
+      {
+        "description": "Instructor age (years).",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "age"
+        ]
+      },
+      {
+        "description": "Instructor gender (1 = female, 0 = male).",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "female"
+        ]
+      },
+      {
+        "description": "Instructor minority status (1 = non-Caucasian/minority, 0 = not).",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "minority"
+        ]
+      },
+      {
+        "description": "Instructor is on the tenure track (1 = yes, 0 = no).",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "tenure_track"
+        ]
+      },
+      {
+        "description": "Course is a single-credit elective (1 = single-credit elective, 0 = otherwise).",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "single_credit"
+        ]
+      },
+      {
+        "description": "Course division (1 = upper-division, 0 = lower-division).",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "upper_division"
+        ]
+      },
+      {
+        "description": "Instructor native English speaker (1 = yes, 0 = no).",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "native_english"
+        ]
+      },
+      {
+        "description": "Log of course enrollment (log( enrollment ) ). Addresses scale of class.",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "log_enrollment"
+        ]
+      },
+      {
+        "description": "Number of students who participated in the evaluation (raw count).",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "n_eval_participants"
+        ]
+      },
+      {
+        "description": "Instructor identifier. Used for clustering standard errors and multi-level (random intercept) modeling.",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "instructor_id"
+        ]
+      }
+    ]
+  },
+  "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform raw dataset into analysis-ready dataframe. The function:\n      - drops rows missing the primary IV (feature6) or DV (feature7),\n      - converts and renames relevant columns,\n      - encodes binary categorical controls as 0/1,\n      - derives a log enrollment covariate and a squared beauty term,\n      - drops rows with missing values in any model-required columns.\n    Returns the transformed dataframe with the exact column names used in modeling.\n    \"\"\"\n    df = df.copy()\n\n    # Ensure the main columns exist and drop rows with missing IV or DV\n    df = df.dropna(subset=['feature6', 'feature7'])\n\n    # Numeric conversions and renaming\n    df['beauty'] = pd.to_numeric(df['feature6'], errors='coerce')\n    df['eval_score'] = pd.to_numeric(df['feature7'], errors='coerce')\n    df['age'] = pd.to_numeric(df['feature3'], errors='coerce')\n\n    # Binary / factor conversions (map known string values to 0/1). Use .astype(str).str.lower() to be robust.\n    df['minority'] = df['feature2'].astype(str).str.lower().map({'yes': 1, 'no': 0})\n    df['female'] = df['feature4'].astype(str).str.lower().map({'female': 1, 'male': 0})\n    df['single_credit'] = df['feature5'].astype(str).str.lower().map({'single': 1, 'more': 0})\n    df['upper_division'] = df['feature8'].astype(str).str.lower().map({'upper': 1, 'lower': 0})\n    df['native_english'] = df['feature9'].astype(str).str.lower().map({'yes': 1, 'no': 0})\n    df['tenure_track'] = df['feature10'].astype(str).str.lower().map({'yes': 1, 'no': 0})\n\n    # Enrollment / counts / instructor id\n    df['n_eval_participants'] = pd.to_numeric(df['feature11'], errors='coerce')\n    df['enrollment'] = pd.to_numeric(df['feature12'], errors='coerce')\n    df['instructor_id'] = pd.to_numeric(df['feature13'], errors='coerce')\n\n    # Derived variables\n    # log enrollment: clip to avoid log(0)\n    df['log_enrollment'] = np.log(df['enrollment'].clip(lower=1))\n    df['beauty_sq'] = df['beauty'] ** 2\n\n    # Final required columns for modelling\n    required = [\n        'beauty', 'beauty_sq', 'eval_score', 'age', 'female', 'minority', 'tenure_track',\n        'single_credit', 'upper_division', 'native_english', 'log_enrollment',\n        'n_eval_participants', 'instructor_id'\n    ]\n\n    # Drop rows with missing data in any required column\n    df = df.dropna(subset=required)\n\n    # Keep only relevant columns (but retain original columns if downstream wants them)\n    # Here we keep all original plus derived; if desired this can be restricted.\n    return df\n",
+  "m_code": "def model(df: pd.DataFrame) -> dict:\n    \"\"\"\n    Fit models to estimate the effect of instructor beauty on student evaluations.\n\n    Two complementary specifications are returned:\n      1) OLS with clustered standard errors at the instructor level (robust to within-instructor correlation),\n      2) Linear mixed effects model with a random intercept for instructor (accounts for instructor-level unobserved heterogeneity).\n\n    The formula includes a quadratic beauty term to allow nonlinearity and the set of controls defined in transform().\n    Returns a dict with both fitted results objects: {'ols_clustered': ..., 'mixedlm': ...}\n    \"\"\"\n    import statsmodels.formula.api as smf\n\n    # Model formula: DV on beauty (linear + squared) plus controls\n    formula = (\n        'eval_score ~ beauty + beauty_sq + age + female + minority + tenure_track + '\n        'single_credit + upper_division + native_english + log_enrollment + n_eval_participants'\n    )\n\n    # 1) OLS (clustered SEs by instructor)\n    ols = smf.ols(formula, data=df).fit()\n    # Clustered standard errors by instructor_id\n    try:\n        ols_clustered = ols.get_robustcov_results(cov_type='cluster', groups=df['instructor_id'])\n    except Exception:\n        # Fallback: if clustering fails, return the plain OLS fit\n        ols_clustered = ols\n\n    # 2) Linear mixed effects model with random intercept for instructor\n    # This captures instructor-level unobserved heterogeneity as random effects.\n    try:\n        md = smf.mixedlm(formula, df, groups=df['instructor_id'])\n        mixed = md.fit(reml=False)\n    except Exception as e:\n        mixed = None\n\n    # Pack and return results\n    results = {\n        'ols_clustered': ols_clustered,\n        'mixedlm': mixed\n    }\n    return results\n"
+}
+===================[TOKENS]=====================
+Number of prompt tokens: 5141
+Number of total tokens: 9344
+
+===================[PROMPT (API Time: 76.06712341308594, Cache Time: None)]=====================
+=====[SYSTEM]=====:
+You are an AI Data Analysis Assistant who is an expert at writing an end-to-end scientific analysis given a research question and a dataset. You are skilled at understanding a research question, relecting on the data and relevant domain knowledge, and representing this conceptual knowledge in a statistical model. Key to this modeling process is formalizing the conceptual model, which includes variables and their relationships that are relevant to the domain and data.
+=====[USER]=====:
+<Instruction> 
+Given the research question, dataset formulate the conceptual model and write an analysis including all necessary data transformations and a statistical model to answer the research question. 
+</Instruction>
+
+<Format Instructions>
+You will return 3 things:
+1. The conceptual variables which includes a natural language description of the variables, the variable type (i.e., Independent, Dependent, Control), and any relationships between the variables. Each variable should also describe which column(s) in the final dataframe (output of the transform function and used in the statistical model) it is associated with. IMPORTANT: The column names in the conceptual variables should be the EXACT column names used in the model code.     
+2. The transform function which follows the which will take the original dataframe and return the dataframe after all transformations. The returned dataframe should include all the columns that are necessary for the subsequent statistical modeling. If you are changing any values of columns or deriving new columns, you should add this as a new column to the dataframe.     
+3. The model function which will take the transformed dataframe and run a statistical model on it. The model function should return the results of the model.
+
+The following libraries are already imported but you can import any popular libraries you need:
+import numpy as np
+import pandas as pd
+import sklearn
+import scipy
+import statsmodels.api as sm
+import matplotlib.pyplot as plt
+
+You are also allowed to use common machine learning libraries, including but not limited to:
+- xgboost
+- lightgbm
+- catboost
+- tensorflow / keras
+- torch (PyTorch)
+- pytorch-lightning
+- sklearn.experimental modules
+- imbalanced-learn (imblearn)
+
+Here is the code template for the transform function:
+```python
+def transform(df: pd.DataFrame) -> pd.DataFrame:
+    # Your code here
+    return df
+```
+Here is the code template for the model function:
+```python
+def model(df: pd.DataFrame) -> Any:
+    # Your code here
+    return results
+```
+
+Please return the conceptual variables, the transform function, and the model function in the format specified below:
+The output should be formatted as a JSON instance that conforms to the JSON schema below.
+
+As an example, for the schema {"properties": {"foo": {"title": "Foo", "description": "a list of strings", "type": "array", "items": {"type": "string"}}}, "required": ["foo"]}
+the object {"foo": ["bar", "baz"]} is a well-formatted instance of the schema. The object {"properties": {"foo": ["bar", "baz"]}} is not well-formatted.
+
+Here is the output schema:
+```
+{"$defs": {"AgentCVarsWithCol": {"properties": {"ivs": {"items": {"$ref": "#/$defs/IVarWithCol"}, "title": "Independent variables", "type": "array"}, "dv": {"allOf": [{"$ref": "#/$defs/DVarWithCol"}], "title": "Dependent variable"}, "controls": {"items": {"$ref": "#/$defs/ControlVarWithCol"}, "title": "Control variables", "type": "array"}}, "required": ["ivs", "dv", "controls"], "title": "AgentCVarsWithCol", "type": "object"}, "ControlVarWithCol": {"properties": {"description": {"title": "Description of the control variable variable", "type": "string"}, "is_moderator": {"title": "Whether the variable is a moderator.", "type": "boolean"}, "moderator_on": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": "", "title": "The variable that the control variable is moderating. Only applicable for control variables that are moderators."}, "columns": {"items": {"type": "string"}, "title": "The column(s) in the FINAL dataframe used in the STATISTICAL MODEL that corresponds to the control variable", "type": "array"}}, "required": ["description", "is_moderator", "columns"], "title": "ControlVarWithCol", "type": "object"}, "DVarWithCol": {"properties": {"description": {"title": "Description of the dependent variable variable", "type": "string"}, "columns": {"items": {"type": "string"}, "title": "The column(s) in the FINAL dataframe used in the STATISTICAL MODEL that corresponds to the dependent variable", "type": "array"}}, "required": ["description", "columns"], "title": "DVarWithCol", "type": "object"}, "IVarWithCol": {"properties": {"description": {"title": "Description of the independent variable variable", "type": "string"}, "columns": {"items": {"type": "string"}, "title": "The column(s) in the FINAL dataframe used in the STATISTICAL MODEL that corresponds to the independent variable", "type": "array"}}, "required": ["description", "columns"], "title": "IVarWithCol", "type": "object"}}, "properties": {"cvars": {"allOf": [{"$ref": "#/$defs/AgentCVarsWithCol"}], "title": "Conceptual variables"}, "transform_code": {"title": "The code that transforms the data", "type": "string"}, "m_code": {"title": "The code for the statistical modeling", "type": "string"}}, "required": ["cvars", "transform_code", "m_code"]}
+```
+</Format Instructions>
+<Example>
+Research Question: What is the effect of hormonal fluctuations associated with fertility on women's religiosity?
+Dataset Schema: {
+  "dataset_description": "A total of 275 women participated in the study for this dataset. Each participant was asked to answer three religiosity items using a 9-point scale. Further, each participant was asked to indicate the typical length of her menstrual cycle, the start date of her last menstrual period, and the start date of her previous menstrual period. In addition, each woman indicated how sure she was about these two start dates, using a 9-point scale. Finally, each woman was asked to indicate her current romantic relationship status with the following four response options: (1) not dating/romantically involved with anyone, (2) dating or involved with only one partner, (3) engaged or living with my partner, and (4) married.",
+  "fields": [
+    {
+      "column": "WorkerID",
+      "properties": {
+        "dtype": "number",
+        "std": 79.52986860293433,
+        "min": 1,
+        "max": 275,
+        "samples": [
+          31,
+          140,
+          196
+        ],
+        "num_unique_values": 275,
+        "description": "The unique identifier of a participant."
+      }
+    },
+    {
+      "column": "Rel1",
+      "properties": {
+        "dtype": "number",
+        "std": 3.284246850080361,
+        "min": 1,
+        "max": 9,
+        "samples": [
+          4,
+          1,
+          9
+        ],
+        "num_unique_values": 9,
+        "description": "'How much do you believe in God?' 1 \u2013 9"
+      }
+    },
+    {
+      "column": "Rel2",
+      "properties": {
+        "dtype": "number",
+        "std": 3.087872913331648,
+        "min": 1.0,
+        "max": 9.0,
+        "samples": [
+          4.0,
+          2.0,
+          6.0
+        ],
+        "num_unique_values": 9,
+        "description": "'I see myself as a religiously oriented person.' 1 \u2013 9"
+      }
+    },
+    {
+      "column": "Rel3",
+      "properties": {
+        "dtype": "number",
+        "std": 3.333610823065186,
+        "min": 1.0,
+        "max": 9.0,
+        "samples": [
+          3.0,
+          1.0,
+          7.0
+        ],
+        "num_unique_values": 9,
+        "description": "'I believe that God or a Higher Power is responsible for my existence.' 1 \u2013 9"
+      }
+    },
+    {
+      "column": "Sure1",
+      "properties": {
+        "dtype": "number",
+        "std": 1.5732501786909676,
+        "min": 1,
+        "max": 9,
+        "samples": [
+          4,
+          7,
+          9
+        ],
+        "num_unique_values": 8,
+        "description": "In reference to `StartDateofLastPeriod`,  'How sure are you about that date?' 1 \u2013 9."
+      }
+    },
+    {
+      "column": "Sure2",
+      "properties": {
+        "dtype": "number",
+        "std": 2.221975065515302,
+        "min": 1,
+        "max": 9,
+        "samples": [
+          6,
+          3,
+          7
+        ],
+        "num_unique_values": 9,
+        "description": "In reference to `StartDateofPeriodBeforeLast`,  'How sure are you about that date?' 1 \u2013 9."
+      }
+    },
+    {
+      "column": "Relationship",
+      "properties": {
+        "dtype": "number",
+        "std": 1.167327837424664,
+        "min": 1,
+        "max": 4,
+        "samples": [
+          1,
+          2,
+          3
+        ],
+        "num_unique_values": 4,
+        "description": "Answer to 'What is your current romantic relationship status?' (1) not dating/romantically involved with anyone, (2) dating or involved with only one partner, (3) engaged or living with my partner, (4) married"
+      }
+    },
+    {
+      "column": "ReportedCycleLength",
+      "properties": {
+        "dtype": "number",
+        "std": 2.6714983210492633,
+        "min": 21.0,
+        "max": 38.0,
+        "samples": [
+          21.0,
+          22.0,
+          26.0
+        ],
+        "num_unique_values": 17,
+        "description": "Answer to 'How many days long are your menstrual cycles? (for most women, the range is between 25-35 days) Keep in mind this is the number of days from the start of one menstrual period to the start of the next menstrual period and NOT the length of your menstrual bleeding.'"
+      }
+    },
+    {
+      "column": "DateTesting",
+      "properties": {
+        "dtype": "date",
+        "min": "03/12/12",
+        "max": "04/27/12",
+        "samples": [
+          "04/06/12",
+          "04/26/12",
+          "03/12/12"
+        ],
+        "num_unique_values": 13,
+        "description": "Date of participant filling in the questionnaire"
+      }
+    },
+    {
+      "column": "StartDateofLastPeriod",
+      "properties": {
+        "dtype": "date",
+        "min": "02/06/12",
+        "max": "04/26/12",
+        "samples": [
+          "02/16/12",
+          "03/01/12",
+          "04/25/12"
+        ],
+        "num_unique_values": 61,
+        "description": "Answer to 'Please give your best estimate of the date on which you started your last period (please be as precise as possible). This date was probably within the last few weeks. Sometimes thinking of where you were when you started your last period helps. For instance, was it on a weekend?, were you at work, was it during a football game?, etc. Please write the date in mm/dd/yyyy format (e.g., 8/18/2012).'"
+      }
+    },
+    {
+      "column": "StartDateofPeriodBeforeLast",
+      "properties": {
+        "dtype": "date",
+        "min": "01/03/12",
+        "max": "03/29/12",
+        "samples": [
+          "01/15/12",
+          "02/04/12",
+          "03/24/12"
+        ],
+        "num_unique_values": 61,
+        "description": "Answer to 'Please give your best estimate of the date on which you started the period before your last period (please be as precise as possible). Please write the date in mm/dd/yyyy format (e.g., 7/18/2012).'"
+      }
+    }
+  ],
+  "num_rows": 275,
+  "field_names": [
+    "WorkerID",
+    "Rel1",
+    "Rel2",
+    "Rel3",
+    "Sure1",
+    "Sure2",
+    "Relationship",
+    "ReportedCycleLength",
+    "DateTesting",
+    "StartDateofLastPeriod",
+    "StartDateofPeriodBeforeLast"
+  ]
+}
+Result: {
+  "cvars": {
+    "ivs": [
+      {
+        "description": "Women's fertility",
+        "columns": [
+          "FertilityGroup"
+        ]
+      }
+    ],
+    "dv": {
+      "description": "Women's religiosity",
+      "columns": [
+        "AvgReligiosity"
+      ]
+    },
+    "controls": [
+      {
+        "description": "Relationship status of the individual",
+        "is_moderator": true,
+        "moderator_on": "Women's fertility",
+        "columns": [
+          "InRelationship"
+        ]
+      }
+    ]
+  },
+  "transform_code": "# drop the rows with missing values in the ReportedCycleLength, Rel1, Rel2, and Rel3 columns\ndf = df.dropna(subset=['ReportedCycleLength'])\ndf = df.dropna(subset=['Rel1', 'Rel2', 'Rel3'])\n\ndf['AvgReligiosity'] = df[['Rel1', 'Rel2', 'Rel3']].mean(axis=1)\n\n\n# Convert date columns to datetime format\ndf['DateTesting'] = pd.to_datetime(df['DateTesting'], format='%m/%d/%y')\ndf['StartDateofLastPeriod'] = pd.to_datetime(df['StartDateofLastPeriod'], format='%m/%d/%y')\ndf['StartDateofPeriodBeforeLast'] = pd.to_datetime(df['StartDateofPeriodBeforeLast'], format='%m/%d/%y')\n\n# Calculate the cycle length based on provided dates\ndf['ReportedCycleLength'] = (df['StartDateofLastPeriod'] - df['StartDateofPeriodBeforeLast']).dt.days\n# Calculate the expected start date of the next menstrual period\n\ndf['ExpectedNextPeriod'] = df['StartDateofLastPeriod'] + pd.to_timedelta(df['ReportedCycleLength'], unit='d')\n\n# Calculate the day of ovulation by subtracting 14 days from the expected start date of the next period\n# since ovulation typically occurs around 14 days before the start of the next period\ndf['OvulationDate'] = df['ExpectedNextPeriod'] - pd.to_timedelta(14, unit='d')\n# Calculate the cycle day on the date of testing\ndf['CycleDay'] = (df['DateTesting'] - df['OvulationDate']).dt.days + 14\n# Define high-fertility (cycle days 6-14) and low-fertility (cycle days 17-27) groups\ndf['FertilityGroup'] = df['CycleDay'].apply(lambda x: 'High-Fertility' if 6 <= x <= 14 else ('Low-Fertility' if 17 <= x <= 27 else 'Other'))\n# Filter out the 'Other' group to focus on the high and low fertility groups\ndf = df[df['FertilityGroup'].isin(['High-Fertility', 'Low-Fertility'])]\n\n\ndf['IsIncommittedRelationship'] = df['Relationship'].apply(lambda x: 0 if x in [1,2] else 1)\ndf['InRelationship'] = df['Relationship'].apply(lambda x: 0 if x == 1 else 1)\ndf['IsInRelationship'] = df['Relationship'].apply(lambda x: 0 if x == 1 else 1)\n",
+  "m_code": "model = smf.ols('AvgReligiosity ~ InRelationship * FertilityGroup', data=df).fit()\n# Display the regression results\nprint(model.summary())\n"
+}
+</Example>
+Research Question: Does instructor beauty affect teaching productivity as reflected in student instructional ratings?
+Dataset Schema: {
+  "dataset_description": "This data contains course evaluations, course characteristics, and professor characteristics for 463 courses for the academic years 2000\u20132002 at the University of Texas at Austin. It specifically resulted from a sample of student instructional ratings for a group of university teachers along with beauty rating (average from six independent judges) and a number of other characteristics.\n\nPaper reference: Hamermesh, D.S., and Parker, A. (2005). Beauty in the Classroom: Instructors\u2019 Pulchritude and Putative Pedagogical Productivity. Economics of Education Review, 24, 369\u2013376.",
+  "fields": [
+    {
+      "column": "feature1",
+      "properties": {
+        "dtype": "number",
+        "std": 133.8008470326951,
+        "min": 1,
+        "max": 463,
+        "samples": [
+          226,
+          31,
+          40
+        ],
+        "num_unique_values": 463,
+        "semantic_type": "",
+        "description": ""
+      }
+    },
+    {
+      "column": "feature2",
+      "properties": {
+        "dtype": "category",
+        "samples": [
+          "no",
+          "yes"
+        ],
+        "num_unique_values": 2,
+        "semantic_type": "",
+        "description": "factor. Does the instructor belong to a minority (non-Caucasian)?"
+      }
+    },
+    {
+      "column": "feature3",
+      "properties": {
+        "dtype": "number",
+        "std": 9.802742037864817,
+        "min": 29,
+        "max": 73,
+        "samples": [
+          39,
+          56,
+          41
+        ],
+        "num_unique_values": 35,
+        "semantic_type": "",
+        "description": "the professor's age."
+      }
+    },
+    {
+      "column": "feature4",
+      "properties": {
+        "dtype": "category",
+        "samples": [
+          "male",
+          "female"
+        ],
+        "num_unique_values": 2,
+        "semantic_type": "",
+        "description": "factor indicating instructor's gender."
+      }
+    },
+    {
+      "column": "feature5",
+      "properties": {
+        "dtype": "category",
+        "samples": [
+          "single",
+          "more"
+        ],
+        "num_unique_values": 2,
+        "semantic_type": "",
+        "description": "factor. Is the course a single-credit elective (e.g., yoga, aerobics, dance)?"
+      }
+    },
+    {
+      "column": "feature6",
+      "properties": {
+        "dtype": "number",
+        "std": 0.7886476673278039,
+        "min": -1.450494,
+        "max": 1.970023,
+        "samples": [
+          -0.2377786,
+          -0.7330914,
+          -0.3260148
+        ],
+        "num_unique_values": 94,
+        "semantic_type": "",
+        "description": "rating of the instructor's physical appearance by a panel of six students, averaged across the six panelists, shifted to have a mean of zero."
+      }
+    },
+    {
+      "column": "feature7",
+      "properties": {
+        "dtype": "number",
+        "std": 0.5548655656195951,
+        "min": 2.1,
+        "max": 5.0,
+        "samples": [
+          2.8,
+          4.1,
+          4.6
+        ],
+        "num_unique_values": 29,
+        "semantic_type": "",
+        "description": "course overall teaching evaluation score, on a scale of 1 (very unsatisfactory) to 5 (excellent)."
+      }
+    },
+    {
+      "column": "feature8",
+      "properties": {
+        "dtype": "category",
+        "samples": [
+          "lower",
+          "upper"
+        ],
+        "num_unique_values": 2,
+        "semantic_type": "",
+        "description": "factor. Is the course an upper or lower division course? (Lower division courses are mainly large freshman and sophomore courses)?"
+      }
+    },
+    {
+      "column": "feature9",
+      "properties": {
+        "dtype": "category",
+        "samples": [
+          "no",
+          "yes"
+        ],
+        "num_unique_values": 2,
+        "semantic_type": "",
+        "description": "factor. Is the instructor a native English speaker?"
+      }
+    },
+    {
+      "column": "feature10",
+      "properties": {
+        "dtype": "category",
+        "samples": [
+          "no",
+          "yes"
+        ],
+        "num_unique_values": 2,
+        "semantic_type": "",
+        "description": "factor. Is the instructor on tenure track?"
+      }
+    },
+    {
+      "column": "feature11",
+      "properties": {
+        "dtype": "number",
+        "std": 45.01848127156701,
+        "min": 5,
+        "max": 380,
+        "samples": [
+          46,
+          65,
+          120
+        ],
+        "num_unique_values": 104,
+        "semantic_type": "",
+        "description": "number of students that participated in the evaluation."
+      }
+    },
+    {
+      "column": "feature12",
+      "properties": {
+        "dtype": "number",
+        "std": 75.07279983847907,
+        "min": 8,
+        "max": 581,
+        "samples": [
+          15,
+          100,
+          149
+        ],
+        "num_unique_values": 127,
+        "semantic_type": "",
+        "description": "number of students enrolled in the course."
+      }
+    },
+    {
+      "column": "feature13",
+      "properties": {
+        "dtype": "number",
+        "std": 27.508902172681815,
+        "min": 1,
+        "max": 94,
+        "samples": [
+          41,
+          23,
+          56
+        ],
+        "num_unique_values": 94,
+        "semantic_type": "",
+        "description": "factor indicating instructor identifier."
+      }
+    }
+  ],
+  "num_rows": 463,
+  "field_names": [
+    "feature1",
+    "feature2",
+    "feature3",
+    "feature4",
+    "feature5",
+    "feature6",
+    "feature7",
+    "feature8",
+    "feature9",
+    "feature10",
+    "feature11",
+    "feature12",
+    "feature13"
+  ]
+}
+Result: 
+
+===================[gpt-5-mini RESPONSE (4039)]=====================
+{
+  "cvars": {
+    "ivs": [
+      {
+        "description": "Instructor physical attractiveness score (average of six judges, mean-centered). Continuous predictor of interest.",
+        "columns": [
+          "Beauty"
+        ]
+      }
+    ],
+    "dv": {
+      "description": "Course teaching evaluation (overall teaching evaluation score, 1-5). Higher = better evaluated teaching productivity.",
+      "columns": [
+        "Eval"
+      ]
+    },
+    "controls": [
+      {
+        "description": "Instructor gender (female = 1, male = 0). Included as a covariate and tested as a moderator of Beauty.",
+        "is_moderator": true,
+        "moderator_on": "Beauty",
+        "columns": [
+          "Female"
+        ]
+      },
+      {
+        "description": "Instructor age in years (continuous). Control for potential experience-related effects.",
+        "is_moderator": false,
+        "moderator_on": "",
+        "columns": [
+          "Age"
+        ]
+      },
+      {
+        "description": "Instructor minority status (non-Caucasian = 1, otherwise 0). Categorical control.",
+        "is_moderator": false,
+        "moderator_on": "",
+        "columns": [
+          "Minority"
+        ]
+      },
+      {
+        "description": "Single-credit elective course indicator (single-credit elective = 1, otherwise 0). Controls for course type.",
+        "is_moderator": false,
+        "moderator_on": "",
+        "columns": [
+          "SingleCourse"
+        ]
+      },
+      {
+        "description": "Course level (upper-division = 1, lower-division = 0). Control for course level differences.",
+        "is_moderator": false,
+        "moderator_on": "",
+        "columns": [
+          "UpperDivision"
+        ]
+      },
+      {
+        "description": "Instructor native English speaker (yes = 1, no = 0). Control for language effects on ratings.",
+        "is_moderator": false,
+        "moderator_on": "",
+        "columns": [
+          "NativeEnglish"
+        ]
+      },
+      {
+        "description": "Instructor on tenure track (yes = 1, no = 0). Control for job/status effects.",
+        "is_moderator": false,
+        "moderator_on": "",
+        "columns": [
+          "TenureTrack"
+        ]
+      },
+      {
+        "description": "Number of students who completed the evaluation (used to compute response rate).",
+        "is_moderator": false,
+        "moderator_on": "",
+        "columns": [
+          "NResponded"
+        ]
+      },
+      {
+        "description": "Number of students enrolled in the course (used to compute response rate and logged to control for scale).",
+        "is_moderator": false,
+        "moderator_on": "",
+        "columns": [
+          "NEnrolled"
+        ]
+      },
+      {
+        "description": "Student response rate to the evaluation (NResponded / NEnrolled). Controls for potential nonresponse bias.",
+        "is_moderator": false,
+        "moderator_on": "",
+        "columns": [
+          "ResponseRate"
+        ]
+      },
+      {
+        "description": "Log of number enrolled in course (log(NEnrolled)). Controls nonlinear effects of class size on ratings.",
+        "is_moderator": false,
+        "moderator_on": "",
+        "columns": [
+          "LogNEnrolled"
+        ]
+      },
+      {
+        "description": "Instructor identifier (used for clustering standard errors by instructor; not a regression covariate).",
+        "is_moderator": false,
+        "moderator_on": "",
+        "columns": [
+          "InstructorID"
+        ]
+      }
+    ]
+  },
+  "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw Hamermesh classroom dataset into a modeling dataframe.\n    Expected raw columns: feature1..feature13 as described in the schema.\n\n    Produces columns used in modeling (see cvars):\n      - Beauty, Eval, Age, Female, Minority, SingleCourse, UpperDivision,\n        NativeEnglish, TenureTrack, NResponded, NEnrolled, ResponseRate,\n        LogNEnrolled, InstructorID\n\n    Behavior:\n      - Rename features to semantic names\n      - Convert categorical yes/no and factor values to binary indicators\n      - Create response rate and log enrollment\n      - Center Beauty (kept as 'Beauty' but also create Beauty_c if needed by user)\n      - Drop rows with missing values in required columns\n    \"\"\"\n    # Make a copy to avoid modifying in place\n    df = df.copy()\n\n    # Rename raw columns to semantic names\n    rename_map = {\n        'feature2': 'Minority_raw',\n        'feature3': 'Age',\n        'feature4': 'Gender_raw',\n        'feature5': 'SingleCourse_raw',\n        'feature6': 'Beauty',\n        'feature7': 'Eval',\n        'feature8': 'UpperDivision_raw',\n        'feature9': 'NativeEnglish_raw',\n        'feature10': 'TenureTrack_raw',\n        'feature11': 'NResponded',\n        'feature12': 'NEnrolled',\n        'feature13': 'InstructorID'\n    }\n    df = df.rename(columns=rename_map)\n\n    # Standardize string columns to lowercase where appropriate and strip whitespace\n    for col in ['Minority_raw', 'Gender_raw', 'SingleCourse_raw', 'UpperDivision_raw', 'NativeEnglish_raw', 'TenureTrack_raw']:\n        if col in df.columns:\n            # convert non-null entries to str and lower\n            df[col] = df[col].astype(str).str.strip().str.lower()\n\n    # Map categorical raw values to binary indicators\n    # Minority: 'yes' -> 1, else 0 (assumes 'no' or other values)\n    df['Minority'] = df['Minority_raw'].map(lambda x: 1 if x == 'yes' else 0)\n\n    # Gender: 'female' -> 1 else 0 (covers missing mapped to 0 after fill)\n    df['Female'] = df['Gender_raw'].map(lambda x: 1 if x == 'female' else 0)\n\n    # SingleCourse: 'single' -> 1 else 0\n    df['SingleCourse'] = df['SingleCourse_raw'].map(lambda x: 1 if x == 'single' else 0)\n\n    # UpperDivision: 'upper' -> 1 else 0\n    df['UpperDivision'] = df['UpperDivision_raw'].map(lambda x: 1 if x == 'upper' else 0)\n\n    # NativeEnglish: 'yes' -> 1 else 0\n    df['NativeEnglish'] = df['NativeEnglish_raw'].map(lambda x: 1 if x == 'yes' else 0)\n\n    # TenureTrack: 'yes' -> 1 else 0\n    df['TenureTrack'] = df['TenureTrack_raw'].map(lambda x: 1 if x == 'yes' else 0)\n\n    # Ensure numeric columns are numeric\n    df['Beauty'] = pd.to_numeric(df['Beauty'], errors='coerce')\n    df['Eval'] = pd.to_numeric(df['Eval'], errors='coerce')\n    df['Age'] = pd.to_numeric(df['Age'], errors='coerce')\n    df['NResponded'] = pd.to_numeric(df['NResponded'], errors='coerce')\n    df['NEnrolled'] = pd.to_numeric(df['NEnrolled'], errors='coerce')\n    df['InstructorID'] = pd.to_numeric(df['InstructorID'], errors='coerce')\n\n    # Create response rate and log enrollment variables\n    # Avoid division by zero\n    df['ResponseRate'] = df.apply(lambda r: (r['NResponded'] / r['NEnrolled']) if (pd.notnull(r['NResponded']) and pd.notnull(r['NEnrolled']) and r['NEnrolled'] > 0) else np.nan, axis=1)\n    df['LogNEnrolled'] = df['NEnrolled'].apply(lambda x: np.log(x) if pd.notnull(x) and x > 0 else np.nan)\n\n    # Center the Beauty variable to improve interpretability of intercept and interactions\n    if 'Beauty' in df.columns:\n        beauty_mean = df['Beauty'].mean(skipna=True)\n        df['Beauty'] = df['Beauty'] - beauty_mean\n\n    # Select and keep only the final columns needed for modeling\n    final_cols = [\n        'Beauty', 'Eval', 'Age', 'Female', 'Minority', 'SingleCourse', 'UpperDivision',\n        'NativeEnglish', 'TenureTrack', 'NResponded', 'NEnrolled', 'ResponseRate', 'LogNEnrolled', 'InstructorID'\n    ]\n    # If some expected columns are missing in the input, raise a clear error\n    missing = [c for c in final_cols if c not in df.columns]\n    if len(missing) > 0:\n        raise ValueError(f\"Missing expected columns after transformation: {missing}\")\n\n    # Drop rows with missing values in the key modeling columns\n    df = df.dropna(subset=['Beauty', 'Eval', 'NEnrolled', 'NResponded', 'InstructorID'])\n\n    # Reset index for cleanliness\n    df = df.reset_index(drop=True)\n\n    return df\n",
+  "m_code": "def model(df: pd.DataFrame):\n    \"\"\"\n    Run an OLS regression of Eval on Beauty and controls. Cluster robust SEs at the InstructorID level.\n\n    Model specification:\n      Eval ~ Beauty + Age + Female + Minority + SingleCourse + UpperDivision\n             + NativeEnglish + TenureTrack + LogNEnrolled + ResponseRate\n             + Beauty:Female\n\n    Returns:\n      fitted_results: statsmodels RegressionResults object (with cluster-robust cov)\n    \"\"\"\n    import statsmodels.formula.api as smf\n\n    # Ensure required columns are present\n    required = ['Eval', 'Beauty', 'Age', 'Female', 'Minority', 'SingleCourse', 'UpperDivision',\n                'NativeEnglish', 'TenureTrack', 'LogNEnrolled', 'ResponseRate', 'InstructorID']\n    missing = [c for c in required if c not in df.columns]\n    if missing:\n        raise ValueError(f\"Missing columns for modeling: {missing}\")\n\n    # Build formula with interaction between Beauty and Female to test moderation by gender\n    formula = (\n        'Eval ~ Beauty + Age + Female + Minority + SingleCourse + UpperDivision '\n        '+ NativeEnglish + TenureTrack + LogNEnrolled + ResponseRate + Beauty:Female'\n    )\n\n    # Fit OLS with cluster-robust standard errors by InstructorID\n    model_fit = smf.ols(formula=formula, data=df).fit(cov_type='cluster', cov_kwds={'groups': df['InstructorID']})\n\n    # Return the fitted results object. Users can call .summary(), .params, .conf_int(), etc.\n    return model_fit\n"
+}
+===================[TOKENS]=====================
+Number of prompt tokens: 5141
+Number of total tokens: 9180
+
+===================[PROMPT (API Time: 71.9509551525116, Cache Time: None)]=====================
+=====[SYSTEM]=====:
+You are an AI Data Analysis Assistant who is an expert at writing an end-to-end scientific analysis given a research question and a dataset. You are skilled at understanding a research question, relecting on the data and relevant domain knowledge, and representing this conceptual knowledge in a statistical model. Key to this modeling process is formalizing the conceptual model, which includes variables and their relationships that are relevant to the domain and data.
+=====[USER]=====:
+<Instruction> 
+Given the research question, dataset formulate the conceptual model and write an analysis including all necessary data transformations and a statistical model to answer the research question. 
+</Instruction>
+
+<Format Instructions>
+You will return 3 things:
+1. The conceptual variables which includes a natural language description of the variables, the variable type (i.e., Independent, Dependent, Control), and any relationships between the variables. Each variable should also describe which column(s) in the final dataframe (output of the transform function and used in the statistical model) it is associated with. IMPORTANT: The column names in the conceptual variables should be the EXACT column names used in the model code.     
+2. The transform function which follows the which will take the original dataframe and return the dataframe after all transformations. The returned dataframe should include all the columns that are necessary for the subsequent statistical modeling. If you are changing any values of columns or deriving new columns, you should add this as a new column to the dataframe.     
+3. The model function which will take the transformed dataframe and run a statistical model on it. The model function should return the results of the model.
+
+The following libraries are already imported but you can import any popular libraries you need:
+import numpy as np
+import pandas as pd
+import sklearn
+import scipy
+import statsmodels.api as sm
+import matplotlib.pyplot as plt
+
+You are also allowed to use common machine learning libraries, including but not limited to:
+- xgboost
+- lightgbm
+- catboost
+- tensorflow / keras
+- torch (PyTorch)
+- pytorch-lightning
+- sklearn.experimental modules
+- imbalanced-learn (imblearn)
+
+Here is the code template for the transform function:
+```python
+def transform(df: pd.DataFrame) -> pd.DataFrame:
+    # Your code here
+    return df
+```
+Here is the code template for the model function:
+```python
+def model(df: pd.DataFrame) -> Any:
+    # Your code here
+    return results
+```
+
+Please return the conceptual variables, the transform function, and the model function in the format specified below:
+The output should be formatted as a JSON instance that conforms to the JSON schema below.
+
+As an example, for the schema {"properties": {"foo": {"title": "Foo", "description": "a list of strings", "type": "array", "items": {"type": "string"}}}, "required": ["foo"]}
+the object {"foo": ["bar", "baz"]} is a well-formatted instance of the schema. The object {"properties": {"foo": ["bar", "baz"]}} is not well-formatted.
+
+Here is the output schema:
+```
+{"$defs": {"AgentCVarsWithCol": {"properties": {"ivs": {"items": {"$ref": "#/$defs/IVarWithCol"}, "title": "Independent variables", "type": "array"}, "dv": {"allOf": [{"$ref": "#/$defs/DVarWithCol"}], "title": "Dependent variable"}, "controls": {"items": {"$ref": "#/$defs/ControlVarWithCol"}, "title": "Control variables", "type": "array"}}, "required": ["ivs", "dv", "controls"], "title": "AgentCVarsWithCol", "type": "object"}, "ControlVarWithCol": {"properties": {"description": {"title": "Description of the control variable variable", "type": "string"}, "is_moderator": {"title": "Whether the variable is a moderator.", "type": "boolean"}, "moderator_on": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": "", "title": "The variable that the control variable is moderating. Only applicable for control variables that are moderators."}, "columns": {"items": {"type": "string"}, "title": "The column(s) in the FINAL dataframe used in the STATISTICAL MODEL that corresponds to the control variable", "type": "array"}}, "required": ["description", "is_moderator", "columns"], "title": "ControlVarWithCol", "type": "object"}, "DVarWithCol": {"properties": {"description": {"title": "Description of the dependent variable variable", "type": "string"}, "columns": {"items": {"type": "string"}, "title": "The column(s) in the FINAL dataframe used in the STATISTICAL MODEL that corresponds to the dependent variable", "type": "array"}}, "required": ["description", "columns"], "title": "DVarWithCol", "type": "object"}, "IVarWithCol": {"properties": {"description": {"title": "Description of the independent variable variable", "type": "string"}, "columns": {"items": {"type": "string"}, "title": "The column(s) in the FINAL dataframe used in the STATISTICAL MODEL that corresponds to the independent variable", "type": "array"}}, "required": ["description", "columns"], "title": "IVarWithCol", "type": "object"}}, "properties": {"cvars": {"allOf": [{"$ref": "#/$defs/AgentCVarsWithCol"}], "title": "Conceptual variables"}, "transform_code": {"title": "The code that transforms the data", "type": "string"}, "m_code": {"title": "The code for the statistical modeling", "type": "string"}}, "required": ["cvars", "transform_code", "m_code"]}
+```
+</Format Instructions>
+<Example>
+Research Question: What is the effect of hormonal fluctuations associated with fertility on women's religiosity?
+Dataset Schema: {
+  "dataset_description": "A total of 275 women participated in the study for this dataset. Each participant was asked to answer three religiosity items using a 9-point scale. Further, each participant was asked to indicate the typical length of her menstrual cycle, the start date of her last menstrual period, and the start date of her previous menstrual period. In addition, each woman indicated how sure she was about these two start dates, using a 9-point scale. Finally, each woman was asked to indicate her current romantic relationship status with the following four response options: (1) not dating/romantically involved with anyone, (2) dating or involved with only one partner, (3) engaged or living with my partner, and (4) married.",
+  "fields": [
+    {
+      "column": "WorkerID",
+      "properties": {
+        "dtype": "number",
+        "std": 79.52986860293433,
+        "min": 1,
+        "max": 275,
+        "samples": [
+          31,
+          140,
+          196
+        ],
+        "num_unique_values": 275,
+        "description": "The unique identifier of a participant."
+      }
+    },
+    {
+      "column": "Rel1",
+      "properties": {
+        "dtype": "number",
+        "std": 3.284246850080361,
+        "min": 1,
+        "max": 9,
+        "samples": [
+          4,
+          1,
+          9
+        ],
+        "num_unique_values": 9,
+        "description": "'How much do you believe in God?' 1 \u2013 9"
+      }
+    },
+    {
+      "column": "Rel2",
+      "properties": {
+        "dtype": "number",
+        "std": 3.087872913331648,
+        "min": 1.0,
+        "max": 9.0,
+        "samples": [
+          4.0,
+          2.0,
+          6.0
+        ],
+        "num_unique_values": 9,
+        "description": "'I see myself as a religiously oriented person.' 1 \u2013 9"
+      }
+    },
+    {
+      "column": "Rel3",
+      "properties": {
+        "dtype": "number",
+        "std": 3.333610823065186,
+        "min": 1.0,
+        "max": 9.0,
+        "samples": [
+          3.0,
+          1.0,
+          7.0
+        ],
+        "num_unique_values": 9,
+        "description": "'I believe that God or a Higher Power is responsible for my existence.' 1 \u2013 9"
+      }
+    },
+    {
+      "column": "Sure1",
+      "properties": {
+        "dtype": "number",
+        "std": 1.5732501786909676,
+        "min": 1,
+        "max": 9,
+        "samples": [
+          4,
+          7,
+          9
+        ],
+        "num_unique_values": 8,
+        "description": "In reference to `StartDateofLastPeriod`,  'How sure are you about that date?' 1 \u2013 9."
+      }
+    },
+    {
+      "column": "Sure2",
+      "properties": {
+        "dtype": "number",
+        "std": 2.221975065515302,
+        "min": 1,
+        "max": 9,
+        "samples": [
+          6,
+          3,
+          7
+        ],
+        "num_unique_values": 9,
+        "description": "In reference to `StartDateofPeriodBeforeLast`,  'How sure are you about that date?' 1 \u2013 9."
+      }
+    },
+    {
+      "column": "Relationship",
+      "properties": {
+        "dtype": "number",
+        "std": 1.167327837424664,
+        "min": 1,
+        "max": 4,
+        "samples": [
+          1,
+          2,
+          3
+        ],
+        "num_unique_values": 4,
+        "description": "Answer to 'What is your current romantic relationship status?' (1) not dating/romantically involved with anyone, (2) dating or involved with only one partner, (3) engaged or living with my partner, (4) married"
+      }
+    },
+    {
+      "column": "ReportedCycleLength",
+      "properties": {
+        "dtype": "number",
+        "std": 2.6714983210492633,
+        "min": 21.0,
+        "max": 38.0,
+        "samples": [
+          21.0,
+          22.0,
+          26.0
+        ],
+        "num_unique_values": 17,
+        "description": "Answer to 'How many days long are your menstrual cycles? (for most women, the range is between 25-35 days) Keep in mind this is the number of days from the start of one menstrual period to the start of the next menstrual period and NOT the length of your menstrual bleeding.'"
+      }
+    },
+    {
+      "column": "DateTesting",
+      "properties": {
+        "dtype": "date",
+        "min": "03/12/12",
+        "max": "04/27/12",
+        "samples": [
+          "04/06/12",
+          "04/26/12",
+          "03/12/12"
+        ],
+        "num_unique_values": 13,
+        "description": "Date of participant filling in the questionnaire"
+      }
+    },
+    {
+      "column": "StartDateofLastPeriod",
+      "properties": {
+        "dtype": "date",
+        "min": "02/06/12",
+        "max": "04/26/12",
+        "samples": [
+          "02/16/12",
+          "03/01/12",
+          "04/25/12"
+        ],
+        "num_unique_values": 61,
+        "description": "Answer to 'Please give your best estimate of the date on which you started your last period (please be as precise as possible). This date was probably within the last few weeks. Sometimes thinking of where you were when you started your last period helps. For instance, was it on a weekend?, were you at work, was it during a football game?, etc. Please write the date in mm/dd/yyyy format (e.g., 8/18/2012).'"
+      }
+    },
+    {
+      "column": "StartDateofPeriodBeforeLast",
+      "properties": {
+        "dtype": "date",
+        "min": "01/03/12",
+        "max": "03/29/12",
+        "samples": [
+          "01/15/12",
+          "02/04/12",
+          "03/24/12"
+        ],
+        "num_unique_values": 61,
+        "description": "Answer to 'Please give your best estimate of the date on which you started the period before your last period (please be as precise as possible). Please write the date in mm/dd/yyyy format (e.g., 7/18/2012).'"
+      }
+    }
+  ],
+  "num_rows": 275,
+  "field_names": [
+    "WorkerID",
+    "Rel1",
+    "Rel2",
+    "Rel3",
+    "Sure1",
+    "Sure2",
+    "Relationship",
+    "ReportedCycleLength",
+    "DateTesting",
+    "StartDateofLastPeriod",
+    "StartDateofPeriodBeforeLast"
+  ]
+}
+Result: {
+  "cvars": {
+    "ivs": [
+      {
+        "description": "Women's fertility",
+        "columns": [
+          "FertilityGroup"
+        ]
+      }
+    ],
+    "dv": {
+      "description": "Women's religiosity",
+      "columns": [
+        "AvgReligiosity"
+      ]
+    },
+    "controls": [
+      {
+        "description": "Relationship status of the individual",
+        "is_moderator": true,
+        "moderator_on": "Women's fertility",
+        "columns": [
+          "InRelationship"
+        ]
+      }
+    ]
+  },
+  "transform_code": "# drop the rows with missing values in the ReportedCycleLength, Rel1, Rel2, and Rel3 columns\ndf = df.dropna(subset=['ReportedCycleLength'])\ndf = df.dropna(subset=['Rel1', 'Rel2', 'Rel3'])\n\ndf['AvgReligiosity'] = df[['Rel1', 'Rel2', 'Rel3']].mean(axis=1)\n\n\n# Convert date columns to datetime format\ndf['DateTesting'] = pd.to_datetime(df['DateTesting'], format='%m/%d/%y')\ndf['StartDateofLastPeriod'] = pd.to_datetime(df['StartDateofLastPeriod'], format='%m/%d/%y')\ndf['StartDateofPeriodBeforeLast'] = pd.to_datetime(df['StartDateofPeriodBeforeLast'], format='%m/%d/%y')\n\n# Calculate the cycle length based on provided dates\ndf['ReportedCycleLength'] = (df['StartDateofLastPeriod'] - df['StartDateofPeriodBeforeLast']).dt.days\n# Calculate the expected start date of the next menstrual period\n\ndf['ExpectedNextPeriod'] = df['StartDateofLastPeriod'] + pd.to_timedelta(df['ReportedCycleLength'], unit='d')\n\n# Calculate the day of ovulation by subtracting 14 days from the expected start date of the next period\n# since ovulation typically occurs around 14 days before the start of the next period\ndf['OvulationDate'] = df['ExpectedNextPeriod'] - pd.to_timedelta(14, unit='d')\n# Calculate the cycle day on the date of testing\ndf['CycleDay'] = (df['DateTesting'] - df['OvulationDate']).dt.days + 14\n# Define high-fertility (cycle days 6-14) and low-fertility (cycle days 17-27) groups\ndf['FertilityGroup'] = df['CycleDay'].apply(lambda x: 'High-Fertility' if 6 <= x <= 14 else ('Low-Fertility' if 17 <= x <= 27 else 'Other'))\n# Filter out the 'Other' group to focus on the high and low fertility groups\ndf = df[df['FertilityGroup'].isin(['High-Fertility', 'Low-Fertility'])]\n\n\ndf['IsIncommittedRelationship'] = df['Relationship'].apply(lambda x: 0 if x in [1,2] else 1)\ndf['InRelationship'] = df['Relationship'].apply(lambda x: 0 if x == 1 else 1)\ndf['IsInRelationship'] = df['Relationship'].apply(lambda x: 0 if x == 1 else 1)\n",
+  "m_code": "model = smf.ols('AvgReligiosity ~ InRelationship * FertilityGroup', data=df).fit()\n# Display the regression results\nprint(model.summary())\n"
+}
+</Example>
+Research Question: Does instructor beauty affect teaching productivity as reflected in student instructional ratings?
+Dataset Schema: {
+  "dataset_description": "This data contains course evaluations, course characteristics, and professor characteristics for 463 courses for the academic years 2000\u20132002 at the University of Texas at Austin. It specifically resulted from a sample of student instructional ratings for a group of university teachers along with beauty rating (average from six independent judges) and a number of other characteristics.\n\nPaper reference: Hamermesh, D.S., and Parker, A. (2005). Beauty in the Classroom: Instructors\u2019 Pulchritude and Putative Pedagogical Productivity. Economics of Education Review, 24, 369\u2013376.",
+  "fields": [
+    {
+      "column": "feature1",
+      "properties": {
+        "dtype": "number",
+        "std": 133.8008470326951,
+        "min": 1,
+        "max": 463,
+        "samples": [
+          226,
+          31,
+          40
+        ],
+        "num_unique_values": 463,
+        "semantic_type": "",
+        "description": ""
+      }
+    },
+    {
+      "column": "feature2",
+      "properties": {
+        "dtype": "category",
+        "samples": [
+          "no",
+          "yes"
+        ],
+        "num_unique_values": 2,
+        "semantic_type": "",
+        "description": "factor. Does the instructor belong to a minority (non-Caucasian)?"
+      }
+    },
+    {
+      "column": "feature3",
+      "properties": {
+        "dtype": "number",
+        "std": 9.802742037864817,
+        "min": 29,
+        "max": 73,
+        "samples": [
+          39,
+          56,
+          41
+        ],
+        "num_unique_values": 35,
+        "semantic_type": "",
+        "description": "the professor's age."
+      }
+    },
+    {
+      "column": "feature4",
+      "properties": {
+        "dtype": "category",
+        "samples": [
+          "male",
+          "female"
+        ],
+        "num_unique_values": 2,
+        "semantic_type": "",
+        "description": "factor indicating instructor's gender."
+      }
+    },
+    {
+      "column": "feature5",
+      "properties": {
+        "dtype": "category",
+        "samples": [
+          "single",
+          "more"
+        ],
+        "num_unique_values": 2,
+        "semantic_type": "",
+        "description": "factor. Is the course a single-credit elective (e.g., yoga, aerobics, dance)?"
+      }
+    },
+    {
+      "column": "feature6",
+      "properties": {
+        "dtype": "number",
+        "std": 0.7886476673278039,
+        "min": -1.450494,
+        "max": 1.970023,
+        "samples": [
+          -0.2377786,
+          -0.7330914,
+          -0.3260148
+        ],
+        "num_unique_values": 94,
+        "semantic_type": "",
+        "description": "rating of the instructor's physical appearance by a panel of six students, averaged across the six panelists, shifted to have a mean of zero."
+      }
+    },
+    {
+      "column": "feature7",
+      "properties": {
+        "dtype": "number",
+        "std": 0.5548655656195951,
+        "min": 2.1,
+        "max": 5.0,
+        "samples": [
+          2.8,
+          4.1,
+          4.6
+        ],
+        "num_unique_values": 29,
+        "semantic_type": "",
+        "description": "course overall teaching evaluation score, on a scale of 1 (very unsatisfactory) to 5 (excellent)."
+      }
+    },
+    {
+      "column": "feature8",
+      "properties": {
+        "dtype": "category",
+        "samples": [
+          "lower",
+          "upper"
+        ],
+        "num_unique_values": 2,
+        "semantic_type": "",
+        "description": "factor. Is the course an upper or lower division course? (Lower division courses are mainly large freshman and sophomore courses)?"
+      }
+    },
+    {
+      "column": "feature9",
+      "properties": {
+        "dtype": "category",
+        "samples": [
+          "no",
+          "yes"
+        ],
+        "num_unique_values": 2,
+        "semantic_type": "",
+        "description": "factor. Is the instructor a native English speaker?"
+      }
+    },
+    {
+      "column": "feature10",
+      "properties": {
+        "dtype": "category",
+        "samples": [
+          "no",
+          "yes"
+        ],
+        "num_unique_values": 2,
+        "semantic_type": "",
+        "description": "factor. Is the instructor on tenure track?"
+      }
+    },
+    {
+      "column": "feature11",
+      "properties": {
+        "dtype": "number",
+        "std": 45.01848127156701,
+        "min": 5,
+        "max": 380,
+        "samples": [
+          46,
+          65,
+          120
+        ],
+        "num_unique_values": 104,
+        "semantic_type": "",
+        "description": "number of students that participated in the evaluation."
+      }
+    },
+    {
+      "column": "feature12",
+      "properties": {
+        "dtype": "number",
+        "std": 75.07279983847907,
+        "min": 8,
+        "max": 581,
+        "samples": [
+          15,
+          100,
+          149
+        ],
+        "num_unique_values": 127,
+        "semantic_type": "",
+        "description": "number of students enrolled in the course."
+      }
+    },
+    {
+      "column": "feature13",
+      "properties": {
+        "dtype": "number",
+        "std": 27.508902172681815,
+        "min": 1,
+        "max": 94,
+        "samples": [
+          41,
+          23,
+          56
+        ],
+        "num_unique_values": 94,
+        "semantic_type": "",
+        "description": "factor indicating instructor identifier."
+      }
+    }
+  ],
+  "num_rows": 463,
+  "field_names": [
+    "feature1",
+    "feature2",
+    "feature3",
+    "feature4",
+    "feature5",
+    "feature6",
+    "feature7",
+    "feature8",
+    "feature9",
+    "feature10",
+    "feature11",
+    "feature12",
+    "feature13"
+  ]
+}
+Result: 
+
+===================[gpt-5-mini RESPONSE (4297)]=====================
+{
+  "cvars": {
+    "ivs": [
+      {
+        "description": "Instructor physical attractiveness (beauty) rating averaged across judges, standardized (z-score). Higher values = more attractive.",
+        "columns": [
+          "beauty_z"
+        ]
+      }
+    ],
+    "dv": {
+      "description": "Course overall teaching evaluation score (student instructional rating), 1 (very unsatisfactory) to 5 (excellent).",
+      "columns": [
+        "teaching_eval"
+      ]
+    },
+    "controls": [
+      {
+        "description": "Instructor age, centered and squared (to capture nonlinear age effects).",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "age_c",
+          "age_sq"
+        ]
+      },
+      {
+        "description": "Instructor gender (female = 1, male = 0).",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "female"
+        ]
+      },
+      {
+        "description": "Instructor minority status (non-Caucasian = 1, else 0).",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "minority"
+        ]
+      },
+      {
+        "description": "Course level: upper-division = 1, lower-division = 0.",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "upper_division"
+        ]
+      },
+      {
+        "description": "Single-credit elective course indicator (single-credit elective = 1).",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "single_credit"
+        ]
+      },
+      {
+        "description": "Instructor native English speaker (yes = 1).",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "native_english"
+        ]
+      },
+      {
+        "description": "Instructor on tenure track (yes = 1).",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "tenure_track"
+        ]
+      },
+      {
+        "description": "Log of course enrollment (log(enrolled + 1)) to capture class size.",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "log_enrolled"
+        ]
+      },
+      {
+        "description": "Response rate for the evaluation = number of participants / number enrolled (fraction).",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "response_rate"
+        ]
+      },
+      {
+        "description": "Number of students who participated in the evaluation (used for weighting/diagnostics).",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "participants"
+        ]
+      },
+      {
+        "description": "Instructor identifier (used for clustering standard errors by instructor).",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "instructor_id"
+        ]
+      }
+    ]
+  },
+  "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform raw dataset (feature1..feature13) into analysis-ready dataframe with named columns used in the model.\n    Output columns (kept/created):\n      - beauty_z: standardized beauty rating (z-score)\n      - teaching_eval: course overall teaching evaluation (DV)\n      - age_c, age_sq: centered age and squared term\n      - female, minority, upper_division, single_credit, native_english, tenure_track: binary controls\n      - participants, enrolled, response_rate, log_enrolled\n      - instructor_id\n    \"\"\"\n    df = df.copy()\n\n    # Rename known columns to meaningful names\n    rename_map = {\n        'feature6': 'beauty',           # beauty rating (mean-zero originally)\n        'feature7': 'teaching_eval',    # outcome\n        'feature3': 'age',\n        'feature4': 'gender',\n        'feature2': 'minority_flag',    # 'yes'/'no'\n        'feature5': 'single_credit_flag',\n        'feature8': 'division',         # 'upper'/'lower'\n        'feature9': 'native_english_flag',\n        'feature10': 'tenure_flag',\n        'feature11': 'participants',    # number participated in evaluation\n        'feature12': 'enrolled',        # number enrolled\n        'feature13': 'instructor_id'\n    }\n    df = df.rename(columns=rename_map)\n\n    # Keep only rows with non-missing DV and IV\n    df = df.dropna(subset=['beauty', 'teaching_eval'])\n\n    # Convert numeric columns to proper dtypes\n    for col in ['beauty', 'teaching_eval', 'age', 'participants', 'enrolled']:\n        if col in df.columns:\n            df[col] = pd.to_numeric(df[col], errors='coerce')\n\n    # Binary / categorical processing (robust to capitalization)\n    def safe_eq(series, val):\n        return series.astype(str).str.lower().eq(str(val).lower())\n\n    # Gender: feature4 values are 'male'/'female'\n    df['female'] = (safe_eq(df.get('gender', pd.Series(['']*len(df))), 'female')).astype(int)\n\n    # Minority: feature2 'yes' -> 1\n    df['minority'] = (safe_eq(df.get('minority_flag', pd.Series(['']*len(df))), 'yes')).astype(int)\n\n    # Single-credit elective: feature5 values 'single' indicates single-credit elective\n    df['single_credit'] = (safe_eq(df.get('single_credit_flag', pd.Series(['']*len(df))), 'single')).astype(int)\n\n    # Division: 'upper' -> 1 else 0\n    df['upper_division'] = (safe_eq(df.get('division', pd.Series(['']*len(df))), 'upper')).astype(int)\n\n    # Native English: feature9 'yes'\n    df['native_english'] = (safe_eq(df.get('native_english_flag', pd.Series(['']*len(df))), 'yes')).astype(int)\n\n    # Tenure track: feature10 'yes'\n    df['tenure_track'] = (safe_eq(df.get('tenure_flag', pd.Series(['']*len(df))), 'yes')).astype(int)\n\n    # Participants / enrolled: ensure numeric and reasonable\n    df['participants'] = pd.to_numeric(df['participants'], errors='coerce')\n    df['enrolled'] = pd.to_numeric(df['enrolled'], errors='coerce')\n\n    # Remove rows with nonpositive enrollment (can't compute response rate)\n    df = df[df['enrolled'].notna() & (df['enrolled'] > 0)]\n\n    # Response rate and log enrollment\n    df['response_rate'] = (df['participants'] / df['enrolled']).clip(lower=0, upper=1)\n    df['log_enrolled'] = np.log(df['enrolled'] + 1)\n\n    # Age: center and squared\n    if 'age' in df.columns:\n        df['age'] = pd.to_numeric(df['age'], errors='coerce')\n        age_mean = df['age'].mean()\n        df['age_c'] = df['age'] - age_mean\n        df['age_sq'] = df['age_c'] ** 2\n    else:\n        df['age_c'] = np.nan\n        df['age_sq'] = np.nan\n\n    # Standardize beauty (z-score) for interpretability. Use sample std (ddof=0) for population-like scaling.\n    beauty_mean = df['beauty'].mean()\n    beauty_std = df['beauty'].std(ddof=0)\n    if beauty_std == 0 or np.isnan(beauty_std):\n        # fallback: keep raw beauty if no variation\n        df['beauty_z'] = df['beauty'] - beauty_mean\n    else:\n        df['beauty_z'] = (df['beauty'] - beauty_mean) / beauty_std\n\n    # Ensure instructor_id is present and numeric or string\n    df['instructor_id'] = df['instructor_id'].astype(object)\n\n    # Final set of columns to return (these are used in the modeling stage)\n    keep_cols = [\n        'beauty_z', 'teaching_eval', 'age_c', 'age_sq', 'female', 'minority',\n        'upper_division', 'single_credit', 'native_english', 'tenure_track',\n        'log_enrolled', 'response_rate', 'participants', 'enrolled', 'instructor_id'\n    ]\n\n    # If any of the keep_cols are missing (rare), create them with NA to keep consistent schema\n    for c in keep_cols:\n        if c not in df.columns:\n            df[c] = np.nan\n\n    # Return only the columns needed for modeling\n    return df[keep_cols]\n",
+  "m_code": "def model(df: pd.DataFrame):\n    \"\"\"\n    Fit OLS regression of teaching evaluation on standardized beauty with controls.\n    Uses cluster-robust standard errors clustered on instructor_id.\n\n    Model specification:\n      teaching_eval ~ beauty_z + age_c + age_sq + female + minority\n                      + upper_division + single_credit + native_english + tenure_track\n                      + log_enrolled + response_rate\n\n    Returns the fitted statsmodels regression result object.\n    \"\"\"\n    import statsmodels.formula.api as smf\n\n    # Drop rows with missing values in key model columns\n    model_cols = [\n        'teaching_eval', 'beauty_z', 'age_c', 'age_sq', 'female', 'minority',\n        'upper_division', 'single_credit', 'native_english', 'tenure_track',\n        'log_enrolled', 'response_rate', 'instructor_id'\n    ]\n    df_model = df.dropna(subset=['teaching_eval', 'beauty_z'])  # always require DV and IV\n\n    # We allow some missing controls; drop rows missing any control used in formula\n    df_model = df_model.dropna(subset=[c for c in model_cols if c in df_model.columns])\n\n    # Define formula\n    formula = (\n        'teaching_eval ~ beauty_z + age_c + age_sq + female + minority '\n        '+ upper_division + single_credit + native_english + tenure_track '\n        '+ ' + log_enrolled + response_rate'\n    )\n\n    # Fit OLS and use clustering by instructor_id for robust SEs if instructor_id is available\n    try:\n        res = smf.ols(formula=formula, data=df_model).fit(\n            cov_type='cluster', cov_kwds={'groups': df_model['instructor_id']}\n        )\n    except Exception:\n        # If clustering fails (e.g., instructor_id constant), fall back to robust (HC3) SEs\n        res = smf.ols(formula=formula, data=df_model).fit(cov_type='HC3')\n\n    # Return the fitted result object (has .summary(), .params, .bse, etc.)\n    return res\n"
+}
+===================[TOKENS]=====================
+Number of prompt tokens: 5141
+Number of total tokens: 9438
+
+===================[PROMPT (API Time: 70.86787509918213, Cache Time: None)]=====================
+=====[SYSTEM]=====:
+You are an AI Data Analysis Assistant who is an expert at writing an end-to-end scientific analysis given a research question and a dataset. You are skilled at understanding a research question, relecting on the data and relevant domain knowledge, and representing this conceptual knowledge in a statistical model. Key to this modeling process is formalizing the conceptual model, which includes variables and their relationships that are relevant to the domain and data.
+=====[USER]=====:
+<Instruction> 
+Given the research question, dataset formulate the conceptual model and write an analysis including all necessary data transformations and a statistical model to answer the research question. 
+</Instruction>
+
+<Format Instructions>
+You will return 3 things:
+1. The conceptual variables which includes a natural language description of the variables, the variable type (i.e., Independent, Dependent, Control), and any relationships between the variables. Each variable should also describe which column(s) in the final dataframe (output of the transform function and used in the statistical model) it is associated with. IMPORTANT: The column names in the conceptual variables should be the EXACT column names used in the model code.     
+2. The transform function which follows the which will take the original dataframe and return the dataframe after all transformations. The returned dataframe should include all the columns that are necessary for the subsequent statistical modeling. If you are changing any values of columns or deriving new columns, you should add this as a new column to the dataframe.     
+3. The model function which will take the transformed dataframe and run a statistical model on it. The model function should return the results of the model.
+
+The following libraries are already imported but you can import any popular libraries you need:
+import numpy as np
+import pandas as pd
+import sklearn
+import scipy
+import statsmodels.api as sm
+import matplotlib.pyplot as plt
+
+You are also allowed to use common machine learning libraries, including but not limited to:
+- xgboost
+- lightgbm
+- catboost
+- tensorflow / keras
+- torch (PyTorch)
+- pytorch-lightning
+- sklearn.experimental modules
+- imbalanced-learn (imblearn)
+
+Here is the code template for the transform function:
+```python
+def transform(df: pd.DataFrame) -> pd.DataFrame:
+    # Your code here
+    return df
+```
+Here is the code template for the model function:
+```python
+def model(df: pd.DataFrame) -> Any:
+    # Your code here
+    return results
+```
+
+Please return the conceptual variables, the transform function, and the model function in the format specified below:
+The output should be formatted as a JSON instance that conforms to the JSON schema below.
+
+As an example, for the schema {"properties": {"foo": {"title": "Foo", "description": "a list of strings", "type": "array", "items": {"type": "string"}}}, "required": ["foo"]}
+the object {"foo": ["bar", "baz"]} is a well-formatted instance of the schema. The object {"properties": {"foo": ["bar", "baz"]}} is not well-formatted.
+
+Here is the output schema:
+```
+{"$defs": {"AgentCVarsWithCol": {"properties": {"ivs": {"items": {"$ref": "#/$defs/IVarWithCol"}, "title": "Independent variables", "type": "array"}, "dv": {"allOf": [{"$ref": "#/$defs/DVarWithCol"}], "title": "Dependent variable"}, "controls": {"items": {"$ref": "#/$defs/ControlVarWithCol"}, "title": "Control variables", "type": "array"}}, "required": ["ivs", "dv", "controls"], "title": "AgentCVarsWithCol", "type": "object"}, "ControlVarWithCol": {"properties": {"description": {"title": "Description of the control variable variable", "type": "string"}, "is_moderator": {"title": "Whether the variable is a moderator.", "type": "boolean"}, "moderator_on": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": "", "title": "The variable that the control variable is moderating. Only applicable for control variables that are moderators."}, "columns": {"items": {"type": "string"}, "title": "The column(s) in the FINAL dataframe used in the STATISTICAL MODEL that corresponds to the control variable", "type": "array"}}, "required": ["description", "is_moderator", "columns"], "title": "ControlVarWithCol", "type": "object"}, "DVarWithCol": {"properties": {"description": {"title": "Description of the dependent variable variable", "type": "string"}, "columns": {"items": {"type": "string"}, "title": "The column(s) in the FINAL dataframe used in the STATISTICAL MODEL that corresponds to the dependent variable", "type": "array"}}, "required": ["description", "columns"], "title": "DVarWithCol", "type": "object"}, "IVarWithCol": {"properties": {"description": {"title": "Description of the independent variable variable", "type": "string"}, "columns": {"items": {"type": "string"}, "title": "The column(s) in the FINAL dataframe used in the STATISTICAL MODEL that corresponds to the independent variable", "type": "array"}}, "required": ["description", "columns"], "title": "IVarWithCol", "type": "object"}}, "properties": {"cvars": {"allOf": [{"$ref": "#/$defs/AgentCVarsWithCol"}], "title": "Conceptual variables"}, "transform_code": {"title": "The code that transforms the data", "type": "string"}, "m_code": {"title": "The code for the statistical modeling", "type": "string"}}, "required": ["cvars", "transform_code", "m_code"]}
+```
+</Format Instructions>
+<Example>
+Research Question: What is the effect of hormonal fluctuations associated with fertility on women's religiosity?
+Dataset Schema: {
+  "dataset_description": "A total of 275 women participated in the study for this dataset. Each participant was asked to answer three religiosity items using a 9-point scale. Further, each participant was asked to indicate the typical length of her menstrual cycle, the start date of her last menstrual period, and the start date of her previous menstrual period. In addition, each woman indicated how sure she was about these two start dates, using a 9-point scale. Finally, each woman was asked to indicate her current romantic relationship status with the following four response options: (1) not dating/romantically involved with anyone, (2) dating or involved with only one partner, (3) engaged or living with my partner, and (4) married.",
+  "fields": [
+    {
+      "column": "WorkerID",
+      "properties": {
+        "dtype": "number",
+        "std": 79.52986860293433,
+        "min": 1,
+        "max": 275,
+        "samples": [
+          31,
+          140,
+          196
+        ],
+        "num_unique_values": 275,
+        "description": "The unique identifier of a participant."
+      }
+    },
+    {
+      "column": "Rel1",
+      "properties": {
+        "dtype": "number",
+        "std": 3.284246850080361,
+        "min": 1,
+        "max": 9,
+        "samples": [
+          4,
+          1,
+          9
+        ],
+        "num_unique_values": 9,
+        "description": "'How much do you believe in God?' 1 \u2013 9"
+      }
+    },
+    {
+      "column": "Rel2",
+      "properties": {
+        "dtype": "number",
+        "std": 3.087872913331648,
+        "min": 1.0,
+        "max": 9.0,
+        "samples": [
+          4.0,
+          2.0,
+          6.0
+        ],
+        "num_unique_values": 9,
+        "description": "'I see myself as a religiously oriented person.' 1 \u2013 9"
+      }
+    },
+    {
+      "column": "Rel3",
+      "properties": {
+        "dtype": "number",
+        "std": 3.333610823065186,
+        "min": 1.0,
+        "max": 9.0,
+        "samples": [
+          3.0,
+          1.0,
+          7.0
+        ],
+        "num_unique_values": 9,
+        "description": "'I believe that God or a Higher Power is responsible for my existence.' 1 \u2013 9"
+      }
+    },
+    {
+      "column": "Sure1",
+      "properties": {
+        "dtype": "number",
+        "std": 1.5732501786909676,
+        "min": 1,
+        "max": 9,
+        "samples": [
+          4,
+          7,
+          9
+        ],
+        "num_unique_values": 8,
+        "description": "In reference to `StartDateofLastPeriod`,  'How sure are you about that date?' 1 \u2013 9."
+      }
+    },
+    {
+      "column": "Sure2",
+      "properties": {
+        "dtype": "number",
+        "std": 2.221975065515302,
+        "min": 1,
+        "max": 9,
+        "samples": [
+          6,
+          3,
+          7
+        ],
+        "num_unique_values": 9,
+        "description": "In reference to `StartDateofPeriodBeforeLast`,  'How sure are you about that date?' 1 \u2013 9."
+      }
+    },
+    {
+      "column": "Relationship",
+      "properties": {
+        "dtype": "number",
+        "std": 1.167327837424664,
+        "min": 1,
+        "max": 4,
+        "samples": [
+          1,
+          2,
+          3
+        ],
+        "num_unique_values": 4,
+        "description": "Answer to 'What is your current romantic relationship status?' (1) not dating/romantically involved with anyone, (2) dating or involved with only one partner, (3) engaged or living with my partner, (4) married"
+      }
+    },
+    {
+      "column": "ReportedCycleLength",
+      "properties": {
+        "dtype": "number",
+        "std": 2.6714983210492633,
+        "min": 21.0,
+        "max": 38.0,
+        "samples": [
+          21.0,
+          22.0,
+          26.0
+        ],
+        "num_unique_values": 17,
+        "description": "Answer to 'How many days long are your menstrual cycles? (for most women, the range is between 25-35 days) Keep in mind this is the number of days from the start of one menstrual period to the start of the next menstrual period and NOT the length of your menstrual bleeding.'"
+      }
+    },
+    {
+      "column": "DateTesting",
+      "properties": {
+        "dtype": "date",
+        "min": "03/12/12",
+        "max": "04/27/12",
+        "samples": [
+          "04/06/12",
+          "04/26/12",
+          "03/12/12"
+        ],
+        "num_unique_values": 13,
+        "description": "Date of participant filling in the questionnaire"
+      }
+    },
+    {
+      "column": "StartDateofLastPeriod",
+      "properties": {
+        "dtype": "date",
+        "min": "02/06/12",
+        "max": "04/26/12",
+        "samples": [
+          "02/16/12",
+          "03/01/12",
+          "04/25/12"
+        ],
+        "num_unique_values": 61,
+        "description": "Answer to 'Please give your best estimate of the date on which you started your last period (please be as precise as possible). This date was probably within the last few weeks. Sometimes thinking of where you were when you started your last period helps. For instance, was it on a weekend?, were you at work, was it during a football game?, etc. Please write the date in mm/dd/yyyy format (e.g., 8/18/2012).'"
+      }
+    },
+    {
+      "column": "StartDateofPeriodBeforeLast",
+      "properties": {
+        "dtype": "date",
+        "min": "01/03/12",
+        "max": "03/29/12",
+        "samples": [
+          "01/15/12",
+          "02/04/12",
+          "03/24/12"
+        ],
+        "num_unique_values": 61,
+        "description": "Answer to 'Please give your best estimate of the date on which you started the period before your last period (please be as precise as possible). Please write the date in mm/dd/yyyy format (e.g., 7/18/2012).'"
+      }
+    }
+  ],
+  "num_rows": 275,
+  "field_names": [
+    "WorkerID",
+    "Rel1",
+    "Rel2",
+    "Rel3",
+    "Sure1",
+    "Sure2",
+    "Relationship",
+    "ReportedCycleLength",
+    "DateTesting",
+    "StartDateofLastPeriod",
+    "StartDateofPeriodBeforeLast"
+  ]
+}
+Result: {
+  "cvars": {
+    "ivs": [
+      {
+        "description": "Women's fertility",
+        "columns": [
+          "FertilityGroup"
+        ]
+      }
+    ],
+    "dv": {
+      "description": "Women's religiosity",
+      "columns": [
+        "AvgReligiosity"
+      ]
+    },
+    "controls": [
+      {
+        "description": "Relationship status of the individual",
+        "is_moderator": true,
+        "moderator_on": "Women's fertility",
+        "columns": [
+          "InRelationship"
+        ]
+      }
+    ]
+  },
+  "transform_code": "# drop the rows with missing values in the ReportedCycleLength, Rel1, Rel2, and Rel3 columns\ndf = df.dropna(subset=['ReportedCycleLength'])\ndf = df.dropna(subset=['Rel1', 'Rel2', 'Rel3'])\n\ndf['AvgReligiosity'] = df[['Rel1', 'Rel2', 'Rel3']].mean(axis=1)\n\n\n# Convert date columns to datetime format\ndf['DateTesting'] = pd.to_datetime(df['DateTesting'], format='%m/%d/%y')\ndf['StartDateofLastPeriod'] = pd.to_datetime(df['StartDateofLastPeriod'], format='%m/%d/%y')\ndf['StartDateofPeriodBeforeLast'] = pd.to_datetime(df['StartDateofPeriodBeforeLast'], format='%m/%d/%y')\n\n# Calculate the cycle length based on provided dates\ndf['ReportedCycleLength'] = (df['StartDateofLastPeriod'] - df['StartDateofPeriodBeforeLast']).dt.days\n# Calculate the expected start date of the next menstrual period\n\ndf['ExpectedNextPeriod'] = df['StartDateofLastPeriod'] + pd.to_timedelta(df['ReportedCycleLength'], unit='d')\n\n# Calculate the day of ovulation by subtracting 14 days from the expected start date of the next period\n# since ovulation typically occurs around 14 days before the start of the next period\ndf['OvulationDate'] = df['ExpectedNextPeriod'] - pd.to_timedelta(14, unit='d')\n# Calculate the cycle day on the date of testing\ndf['CycleDay'] = (df['DateTesting'] - df['OvulationDate']).dt.days + 14\n# Define high-fertility (cycle days 6-14) and low-fertility (cycle days 17-27) groups\ndf['FertilityGroup'] = df['CycleDay'].apply(lambda x: 'High-Fertility' if 6 <= x <= 14 else ('Low-Fertility' if 17 <= x <= 27 else 'Other'))\n# Filter out the 'Other' group to focus on the high and low fertility groups\ndf = df[df['FertilityGroup'].isin(['High-Fertility', 'Low-Fertility'])]\n\n\ndf['IsIncommittedRelationship'] = df['Relationship'].apply(lambda x: 0 if x in [1,2] else 1)\ndf['InRelationship'] = df['Relationship'].apply(lambda x: 0 if x == 1 else 1)\ndf['IsInRelationship'] = df['Relationship'].apply(lambda x: 0 if x == 1 else 1)\n",
+  "m_code": "model = smf.ols('AvgReligiosity ~ InRelationship * FertilityGroup', data=df).fit()\n# Display the regression results\nprint(model.summary())\n"
+}
+</Example>
+Research Question: Does instructor beauty affect teaching productivity as reflected in student instructional ratings?
+Dataset Schema: {
+  "dataset_description": "This data contains course evaluations, course characteristics, and professor characteristics for 463 courses for the academic years 2000\u20132002 at the University of Texas at Austin. It specifically resulted from a sample of student instructional ratings for a group of university teachers along with beauty rating (average from six independent judges) and a number of other characteristics.\n\nPaper reference: Hamermesh, D.S., and Parker, A. (2005). Beauty in the Classroom: Instructors\u2019 Pulchritude and Putative Pedagogical Productivity. Economics of Education Review, 24, 369\u2013376.",
+  "fields": [
+    {
+      "column": "feature1",
+      "properties": {
+        "dtype": "number",
+        "std": 133.8008470326951,
+        "min": 1,
+        "max": 463,
+        "samples": [
+          226,
+          31,
+          40
+        ],
+        "num_unique_values": 463,
+        "semantic_type": "",
+        "description": ""
+      }
+    },
+    {
+      "column": "feature2",
+      "properties": {
+        "dtype": "category",
+        "samples": [
+          "no",
+          "yes"
+        ],
+        "num_unique_values": 2,
+        "semantic_type": "",
+        "description": "factor. Does the instructor belong to a minority (non-Caucasian)?"
+      }
+    },
+    {
+      "column": "feature3",
+      "properties": {
+        "dtype": "number",
+        "std": 9.802742037864817,
+        "min": 29,
+        "max": 73,
+        "samples": [
+          39,
+          56,
+          41
+        ],
+        "num_unique_values": 35,
+        "semantic_type": "",
+        "description": "the professor's age."
+      }
+    },
+    {
+      "column": "feature4",
+      "properties": {
+        "dtype": "category",
+        "samples": [
+          "male",
+          "female"
+        ],
+        "num_unique_values": 2,
+        "semantic_type": "",
+        "description": "factor indicating instructor's gender."
+      }
+    },
+    {
+      "column": "feature5",
+      "properties": {
+        "dtype": "category",
+        "samples": [
+          "single",
+          "more"
+        ],
+        "num_unique_values": 2,
+        "semantic_type": "",
+        "description": "factor. Is the course a single-credit elective (e.g., yoga, aerobics, dance)?"
+      }
+    },
+    {
+      "column": "feature6",
+      "properties": {
+        "dtype": "number",
+        "std": 0.7886476673278039,
+        "min": -1.450494,
+        "max": 1.970023,
+        "samples": [
+          -0.2377786,
+          -0.7330914,
+          -0.3260148
+        ],
+        "num_unique_values": 94,
+        "semantic_type": "",
+        "description": "rating of the instructor's physical appearance by a panel of six students, averaged across the six panelists, shifted to have a mean of zero."
+      }
+    },
+    {
+      "column": "feature7",
+      "properties": {
+        "dtype": "number",
+        "std": 0.5548655656195951,
+        "min": 2.1,
+        "max": 5.0,
+        "samples": [
+          2.8,
+          4.1,
+          4.6
+        ],
+        "num_unique_values": 29,
+        "semantic_type": "",
+        "description": "course overall teaching evaluation score, on a scale of 1 (very unsatisfactory) to 5 (excellent)."
+      }
+    },
+    {
+      "column": "feature8",
+      "properties": {
+        "dtype": "category",
+        "samples": [
+          "lower",
+          "upper"
+        ],
+        "num_unique_values": 2,
+        "semantic_type": "",
+        "description": "factor. Is the course an upper or lower division course? (Lower division courses are mainly large freshman and sophomore courses)?"
+      }
+    },
+    {
+      "column": "feature9",
+      "properties": {
+        "dtype": "category",
+        "samples": [
+          "no",
+          "yes"
+        ],
+        "num_unique_values": 2,
+        "semantic_type": "",
+        "description": "factor. Is the instructor a native English speaker?"
+      }
+    },
+    {
+      "column": "feature10",
+      "properties": {
+        "dtype": "category",
+        "samples": [
+          "no",
+          "yes"
+        ],
+        "num_unique_values": 2,
+        "semantic_type": "",
+        "description": "factor. Is the instructor on tenure track?"
+      }
+    },
+    {
+      "column": "feature11",
+      "properties": {
+        "dtype": "number",
+        "std": 45.01848127156701,
+        "min": 5,
+        "max": 380,
+        "samples": [
+          46,
+          65,
+          120
+        ],
+        "num_unique_values": 104,
+        "semantic_type": "",
+        "description": "number of students that participated in the evaluation."
+      }
+    },
+    {
+      "column": "feature12",
+      "properties": {
+        "dtype": "number",
+        "std": 75.07279983847907,
+        "min": 8,
+        "max": 581,
+        "samples": [
+          15,
+          100,
+          149
+        ],
+        "num_unique_values": 127,
+        "semantic_type": "",
+        "description": "number of students enrolled in the course."
+      }
+    },
+    {
+      "column": "feature13",
+      "properties": {
+        "dtype": "number",
+        "std": 27.508902172681815,
+        "min": 1,
+        "max": 94,
+        "samples": [
+          41,
+          23,
+          56
+        ],
+        "num_unique_values": 94,
+        "semantic_type": "",
+        "description": "factor indicating instructor identifier."
+      }
+    }
+  ],
+  "num_rows": 463,
+  "field_names": [
+    "feature1",
+    "feature2",
+    "feature3",
+    "feature4",
+    "feature5",
+    "feature6",
+    "feature7",
+    "feature8",
+    "feature9",
+    "feature10",
+    "feature11",
+    "feature12",
+    "feature13"
+  ]
+}
+Result: 
+
+===================[gpt-5-mini RESPONSE (4186)]=====================
+{
+  "cvars": {
+    "ivs": [
+      {
+        "description": "Instructor beauty: average rating of the instructor's physical appearance by a panel (mean-shifted in original data). Standardized (z-score) to aid interpretation and numerical stability.",
+        "columns": [
+          "Beauty_z"
+        ]
+      }
+    ],
+    "dv": {
+      "description": "Course overall teaching evaluation score (student instructional rating), on a scale from 1 (very unsatisfactory) to 5 (excellent).",
+      "columns": [
+        "EvalScore"
+      ]
+    },
+    "controls": [
+      {
+        "description": "Instructor age in years (numeric).",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "Age"
+        ]
+      },
+      {
+        "description": "Instructor gender (categorical: 'Male' or 'Female').",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "Gender"
+        ]
+      },
+      {
+        "description": "Instructor minority status (categorical: 'Yes' if non-Caucasian, 'No' otherwise).",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "Minority"
+        ]
+      },
+      {
+        "description": "Whether the course is lower-division or upper-division (categorical: 'Lower' or 'Upper').",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "CourseLevel"
+        ]
+      },
+      {
+        "description": "Whether the instructor is a native English speaker (categorical: 'Yes'/'No').",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "NativeEnglish"
+        ]
+      },
+      {
+        "description": "Whether the instructor is on the tenure track (categorical: 'Yes'/'No').",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "TenureTrack"
+        ]
+      },
+      {
+        "description": "Indicator/whether the course is a single-credit elective (categorical: 'Yes'/'No').",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "SingleCourse"
+        ]
+      },
+      {
+        "description": "Number of students who completed the evaluation (numeric).",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "NumRespondents"
+        ]
+      },
+      {
+        "description": "Number of students enrolled in the course (numeric).",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "Enrolled"
+        ]
+      },
+      {
+        "description": "Response rate in the evaluation: NumRespondents / Enrolled (numeric, clipped to [0,1]).",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "ResponseRate"
+        ]
+      },
+      {
+        "description": "Instructor identifier (used for clustering standard errors by instructor).",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "InstructorID"
+        ]
+      }
+    ]
+  },
+  "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw dataset (feature1...feature13) into a cleaned dataframe with\n    columns used by the statistical model.\n\n    Produced columns (exact names used by model):\n      - RowID, Minority, Age, Gender, SingleCourse, Beauty, EvalScore,\n        CourseLevel, NativeEnglish, TenureTrack, NumRespondents, Enrolled, InstructorID,\n        ResponseRate, Beauty_z\n    \"\"\"\n    df = df.copy()\n\n    # Rename columns to meaningful names used downstream\n    rename_map = {\n        'feature1': 'RowID',\n        'feature2': 'Minority',\n        'feature3': 'Age',\n        'feature4': 'Gender',\n        'feature5': 'SingleCourse',\n        'feature6': 'Beauty',\n        'feature7': 'EvalScore',\n        'feature8': 'CourseLevel',\n        'feature9': 'NativeEnglish',\n        'feature10': 'TenureTrack',\n        'feature11': 'NumRespondents',\n        'feature12': 'Enrolled',\n        'feature13': 'InstructorID'\n    }\n    df = df.rename(columns=rename_map)\n\n    # Ensure numeric columns are numeric and coerce bad values to NaN\n    numeric_cols = ['Beauty', 'EvalScore', 'Age', 'NumRespondents', 'Enrolled', 'InstructorID']\n    for c in numeric_cols:\n        if c in df.columns:\n            df[c] = pd.to_numeric(df[c], errors='coerce')\n\n    # Drop rows that cannot inform the main relationship (missing DV or main IV)\n    df = df.dropna(subset=['EvalScore', 'Beauty']).reset_index(drop=True)\n\n    # Standardize / normalize categorical text fields and coerce consistent labels\n    if 'Gender' in df.columns:\n        df['Gender'] = df['Gender'].astype(str).str.strip().str.lower().replace({\n            'male': 'Male', 'female': 'Female'\n        })\n    if 'Minority' in df.columns:\n        df['Minority'] = df['Minority'].astype(str).str.strip().str.lower().replace({\n            'yes': 'Yes', 'no': 'No'\n        })\n    if 'CourseLevel' in df.columns:\n        df['CourseLevel'] = df['CourseLevel'].astype(str).str.strip().str.lower().replace({\n            'lower': 'Lower', 'upper': 'Upper'\n        })\n    if 'NativeEnglish' in df.columns:\n        df['NativeEnglish'] = df['NativeEnglish'].astype(str).str.strip().str.lower().replace({\n            'yes': 'Yes', 'no': 'No'\n        })\n    if 'TenureTrack' in df.columns:\n        df['TenureTrack'] = df['TenureTrack'].astype(str).str.strip().str.lower().replace({\n            'yes': 'Yes', 'no': 'No'\n        })\n    # feature5 had values like 'single' or 'more' in the schema; normalize to Yes/No for single-credit\n    if 'SingleCourse' in df.columns:\n        df['SingleCourse'] = df['SingleCourse'].astype(str).str.strip().str.lower().replace({\n            'single': 'Yes', 'yes': 'Yes', 'more': 'No', 'no': 'No'\n        })\n\n    # Construct response rate (safely) and clip to [0,1]\n    df['ResponseRate'] = pd.to_numeric(df['NumRespondents'], errors='coerce') / pd.to_numeric(df['Enrolled'], errors='coerce')\n    df['ResponseRate'] = df['ResponseRate'].fillna(0.0).clip(lower=0.0, upper=1.0)\n\n    # Standardize the Beauty measure to a z-score (use population std to be explicit)\n    beauty_mean = df['Beauty'].mean()\n    beauty_std = df['Beauty'].std(ddof=0)\n    # guard against zero std\n    if beauty_std == 0 or np.isnan(beauty_std):\n        df['Beauty_z'] = 0.0\n    else:\n        df['Beauty_z'] = (df['Beauty'] - beauty_mean) / beauty_std\n\n    # Final housekeeping: ensure categorical dtypes where appropriate\n    for cat in ['Gender', 'Minority', 'CourseLevel', 'NativeEnglish', 'TenureTrack', 'SingleCourse']:\n        if cat in df.columns:\n            df[cat] = df[cat].astype('category')\n\n    return df\n",
+  "m_code": "def model(df: pd.DataFrame):\n    \"\"\"\n    Fits an OLS regression of EvalScore on standardized Beauty and a set of controls.\n\n    The model uses cluster-robust standard errors clustered by InstructorID to account for\n    non-independence of observations from the same instructor.\n\n    Formula used:\n      EvalScore ~ Beauty_z + Age + C(Gender) + C(Minority) + C(CourseLevel) +\n                  C(NativeEnglish) + C(TenureTrack) + C(SingleCourse) +\n                  NumRespondents + Enrolled + ResponseRate\n\n    Returns the fitted regression results object (statsmodels RegressionResultsWrapper).\n    \"\"\"\n    # local import for formula API\n    import statsmodels.formula.api as smf\n\n    # Make a defensive copy\n    df_model = df.copy()\n\n    # Build formula. C(...) instructs statsmodels to treat those as categorical.\n    formula = (\n        'EvalScore ~ Beauty_z + Age + '\n        'C(Gender) + C(Minority) + C(CourseLevel) + '\n        'C(NativeEnglish) + C(TenureTrack) + C(SingleCourse) + '\n        'NumRespondents + Enrolled + ResponseRate'\n    )\n\n    # Fit OLS with clustering of standard errors by InstructorID\n    ols_mod = smf.ols(formula=formula, data=df_model)\n\n    # If InstructorID contains missing or non-integer values, ensure groups are defined\n    groups = df_model['InstructorID'] if 'InstructorID' in df_model.columns else None\n\n    # Fit model and use cluster-robust SEs when InstructorID is available\n    if groups is not None:\n        results = ols_mod.fit(cov_type='cluster', cov_kwds={'groups': groups})\n    else:\n        results = ols_mod.fit()\n\n    # Return the fitted results object (caller can inspect .summary(), .params, etc.)\n    return results\n"
+}
+===================[TOKENS]=====================
+Number of prompt tokens: 5141
+Number of total tokens: 9327

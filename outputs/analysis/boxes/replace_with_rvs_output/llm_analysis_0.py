@@ -1,168 +1,128 @@
-from typing import Any
+from typing import Dict, FrozenSet, List, Literal, Optional, Set, Tuple, Any
 import numpy as np
 import pandas as pd
+import sklearn
+import scipy
 import statsmodels.api as sm
 import statsmodels.formula.api as smf
-from statsmodels.stats.sandwich_covariance import cov_cluster
-import scipy.stats as stats
-
+import matplotlib.pyplot as plt
+import pickle
+  
 df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/analysis/boxes/replace_with_rvs_output/boxes.csv')
 
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Transform the raw dataset into a dataframe ready for modeling.
+    Transform the raw dataset into a dataframe suitable for modeling.
 
-    Produces the following new columns used in the model:
-      - MajorityChosen : int (1 if y==2 [majority], else 0)
-      - gender_male    : int (1 if gender==2 (boy), 0 if gender==1 (girl))
-      - age_c          : centered age (age - mean(age))
-      - age_c2         : squared centered age
-      - majority_first : integer (kept from input, ensures 0/1)
-      - culture        : integer site identifier (kept as int for categorical coding in model)
-
-    Drops rows with missing values on required columns.
+    Outputs (columns created/kept):
+      - Choice: integer copy of original y (1=unchosen,2=majority,3=minority)
+      - Choice_code: zero-based code (0,1,2) for statsmodels MNLogit
+      - MajorityChoice: binary indicator 1 if child chose majority (y==2)
+      - IsBoy: binary gender indicator (1 if gender==2 (boy), 0 if gender==1 (girl))
+      - age_c: centered age
+      - age_c2: squared centered age
+      - AgeGroup: binned age group for descriptive work ('4-6','7-9','10-14')
+      - culture_2..culture_8: dummy variables for cultures 2..8 (culture_1 is baseline)
+      - age_c:culture_#: interaction terms between centered age and each culture dummy
+      - majority_first: cast to int
     """
-    # work on a copy
     df = df.copy()
 
-    # Required columns
-    req_cols = ['y', 'age', 'gender', 'majority_first', 'culture']
-    # Drop rows missing any required variable
-    df = df.dropna(subset=req_cols)
+    # Drop rows with missing critical variables
+    df = df.dropna(subset=['y', 'age', 'culture', 'gender', 'majority_first'])
 
-    # Dependent variable: majority chosen (y==2 means majority option)
-    df['MajorityChosen'] = (df['y'] == 2).astype(int)
+    # Dependent variables
+    df['Choice'] = df['y'].astype(int)
+    # zero-based code for MNLogit (0,1,2)
+    df['Choice_code'] = df['Choice'] - 1
+    # binary outcome: did the child pick the majority demonstration?
+    df['MajorityChoice'] = (df['y'] == 2).astype(int)
 
-    # Gender encoding: input uses 1=girl, 2=boy -> create gender_male as 1 for boy
-    df['gender_male'] = df['gender'].map({1: 0, 2: 1})
-    # If any unexpected values remain (not 1 or 2), coerce to NaN and drop
-    if df['gender_male'].isnull().any():
-        df = df.dropna(subset=['gender_male'])
-    df['gender_male'] = df['gender_male'].astype(int)
+    # Controls
+    # gender: original coding 1=girl, 2=boy -> IsBoy binary
+    df['IsBoy'] = (df['gender'].astype(int) == 2).astype(int)
+
+    # Center age and add quadratic term for potential nonlinearity
+    df['age'] = df['age'].astype(float)
+    df['age_c'] = df['age'] - df['age'].mean()
+    df['age_c2'] = df['age_c'] ** 2
+
+    # Age group for descriptive checks (not required for the main models but useful)
+    bins = [3.5, 6.5, 9.5, 14.5]
+    labels = ['4-6', '7-9', '10-14']
+    df['AgeGroup'] = pd.cut(df['age'], bins=bins, labels=labels, right=True)
+
+    # Culture dummies: create explicit dummy columns for culture_2..culture_8 (culture_1 = baseline)
+    # This ensures consistent column names even if some cultures are absent in a particular subset.
+    culture_vals = df['culture'].astype(int)
+    culture_dummies = pd.get_dummies(culture_vals, prefix='culture')
+
+    desired_cult_cols = [f'culture_{i}' for i in range(2, 9)]
+    # Add any missing dummy columns with zeros so subsequent code can always refer to these names
+    for c in desired_cult_cols:
+        if c not in culture_dummies.columns:
+            culture_dummies[c] = 0
+    # Keep only the desired columns (2..8). If some cultures weren't present, those columns are zeros.
+    culture_df = culture_dummies.reindex(columns=desired_cult_cols, fill_value=0)
+    df = pd.concat([df.reset_index(drop=True), culture_df.reset_index(drop=True)], axis=1)
+
+    # Interaction terms: age_c multiplied by each culture dummy
+    for c in desired_cult_cols:
+        df[f'age_c:{c}'] = df['age_c'] * df[c]
 
     # Ensure majority_first is integer 0/1
     df['majority_first'] = df['majority_first'].astype(int)
 
-    # Culture as integer categorical indicator
-    df['culture'] = df['culture'].astype(int)
-
-    # Center age and add quadratic term to capture nonlinear development
-    df['age_c'] = df['age'] - df['age'].mean()
-    df['age_c2'] = df['age_c'] ** 2
-
-    # Final check: drop any rows with NA in columns we will use in modeling
-    model_cols = ['MajorityChosen', 'age_c', 'age_c2', 'culture', 'gender_male', 'majority_first']
-    df = df.dropna(subset=model_cols)
-
-    # Return transformed dataframe with all columns needed for modeling
     return df
 
 
 # ======== MODEL CODE ========
-def model(df: pd.DataFrame) -> Any:
+def model(df: pd.DataFrame) -> dict:
     """
-    Fit a logistic regression predicting the probability that a child chooses the majority option.
+    Run two complementary models to answer the research question:
+      1) A multinomial logistic regression predicting Choice (unchosen / majority / minority) from age, culture, their interaction, and controls.
+      2) A binary logistic regression predicting whether the child chose the majority option (MajorityChoice) with the same predictors. This gives a focused test of majority preference.
 
-    Model specification (primary):
-      MajorityChosen ~ age_c * C(culture) + age_c2 + gender_male + majority_first
-
-    - age_c * C(culture) tests whether age-related change in majority reliance differs across cultures (interaction).
-    - age_c2 captures potential nonlinearity in the age effect.
-    - gender_male and majority_first are included as control variables.
-
-    Because observations are clustered by culture/site, cluster-robust standard errors (cluster = culture)
-    are estimated.
-
-    Returns a results-like object that exposes params, bse, pvalues, conf_int, cov (cluster-robust covariance),
-    and a summary() method.
+    Returns a dictionary containing the fitted statsmodels results objects for both models.
     """
-    # Work on a copy to avoid modifying the input
-    df = df.copy()
+    # Ensure we operate on a copy
+    data = df.copy()
 
-    # Define formula: include culture as categorical factor and interact with centered age
-    formula = 'MajorityChosen ~ age_c * C(culture) + age_c2 + gender_male + majority_first'
+    # Define the exogenous columns to include. Only keep those that exist in data (robust to missing cultures).
+    main_cols = ['age_c', 'age_c2', 'IsBoy', 'majority_first']
+    culture_cols = [f'culture_{i}' for i in range(2, 9)]
+    interaction_cols = [f'age_c:culture_{i}' for i in range(2, 9)]
 
-    # Fit a standard logistic regression (maximum likelihood)
-    logit_model = smf.logit(formula=formula, data=df)
-    fitted = logit_model.fit(disp=False)
+    exog_cols = main_cols + culture_cols + interaction_cols
+    exog_cols = [c for c in exog_cols if c in data.columns]
 
-    # Obtain cluster-robust covariance (clusters = culture) using statsmodels utility
-    cluster_groups = df['culture'].astype(int).values
-    # cov_cluster accepts the fitted results object and a group vector
-    cluster_cov = cov_cluster(fitted, cluster_groups)
+    # Prepare X and add intercept
+    X = data[exog_cols]
+    X = sm.add_constant(X, has_constant='add')
 
-    # Compute robust standard errors, z-stats, p-values, and confidence intervals
-    params = fitted.params
-    bse = np.sqrt(np.diag(cluster_cov))
-    # Protect against zero or negative variances (shouldn't happen, but guard)
-    bse = np.where(bse == 0, np.nan, bse)
-    z_stats = params / bse
-    pvalues = 2 * (1 - stats.norm.cdf(np.abs(z_stats)))
+    results = {}
 
-    def conf_int(alpha=0.05):
-        crit = stats.norm.ppf(1 - alpha / 2)
-        lower = params - crit * bse
-        upper = params + crit * bse
-        return np.column_stack((lower, upper))
+    # 1) Multinomial logistic regression: Choice_code should be 0,1,2
+    if 'Choice_code' not in data.columns:
+        raise ValueError("Choice_code column not found in dataframe. Run transform() first.")
 
-    # Create a simple results-like wrapper to hold cluster-robust inference
-    class ClusterRobustResults:
-        def __init__(self, orig, cov, params, bse, pvalues, conf_int_func):
-            self._orig = orig
-            self.cov = cov
-            self.params = params
-            self.bse = bse
-            self.pvalues = pvalues
-            self._conf_int_func = conf_int_func
-            # expose some original attributes for compatibility
-            self.model = getattr(orig, 'model', None)
-            self.df_model = getattr(orig, 'df_model', None)
-            self.df_resid = getattr(orig, 'df_resid', None)
+    endog = data['Choice_code']
+    # Fit MNLogit (note: statsmodels' MNLogit uses a reference category implicitly)
+    mnlogit_model = sm.MNLogit(endog, X)
+    mnlogit_res = mnlogit_model.fit(method='newton', maxiter=100, disp=False)
+    results['mnlogit'] = mnlogit_res
 
-        def cov_params(self):
-            return self.cov
+    # 2) Binary logistic regression for choosing the majority option
+    if 'MajorityChoice' not in data.columns:
+        raise ValueError("MajorityChoice column not found in dataframe. Run transform() first.")
 
-        def conf_int(self, alpha=0.05):
-            return self._conf_int_func(alpha)
+    y_bin = data['MajorityChoice']
+    logit_model = sm.Logit(y_bin, X)
+    logit_res = logit_model.fit(disp=False)
+    results['logit_majority'] = logit_res
 
-        def summary(self):
-            """
-            Attempt to return the original summary; if that is not informative about cluster-robust SEs,
-            provide a concise table using cluster-robust estimates.
-            """
-            try:
-                # try to display the original summary (may not reflect cluster-robust SEs)
-                orig_summary = self._orig.summary()
-            except Exception:
-                orig_summary = None
-
-            # Build a concise DataFrame with cluster-robust stats
-            try:
-                import pandas as _pd
-                ci = self.conf_int()
-                table = _pd.DataFrame({
-                    'coef': self.params,
-                    'std err (cluster)': self.bse,
-                    'z': self.params / self.bse,
-                    'P>|z|': self.pvalues,
-                    '[0.025': ci[:, 0],
-                    '0.975]': ci[:, 1]
-                })
-                if orig_summary is not None:
-                    return orig_summary
-                return table
-            except Exception:
-                # As a final fallback, return a string
-                return f'params:\n{self.params}\n\nbse (cluster):\n{self.bse}\n\npvalues:\n{self.pvalues}'
-
-    results = ClusterRobustResults(fitted, cluster_cov, params, bse, pvalues, conf_int)
-
-    # Print a brief summary (caller can inspect returned results as well)
-    try:
-        print(results.summary())
-    except Exception:
-        # In some runtime contexts printing the summary may fail; ignore silently
-        pass
-
+    # Return fitted model objects (caller can call .summary() on each)
     return results
+
+

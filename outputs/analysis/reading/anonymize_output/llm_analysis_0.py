@@ -1,194 +1,174 @@
-from typing import Any
+from typing import Dict, FrozenSet, List, Literal, Optional, Set, Tuple, Any
 import numpy as np
 import pandas as pd
+import sklearn
+import scipy
 import statsmodels.api as sm
 import statsmodels.formula.api as smf
-from types import SimpleNamespace
+import matplotlib.pyplot as plt
+import pickle
+  
+df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/analysis/reading/anonymize_output/reading.csv')
 
-
+# ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
-    # Make a copy to avoid modifying original
+    """
+    Transform the raw dataset into an analysis-ready dataframe.
+
+    Output columns (kept/created):
+      - RecordID: original record identifier from feature1
+      - PageID: page identifier from feature2 (categorical)
+      - ReaderView: binary indicator (0/1) from feature3
+      - ReadingTime_ms: reading time excluding scrolling (feature5)
+      - ReadingTime_s: reading time in seconds
+      - WordsCount: number of words on page (feature7)
+      - ReadingSpeed_wps: words per second (WordsCount / ReadingTime_s)
+      - ReadingSpeed_wps_wins: winsorized ReadingSpeed_wps at 1st and 99th pct
+      - LogReadingSpeed: log(ReadingSpeed_wps_wins)
+      - Dyslexia: binary dyslexia indicator (feature17 where available, fallback to feature12 mapping)
+      - Age, Device, Retake, ComprehensionRate, NativeEnglish, FleschKincaid
+    """
     df = df.copy()
 
-    # Rename known raw feature columns to canonical intermediate names when present
+    # Rename relevant columns for clarity
     rename_map = {
-        'feature1': 'ParticipantID',
+        'feature1': 'RecordID',
         'feature2': 'PageID',
         'feature3': 'ReaderView_raw',
-        'feature4': 'TotalTime_ms',
-        'feature5': 'ReadTime_ms',
+        'feature4': 'TimeOnPage_ms',
+        'feature5': 'ReadingTime_ms',
         'feature6': 'ScrollTime_ms',
-        'feature7': 'Words',
+        'feature7': 'WordsCount',
         'feature8': 'ComprehensionRate',
         'feature9': 'ImageWidth',
         'feature10': 'Age',
         'feature11': 'Device',
-        'feature12': 'Dyslexia_multiclass',
+        'feature12': 'DyslexiaMulti',
         'feature13': 'Education',
-        'feature14': 'Gender_raw',
+        'feature14': 'Gender',
         'feature15': 'Language',
         'feature16': 'Retake',
         'feature17': 'Dyslexia',
-        'feature18': 'NativeEnglish_raw',
-        'feature19': 'Readability',
+        'feature18': 'NativeEnglish',
+        'feature19': 'FleschKincaid',
         'feature20': 'feature20'
     }
-    # Only keys that exist will be renamed; pandas.rename ignores absent keys
-    df = df.rename(columns=rename_map)
+    df.rename(columns=rename_map, inplace=True)
 
-    # Helper to get a Series from the dataframe using several candidate column names.
-    # Returns a Series of NaNs (length matches df) if none found.
-    def get_series(*candidates):
-        for c in candidates:
-            if c in df.columns:
-                return df[c]
-        return pd.Series([np.nan] * len(df), index=df.index)
+    # ReaderView: ensure binary 0/1
+    df['ReaderView'] = pd.to_numeric(df.get('ReaderView_raw', 0), errors='coerce').fillna(0).astype(int)
 
-    # Ensure all intermediate raw columns exist (create from alternatives or as NaN)
-    df['ReaderView_raw'] = get_series('ReaderView_raw', 'ReaderView')
-    df['ReadTime_ms'] = get_series('ReadTime_ms', 'ReadTime', 'feature4')
-    df['Words'] = get_series('Words', 'words', 'feature7')
-    df['Dyslexia'] = get_series('Dyslexia', 'feature17', 'Dyslexia_multiclass')
-    df['Age'] = get_series('Age', 'feature10')
-    df['Device'] = get_series('Device', 'feature11')
-    df['Education'] = get_series('Education', 'feature13')
-    df['Gender_raw'] = get_series('Gender_raw', 'feature14', 'Gender')
-    df['NativeEnglish_raw'] = get_series('NativeEnglish_raw', 'feature18', 'NativeEnglish')
-    df['Retake'] = get_series('Retake', 'feature16')
-    df['Readability'] = get_series('Readability', 'feature19')
-    # Ensure ParticipantID exists and is string; fill missing with 'unknown'
-    pid_series = get_series('ParticipantID', 'feature1')
-    pid_series = pid_series.fillna('unknown').astype(str)
-    df['ParticipantID'] = pid_series
+    # Ensure ReadingTime_ms exists and is numeric; drop nonpositive times
+    df['ReadingTime_ms'] = pd.to_numeric(df.get('ReadingTime_ms', np.nan), errors='coerce')
+    df = df[df['ReadingTime_ms'].notnull()]
+    df = df[df['ReadingTime_ms'] > 0]
 
-    # Keep only rows with at least some of the core raw variables present.
-    # Avoid KeyError by intersecting with existing columns.
-    required_raw = ['ReaderView_raw', 'ReadTime_ms', 'Words', 'Dyslexia', 'Age']
-    present_required_raw = [c for c in required_raw if c in df.columns]
-    if present_required_raw:
-        df = df.dropna(subset=present_required_raw)
+    # WordsCount numeric
+    df['WordsCount'] = pd.to_numeric(df.get('WordsCount', np.nan), errors='coerce')
+    df = df[df['WordsCount'].notnull()]
 
-    # Process ReaderView and Dyslexia as binary ints (0/1)
-    # Coerce non-numeric encodings sensibly
-    df['ReaderView'] = pd.to_numeric(df['ReaderView_raw'], errors='coerce').fillna(0).astype(int)
-    df['Dyslexia'] = pd.to_numeric(df['Dyslexia'], errors='coerce').fillna(0).astype(int)
+    # Compute reading time in seconds and words per second
+    df['ReadingTime_s'] = df['ReadingTime_ms'] / 1000.0
+    df['ReadingSpeed_wps'] = df['WordsCount'] / df['ReadingTime_s']
 
-    # ReadTime_ms: numeric and enforce a minimum floor to avoid division by zero
-    df['ReadTime_ms'] = pd.to_numeric(df['ReadTime_ms'], errors='coerce')
-    df = df.dropna(subset=['ReadTime_ms'])
-    if not df.empty:
-        df.loc[df['ReadTime_ms'] < 50, 'ReadTime_ms'] = 50.0  # floor at 50 ms
+    # Remove rows with non-finite speeds
+    df = df[np.isfinite(df['ReadingSpeed_wps'])]
 
-    # Words numeric and positive
-    df['Words'] = pd.to_numeric(df['Words'], errors='coerce')
-    df = df.dropna(subset=['Words'])
-    if not df.empty:
-        df = df[df['Words'] > 0]
+    # Winsorize ReadingSpeed at 1st and 99th percentiles to reduce influence of extreme outliers
+    lower = df['ReadingSpeed_wps'].quantile(0.01)
+    upper = df['ReadingSpeed_wps'].quantile(0.99)
+    df['ReadingSpeed_wps_wins'] = df['ReadingSpeed_wps'].clip(lower=lower, upper=upper)
 
-    # Compute Words Per Minute (WPM) from words and ReadTime_ms
-    # ReadTime_ms is milliseconds -> seconds = ReadTime_ms / 1000
-    # WPM = (words / seconds) * 60
-    if not df.empty:
-        df['ReadingSpeed_wpm'] = df['Words'] / (df['ReadTime_ms'] / 1000.0) * 60.0
+    # Log-transform the winsorized speed for modeling
+    # Add a small constant guard (should not be needed because speed>0) but keep for numerical safety
+    df['LogReadingSpeed'] = np.log(df['ReadingSpeed_wps_wins'] + 1e-9)
+
+    # Dyslexia: prefer binary feature17; if missing, infer from feature12 (DyslexiaMulti: 0/1/2)
+    if 'Dyslexia' in df.columns:
+        df['Dyslexia'] = pd.to_numeric(df['Dyslexia'], errors='coerce')
     else:
-        df['ReadingSpeed_wpm'] = pd.Series(dtype=float)
+        df['Dyslexia'] = np.nan
+    if 'DyslexiaMulti' in df.columns:
+        df['DyslexiaMulti'] = pd.to_numeric(df['DyslexiaMulti'], errors='coerce')
+    # Where Dyslexia is missing, map DyslexiaMulti>0 to 1 (1 or 2 means some dyslexia)
+    df['Dyslexia'] = df['Dyslexia'].fillna(df['DyslexiaMulti'].apply(lambda x: 1 if pd.notnull(x) and x in [1, 2] else np.nan))
+    # Final binary cast (drop rows where dyslexia info missing)
+    df = df[df['Dyslexia'].notnull()]
+    df['Dyslexia'] = df['Dyslexia'].astype(int)
 
-    # Remove extreme outliers in ReadingSpeed_wpm
-    if 'ReadingSpeed_wpm' in df.columns and not df['ReadingSpeed_wpm'].empty:
-        df = df[(df['ReadingSpeed_wpm'] > 1) & (df['ReadingSpeed_wpm'] < 2000)]
+    # Other controls
+    df['Age'] = pd.to_numeric(df.get('Age', np.nan), errors='coerce')
+    df['Retake'] = pd.to_numeric(df.get('Retake', 0), errors='coerce').fillna(0).astype(int)
+    df['ComprehensionRate'] = pd.to_numeric(df.get('ComprehensionRate', np.nan), errors='coerce')
+    df['FleschKincaid'] = pd.to_numeric(df.get('FleschKincaid', df.get('FleschKincaid', np.nan)), errors='coerce')
 
-    # Log-transform reading speed (natural log)
-    # Ensure positive values before log
-    if 'ReadingSpeed_wpm' in df.columns and not df['ReadingSpeed_wpm'].empty:
-        df['log_ReadingSpeed'] = np.log(df['ReadingSpeed_wpm'].astype(float))
+    # NativeEnglish: convert 'Y'/'N' to 1/0 if necessary
+    if 'NativeEnglish' in df.columns:
+        df['NativeEnglish'] = df['NativeEnglish'].replace({'Y': 1, 'N': 0})
+        # If still non-numeric, coerce
+        df['NativeEnglish'] = pd.to_numeric(df['NativeEnglish'], errors='coerce')
     else:
-        df['log_ReadingSpeed'] = pd.Series([np.nan] * len(df), index=df.index)
+        df['NativeEnglish'] = np.nan
 
-    # Age numeric
-    df['Age'] = pd.to_numeric(df['Age'], errors='coerce')
+    # Device and PageID ensure categorical
+    if 'Device' in df.columns:
+        df['Device'] = df['Device'].astype('category')
+    if 'PageID' in df.columns:
+        df['PageID'] = df['PageID'].astype('category')
 
-    # Device, Education as categorical-like strings
-    # Fill missing with 'unknown' before astype(str)
-    df['Device'] = df['Device'].fillna('unknown').astype(str)
-    df['Education'] = df['Education'].fillna('unknown').astype(str)
+    # Drop rows with missing values in key model columns
+    required_cols = ['LogReadingSpeed', 'ReaderView', 'Dyslexia', 'ComprehensionRate', 'WordsCount']
+    df = df.dropna(subset=required_cols)
 
-    # Gender: convert to string categories, fill missing first
-    df['Gender'] = df['Gender_raw'].fillna('unknown').astype(str)
-
-    # NativeEnglish: map 'Y'/'N' to 1/0, fall back to numeric coercion otherwise
-    native_map = {'Y': 1, 'N': 0, 'y': 1, 'n': 0, 'Yes': 1, 'No': 0}
-    df['NativeEnglish'] = df['NativeEnglish_raw'].map(native_map)
-    # If mapping gives NaN, try numeric coercion or treat missing as 0
-    df['NativeEnglish'] = pd.to_numeric(df['NativeEnglish'], errors='coerce').fillna(
-        pd.to_numeric(df['NativeEnglish_raw'], errors='coerce')
-    ).fillna(0).astype(int)
-
-    # Retake numeric 0/1
-    df['Retake'] = pd.to_numeric(df['Retake'], errors='coerce').fillna(0).astype(int)
-
-    # Readability numeric
-    df['Readability'] = pd.to_numeric(df['Readability'], errors='coerce')
-
-    # ParticipantID ensure string and no missing
-    df['ParticipantID'] = df['ParticipantID'].fillna('unknown').astype(str)
-
-    # Final filtering: ensure the model-required columns are present and non-missing
-    model_cols = [
-        'log_ReadingSpeed', 'ReaderView', 'Dyslexia', 'Age', 'Device',
-        'Education', 'Gender', 'NativeEnglish', 'Retake', 'Readability', 'ParticipantID'
+    # Keep only the columns needed for modeling and a few diagnostics
+    keep_cols = [
+        'RecordID', 'PageID', 'ReaderView', 'ReadingTime_ms', 'ReadingTime_s', 'WordsCount',
+        'ReadingSpeed_wps', 'ReadingSpeed_wps_wins', 'LogReadingSpeed', 'Dyslexia', 'Age', 'Device',
+        'Retake', 'ComprehensionRate', 'NativeEnglish', 'FleschKincaid'
     ]
-    # Only drop rows for columns that exist; this avoids KeyError if some optional pieces are absent.
-    present_model_cols = [c for c in model_cols if c in df.columns]
-    if present_model_cols:
-        df = df.dropna(subset=present_model_cols)
-
-    # Winsorize log_ReadingSpeed at 1st/99th percentiles if possible
-    if 'log_ReadingSpeed' in df.columns and not df['log_ReadingSpeed'].empty:
-        lower = df['log_ReadingSpeed'].quantile(0.01)
-        upper = df['log_ReadingSpeed'].quantile(0.99)
-        df['log_ReadingSpeed'] = df['log_ReadingSpeed'].clip(lower=lower, upper=upper)
-
-    # Keep only columns needed for modeling plus some diagnostics
-    keep_cols = model_cols + ['ReadingSpeed_wpm', 'Words', 'ReadTime_ms', 'PageID', 'TotalTime_ms', 'ScrollTime_ms', 'ComprehensionRate']
+    # Some columns may not exist in the original; select those that do
     keep_cols = [c for c in keep_cols if c in df.columns]
+    df = df[keep_cols]
 
-    return df[keep_cols]
+    # Reset index before returning
+    df = df.reset_index(drop=True)
+    return df
 
 
-def model(df: pd.DataFrame) -> Any:
-    # Formula: main effect of ReaderView, moderator Dyslexia (interaction), plus covariates
+# ======== MODEL CODE ========
+def model(df: pd.DataFrame) -> any:
+    """
+    Fit an OLS model predicting log reading speed with ReaderView, Dyslexia (moderator), their interaction,
+    and control variables. Returns the fitted model object (statsmodels regression results).
+
+    Model specification:
+      LogReadingSpeed ~ ReaderView * Dyslexia + Age + Retake + ComprehensionRate + FleschKincaid + WordsCount
+                       + C(Device) + C(PageID) + NativeEnglish
+
+    Robust (HC3) standard errors are used to guard against heteroskedasticity.
+    """
+    import statsmodels.formula.api as smf
+    import statsmodels.api as sm
+
+    # Ensure categorical variables are of type 'category' for formula interface
+    if 'Device' in df.columns:
+        df['Device'] = df['Device'].astype('category')
+    if 'PageID' in df.columns:
+        df['PageID'] = df['PageID'].astype('category')
+    if 'NativeEnglish' in df.columns:
+        # If native english is not binary, coerce to numeric
+        df['NativeEnglish'] = pd.to_numeric(df['NativeEnglish'], errors='coerce')
+
+    # Build formula. Use C(...) to treat Device and PageID as categorical fixed effects.
     formula = (
-        'log_ReadingSpeed ~ ReaderView * Dyslexia + Age + C(Device) + C(Education) + C(Gender)'
-        ' + NativeEnglish + Retake + Readability'
+        'LogReadingSpeed ~ ReaderView * Dyslexia + Age + Retake + ComprehensionRate '
+        '+ FleschKincaid + WordsCount + C(Device) + C(PageID) + NativeEnglish'
     )
 
-    # If the dataframe is empty or lacks sufficient rows after removing rows with missing
-    # values in variables referenced by the model, return an empty/stub result rather than
-    # allowing patsy to fail with cryptic errors.
-    required_for_model = [
-        'log_ReadingSpeed', 'ReaderView', 'Dyslexia', 'Age', 'Device',
-        'Education', 'Gender', 'NativeEnglish', 'Retake', 'Readability', 'ParticipantID'
-    ]
-    present_required = [c for c in required_for_model if c in df.columns]
-    if not present_required:
-        # Nothing to model on
-        return SimpleNamespace(params=pd.Series(dtype=float), bse=pd.Series(dtype=float),
-                               pvalues=pd.Series(dtype=float), rsquared=np.nan, nobs=0)
+    # Fit OLS with robust standard errors (HC3)
+    model_res = smf.ols(formula=formula, data=df).fit(cov_type='HC3')
 
-    # Drop rows with missing values in the required columns for modeling / clustering
-    df_model = df.dropna(subset=present_required)
-    # If no data remains, return an empty/stub result
-    if df_model.empty:
-        return SimpleNamespace(params=pd.Series(dtype=float), bse=pd.Series(dtype=float),
-                               pvalues=pd.Series(dtype=float), rsquared=np.nan, nobs=0)
+    # Return the fitted results object. The caller can inspect model_res.summary() or model_res.params, etc.
+    return model_res
 
-    # Fit OLS
-    ols_res = smf.ols(formula, data=df_model).fit()
 
-    # Attempt cluster-robust SEs by ParticipantID; fallback to HC3 if clustering fails
-    try:
-        clustered = ols_res.get_robustcov_results(cov_type='cluster', groups=df_model['ParticipantID'])
-    except Exception:
-        clustered = ols_res.get_robustcov_results(cov_type='HC3')
-
-    return clustered

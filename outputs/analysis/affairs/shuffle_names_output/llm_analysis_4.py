@@ -1,238 +1,194 @@
-from typing import Any
+from typing import Dict, FrozenSet, List, Literal, Optional, Set, Tuple, Any
 import numpy as np
 import pandas as pd
+import sklearn
+import scipy
 import statsmodels.api as sm
-
+import statsmodels.formula.api as smf
+import matplotlib.pyplot as plt
+import pickle
+  
 df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/analysis/affairs/shuffle_names_output/affairs.csv')
-
 
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Transform the raw Psychology Today / Fair dataset into a cleaned dataframe ready for modeling.
-
-    - Creates a binary HasChildren indicator from the 'age' column (which in this dataset encodes whether there are children in the marriage).
-    - Creates the dependent variable AffairFreq from the 'education' column (which here encodes extramarital frequency).
-    - Derives control variables from the columns that (due to schema misalignment) represent gender, age, years married, occupation, etc.
-    - Converts types, handles common string encodings, and ensures the final DataFrame contains the exact columns required by the model.
-
-    Returns the dataframe containing the exact columns referenced in the model.
-    """
-
+    # Work on a copy
     df = df.copy()
 
-    # Ensure source columns exist to avoid KeyErrors later; missing ones will be NaN
-    source_cols = ['age', 'education', 'children', 'rating', 'gender', 'occupation', 'religiousness', 'affairs', 'rownames']
-    for col in source_cols:
+    # --- 1) Create/clean dependent variable: affairs_count ---
+    # Coerce to numeric; typical coding in this dataset uses 0 for none and higher integers for more frequent affairs.
+    df['affairs_count'] = pd.to_numeric(df.get('affairs'), errors='coerce')
+
+    # --- 2) Independent variable: HasChildren ---
+    # There is ambiguity in schema; several columns may carry children/gender info. We try a robust inference.
+    def detect_has_children(row):
+        # priority 1: explicit column named 'children'
+        v = row.get('children', None)
+        if pd.notna(v):
+            if isinstance(v, str):
+                s = v.strip().lower()
+                if s in ('yes', 'y', '1', 'true', 't'):
+                    return 1
+                if s in ('no', 'n', '0', 'false', 'f'):
+                    return 0
+                # sometimes 'children' column is actually gender (male/female) in broken schema; skip
+            # numeric coded children indicator (0/1)
+            try:
+                iv = int(float(v))
+                if iv in (0, 1):
+                    return iv
+            except Exception:
+                pass
+        # priority 2: some versions have 'age' column as factor indicating children yes/no (per provided schema)
+        v2 = row.get('age', None)
+        if pd.notna(v2):
+            if isinstance(v2, str):
+                s = v2.strip().lower()
+                if s in ('yes', 'y'):
+                    return 1
+                if s in ('no', 'n'):
+                    return 0
+            try:
+                iv2 = int(float(v2))
+                if iv2 in (0, 1):
+                    return iv2
+            except Exception:
+                pass
+        # If nothing matched, return NaN (will be dropped later)
+        return np.nan
+
+    df['HasChildren'] = df.apply(detect_has_children, axis=1)
+
+    # --- 3) Controls: create/standardize columns ---
+    # Education
+    df['Education'] = pd.to_numeric(df.get('education'), errors='coerce')
+
+    # Religiousness
+    df['Religiousness'] = pd.to_numeric(df.get('religiousness'), errors='coerce')
+
+    # MarriageRating: 'rownames' in schema corresponded to self-rating of marriage
+    df['MarriageRating'] = pd.to_numeric(df.get('rownames'), errors='coerce')
+
+    # Age: many schemas use 'rating' to encode age bracket (17.5,...,57)
+    # We'll prefer 'rating' if it looks like ages (min>15), otherwise fallback to 'age' if numeric.
+    candidate_age = pd.to_numeric(df.get('rating'), errors='coerce')
+    if candidate_age.notna().sum() > 0 and candidate_age.min(skipna=True) >= 15:
+        df['Age'] = candidate_age
+    else:
+        df['Age'] = pd.to_numeric(df.get('age'), errors='coerce')
+
+    # YearsMarried: prefer explicit 'yearsmarried' column, otherwise try 'gender' if that looks numeric-coded for years married
+    df['YearsMarried'] = pd.to_numeric(df.get('yearsmarried'), errors='coerce')
+    if df['YearsMarried'].isna().sum() == len(df):
+        df['YearsMarried'] = pd.to_numeric(df.get('gender'), errors='coerce')
+
+    # Occupation
+    df['Occupation'] = pd.to_numeric(df.get('occupation'), errors='coerce')
+
+    # IsFemale: try to infer from any column that looks like gender strings or codes
+    def detect_female(row):
+        # check 'gender' column first (if textual)
+        g = row.get('gender', None)
+        if pd.notna(g):
+            if isinstance(g, str):
+                s = g.strip().lower()
+                if s in ('female', 'f', 'woman', 'woman '):
+                    return 1
+                if s in ('male', 'm', 'man'):
+                    return 0
+            # if numeric and clearly 1/2 codes appear (common coding: 1=male, 2=female or vice versa) handle heuristically
+            try:
+                gv = int(float(g))
+                if gv in (0, 1):
+                    # assume 1 = female if distribution/labels unknown (but better to check unique values)
+                    return gv
+                if gv in (1, 2):
+                    # guess 2->female (common), map 2->1
+                    return 1 if gv == 2 else 0
+            except Exception:
+                pass
+        # fallback: sometimes 'children' column was mislabelled and contains 'male'/'female'
+        c = row.get('children', None)
+        if isinstance(c, str):
+            s = c.strip().lower()
+            if s in ('female', 'f', 'woman'):
+                return 1
+            if s in ('male', 'm', 'man'):
+                return 0
+        return np.nan
+
+    df['IsFemale'] = df.apply(detect_female, axis=1)
+
+    # --- 4) Final cleaning ---
+    # Drop rows missing the core variables (affairs_count or HasChildren)
+    df = df.dropna(subset=['affairs_count', 'HasChildren'])
+
+    # Convert HasChildren and IsFemale to integer types where possible
+    df['HasChildren'] = df['HasChildren'].astype(int)
+    if df['IsFemale'].notna().any():
+        # where IsFemale is not null, cast to integer; else fill with mode or 0 if completely missing
+        if df['IsFemale'].isna().all():
+            df['IsFemale'] = 0
+        else:
+            # fill missing IsFemale with modal value to avoid dropping many rows (alternatively could drop)
+            df['IsFemale'] = df['IsFemale'].fillna(df['IsFemale'].mode().iloc[0]).astype(int)
+
+    # Rename any remaining columns used for interpretability are already set
+    # Keep only columns needed for modeling to make downstream modeling code simple
+    final_cols = ['affairs_count', 'HasChildren', 'Age', 'YearsMarried', 'Education',
+                  'Religiousness', 'MarriageRating', 'IsFemale', 'Occupation']
+    # If some of these columns do not exist, they'll be created with NaN and later handled by the model function
+    for col in final_cols:
         if col not in df.columns:
             df[col] = np.nan
 
-    # Dependent variable: extramarital frequency encoded in 'education' for this dataset
-    df['AffairFreq'] = pd.to_numeric(df['education'], errors='coerce')
-
-    # Independent variable: whether there are children in the marriage.
-    # The 'age' column (per provided schema) is actually the factor 'Are there children in the marriage?'
-    # Handle common string values and some possible capitalizations.
-    def map_has_children(x):
-        if pd.isna(x):
-            return np.nan
-        # If it's already numeric-like
-        if isinstance(x, (int, float, np.integer, np.floating)):
-            try:
-                xv = float(x)
-                if xv in (0.0, 1.0):
-                    return int(xv)
-                # Heuristic: treat positive values >0 as yes, 0 as no
-                if xv == 0.0:
-                    return 0
-                if xv > 0:
-                    return 1
-            except Exception:
-                return np.nan
-        # For strings, be permissive in parsing
-        if isinstance(x, str):
-            x_low = x.strip().lower()
-            # direct matches
-            if x_low in ['yes', 'y', '1', 'true', 't', 'have', 'has', 'children', 'child']:
-                return 1
-            if x_low in ['no', 'n', '0', 'false', 'f', 'none', 'no children', 'nochild']:
-                return 0
-            # check numeric tokens inside string
-            for token in x_low.replace(',', ' ').split():
-                if token.isdigit():
-                    try:
-                        tv = int(token)
-                        if tv in (0, 1):
-                            return tv
-                        if tv > 1:
-                            return 1
-                    except Exception:
-                        continue
-            # check presence of y/n characters as fallback
-            if 'yes' in x_low or (('y' in x_low) and ('no' not in x_low)):
-                return 1
-            if 'no' in x_low or 'n' in x_low:
-                return 0
-            return np.nan
-        return np.nan
-
-    df['HasChildren'] = df['age'].apply(map_has_children)
-
-    # Control: gender. In this dataset 'children' column actually contains gender strings ('male'/'female')
-    def map_is_male(x):
-        if pd.isna(x):
-            return np.nan
-        if isinstance(x, (int, float, np.integer, np.floating)):
-            try:
-                xv = float(x)
-                # Common encodings: 1 -> male, 2 -> female, 0 -> female/unknown
-                if xv == 1.0:
-                    return 1
-                if xv in (2.0, 0.0):
-                    return 0
-                # fallback: treat positive odd as male, even as female
-                if xv > 1:
-                    return int(xv) % 2
-                return 0
-            except Exception:
-                return np.nan
-        if isinstance(x, str):
-            xl = x.strip().lower()
-            if xl in ['male', 'm', 'man', 'boy']:
-                return 1
-            if xl in ['female', 'f', 'woman', 'girl']:
-                return 0
-            # check tokens
-            if 'male' in xl or ' man' in xl or xl.startswith('man'):
-                return 1
-            if 'female' in xl or ' woman' in xl or xl.startswith('woman'):
-                return 0
-            # numeric-like tokens
-            for token in xl.replace(',', ' ').split():
-                if token.isdigit():
-                    try:
-                        tv = int(token)
-                        if tv == 1:
-                            return 1
-                        if tv == 2:
-                            return 0
-                    except Exception:
-                        continue
-            return np.nan
-        return np.nan
-
-    df['IsMale'] = df['children'].apply(map_is_male)
-
-    # Controls: numeric conversions for other columns. Use provided columns but coerce errors to NaN.
-    df['AgeYears'] = pd.to_numeric(df['rating'], errors='coerce')
-    df['YearsMarried'] = pd.to_numeric(df['gender'], errors='coerce')
-    df['Occupation'] = pd.to_numeric(df['occupation'], errors='coerce')
-    df['Religiousness'] = pd.to_numeric(df['religiousness'], errors='coerce')
-    # The 'affairs' column in the provided schema appears to contain education coding (9-20).
-    df['EducationLevel'] = pd.to_numeric(df['affairs'], errors='coerce')
-    df['MarriageHappiness'] = pd.to_numeric(df['rownames'], errors='coerce')
-
-    # Keep only the exact columns required by the model (but do not drop rows here).
-    model_cols = ['AffairFreq', 'HasChildren', 'IsMale', 'AgeYears', 'Religiousness', 'YearsMarried', 'Occupation', 'EducationLevel', 'MarriageHappiness']
-
-    # Reindex to ensure all required columns are present in the final DataFrame (missing ones will be NaN)
-    df = df.reindex(columns=model_cols)
-
-    # Do not drop rows here; the model function will handle dropping or imputing observations as needed.
-    # Cast binary columns to nullable integer dtype so NA is preserved but values are integer-like.
-    # If mapping produced float-like 0.0/1.0, convert to integer where possible
-    try:
-        df['HasChildren'] = df['HasChildren'].astype('Int64')
-    except Exception:
-        df['HasChildren'] = pd.to_numeric(df['HasChildren'], errors='coerce').astype('Int64')
-    try:
-        df['IsMale'] = df['IsMale'].astype('Int64')
-    except Exception:
-        df['IsMale'] = pd.to_numeric(df['IsMale'], errors='coerce').astype('Int64')
-
-    return df
+    return df[final_cols]
 
 
 # ======== MODEL CODE ========
-def model(df: pd.DataFrame) -> Any:
-    """
-    Fit a linear regression model to estimate the relationship between having children and
-    extramarital affair frequency, controlling for observed covariates.
+def model(df: pd.DataFrame):
+    # This function assumes df is the transformed dataframe returned by transform().
+    import statsmodels.api as sm
+    from statsmodels.discrete.count_model import ZeroInflatedNegativeBinomialP
 
-    Returns the fitted statsmodels results object with robust (HC3) standard errors.
-    """
+    # Work on a copy
+    dfm = df.copy()
 
-    # Validate input contains required columns
-    required_cols = ['AffairFreq', 'HasChildren', 'IsMale', 'AgeYears', 'Religiousness', 'YearsMarried', 'Occupation', 'EducationLevel', 'MarriageHappiness']
-    missing = [c for c in required_cols if c not in df.columns]
-    if missing:
-        raise ValueError(f"Input DataFrame is missing required columns: {missing}")
+    # Drop rows with missing values in the variables used for modeling
+    model_vars = ['affairs_count', 'HasChildren', 'Age', 'YearsMarried', 'Education',
+                  'Religiousness', 'MarriageRating', 'IsFemale', 'Occupation']
+    dfm = dfm.dropna(subset=['affairs_count', 'HasChildren'])
 
-    if df.shape[0] == 0:
-        raise ValueError("Input DataFrame contains no rows. Check transform() output for dropped rows or mapping issues.")
-
-    # Prepare design matrix
-    X_cols = ['HasChildren', 'IsMale', 'AgeYears', 'Religiousness', 'YearsMarried', 'Occupation', 'EducationLevel', 'MarriageHappiness']
-    X = df[X_cols].copy()
-
-    # Ensure numeric dtypes for exog
-    for col in X.columns:
-        X[col] = pd.to_numeric(X[col], errors='coerce')
-
-    # Dependent variable
-    y = pd.to_numeric(df['AffairFreq'], errors='coerce')
-
-    # Combine for row-wise operations
-    combined = pd.concat([y, X], axis=1)
-
-    # Require that the dependent variable and primary independent (HasChildren) are present.
-    # Drop rows missing the dependent variable or the primary independent variable.
-    combined = combined.dropna(subset=['AffairFreq', 'HasChildren'])
-
-    if combined.shape[0] == 0:
-        raise ValueError("No valid observations remain after requiring non-missing AffairFreq and HasChildren.")
-
-    # For remaining missing control values, perform simple, transparent imputation:
-    # - For binary controls (HasChildren, IsMale): fill with the column mode (most common value) if available, otherwise 0.
-    # - For numeric controls: fill with the column median if available, otherwise 0.
-    for col in X_cols:
-        if col not in combined.columns:
-            continue
-        if combined[col].isna().all():
-            # If entire column is missing, fill with 0 to allow the model to run.
-            combined[col] = combined[col].fillna(0)
-            continue
-
-        if col in ['HasChildren', 'IsMale']:
-            # Use mode if exists
-            try:
-                modes = combined[col].mode(dropna=True)
-                if not modes.empty:
-                    fill_val = int(modes.iloc[0])
+    # For control variables, we'll fill modest amounts of missing data with median (alternatively drop if many missing).
+    for v in ['Age', 'YearsMarried', 'Education', 'Religiousness', 'MarriageRating', 'IsFemale', 'Occupation']:
+        if v in dfm.columns:
+            if dfm[v].isna().sum() > 0:
+                # fill with median for numeric (IsFemale will be integer or modal)
+                if dfm[v].dtype.kind in 'biufc':
+                    dfm[v] = dfm[v].fillna(dfm[v].median())
                 else:
-                    fill_val = 0
-            except Exception:
-                fill_val = 0
-            combined[col] = combined[col].fillna(fill_val).astype(float)
-        else:
-            # Numeric control: fill with median
-            try:
-                med = combined[col].median(skipna=True)
-                if pd.isna(med):
-                    med = 0.0
-            except Exception:
-                med = 0.0
-            combined[col] = combined[col].fillna(med).astype(float)
+                    dfm[v] = dfm[v].fillna(dfm[v].mode().iloc[0])
 
-    # Final y and X
-    y = combined['AffairFreq'].astype(float)
-    X = combined[X_cols].astype(float)
+    # Define endogenous and exogenous variables
+    endog = dfm['affairs_count']
+    exog_vars = ['HasChildren', 'Age', 'YearsMarried', 'Education', 'Religiousness', 'MarriageRating', 'IsFemale', 'Occupation']
+    exog = sm.add_constant(dfm[exog_vars].astype(float))
 
-    # Add constant term
-    X = sm.add_constant(X, has_constant='add')
+    # Fit a Zero-Inflated Negative Binomial (ZINB) model to account for excess zeros and overdispersion
+    try:
+        zinb = ZeroInflatedNegativeBinomialP(endog, exog, exog_infl=exog, inflation='logit')
+        res = zinb.fit(disp=0, maxiter=100)
+    except Exception as e:
+        # If ZINB fails to converge or is unavailable, fallback to a simple Negative Binomial (NB)
+        try:
+            nb = sm.GLM(endog, exog, family=sm.families.NegativeBinomial())
+            res = nb.fit()
+        except Exception as e2:
+            # Final fallback: OLS on the raw outcome (not ideal for count data, but provides a baseline)
+            ols = sm.OLS(endog, exog)
+            res = ols.fit()
 
-    # Fit OLS with heteroskedasticity-robust SEs (HC3)
-    ols_model = sm.OLS(y, X)
-    results = ols_model.fit(cov_type='HC3')
+    # Return the fitted model result object. Caller can use res.summary() or inspect coefficients.
+    return res
 
-    return results
+

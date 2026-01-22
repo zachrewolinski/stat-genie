@@ -1,95 +1,115 @@
 def extract_final_answer(model_output):
     """
-    Extracts the statistics for the IsHuman predictor from a fitted statsmodels GLMResults-like object.
-
-    Returns a dictionary with:
-      - "object": dict with numeric results for the IsHuman coefficient (log-odds), SE, z/t, p-value,
-                  95% CI (log-odds), odds ratio and its 95% CI, and a boolean 'significant' (p < 0.05).
-      - "description": short textual interpretation of these statistics in the context of the task.
-
-    If the IsHuman parameter cannot be found in the model, the function returns an explanation.
+    Extracts statistics comparing Homo sapiens (reference) to non-human genera (Pan, Papio, Pongo)
+    from the provided model_output (expected to contain an 'odds_ratios' DataFrame or a fitted model).
+    
+    Returns:
+      {
+        "object": {
+          "per_genus": {
+             "Pan": {"coef": ..., "OR": ..., "CI": [low, high], "pvalue": ..., "significant": True/False},
+             "Papio": {...},
+             "Pongo": {...}
+          },
+          "humans_higher_amtl": True/False,   # True if all non-human genera have OR < 1 and p < 0.05
+          "notes": "reference = Homo sapiens; model adjusted for age_c, prob_male, tooth_class"
+        },
+        "description": "<text explanation>"
+      }
     """
-    import re
     import numpy as np
+    import pandas as pd
 
-    # Validate model_output has the attributes we need
-    required_attrs = ['params', 'bse', 'tvalues', 'pvalues', 'conf_int']
-    for attr in required_attrs:
-        if not hasattr(model_output, attr):
-            return {
-                "object": None,
-                "description": f"Input model_output does not have required attribute '{attr}'."
+    # Terms we expect in the odds_ratios table (Homo sapiens is the reference level)
+    genus_terms = {
+        "Pan": "C(genus)[T.Pan]",
+        "Papio": "C(genus)[T.Papio]",
+        "Pongo": "C(genus)[T.Pongo]"
+    }
+
+    # Try to get the precomputed odds_ratios table if present
+    or_table = None
+    if isinstance(model_output, dict) and 'odds_ratios' in model_output:
+        or_table = model_output['odds_ratios']
+    elif isinstance(model_output, dict) and 'model_fit' in model_output:
+        # Build a similar table from the fitted model if necessary
+        res = model_output['model_fit']
+        params = res.params
+        conf = res.conf_int()
+        pvals = res.pvalues
+        or_table = pd.DataFrame({
+            'coef': params,
+            'OR': np.exp(params),
+            'CI_lower': np.exp(conf[0]),
+            'CI_upper': np.exp(conf[1]),
+            'pvalue': pvals
+        })
+    else:
+        raise ValueError("model_output must be a dict containing 'odds_ratios' or 'model_fit'.")
+
+    # Ensure index is accessible (if term column exists convert to index)
+    if 'term' in or_table.columns:
+        or_table = or_table.set_index('term')
+
+    results_per_genus = {}
+    all_lower_and_sig = True
+
+    for common_name, term in genus_terms.items():
+        if term in or_table.index:
+            row = or_table.loc[term]
+            coef = float(row['coef'])
+            OR = float(row['OR'])
+            ci_low = float(row['CI_lower'])
+            ci_high = float(row['CI_upper'])
+            p = float(row['pvalue'])
+            significant = (p < 0.05)
+            results_per_genus[common_name] = {
+                'term': term,
+                'coef': coef,
+                'OR': OR,
+                'CI': [ci_low, ci_high],
+                'pvalue': p,
+                'significant': significant
             }
-
-    # Find the parameter name corresponding to IsHuman
-    param_names = list(model_output.params.index)
-    ishuman_candidates = [n for n in param_names if re.search(r'IsHuman', n)]
-    if len(ishuman_candidates) == 0:
-        return {
-            "object": None,
-            "description": "Could not find a parameter name containing 'IsHuman' in the model's parameters."
-        }
-    # choose the first matching parameter name
-    pname = ishuman_candidates[0]
-
-    # Extract statistics
-    try:
-        coef = float(model_output.params[pname])
-        se = float(model_output.bse[pname])
-        # statsmodels GLM uses .tvalues for z/t; also some versions provide .tvalues or .zvalues
-        # we'll try tvalues then fall back to zvalues if present
-        if hasattr(model_output, 'tvalues'):
-            stat = float(model_output.tvalues[pname])
-        elif hasattr(model_output, 'zvalues'):
-            stat = float(model_output.zvalues[pname])
+            if not (OR < 1 and significant):
+                all_lower_and_sig = False
         else:
-            stat = None
-        pval = float(model_output.pvalues[pname]) if pname in model_output.pvalues.index else None
+            # Term missing: record as NaNs and mark overall as inconclusive
+            results_per_genus[common_name] = {
+                'term': term,
+                'coef': np.nan,
+                'OR': np.nan,
+                'CI': [np.nan, np.nan],
+                'pvalue': np.nan,
+                'significant': False
+            }
+            all_lower_and_sig = False
 
-        ci_df = model_output.conf_int()
-        if pname in ci_df.index:
-            ci_low = float(ci_df.loc[pname, 0])
-            ci_high = float(ci_df.loc[pname, 1])
-        else:
-            ci_low, ci_high = None, None
-
-        # Odds ratio and CI on odds ratio scale
-        or_coef = float(np.exp(coef))
-        or_ci_low = float(np.exp(ci_low)) if ci_low is not None else None
-        or_ci_high = float(np.exp(ci_high)) if ci_high is not None else None
-
-        significant = (pval is not None) and (pval < 0.05)
-
-        result_obj = {
-            "predictor": pname,
-            "coef_log_odds": coef,
-            "se": se,
-            "z_or_t": stat,
-            "p_value": pval,
-            "ci_log_odds_95%": [ci_low, ci_high],
-            "odds_ratio": or_coef,
-            "ci_odds_ratio_95%": [or_ci_low, or_ci_high],
-            "significant_at_0.05": significant
-        }
-
-        # Build human-readable interpretation
-        direction = "higher" if coef > 0 else ("lower" if coef < 0 else "no difference")
-        p_sig_text = "statistically significant (p < 0.05)" if significant else "not statistically significant (p ≥ 0.05)"
-        description = (
-            f"Parameter '{pname}' estimates the difference in log-odds of antemortem tooth loss (AMTL) for modern humans "
-            f"relative to non-human primates, controlling for age, prob_male, and tooth_class. "
-            f"The estimated coefficient is {coef:.4f} (SE = {se:.4f}), z/t = {stat:.3f}, p = {pval:.4g}. "
-            f"The 95% CI for the log-odds is [{ci_low:.4f}, {ci_high:.4f}]. "
-            f"This corresponds to an odds ratio of {or_coef:.3f} with 95% CI [{or_ci_low:.3f}, {or_ci_high:.3f}]. "
-            f"Because the coefficient is {direction} and the result is {p_sig_text}, "
-            f"we {'have' if significant else 'do not have'} evidence that modern humans have {'higher' if coef>0 else 'lower' if coef<0 else 'different'} "
-            f"AMTL frequency compared to the non-human primate genera after accounting for the covariates."
+    # Build overall conclusion
+    if all_lower_and_sig:
+        conclusion_text = (
+            "Yes — after adjusting for age, sex (prob_male), and tooth class, Homo sapiens (the model reference) "
+            "have significantly higher AMTL odds than each non-human genus listed. "
+            "Each non-human genus shows OR < 1 (lower odds of AMTL relative to Homo) with p < 0.05."
+        )
+    else:
+        conclusion_text = (
+            "No / Inconclusive — not all comparisons show significantly lower odds in non-human genera, "
+            "so we cannot conclude that Homo sapiens have higher AMTL in all comparisons after adjustment."
         )
 
-        return {"object": result_obj, "description": description}
+    output_object = {
+        'per_genus': results_per_genus,
+        'humans_higher_amtl': bool(all_lower_and_sig),
+        'notes': "Reference category is Homo sapiens; model controls: age_c, prob_male, C(tooth_class)."
+    }
 
-    except Exception as e:
-        return {
-            "object": None,
-            "description": f"An error occurred while extracting statistics for parameter '{pname}': {e}"
-        }
+    description_lines = [
+        "Extracted coefficients, odds ratios (OR), 95% CIs, and p-values for comparisons of Pan, Papio, and Pongo",
+        "to the reference genus (Homo sapiens).",
+        f"Conclusion: {conclusion_text}",
+        "Detailed per-genus results are provided in the 'object' field under 'per_genus'."
+    ]
+    description = " ".join(description_lines)
+
+    return {"object": output_object, "description": description}

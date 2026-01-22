@@ -1,129 +1,175 @@
 def extract_final_answer(model_output):
     """
-    Extracts the effect of 'masfem_c' from the provided model_output dictionary
-    (expects keys 'nb_model' and 'ols_model' containing fitted statsmodels results).
-    Returns a dictionary with keys:
-      - "object": a dict containing coefficients, standard errors, p-values, 95% CIs,
-                  exponentiated effect (for NB), percent-change interpretation, and
-                  a boolean 'supports_hypothesis' flag for the primary NB model.
-      - "description": human-readable explanation of what the numbers mean.
+    Extracts coefficients, p-values, confidence intervals, and incidence-rate/percent-change
+    interpretations for the primary predictors related to femininity of hurricane names from the
+    provided model_output dict.
+
+    Expects model_output to be a dict with keys:
+      - 'nb_model_masfem_z' : statsmodels GLMResultsWrapper (NegativeBinomial) for alldeaths ~ masfem_z + controls
+      - 'ols_damage_masfem_z' : statsmodels RegressionResultsWrapper (OLS) for log_ndam15 ~ masfem_z + controls
+      - 'nb_model_female_binary' : statsmodels GLMResultsWrapper (NegativeBinomial) for alldeaths ~ FemaleName + controls
+
+    Returns a dict with:
+      - "object": dict of extracted numeric results
+      - "description": human-readable summary/interpretation of those results in the context of the hypothesis
     """
     import numpy as np
-    import pandas as pd
 
-    # Helper to safe-get attribute and raise informative error
-    def _get_result(model_output, key):
-        if key not in model_output:
-            raise KeyError(f"Expected key '{key}' in model_output but not found.")
-        return model_output[key]
+    def _get_conf_int(res, name):
+        # statsmodels results.conf_int() may return DataFrame-like or ndarray;
+        # handle both robustly.
+        try:
+            ci = res.conf_int().loc[name].values
+        except Exception:
+            # fallback: conf_int returns ndarray with rows in same order as params
+            try:
+                params_index = list(res.params.index)
+                i = params_index.index(name)
+                ci = res.conf_int()[i]
+            except Exception:
+                raise KeyError(f"Could not extract confidence interval for parameter '{name}'.")
+        return float(ci[0]), float(ci[1])
 
-    nb_res = _get_result(model_output, 'nb_model')
-    ols_res = _get_result(model_output, 'ols_model')
+    def _summarize_coef(res, name, model_type):
+        if name not in res.params.index:
+            raise KeyError(f"Parameter '{name}' not found in model results.")
+        coef = float(res.params[name])
+        pval = float(res.pvalues[name])
+        ci_low, ci_high = _get_conf_int(res, name)
 
-    varname = 'masfem_c'
-    # Ensure variable exists in model results
-    if varname not in nb_res.params.index:
-        raise KeyError(f"Variable '{varname}' not found in nb_model params: {list(nb_res.params.index)}")
-    if varname not in ols_res.params.index:
-        raise KeyError(f"Variable '{varname}' not found in ols_model params: {list(ols_res.params.index)}")
-
-    # Negative-binomial (primary) extraction
-    coef_nb = float(nb_res.params[varname])
-    se_nb = float(nb_res.bse[varname]) if hasattr(nb_res, 'bse') else None
-    p_nb = float(nb_res.pvalues[varname]) if hasattr(nb_res, 'pvalues') else None
-    # Confidence interval: statsmodels returns array-like; align indices if needed
-    try:
-        ci_nb = nb_res.conf_int().loc[varname].astype(float)
-        ci_lower_nb = float(ci_nb[0])
-        ci_upper_nb = float(ci_nb[1])
-    except Exception:
-        # fallback if conf_int returns ndarray without index
-        ci_array = np.asarray(nb_res.conf_int())
-        param_idx = list(nb_res.params.index).index(varname)
-        ci_lower_nb = float(ci_array[param_idx, 0])
-        ci_upper_nb = float(ci_array[param_idx, 1])
-
-    # Interpret NB coefficient: multiplicative effect on expected count
-    rate_ratio = float(np.exp(coef_nb))
-    rr_ci_lower = float(np.exp(ci_lower_nb))
-    rr_ci_upper = float(np.exp(ci_upper_nb))
-    pct_change = (rate_ratio - 1.0) * 100.0
-    pct_ci_lower = (rr_ci_lower - 1.0) * 100.0
-    pct_ci_upper = (rr_ci_upper - 1.0) * 100.0
-
-    # Determine whether the NB result supports the hypothesis:
-    # Hypothesis expects more feminine names -> more deaths (positive coef).
-    supports_hypothesis = (coef_nb > 0) and (p_nb is not None and p_nb < 0.05)
-
-    # OLS robustness extraction (log(1+deaths))
-    coef_ols = float(ols_res.params[varname])
-    se_ols = float(ols_res.bse[varname]) if hasattr(ols_res, 'bse') else None
-    p_ols = float(ols_res.pvalues[varname]) if hasattr(ols_res, 'pvalues') else None
-    try:
-        ci_ols = ols_res.conf_int().loc[varname].astype(float)
-        ci_lower_ols = float(ci_ols[0])
-        ci_upper_ols = float(ci_ols[1])
-    except Exception:
-        ci_array_ols = np.asarray(ols_res.conf_int())
-        param_idx_ols = list(ols_res.params.index).index(varname)
-        ci_lower_ols = float(ci_array_ols[param_idx_ols, 0])
-        ci_upper_ols = float(ci_array_ols[param_idx_ols, 1])
-
-    # For log outcome, approximate percent change ~ coef_ols * 100 (small changes)
-    approx_pct_change_ols = coef_ols * 100.0
-    approx_pct_ci_lower_ols = ci_lower_ols * 100.0
-    approx_pct_ci_upper_ols = ci_upper_ols * 100.0
-
-    result_object = {
-        'nb_model': {
-            'variable': varname,
-            'coef': coef_nb,
-            'se': se_nb,
-            'p_value': p_nb,
-            'ci_95': [ci_lower_nb, ci_upper_nb],
-            'rate_ratio': rate_ratio,
-            'rate_ratio_95_ci': [rr_ci_lower, rr_ci_upper],
-            'percent_change_in_deaths': pct_change,
-            'percent_change_95_ci': [pct_ci_lower, pct_ci_upper],
-            'supports_hypothesis_at_p<.05': bool(supports_hypothesis)
-        },
-        'ols_model_log_outcome': {
-            'variable': varname,
-            'coef': coef_ols,
-            'se': se_ols,
-            'p_value': p_ols,
-            'ci_95': [ci_lower_ols, ci_upper_ols],
-            'approx_percent_change_in_1_plus_deaths': approx_pct_change_ols,
-            'approx_percent_change_95_ci': [approx_pct_ci_lower_ols, approx_pct_ci_upper_ols]
+        summary = {
+            'coef': coef,
+            'pvalue': pval,
+            'ci_95': [ci_low, ci_high]
         }
-    }
 
-    # Human-readable description
-    description_lines = []
-    description_lines.append(
-        "Primary result (Negative-Binomial GLM on raw death counts): "
-        f"Coefficient for '{varname}' = {coef_nb:.4f} (SE={se_nb:.4f}, p={p_nb:.4f}). "
-        f"This corresponds to a rate ratio = {rate_ratio:.3f} (95% CI [{rr_ci_lower:.3f}, {rr_ci_upper:.3f}]), "
-        f"i.e. an expected change of {pct_change:.1f}% in deaths per one-unit increase in '{varname}' "
-        f"(95% CI: [{pct_ci_lower:.1f}%, {pct_ci_upper:.1f}%])."
-    )
-    if supports_hypothesis:
-        description_lines.append("The effect is positive and statistically significant at p<0.05, which is consistent with the hypothesis "
-                                 "that more-feminine hurricane names are associated with higher deaths (interpreted as fewer precautions).")
+        if model_type == 'nb_count':
+            # For negative binomial (count) model, interpret via incidence rate ratio (IRR)
+            irr = float(np.exp(coef))
+            irr_ci = [float(np.exp(ci_low)), float(np.exp(ci_high))]
+            summary.update({
+                'interpretation': 'Incidence Rate Ratio (IRR) for a one-unit change in predictor',
+                'IRR': irr,
+                'IRR_95_CI': irr_ci,
+                'interpretation_text': (
+                    "IRR > 1 means higher expected count (deaths); IRR < 1 means lower expected count."
+                )
+            })
+        elif model_type == 'ols_log':
+            # For OLS on log outcome, interpret as percent change: (exp(coef)-1)*100
+            pct_change = float(np.exp(coef) - 1) * 100.0
+            pct_ci = [float(np.exp(ci_low) - 1) * 100.0, float(np.exp(ci_high) - 1) * 100.0]
+            summary.update({
+                'interpretation': 'Approximate percent change in outcome for a one-unit change in predictor',
+                'percent_change': pct_change,
+                'percent_change_95_CI': pct_ci,
+                'interpretation_text': (
+                    "Values > 0 indicate an increase in logged damages (i.e., higher damages); values < 0 indicate a decrease."
+                )
+            })
+        else:
+            # Generic
+            summary.update({'interpretation': 'raw coefficient (interpretation depends on link/scale)'})
+
+        # Significance label
+        summary['significant_0.05'] = pval < 0.05
+
+        return summary
+
+    # Validate input
+    if not isinstance(model_output, dict):
+        raise ValueError("model_output must be a dict as returned by the modeling function.")
+
+    results_obj = {}
+    desc_lines = []
+
+    # Extract from negative binomial model with continuous masfem_z
+    if 'nb_model_masfem_z' in model_output:
+        nb_m = model_output['nb_model_masfem_z']
+        try:
+            nb_summary = _summarize_coef(nb_m, 'masfem_z', model_type='nb_count')
+            results_obj['nb_masfem_z'] = nb_summary
+            # interpret direction w.r.t hypothesis
+            direction = 'positive' if nb_summary['coef'] > 0 else 'negative'
+            sig_text = 'statistically significant' if nb_summary['significant_0.05'] else 'not statistically significant'
+            desc_lines.append(
+                f"Negative binomial (deaths): masfem_z coef = {nb_summary['coef']:.4f} (p = {nb_summary['pvalue']:.3g}), "
+                f"IRR = {nb_summary['IRR']:.3f} [{nb_summary['IRR_95_CI'][0]:.3f}, {nb_summary['IRR_95_CI'][1]:.3f}]. "
+                f"Coefficient is {direction} and {sig_text}."
+            )
+        except Exception as e:
+            desc_lines.append(f"Could not extract masfem_z from nb_model_masfem_z: {e}")
     else:
-        description_lines.append("The effect is NOT statistically significant at p<0.05 and therefore does not provide reliable support for the hypothesis.")
-    description_lines.append(
-        "Robustness (OLS on log(1 + deaths)): "
-        f"Coefficient = {coef_ols:.4f} (SE={se_ols:.4f}, p={p_ols:.4f}), approximately equal to {approx_pct_change_ols:.2f}% change in (1+deaths) per unit."
-    )
-    description_lines.append(
-        "Note: 'masfem_c' is mean-centered; interpretation is per one-unit increase in that centered femininity rating. "
-        "NB model is primary because the outcome is an overdispersed count; OLS on log-transformed deaths is presented as a robustness check."
-    )
+        desc_lines.append("nb_model_masfem_z not found in model_output.")
 
-    description = " ".join(description_lines)
+    # Extract from OLS on logged damages
+    if 'ols_damage_masfem_z' in model_output:
+        ols_m = model_output['ols_damage_masfem_z']
+        try:
+            ols_summary = _summarize_coef(ols_m, 'masfem_z', model_type='ols_log')
+            results_obj['ols_masfem_z'] = ols_summary
+            direction = 'positive' if ols_summary['coef'] > 0 else 'negative'
+            sig_text = 'statistically significant' if ols_summary['significant_0.05'] else 'not statistically significant'
+            desc_lines.append(
+                f"OLS (log damages): masfem_z coef = {ols_summary['coef']:.4f} (p = {ols_summary['pvalue']:.3g}), "
+                f"approx. percent change = {ols_summary['percent_change']:.2f}% "
+                f"[{ols_summary['percent_change_95_CI'][0]:.2f}%, {ols_summary['percent_change_95_CI'][1]:.2f}%]. "
+                f"Coefficient is {direction} and {sig_text}."
+            )
+        except Exception as e:
+            desc_lines.append(f"Could not extract masfem_z from ols_damage_masfem_z: {e}")
+    else:
+        desc_lines.append("ols_damage_masfem_z not found in model_output.")
+
+    # Extract from negative binomial model with binary FemaleName
+    if 'nb_model_female_binary' in model_output:
+        nb_bin = model_output['nb_model_female_binary']
+        try:
+            nb_bin_summary = _summarize_coef(nb_bin, 'FemaleName', model_type='nb_count')
+            results_obj['nb_female_binary'] = nb_bin_summary
+            direction = 'positive' if nb_bin_summary['coef'] > 0 else 'negative'
+            sig_text = 'statistically significant' if nb_bin_summary['significant_0.05'] else 'not statistically significant'
+            desc_lines.append(
+                f"Negative binomial (deaths) - FemaleName: coef = {nb_bin_summary['coef']:.4f} (p = {nb_bin_summary['pvalue']:.3g}), "
+                f"IRR = {nb_bin_summary['IRR']:.3f} [{nb_bin_summary['IRR_95_CI'][0]:.3f}, {nb_bin_summary['IRR_95_CI'][1]:.3f}]. "
+                f"Coefficient is {direction} and {sig_text}."
+            )
+        except Exception as e:
+            desc_lines.append(f"Could not extract FemaleName from nb_model_female_binary: {e}")
+    else:
+        desc_lines.append("nb_model_female_binary not found in model_output.")
+
+    # High-level conclusion on hypothesis consistency
+    # Hypothesis: more feminine names -> fewer precautions -> higher fatalities/damages.
+    # We interpret "supports hypothesis" if coefficient for masfem_z or FemaleName is positive and statistically significant.
+    support_msgs = []
+    try:
+        # check continuous nb model first
+        nb_ok = 'nb_masfem_z' in results_obj
+        if nb_ok and results_obj['nb_masfem_z']['significant_0.05'] and results_obj['nb_masfem_z']['coef'] > 0:
+            support_msgs.append("Primary count model (nb_model_masfem_z) shows a positive, statistically significant association consistent with the hypothesis.")
+        elif nb_ok:
+            support_msgs.append("Primary count model does not provide statistically significant evidence in support of the hypothesis." if not results_obj['nb_masfem_z']['significant_0.05'] else "Primary count model shows a coefficient in the opposite direction of the hypothesis.")
+
+        # check OLS
+        ols_ok = 'ols_masfem_z' in results_obj
+        if ols_ok and results_obj['ols_masfem_z']['significant_0.05'] and results_obj['ols_masfem_z']['coef'] > 0:
+            support_msgs.append("Robustness OLS (log damages) shows a positive, statistically significant association consistent with the hypothesis.")
+        elif ols_ok:
+            support_msgs.append("Robustness OLS does not provide statistically significant evidence in support of the hypothesis." if not results_obj['ols_masfem_z']['significant_0.05'] else "Robustness OLS shows a coefficient in the opposite direction of the hypothesis.")
+
+        # check binary female
+        bin_ok = 'nb_female_binary' in results_obj
+        if bin_ok and results_obj['nb_female_binary']['significant_0.05'] and results_obj['nb_female_binary']['coef'] > 0:
+            support_msgs.append("Binary female-name model shows a positive, statistically significant association consistent with the hypothesis.")
+        elif bin_ok:
+            support_msgs.append("Binary female-name model does not provide statistically significant evidence in support of the hypothesis." if not results_obj['nb_female_binary']['significant_0.05'] else "Binary female-name model shows a coefficient in the opposite direction of the hypothesis.")
+    except Exception:
+        support_msgs.append("Could not form a clear conclusion programmatically; inspect the extracted statistics in 'object' for manual interpretation.")
+
+    description = "\n".join(desc_lines) + "\n\nConclusion summary:\n" + "\n".join(support_msgs)
 
     return {
-        "object": result_object,
+        "object": results_obj,
         "description": description
     }

@@ -1,91 +1,126 @@
-from typing import Any
+from typing import Dict, FrozenSet, List, Literal, Optional, Set, Tuple, Any
 import numpy as np
 import pandas as pd
+import sklearn
+import scipy
 import statsmodels.api as sm
 import statsmodels.formula.api as smf
-
+import matplotlib.pyplot as plt
+import pickle
+  
 df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/analysis/boxes/shuffle_names_output/boxes.csv')
 
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Transform the raw dataset into a dataframe with the exact columns used in the statistical models.
+    Transform the raw dataset into a cleaned dataframe containing the columns required for modeling.
 
-    Input schema (expected columns):
-      - majority_first: outcome code with values {1=unchosen option, 2=majority option, 3=minority option}
-      - culture: (in this dataset) child's age in years (numeric)
-      - age: (in this dataset) indicator whether the majority option was demonstrated first (0/1)
-      - gender: 1=girl, 2=boy
-      - y: site ID (1..8)
+    Input expected columns in the raw dataframe:
+      - 'majority_first': original categorical choice outcome (1 = unchosen option, 2 = majority option, 3 = minority option)
+      - 'gender': 1 = girl, 2 = boy
+      - 'culture': numeric age in years (note: in the provided schema this column holds the child's age)
+      - 'age': binary flag indicating whether the majority option was demonstrated first (0/1)
+      - 'y': site id (1..8)
 
     Output columns (kept/created):
-      - MajorityChoice: binary (1 if majority chosen, else 0)
-      - age_years: child's age in years (float)
-      - age_c: centered age (age_years - mean(age_years)) [helper column]
-      - age_sq: squared centered age (for nonlinearity if desired) [helper column]
-      - is_majority_first: 0/1 indicator whether majority was demonstrated first
-      - gender_female: 1 if girl, 0 if boy
-      - site_id: string-coded site identifier
+      - 'Choice' (int): original 1/2/3 outcome copied from 'majority_first'
+      - 'ChoseMajority' (int): 1 if Choice == 2 (majority), else 0
+      - 'AgeYears' (float): child's age in years (from 'culture')
+      - 'AgeGroup' (category): coarse developmental bins (4-6, 7-9, 10-14)
+      - 'Site' (str category): site id as string (from 'y')
+      - 'IsMale' (int): 1 if gender == 2, else 0
+      - 'MajorityFirst' (int): copy of 'age' column indicating whether majority option was demonstrated first
     """
     df = df.copy()
 
-    # Drop rows with missing essential variables
-    df = df.dropna(subset=['majority_first', 'culture', 'age', 'gender', 'y'])
+    # Drop rows missing any of the columns needed for analysis
+    need_cols = ['majority_first', 'gender', 'culture', 'age', 'y']
+    df = df.dropna(subset=need_cols)
 
-    # Dependent variable: did the child choose the majority-demonstrated option?
-    df['MajorityChoice'] = (df['majority_first'] == 2).astype(int)
+    # Standardize / rename columns
+    # Original schema has some naming mismatch: 'culture' actually contains age in years; 'age' contains majority-first flag.
+    df['majority_first'] = pd.to_numeric(df['majority_first'], errors='coerce').astype('Int64')
+    df['Choice'] = df['majority_first'].astype(int)
 
-    # Age: the column 'culture' contains the child's age in years (per provided schema)
-    df['age_years'] = df['culture'].astype(float)
-    # Center age for interpretability and add quadratic term to allow nonlinearity (helper columns)
-    df['age_c'] = df['age_years'] - df['age_years'].mean()
-    df['age_sq'] = df['age_c'] ** 2
+    # Binary DV: chose majority (choice == 2)
+    df['ChoseMajority'] = (df['Choice'] == 2).astype(int)
 
-    # Experimental control: whether majority was demonstrated first.
-    df['is_majority_first'] = df['age'].astype(int)
+    # Age in years
+    df['AgeYears'] = pd.to_numeric(df['culture'], errors='coerce')
 
-    # Gender: encode as female indicator (1 = girl, 0 = boy)
-    df['gender_female'] = (df['gender'] == 1).astype(int)
+    # Keep rows with plausible ages (dataset describes ages 4-14)
+    df = df[df['AgeYears'].between(4, 14)]
 
-    # Site / cultural context
-    df['site_id'] = df['y'].astype(str)
+    # Create coarse age groups for descriptive checks / stratified analyses
+    bins = [0, 6, 9, 14]
+    labels = ['4-6', '7-9', '10-14']
+    df['AgeGroup'] = pd.cut(df['AgeYears'], bins=bins, labels=labels, include_lowest=True)
 
-    # Keep only the columns needed for modeling (and allowed helper columns)
-    out_cols = ['MajorityChoice', 'age_years', 'age_c', 'age_sq', 'is_majority_first', 'gender_female', 'site_id']
-    return df[out_cols]
+    # Site as categorical string (use original 'y' column which is site id)
+    df['Site'] = df['y'].astype(int).astype(str)
+
+    # Gender -> IsMale (1 = boy, 0 = girl)
+    df['IsMale'] = (pd.to_numeric(df['gender'], errors='coerce') == 2).astype(int)
+
+    # MajorityFirst flag (original 'age' column per schema is whether majority was shown first)
+    df['MajorityFirst'] = pd.to_numeric(df['age'], errors='coerce').astype(int)
+
+    # Keep only the columns required for modeling and reset index
+    out_cols = ['Choice', 'ChoseMajority', 'AgeYears', 'AgeGroup', 'Site', 'IsMale', 'MajorityFirst']
+    df = df.loc[:, out_cols].reset_index(drop=True)
+
+    return df
 
 
 # ======== MODEL CODE ========
-def model(df: pd.DataFrame) -> Any:
+def model(df: pd.DataFrame):
     """
-    Fit population-averaged logistic regression models for the binary outcome 'MajorityChoice'.
+    Fit two complementary models to answer whether reliance on the majority varies by age and culture:
+      1) Primary analysis: logistic regression predicting the binary outcome ChoseMajority (1 = majority chosen) with fixed effects for age, gender, majority-first, site (dummy-coded) and interactions between age and site (tests whether developmental trajectories differ across sites).
+      2) Secondary analysis: multinomial logistic regression predicting the three-way choice outcome (unchosen / majority / minority) with main effects for age, gender, majority-first and site (no interaction, for stability).
 
-    Two models are estimated:
-      1) Main effects model: MajorityChoice ~ age_years + gender_female + is_majority_first + C(site_id)
-         - site_id entered as categorical fixed effects to control for baseline cross-cultural differences.
-         - Cluster-robust standard errors are computed by site (to account for within-site dependence).
-           Implemented here using GEE with an exchangeable working correlation (population-averaged model).
-
-      2) Interaction model: MajorityChoice ~ age_years * C(site_id) + gender_female + is_majority_first
-         - Tests whether the age slope differs across sites (i.e., whether developmental trajectories differ by culture).
-
-    Returns a dict with keys 'main' and 'interaction' containing fitted results objects.
+    Returns a dictionary with the fitted model objects (statsmodels results).
     """
-    # Ensure no missing values in model columns
-    df = df.dropna(subset=['MajorityChoice', 'age_years', 'gender_female', 'is_majority_first', 'site_id'])
+    import statsmodels.api as sm
 
-    # Use GEE (population-averaged model) with exchangeable covariance to obtain cluster-robust SEs by site
-    cov_struct = sm.cov_struct.Exchangeable()
+    df = df.copy()
 
-    formula_main = 'MajorityChoice ~ age_years + gender_female + is_majority_first + C(site_id)'
-    gee_main = smf.gee(formula_main, groups="site_id", data=df, family=sm.families.Binomial(), cov_struct=cov_struct)
-    res_main = gee_main.fit()
+    # Prepare site dummy variables (fixed effects). Drop first to avoid multicollinearity.
+    site_dummies = pd.get_dummies(df['Site'], prefix='Site', drop_first=True)
 
-    formula_int = 'MajorityChoice ~ age_years * C(site_id) + gender_female + is_majority_first'
-    gee_int = smf.gee(formula_int, groups="site_id", data=df, family=sm.families.Binomial(), cov_struct=cov_struct)
-    res_int = gee_int.fit()
+    # Base predictors
+    X_base = pd.concat([df[['AgeYears', 'IsMale', 'MajorityFirst']].reset_index(drop=True), site_dummies.reset_index(drop=True)], axis=1)
 
-    return {
-        'main': res_main,
-        'interaction': res_int
+    # Build interaction terms between AgeYears and each site dummy to test whether age effects differ across sites
+    X = X_base.copy()
+    for col in site_dummies.columns:
+        X[f'{col}:AgeYears'] = X[col] * df['AgeYears']
+
+    # Add intercept
+    X = sm.add_constant(X)
+
+    # Binary outcome: ChoseMajority
+    y_bin = df['ChoseMajority']
+
+    # Fit logistic regression for binary outcome. Use a regularized fallback if needed.
+    try:
+        logit_model = sm.Logit(y_bin, X).fit(disp=False)
+    except Exception as e:
+        # If perfect separation / convergence issues occur, try a small L1/L2 regularization via fit_regularized
+        logit_model = sm.Logit(y_bin, X).fit_regularized(disp=False)
+
+    # Secondary: multinomial logistic regression on the full choice (1=unchosen,2=majority,3=minority)
+    X_mn = sm.add_constant(X_base)
+    y_mn = df['Choice'].astype(int)
+
+    # Fit multinomial logit (no interaction to keep model stable). The baseline is the first numeric category (1 = unchosen option).
+    mn_model = sm.MNLogit(y_mn, X_mn).fit(disp=False)
+
+    results = {
+        'binary_majority_logit': logit_model,
+        'multinomial_choice_mnlogit': mn_model
     }
+
+    return results
+
+

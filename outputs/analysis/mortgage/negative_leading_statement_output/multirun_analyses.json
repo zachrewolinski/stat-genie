@@ -1,0 +1,508 @@
+{
+  "dataset_name": "mortgage",
+  "n": 5,
+  "analyses": {
+    "0": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Applicant gender (independent variable): 1 if female, 0 if male.",
+            "columns": [
+              "female"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Mortgage application outcome (dependent variable): 1 if accepted, 0 if denied.",
+          "columns": [
+            "accept"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Applicant race: 1 if Black, 0 otherwise.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "black"
+            ]
+          },
+          {
+            "description": "Housing expense ratio (standardized).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "housing_expense_ratio_z"
+            ]
+          },
+          {
+            "description": "Self-employed indicator: 1 if self-employed, 0 otherwise.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "self_employed"
+            ]
+          },
+          {
+            "description": "Marital status: 1 if married, 0 otherwise.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "married"
+            ]
+          },
+          {
+            "description": "Mortgage credit score (standardized).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "mortgage_credit_z"
+            ]
+          },
+          {
+            "description": "Consumer credit score (standardized).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "consumer_credit_z"
+            ]
+          },
+          {
+            "description": "History of bad credit: 1 if bad history, 0 otherwise.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "bad_history"
+            ]
+          },
+          {
+            "description": "Total debt payments to income ratio (standardized).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "PI_ratio_z"
+            ]
+          },
+          {
+            "description": "Loan-to-value ratio (standardized).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "loan_to_value_z"
+            ]
+          },
+          {
+            "description": "Whether private mortgage insurance application was denied: 1 if denied, 0 otherwise.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "denied_PMI"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw Boston mortgage dataset to the analysis-ready dataframe.\n\n    Produces standardized continuous controls and drops rows with missing values in any\n    variables that will be used in the model.\n\n    Final dataframe includes the exact columns used in modeling:\n      - accept (DV), female (IV)\n      - control columns: black, housing_expense_ratio_z, self_employed, married,\n        mortgage_credit_z, consumer_credit_z, bad_history, PI_ratio_z, loan_to_value_z, denied_PMI\n    \"\"\"\n    df = df.copy()\n\n    # Ensure essential columns are present\n    required_cols = [\n        'accept', 'female', 'black', 'housing_expense_ratio', 'self_employed', 'married',\n        'mortgage_credit', 'consumer_credit', 'bad_history', 'PI_ratio', 'loan_to_value', 'denied_PMI'\n    ]\n    missing = [c for c in required_cols if c not in df.columns]\n    if len(missing) > 0:\n        raise ValueError(f\"Input dataframe is missing required columns: {missing}\")\n\n    # Keep only relevant columns first to simplify\n    df = df[required_cols].copy()\n\n    # Coerce types\n    # Binary indicators should be numeric 0/1\n    binary_cols = ['accept', 'female', 'black', 'self_employed', 'married', 'bad_history', 'denied_PMI']\n    for c in binary_cols:\n        df[c] = pd.to_numeric(df[c], errors='coerce')\n\n    # Continuous controls -> coerce to numeric\n    cont_cols = ['housing_expense_ratio', 'PI_ratio', 'loan_to_value', 'mortgage_credit', 'consumer_credit']\n    for c in cont_cols:\n        df[c] = pd.to_numeric(df[c], errors='coerce')\n\n    # Drop rows with missing values in any variables used by the model\n    df = df.dropna(subset=required_cols)\n\n    # Standardize continuous controls (z-score). Keep original columns removed from controls\n    for c in cont_cols:\n        mean = df[c].mean()\n        std = df[c].std(ddof=0)\n        if std == 0 or np.isnan(std):\n            # If zero variance, create zeros\n            df[c + '_z'] = 0.0\n        else:\n            df[c + '_z'] = (df[c] - mean) / std\n\n    # The final dataframe should contain the columns referenced in the modeling code\n    final_cols = [\n        'accept', 'female', 'black', 'housing_expense_ratio_z', 'self_employed', 'married',\n        'mortgage_credit_z', 'consumer_credit_z', 'bad_history', 'PI_ratio_z', 'loan_to_value_z', 'denied_PMI'\n    ]\n    df = df[final_cols].reset_index(drop=True)\n\n    return df",
+      "m_code": "def model(df: pd.DataFrame) -> dict:\n    \"\"\"\n    Fit a logistic regression predicting mortgage acceptance (accept) from applicant gender (female)\n    controlling for applicant and loan characteristics.\n\n    Returns a dictionary with:\n      - model: the fitted robust-logit results object (statsmodels-like wrapper)\n      - summary_text: textual model summary\n      - female_odds_ratio, female_pvalue, female_ci_lower, female_ci_upper\n      - marginal_effects_summary: textual summary of average marginal effects\n    \"\"\"\n    # Copy to avoid side-effects\n    df = df.copy()\n\n    # Ensure required columns exist\n    model_cols = [\n        'accept', 'female', 'black', 'housing_expense_ratio_z', 'self_employed', 'married',\n        'mortgage_credit_z', 'consumer_credit_z', 'bad_history', 'PI_ratio_z', 'loan_to_value_z', 'denied_PMI'\n    ]\n    missing = [c for c in model_cols if c not in df.columns]\n    if len(missing) > 0:\n        raise ValueError(f\"Transformed dataframe is missing required columns for modeling: {missing}\")\n\n    # Define X and y\n    y = df['accept'].astype(float)\n    X = df[[\n        'female', 'black', 'self_employed', 'married', 'bad_history', 'denied_PMI',\n        'housing_expense_ratio_z', 'PI_ratio_z', 'loan_to_value_z', 'mortgage_credit_z', 'consumer_credit_z'\n    ]].astype(float)\n\n    # Add constant\n    X = sm.add_constant(X, has_constant='add')\n\n    # Fit logistic regression (maximum likelihood). We'll request the fit and then compute robust SEs.\n    model_logit = sm.Logit(y, X)\n    try:\n        res = model_logit.fit(disp=False, method='lbfgs', maxiter=100)\n    except Exception:\n        # fallback to default method\n        res = model_logit.fit(disp=False)\n\n    # Attempt to obtain a HC3 robust covariance using statsmodels helper. If unavailable, fall back.\n    cov = None\n    try:\n        # Preferred: ask the fitted results to return a robust-covariance results object\n        res_sm_robust = res.get_robustcov_results(cov_type='HC3')\n        cov = res_sm_robust.cov_params()\n    except Exception:\n        try:\n            # Fallback: use cov_hc3 directly on the results object (may fail for some discrete models)\n            cov = cov_hc3(res)\n        except Exception:\n            # Last resort: use model-based covariance (not robust)\n            cov = res.cov_params()\n\n    # Ensure cov is an ndarray or DataFrame; extract diagonal safely\n    if isinstance(cov, pd.DataFrame):\n        cov_values = cov.values\n    else:\n        cov_values = np.asarray(cov)\n\n    params = res.params.copy()\n    bse_array = np.sqrt(np.diag(cov_values))\n    bse = pd.Series(bse_array, index=params.index)\n    tvals = params / bse\n    # Ensure pvalues is a Series with the same index (previously was converted to ndarray)\n    pvalues = pd.Series(2 * (1 - scipy.stats.norm.cdf(np.abs(tvals.values))), index=params.index)\n\n    def conf_int(alpha=0.05):\n        z = scipy.stats.norm.ppf(1 - alpha / 2)\n        lower = params - z * bse\n        upper = params + z * bse\n        return pd.DataFrame({0: lower, 1: upper})\n\n    # Create a simple wrapper object that mimics the subset of a results object used downstream\n    class RobustResultsWrapper:\n        def __init__(self, params, bse, pvalues, cov, conf_func, orig_res):\n            self.params = params\n            self.bse = bse\n            self.pvalues = pvalues\n            self._cov = cov\n            self._conf_func = conf_func\n            self._orig_res = orig_res\n\n        def conf_int(self, alpha=0.05):\n            return self._conf_func(alpha=alpha)\n\n        def summary(self):\n            # Build a textual summary that mirrors the typical table with robust SEs\n            tab = pd.DataFrame({\n                'coef': self.params,\n                'std err': self.bse,\n                'z': (self.params / self.bse),\n                'P>|z|': self.pvalues,\n            })\n            ci = self.conf_int()\n            tab['[0.025'] = ci[0]\n            tab['0.975]'] = ci[1]\n            return tab\n\n        def summary_as_text(self):\n            return self.summary().to_string()\n\n        def cov_params(self):\n            # Return covariance as a DataFrame with appropriate index/columns\n            cov_arr = np.asarray(self._cov)\n            return pd.DataFrame(cov_arr, index=self.params.index, columns=self.params.index)\n\n    res_robust = RobustResultsWrapper(params=params, bse=bse, pvalues=pvalues, cov=cov_values, conf_func=conf_int, orig_res=res)\n\n    # Odds ratio and confidence interval for female (using robust parameters/cov).\n    if 'female' not in res_robust.params.index:\n        raise KeyError('female not in fitted model parameters')\n\n    female_coef = float(res_robust.params['female'])\n    female_pval = float(res_robust.pvalues['female'])\n    female_ci = res_robust.conf_int().loc['female'].astype(float)\n    female_odds = float(np.exp(female_coef))\n    female_ci_lower = float(np.exp(female_ci[0]))\n    female_ci_upper = float(np.exp(female_ci[1]))\n\n    # Average marginal effect for female (change in probability)\n    try:\n        me = res.get_margeff(method='dydx', at='overall')\n        me_summary = me.summary().as_text()\n        # attempt to access table HTML if needed; keep within try/except\n        try:\n            me_table = me.summary().tables[1].as_html()\n        except Exception:\n            me_table = None\n    except Exception:\n        me = None\n        me_summary = 'marginal effects could not be computed'\n        me_table = None\n\n    # Prepare textual summary_text using the robust summary table\n    summary_text = res_robust.summary_as_text()\n\n    results = {\n        'model_object': res_robust,\n        'summary_text': summary_text,\n        'female_odds_ratio': female_odds,\n        'female_pvalue': female_pval,\n        'female_ci_lower': female_ci_lower,\n        'female_ci_upper': female_ci_upper,\n        'marginal_effects_summary': me_summary\n    }\n\n    return results"
+    },
+    "1": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Applicant gender: 1 if female, 0 if male. Primary independent variable whose effect on loan acceptance we test.",
+            "columns": [
+              "female"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Loan application outcome: 1 if mortgage application was accepted, 0 if denied. Dependent (binary) variable.",
+          "columns": [
+            "accept"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Applicant race: 1 if Black, 0 otherwise. Control for race-related differences in approvals.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "black"
+            ]
+          },
+          {
+            "description": "Self-employed indicator: 1 if self-employed, 0 otherwise. Control for employment type.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "self_employed"
+            ]
+          },
+          {
+            "description": "Marital status: 1 if married, 0 otherwise. Control for household composition/financial stability.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "married"
+            ]
+          },
+          {
+            "description": "History of bad credit: 1 if has bad history, 0 otherwise. Controls for creditworthiness.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "bad_history"
+            ]
+          },
+          {
+            "description": "Denied private mortgage insurance indicator: 1 if denied, 0 otherwise. Control for underwriting outcome related to insurance.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "denied_PMI"
+            ]
+          },
+          {
+            "description": "Mortgage credit score (ordinal). Standardized in the dataframe as mortgage_credit_z to help interpretation and numerical stability.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "mortgage_credit_z"
+            ]
+          },
+          {
+            "description": "Consumer credit score (ordinal). Standardized in the dataframe as consumer_credit_z.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "consumer_credit_z"
+            ]
+          },
+          {
+            "description": "Payment-to-income ratio (PI_ratio). Standardized in the dataframe as PI_ratio_z.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "PI_ratio_z"
+            ]
+          },
+          {
+            "description": "Loan-to-value ratio. Standardized in the dataframe as loan_to_value_z.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "loan_to_value_z"
+            ]
+          },
+          {
+            "description": "Housing expense ratio. Standardized in the dataframe as housing_expense_ratio_z.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "housing_expense_ratio_z"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Prepare dataframe for modeling. Steps:\n    - Copy input dataframe.\n    - Drop rows with missing values in variables required for the analysis.\n    - Ensure binary variables are integer-coded (0/1).\n    - Standardize numeric credit/risk covariates to z-scores for stable estimation.\n    - Return dataframe containing all columns referenced in the conceptual model.\n    \"\"\"\n    df = df.copy()\n\n    # Required columns for the analysis\n    required_cols = [\n        'accept', 'female', 'black', 'self_employed', 'married', 'bad_history', 'denied_PMI',\n        'mortgage_credit', 'consumer_credit', 'PI_ratio', 'loan_to_value', 'housing_expense_ratio'\n    ]\n\n    # Drop rows missing any required variable\n    df = df.dropna(subset=required_cols)\n\n    # Ensure binary columns are integers (0/1)\n    binary_cols = ['accept', 'female', 'black', 'self_employed', 'married', 'bad_history', 'denied_PMI']\n    for c in binary_cols:\n        # safe cast: if values are floats but represent 0/1\n        df[c] = df[c].astype(int)\n\n    # Standardize continuous/ordinal numeric covariates (z-score)\n    to_scale = ['mortgage_credit', 'consumer_credit', 'PI_ratio', 'loan_to_value', 'housing_expense_ratio']\n    for c in to_scale:\n        # if constant (std==0) avoid division by zero\n        std = df[c].std()\n        mean = df[c].mean()\n        if std == 0 or np.isclose(std, 0):\n            # create zero column if no variation\n            df[c + '_z'] = 0.0\n        else:\n            df[c + '_z'] = (df[c] - mean) / std\n\n    # Keep only columns we need for modeling (but keep others if desired)\n    model_cols = [\n        'accept', 'female', 'black', 'self_employed', 'married', 'bad_history', 'denied_PMI',\n        'mortgage_credit_z', 'consumer_credit_z', 'PI_ratio_z', 'loan_to_value_z', 'housing_expense_ratio_z'\n    ]\n\n    # Some dataframes may contain those columns already; ensure they exist\n    missing_model_cols = [c for c in model_cols if c not in df.columns]\n    if missing_model_cols:\n        raise ValueError(f\"Missing required transformed columns: {missing_model_cols}\")\n\n    return df",
+      "m_code": "def model(df: pd.DataFrame):\n    \"\"\"\n    Fit a logistic regression of loan acceptance on applicant female indicator (primary IV)\n    and the set of control variables that capture creditworthiness and demographics.\n\n    Returns a dictionary containing:\n      - 'model': the fitted statsmodels LogitResults object\n      - 'odds_ratios': exponentiated coefficients (odds ratios)\n      - 'conf_int_odds': 95% CI for odds ratios\n      - 'pvalues': p-values for coefficients\n\n    The primary test of interest is the coefficient on 'female'. A statistically significant\n    coefficient (p < .05) would suggest gender is associated with approval probability\n    after controlling for the included covariates. If non-significant and effect size small,\n    that provides evidence consistent with the hypothesis that gender does not affect approval.\n    \"\"\"\n    df = df.copy()\n\n    # Define predictors: female plus controls (already standardized where appropriate)\n    X_cols = [\n        'female', 'black', 'self_employed', 'married', 'bad_history', 'denied_PMI',\n        'mortgage_credit_z', 'consumer_credit_z', 'PI_ratio_z', 'loan_to_value_z', 'housing_expense_ratio_z'\n    ]\n\n    # Confirm columns are present\n    missing = [c for c in X_cols + ['accept'] if c not in df.columns]\n    if missing:\n        raise ValueError(f\"Missing columns for modeling: {missing}\")\n\n    X = df[X_cols]\n    X = sm.add_constant(X, has_constant='add')\n    y = df['accept']\n\n    # Fit logistic regression (use GLM with Binomial or Logit). Using Logit here.\n    try:\n        logit_model = sm.Logit(y, X)\n        res = logit_model.fit(disp=False, method='lbfgs')\n    except Exception:\n        # fallback to GLM if Logit has convergence problems\n        glm_model = sm.GLM(y, X, family=sm.families.Binomial())\n        res = glm_model.fit()\n\n    # Odds ratios and 95% confidence intervals for odds ratios\n    params = res.params\n    conf = res.conf_int()\n    odds_ratios = np.exp(params)\n    conf_odds = np.exp(conf)\n\n    results = {\n        'model': res,\n        'odds_ratios': odds_ratios,\n        'conf_int_odds': conf_odds,\n        'pvalues': res.pvalues\n    }\n\n    return results"
+    },
+    "2": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Applicant gender: indicator for female (1 = female, 0 = male). Primary independent variable testing whether being female affects loan approval.",
+            "columns": [
+              "female"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Loan acceptance: binary outcome where 1 = mortgage application accepted, 0 = denied.",
+          "columns": [
+            "accept"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Race: indicator for Black applicants (1 = Black, 0 = not Black). Controls for potential racial effects on decisions.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "black"
+            ]
+          },
+          {
+            "description": "Self employment status (1 = self-employed, 0 = not).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "self_employed"
+            ]
+          },
+          {
+            "description": "Marital status (1 = married, 0 = not).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "married"
+            ]
+          },
+          {
+            "description": "History of bad credit (1 = has bad history, 0 = no bad history).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "bad_history"
+            ]
+          },
+          {
+            "description": "Private mortgage insurance denied indicator (1 = denied PMI, 0 = not). Included as a control for underwriting outcomes related to loan risk assessments.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "denied_PMI"
+            ]
+          },
+          {
+            "description": "Standardized housing expense ratio (housing_expense_ratio z-score). Continuous control for housing expense burden relative to income.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "z_housing_expense_ratio"
+            ]
+          },
+          {
+            "description": "Standardized total debt-to-income ratio (PI_ratio z-score). Continuous control for overall indebtedness.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "z_PI_ratio"
+            ]
+          },
+          {
+            "description": "Standardized loan-to-value ratio (loan_to_value z-score). Controls for collateral/loan risk.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "z_loan_to_value"
+            ]
+          },
+          {
+            "description": "Standardized mortgage credit score (mortgage_credit z-score). Proxy for mortgage-specific creditworthiness.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "z_mortgage_credit"
+            ]
+          },
+          {
+            "description": "Standardized consumer credit score (consumer_credit z-score). Proxy for general creditworthiness.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "z_consumer_credit"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Prepare the dataset for modeling.\n    - Select relevant columns\n    - Drop rows with missing values on variables used in the model\n    - Ensure binary indicators are integers (0/1)\n    - Create standardized (z-scored) versions of continuous predictors used as controls\n    - Return a dataframe that contains the outcome, the focal IV, and all control columns named exactly as in the conceptual variables\n    \"\"\"\n    df = df.copy()\n\n    # Columns needed for analysis\n    needed = [\n        'female',\n        'accept',\n        'black',\n        'housing_expense_ratio',\n        'self_employed',\n        'married',\n        'mortgage_credit',\n        'consumer_credit',\n        'bad_history',\n        'PI_ratio',\n        'loan_to_value',\n        'denied_PMI'\n    ]\n\n    # Keep only needed columns (if any are missing in the provided df this will raise KeyError)\n    df = df[needed]\n\n    # Drop rows with missing values in any of the variables required for the model\n    df = df.dropna()\n\n    # Ensure binary columns are integer 0/1\n    binary_cols = ['female', 'accept', 'black', 'self_employed', 'married', 'bad_history', 'denied_PMI']\n    for c in binary_cols:\n        # Some datasets may have floats like 0.0/1.0; cast to int\n        df[c] = df[c].astype(int)\n\n    # Standardize continuous controls (z-scores). Use population std (ddof=0) for stable scaling.\n    cont_cols = ['housing_expense_ratio', 'PI_ratio', 'loan_to_value', 'mortgage_credit', 'consumer_credit']\n    for c in cont_cols:\n        mean = df[c].mean()\n        std = df[c].std(ddof=0)\n        # If zero variance (unlikely here), set z to 0 to avoid division by zero\n        if std == 0 or np.isnan(std):\n            df['z_' + c] = 0.0\n        else:\n            df['z_' + c] = (df[c] - mean) / std\n\n    # Final set of columns returned (exact names used in modeling)\n    final_cols = [\n        'accept',\n        'female',\n        'black',\n        'self_employed',\n        'married',\n        'bad_history',\n        'denied_PMI',\n        'z_housing_expense_ratio',\n        'z_PI_ratio',\n        'z_loan_to_value',\n        'z_mortgage_credit',\n        'z_consumer_credit'\n    ]\n\n    return df[final_cols]",
+      "m_code": "def model(df: pd.DataFrame) -> dict:\n    \"\"\"\n    Fit a multivariable logistic regression to estimate the effect of gender (female)\n    on loan acceptance (accept), adjusting for creditworthiness and other controls.\n\n    Returns a dictionary containing:\n    - 'model': the fitted statsmodels result object\n    - 'odds_ratios': pandas Series of exponentiated coefficients (odds ratios)\n    - 'conf_int_odds': DataFrame of 95% CI for odds ratios\n    - 'summary_text': model.summary().as_text() for quick textual inspection\n    - 'n_obs' : number of observations used\n    - 'accept_rate_by_gender': a small DataFrame with acceptance rates by female\n    \n    The caller should pass the output of transform(df) into this function.\n    \"\"\"\n    # Expect df already transformed (contains the exact columns listed in transform)\n    df = df.copy()\n\n    import statsmodels.api as sm\n    import numpy as np\n    import pandas as pd\n\n    # Define predictors: focal variable female plus controls\n    X_cols = [\n        'female',\n        'black',\n        'self_employed',\n        'married',\n        'bad_history',\n        'denied_PMI',\n        'z_housing_expense_ratio',\n        'z_PI_ratio',\n        'z_loan_to_value',\n        'z_mortgage_credit',\n        'z_consumer_credit'\n    ]\n\n    # Safety check: ensure columns are present\n    missing = [c for c in X_cols + ['accept'] if c not in df.columns]\n    if missing:\n        raise ValueError(f\"Missing columns in input dataframe required for modeling: {missing}\")\n\n    X = df[X_cols]\n    X = sm.add_constant(X, has_constant='add')\n    y = df['accept']\n\n    # Fit logistic regression (binomial) using Maximum Likelihood\n    logit_model = sm.Logit(y, X)\n    try:\n        res = logit_model.fit(disp=False)\n    except Exception as e:\n        # Retry with a small regularization if convergence problems arise\n        res = logit_model.fit_regularized(method='l1', disp=False)\n\n    # Compute odds ratios and 95% CI for odds ratios\n    params = res.params\n    conf = res.conf_int()\n    conf.columns = ['2.5%', '97.5%']\n    odds_ratios = np.exp(params)\n    conf_odds = np.exp(conf)\n\n    # Summary info for quick diagnostics\n    summary_text = res.summary().as_text()\n    n_obs = int(res.nobs)\n\n    # Acceptance rates by gender (raw, unadjusted)\n    accept_rate_by_gender = df.groupby('female')['accept'].agg(['mean', 'count']).rename(columns={'mean': 'accept_rate'})\n\n    results = {\n        'model': res,\n        'odds_ratios': odds_ratios,\n        'conf_int_odds': conf_odds,\n        'summary_text': summary_text,\n        'n_obs': n_obs,\n        'accept_rate_by_gender': accept_rate_by_gender\n    }\n\n    return results"
+    },
+    "3": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Applicant gender indicator: 1 if applicant is female, 0 if male. Primary independent variable to test whether gender affects mortgage approval.",
+            "columns": [
+              "female"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Mortgage application outcome: 1 if application was accepted, 0 if denied. Binary dependent variable.",
+          "columns": [
+            "accept"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Race indicator: 1 if applicant is Black, 0 otherwise. Controls for race-related effects on approval.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "black"
+            ]
+          },
+          {
+            "description": "Applicant mortgage credit score (standardized). Standardized version of mortgage_credit to make coefficients comparable and improve numerical stability.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "mortgage_credit_z"
+            ]
+          },
+          {
+            "description": "Applicant consumer credit score (standardized). Standardized version of consumer_credit.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "consumer_credit_z"
+            ]
+          },
+          {
+            "description": "Total debt payments to income ratio (standardized). Standardized version of PI_ratio.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "PI_ratio_z"
+            ]
+          },
+          {
+            "description": "Loan-to-value ratio (standardized). Standardized version of loan_to_value.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "loan_to_value_z"
+            ]
+          },
+          {
+            "description": "Indicator for prior bad credit history: 1 if applicant has bad history, 0 otherwise.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "bad_history"
+            ]
+          },
+          {
+            "description": "Housing expense as a ratio of income (standardized). Standardized version of housing_expense_ratio.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "housing_expense_ratio_z"
+            ]
+          },
+          {
+            "description": "Indicator for self-employment: 1 if self-employed, 0 otherwise.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "self_employed"
+            ]
+          },
+          {
+            "description": "Indicator for married status: 1 if married, 0 otherwise.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "married"
+            ]
+          },
+          {
+            "description": "Indicator for denied private mortgage insurance: 1 if denied PMI, 0 otherwise.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "denied_PMI"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Clean and prepare the Boston mortgage dataset for logistic regression.\n    - Keep only columns needed for modeling.\n    - Coerce to numeric and drop rows with missing values in those columns.\n    - Create standardized (z-scored) versions of continuous predictors for stability and interpretability.\n\n    Final dataframe will include\n      - accept (DV), female (IV), binary controls (black, bad_history, self_employed, married, denied_PMI)\n      - standardized continuous controls: mortgage_credit_z, consumer_credit_z, PI_ratio_z, loan_to_value_z, housing_expense_ratio_z\n    \"\"\"\n    df = df.copy()\n\n    # Columns required for the analysis\n    required_cols = [\n        'accept', 'female', 'black', 'mortgage_credit', 'consumer_credit', 'PI_ratio',\n        'loan_to_value', 'bad_history', 'housing_expense_ratio', 'self_employed', 'married', 'denied_PMI'\n    ]\n\n    # Ensure columns exist (if a few are missing, this will raise a clear KeyError)\n    missing = [c for c in required_cols if c not in df.columns]\n    if len(missing) > 0:\n        raise KeyError(f\"Missing required columns for transform: {missing}\")\n\n    # Keep only the required columns to simplify downstream analysis\n    df = df[required_cols].copy()\n\n    # Coerce to numeric and set NaN for non-convertible values\n    for c in required_cols:\n        df[c] = pd.to_numeric(df[c], errors='coerce')\n\n    # Drop rows with missing values in any of the required modeling columns\n    df = df.dropna(subset=required_cols)\n\n    # Ensure binary indicators are integers (0/1)\n    binary_cols = ['accept', 'female', 'black', 'bad_history', 'self_employed', 'married', 'denied_PMI']\n    for c in binary_cols:\n        df[c] = df[c].astype(int)\n\n    # Standardize continuous predictors (use population std ddof=0 for stability)\n    cont_cols = ['mortgage_credit', 'consumer_credit', 'PI_ratio', 'loan_to_value', 'housing_expense_ratio']\n    for c in cont_cols:\n        mean = df[c].mean()\n        std = df[c].std(ddof=0)\n        if std == 0 or np.isnan(std):\n            # If zero variance (unlikely), create zero column to avoid division by zero\n            df[c + '_z'] = 0.0\n        else:\n            df[c + '_z'] = (df[c] - mean) / std\n\n    # Return the transformed dataframe with all columns necessary for modeling\n    return df",
+      "m_code": "def model(df: pd.DataFrame) -> dict:\n    \"\"\"\n    Fit a logistic regression predicting acceptance of mortgage (accept) as a function of\n    applicant gender (female) and controls. Returns the fitted statsmodels result and a\n    table of odds ratios with 95% confidence intervals and p-values.\n\n    Model formula:\n      accept ~ female + black + mortgage_credit_z + consumer_credit_z + PI_ratio_z\n               + loan_to_value_z + bad_history + housing_expense_ratio_z\n               + self_employed + married + denied_PMI\n    \"\"\"\n    import statsmodels.formula.api as smf\n\n    # Ensure required transformed columns exist\n    required_model_cols = [\n        'accept', 'female', 'black', 'mortgage_credit_z', 'consumer_credit_z', 'PI_ratio_z',\n        'loan_to_value_z', 'bad_history', 'housing_expense_ratio_z', 'self_employed', 'married', 'denied_PMI'\n    ]\n    missing = [c for c in required_model_cols if c not in df.columns]\n    if len(missing) > 0:\n        raise KeyError(f\"Missing required columns for model: {missing}\")\n\n    formula = (\n        'accept ~ female + black + mortgage_credit_z + consumer_credit_z + PI_ratio_z '\n        '+ loan_to_value_z + bad_history + housing_expense_ratio_z + self_employed + married + denied_PMI'\n    )\n\n    # Fit logistic regression\n    result = smf.logit(formula=formula, data=df).fit(disp=False)\n\n    # Compute odds ratios and 95% CI\n    params = result.params\n    conf = result.conf_int()\n    conf.columns = ['2.5%', '97.5%']\n    odds = np.exp(params)\n    conf_exp = np.exp(conf)\n\n    or_table = pd.DataFrame({\n        'OR': odds,\n        'OR_2.5%': conf_exp['2.5%'],\n        'OR_97.5%': conf_exp['97.5%'],\n        'pvalue': result.pvalues\n    })\n\n    # Return a dictionary with the fitted result object and odds ratio table\n    results = {\n        'fitted_model': result,\n        'odds_ratios': or_table\n    }\n    return results"
+    },
+    "4": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Applicant gender, coded 1 = female, 0 = male. This is the key independent variable to test whether being female affects the probability of mortgage approval.",
+            "columns": [
+              "female"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Mortgage application outcome: 1 = accepted, 0 = denied. This is the dependent variable modeled as a binary outcome.",
+          "columns": [
+            "accept"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Applicant race indicator: 1 = Black, 0 = non-Black. Controls for race differences in approval.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "black"
+            ]
+          },
+          {
+            "description": "Self-employment indicator: 1 = self-employed, 0 = not self-employed. Controls for employment type.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "self_employed"
+            ]
+          },
+          {
+            "description": "Marital status indicator: 1 = married, 0 = not married. Controls for household composition that may influence lending decisions.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "married"
+            ]
+          },
+          {
+            "description": "Indicator for prior bad credit history: 1 = has bad history, 0 = no bad history. Controls for creditworthiness.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "bad_history"
+            ]
+          },
+          {
+            "description": "Applicant's mortgage-specific credit rating (standardized). Higher values indicate better mortgage credit; standardized to mean=0, sd=1 for model stability.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "mortgage_credit_std"
+            ]
+          },
+          {
+            "description": "Applicant's consumer credit rating (standardized). Higher values indicate better consumer credit; standardized to mean=0, sd=1.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "consumer_credit_std"
+            ]
+          },
+          {
+            "description": "Total debt payments to income ratio (standardized). Higher values indicate a larger debt burden relative to income.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "PI_ratio_std"
+            ]
+          },
+          {
+            "description": "Loan-to-value ratio of the mortgage (standardized). Higher values indicate a larger loan relative to property value.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "loan_to_value_std"
+            ]
+          },
+          {
+            "description": "Housing expense to income ratio (standardized). Controls for ongoing housing cost burden.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "housing_expense_ratio_std"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw Boston mortgage dataset into an analysis-ready dataframe.\n\n    Steps:\n    - Require that all raw columns needed for transformation are present.\n    - Drop rows with missing values on those columns (complete-case analysis).\n    - Ensure binary indicators are integer-typed (0/1).\n    - Standardize numeric continuous controls (z-score) and create new columns with suffix '_std'.\n\n    Returns the transformed dataframe containing all columns listed in the conceptual variables.\n    \"\"\"\n    df = df.copy()\n\n    # Raw columns required to produce the final analysis variables\n    required_raw_cols = [\n        'accept', 'female', 'black', 'self_employed', 'married', 'bad_history',\n        'mortgage_credit', 'consumer_credit', 'PI_ratio', 'loan_to_value', 'housing_expense_ratio'\n    ]\n\n    # Ensure all required raw columns are present\n    missing_raw = [c for c in required_raw_cols if c not in df.columns]\n    if missing_raw:\n        raise KeyError(f\"Missing required raw columns for transform: {missing_raw}\")\n\n    # Keep only required raw columns\n    df = df.loc[:, required_raw_cols].copy()\n\n    # Drop rows missing any required raw column values (complete-case)\n    df = df.dropna(subset=required_raw_cols)\n\n    # Ensure binary columns are integer-coded 0/1\n    binary_cols = ['accept', 'female', 'black', 'self_employed', 'married', 'bad_history']\n    for col in binary_cols:\n        # Safely convert booleans or numeric-like to integers; if values are non-numeric strings, this will raise\n        if pd.api.types.is_bool_dtype(df[col].dtype):\n            df[col] = df[col].astype(int)\n        else:\n            df[col] = pd.to_numeric(df[col], errors='raise').astype(int)\n\n    # Standardize continuous control variables and store as new columns with suffix '_std'\n    cont_cols = ['mortgage_credit', 'consumer_credit', 'PI_ratio', 'loan_to_value', 'housing_expense_ratio']\n    for col in cont_cols:\n        mu = df[col].mean()\n        sigma = df[col].std(ddof=0)\n        if sigma == 0 or np.isnan(sigma):\n            df[col + '_std'] = 0.0\n        else:\n            df[col + '_std'] = (df[col] - mu) / sigma\n\n    # Final columns required by the conceptual variables (must exist in final dataframe)\n    final_cols = [\n        'accept', 'female', 'black', 'self_employed', 'married', 'bad_history',\n        'mortgage_credit_std', 'consumer_credit_std', 'PI_ratio_std', 'loan_to_value_std', 'housing_expense_ratio_std'\n    ]\n\n    # Verify all final cols were created\n    missing_final = [c for c in final_cols if c not in df.columns]\n    if missing_final:\n        raise KeyError(f\"Failed to produce required final columns: {missing_final}\")\n\n    # Return only the final columns in the specified order\n    return df.loc[:, final_cols].copy()",
+      "m_code": "def model(df: pd.DataFrame) -> Any:\n    \"\"\"\n    Fit a logistic regression predicting the probability of mortgage acceptance (accept=1) from applicant gender (female)\n    while adjusting for a set of controls capturing creditworthiness and demographics.\n\n    Returns a dictionary with the fitted model, a robust results wrapper (via robust covariance), an estimated average marginal effect for being female,\n    and a small summary with the female coefficient odds ratio and robust 95% CI.\n    \"\"\"\n    df = df.copy()\n\n    # Define model covariates (must match columns created in transform)\n    X_cols = [\n        'female', 'black', 'self_employed', 'married', 'bad_history',\n        'mortgage_credit_std', 'consumer_credit_std', 'PI_ratio_std', 'loan_to_value_std', 'housing_expense_ratio_std'\n    ]\n\n    # Ensure all required covariates and outcome exist in df\n    missing = [c for c in X_cols + ['accept'] if c not in df.columns]\n    if missing:\n        raise KeyError(f\"Missing columns required for modeling: {missing}\")\n\n    # Prepare design matrices\n    X = sm.add_constant(df[X_cols], has_constant='add')\n    y = df['accept'].astype(float)\n\n    # Fit logistic regression (maximum likelihood)\n    logit = sm.Logit(y, X)\n    res = logit.fit(disp=False, maxiter=200)\n\n    # Compute robust covariance matrix. Prefer get_robustcov_results when available,\n    # otherwise compute sandwich robust covariance manually using the score-based formulation.\n    try:\n        # Try to use get_robustcov_results if available (newer versions)\n        robust_res = res.get_robustcov_results(cov_type='HC3')\n        cov_robust = robust_res.cov_params()\n    except Exception:\n        # Fallback: compute sandwich (robust) covariance manually.\n        # For Logit, score for observation i is x_i * (y_i - p_i).\n        # Sandwich covariance = inv(X' W X) @ (X' diag((y-p)^2) X) @ inv(X' W X)\n        p = res.predict(X)\n        resid = (y - p).to_numpy().reshape(-1)\n        X_mat = np.asarray(X)\n        # meat = X' diag(resid^2) X\n        meat = X_mat.T.dot(np.diag(resid ** 2)).dot(X_mat)\n        # bread_inv: model-based covariance (inverse Fisher information)\n        bread_inv = np.asarray(res.cov_params())\n        cov_mat = bread_inv.dot(meat).dot(bread_inv)\n        cov_robust = pd.DataFrame(cov_mat, index=res.params.index, columns=res.params.index)\n\n    # robust standard errors as a pandas Series aligned with parameter names\n    robust_se = pd.Series(np.sqrt(np.diag(cov_robust)), index=res.params.index)\n\n    # Compute Average Marginal Effect (AME) of female by computing predicted probabilities when female=1 vs female=0\n    X_f1 = X.copy()\n    X_f0 = X.copy()\n    X_f1['female'] = 1\n    X_f0['female'] = 0\n    pred_f1 = res.predict(X_f1)\n    pred_f0 = res.predict(X_f0)\n    avg_marginal_effect_female = (pred_f1 - pred_f0).mean()\n\n    # Odds ratio and robust 95% CI for the female coefficient (use normal approximation with robust SE)\n    coef = res.params['female']\n    se = float(robust_se['female'])\n    z = norm.ppf(0.975)\n    ci_lower = coef - z * se\n    ci_upper = coef + z * se\n    or_point = float(np.exp(coef))\n    or_ci_lower = float(np.exp(ci_lower))\n    or_ci_upper = float(np.exp(ci_upper))\n\n    summary = {\n        'n_obs': int(df.shape[0]),\n        'female_coef_mle': float(coef),\n        'female_se_robust': se,\n        'female_avg_marginal_effect': float(avg_marginal_effect_female),\n        'female_odds_ratio': or_point,\n        'female_odds_ratio_robust_CI_95': [or_ci_lower, or_ci_upper]\n    }\n\n    results = {\n        'mle_result': res,\n        'robust_cov': cov_robust,\n        'robust_se': robust_se,\n        'avg_marginal_effect_female': avg_marginal_effect_female,\n        'female_odds_ratio': or_point,\n        'female_odds_ratio_robust_CI_95': [or_ci_lower, or_ci_upper],\n        'summary_dict': summary\n    }\n\n    return results"
+    }
+  }
+}

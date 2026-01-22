@@ -1,179 +1,246 @@
 def extract_final_answer(model_output):
     """
-    Extracts the estimated effect of Reader View for readers with dyslexia from a fitted
-    statsmodels MixedLMResults (or wrapper) object that used the formula:
-      log_speed ~ reader_view * dyslexia_bin + ...
-    Returns a dictionary with:
-      - "object": a dict of numeric results (coef on log scale, se, z, p, CI, percent change)
-      - "description": a short plain-English interpretation of the result
+    Extracts statistics relevant to whether Reader View improves reading speed for individuals with dyslexia.
+    Expects a fitted statsmodels results object (OLS/MixedLM or a robustified results wrapper).
 
-    The function is written defensively to find parameter names like:
-      'reader_view' (main effect) and an interaction parameter that contains both
-      'reader_view' and 'dyslexia' (e.g., 'reader_view:dyslexia_bin').
+    Returns:
+      {
+        "object": {
+           "model_type": str,
+           "interaction_name": str or None,
+           "interaction_coef": float or None,
+           "interaction_se": float or None,
+           "interaction_pval": float or None,
+           "interaction_ci": [low, high] or None,
+           "reader_view_coef_non_dyslexic": float or None,
+           "reader_view_se_non_dyslexic": float or None,
+           "reader_view_pval_non_dyslexic": float or None,
+           "reader_view_ci_non_dyslexic": [low, high] or None,
+           "reader_view_effect_dyslexic_log": float or None,
+           "reader_view_effect_dyslexic_se": float or None,
+           "reader_view_effect_dyslexic_pval": float or None,
+           "reader_view_effect_dyslexic_pct_change": float or None
+        },
+        "description": "Concise interpretation"
+      }
+
+    The function is defensive: it searches for the interaction term name in the model parameter names
+    (looks for any param name containing both 'reader_view' and 'dyslexia' / 'dyslexia_bin'). If covariance
+    matrix is available, it computes the standard error and p-value for the combined effect (reader_view + interaction)
+    which is the effect of Reader View for dyslexic readers. p-values for combined effect use a normal approximation.
     """
-    import numpy as np
-    from math import sqrt
-    from scipy import stats
+    import math
+    from collections import OrderedDict
 
-    res = model_output
+    # Helper: normal two-sided p-value from z
+    def two_sided_p_from_z(z):
+        # p = 2*(1 - Phi(|z|)) where Phi is CDF of standard normal
+        # Use erf: Phi(x) = 0.5*(1 + erf(x/sqrt(2)))
+        return 2 * (1 - 0.5 * (1 + math.erf(abs(z) / math.sqrt(2))))
 
-    # Try to obtain parameter estimates and covariance matrix from common attributes
-    # statsmodels MixedLMResultsWrapper exposes .params and .cov_params()
+    # Prepare return structure
+    result_obj = OrderedDict(
+        [
+            ("model_type", None),
+            ("interaction_name", None),
+            ("interaction_coef", None),
+            ("interaction_se", None),
+            ("interaction_pval", None),
+            ("interaction_ci", None),
+            ("reader_view_coef_non_dyslexic", None),
+            ("reader_view_se_non_dyslexic", None),
+            ("reader_view_pval_non_dyslexic", None),
+            ("reader_view_ci_non_dyslexic", None),
+            ("reader_view_effect_dyslexic_log", None),
+            ("reader_view_effect_dyslexic_se", None),
+            ("reader_view_effect_dyslexic_pval", None),
+            ("reader_view_effect_dyslexic_pct_change", None),
+        ]
+    )
+
+    # Determine model type string
     try:
-        params = res.params
+        result_obj["model_type"] = type(model_output).__name__
     except Exception:
-        # fallback to attribute name used by some statsmodels versions
-        try:
-            params = res.fe_params
-        except Exception as e:
-            raise ValueError("Could not extract parameter estimates from model_output") from e
+        result_obj["model_type"] = str(model_output)
 
+    # Get params (as a pandas Series or dict-like)
     try:
-        cov = res.cov_params()
-    except Exception:
-        # fallback to covariance of fixed effects
-        try:
-            cov = res.cov_re  # not ideal, but try something sensible
-        except Exception as e:
-            raise ValueError("Could not extract covariance matrix from model_output") from e
-
-    # Ensure params is a pandas Series-like with index
-    try:
-        param_names = list(params.index)
-    except Exception:
-        # if params is a numpy array, we cannot proceed reliably
-        raise ValueError("Parameter object from model_output does not have named indices")
-
-    # Find parameter names related to reader_view
-    reader_terms = [n for n in param_names if 'reader_view' in n]
-    if not reader_terms:
-        raise ValueError("No parameter name containing 'reader_view' was found in the model parameters.")
-
-    # Identify interaction term (contains both reader_view and dyslexia)
-    interaction_term = None
-    for n in reader_terms:
-        if ('dyslex' in n) or ('dyslexia' in n) or ('dyslexia_bin' in n):
-            interaction_term = n
-            break
-
-    # Identify main reader_view term (a reader_view term that is not the interaction)
-    main_term = None
-    for n in reader_terms:
-        if n != interaction_term:
-            main_term = n
-            break
-
-    if main_term is None:
-        # If we could not find a clear main term but there is exactly one reader_terms entry,
-        # treat that as the main effect and assume no separate interaction term.
-        if len(reader_terms) == 1 and interaction_term is None:
-            main_term = reader_terms[0]
-        else:
-            raise ValueError("Could not identify the main 'reader_view' coefficient in parameters.")
-
-    # Extract coefficients
-    beta_main = float(params[main_term])
-    # covariance entries
-    try:
-        var_main = float(cov.loc[main_term, main_term])
-    except Exception:
-        # try indexing if cov is a numpy matrix with same ordering as params
-        try:
-            idx_main = param_names.index(main_term)
-            var_main = float(cov[idx_main, idx_main])
-        except Exception as e:
-            raise ValueError("Could not find variance for main term in covariance matrix") from e
-
-    if interaction_term is not None:
-        beta_inter = float(params[interaction_term])
-        try:
-            var_inter = float(cov.loc[interaction_term, interaction_term])
-            cov_mi = float(cov.loc[main_term, interaction_term])
-        except Exception:
-            # fallback to index-based access
-            try:
-                idx_main = param_names.index(main_term)
-                idx_inter = param_names.index(interaction_term)
-                var_inter = float(cov[idx_inter, idx_inter])
-                cov_mi = float(cov[idx_main, idx_inter])
-            except Exception as e:
-                raise ValueError("Could not find covariance entries for interaction/main terms") from e
-
-        # Combined effect of reader_view for dyslexia = main + interaction
-        beta_combined = beta_main + beta_inter
-        var_combined = var_main + var_inter + 2.0 * cov_mi
-        se_combined = sqrt(var_combined) if var_combined >= 0 else float('nan')
-
-        # z-stat and p-value using normal approximation
-        z_combined = beta_combined / se_combined if se_combined != 0 else float('nan')
-        p_combined = 2.0 * (1.0 - stats.norm.cdf(abs(z_combined))) if se_combined != 0 else float('nan')
-
-        # 95% CI on log scale
-        ci_lo = beta_combined - 1.96 * se_combined
-        ci_hi = beta_combined + 1.96 * se_combined
-
-        # Convert to percent change in original reading speed
-        pct_change = (np.exp(beta_combined) - 1.0) * 100.0
-        pct_ci_lo = (np.exp(ci_lo) - 1.0) * 100.0
-        pct_ci_hi = (np.exp(ci_hi) - 1.0) * 100.0
-
-        result_obj = {
-            "term_for_dyslexic_log_coef": float(beta_combined),
-            "term_for_dyslexic_se": float(se_combined),
-            "term_for_dyslexic_z": float(z_combined),
-            "term_for_dyslexic_pvalue": float(p_combined),
-            "term_for_dyslexic_95ci_log": (float(ci_lo), float(ci_hi)),
-            "term_for_dyslexic_percent_change": float(pct_change),
-            "term_for_dyslexic_95ci_percent": (float(pct_ci_lo), float(pct_ci_hi)),
-            "main_term_name": main_term,
-            "interaction_term_name": interaction_term,
-            "main_term_log_coef": float(beta_main),
-            "interaction_log_coef": float(beta_inter)
+        params = model_output.params
+    except Exception as e:
+        return {
+            "object": result_obj,
+            "description": f"Could not read model parameters from the provided object: {e}",
         }
 
-        # Build a concise description
-        sig_text = "statistically significant (p < 0.05)" if p_combined < 0.05 else "not statistically significant (p >= 0.05)"
-        direction = "increase" if beta_combined > 0 else ("decrease" if beta_combined < 0 else "no change")
-        description = (
-            f"The estimated effect of turning Reader View ON for readers with dyslexia is a log-coefficient of "
-            f"{beta_combined:.4f} (SE={se_combined:.4f}, z={z_combined:.2f}, p={p_combined:.3g}). "
-            f"On the original reading-speed scale this corresponds to a {pct_change:.1f}% {direction} "
-            f"in reading speed (95% CI: {pct_ci_lo:.1f}% to {pct_ci_hi:.1f}%). The effect is {sig_text}. "
-            f"(Main reader_view term = {beta_main:.4f}; interaction term = {beta_inter:.4f}.)"
-        )
+    # Ensure parameter names are strings
+    try:
+        param_names = [str(n) for n in params.index]
+    except Exception:
+        param_names = [str(n) for n in list(params.keys())]
 
+    # Find interaction parameter name: any param containing both reader_view and dyslexia/dyslexia_bin
+    interaction_candidates = [
+        n
+        for n in param_names
+        if ("reader_view" in n and ("dyslexia" in n or "dyslexia_bin" in n) and ":" in n)
+        or ("reader_view" in n and "dyslexia" in n and ":" not in n and "/" in n)  # just in case
+    ]
+    # fallback: any param that contains both substrings even without ":" (defensive)
+    if not interaction_candidates:
+        interaction_candidates = [
+            n for n in param_names if ("reader_view" in n and "dyslexia" in n)
+        ]
+
+    interaction_name = interaction_candidates[0] if interaction_candidates else None
+    result_obj["interaction_name"] = interaction_name
+
+    # Find reader_view main effect parameter: contains reader_view but not dyslexia
+    reader_view_candidates = [
+        n
+        for n in param_names
+        if ("reader_view" in n and "dyslexia" not in n)
+    ]
+    # Prefer exact 'reader_view' if present
+    if "reader_view" in param_names:
+        reader_view_name = "reader_view"
+    elif reader_view_candidates:
+        # pick the shortest matching name (most likely the main numeric term)
+        reader_view_name = sorted(reader_view_candidates, key=len)[0]
     else:
-        # No interaction term found: effect for dyslexic readers equals main effect
-        se_main = sqrt(var_main) if var_main >= 0 else float('nan')
-        z_main = beta_main / se_main if se_main != 0 else float('nan')
-        p_main = 2.0 * (1.0 - stats.norm.cdf(abs(z_main))) if se_main != 0 else float('nan')
-        ci_lo = beta_main - 1.96 * se_main
-        ci_hi = beta_main + 1.96 * se_main
-        pct_change = (np.exp(beta_main) - 1.0) * 100.0
-        pct_ci_lo = (np.exp(ci_lo) - 1.0) * 100.0
-        pct_ci_hi = (np.exp(ci_hi) - 1.0) * 100.0
+        reader_view_name = None
 
-        result_obj = {
-            "term_for_dyslexic_log_coef": float(beta_main),
-            "term_for_dyslexic_se": float(se_main),
-            "term_for_dyslexic_z": float(z_main),
-            "term_for_dyslexic_pvalue": float(p_main),
-            "term_for_dyslexic_95ci_log": (float(ci_lo), float(ci_hi)),
-            "term_for_dyslexic_percent_change": float(pct_change),
-            "term_for_dyslexic_95ci_percent": (float(pct_ci_lo), float(pct_ci_hi)),
-            "main_term_name": main_term,
-            "interaction_term_name": None,
-            "main_term_log_coef": float(beta_main)
-        }
+    # Extract interaction stats if present
+    def safe_get_value(series_like, key):
+        try:
+            return float(series_like[key])
+        except Exception:
+            return None
 
-        sig_text = "statistically significant (p < 0.05)" if p_main < 0.05 else "not statistically significant (p >= 0.05)"
-        direction = "increase" if beta_main > 0 else ("decrease" if beta_main < 0 else "no change")
+    if interaction_name is not None:
+        interaction_coef = safe_get_value(params, interaction_name)
+        # SE and p-val may be in bse / pvalues
+        try:
+            bse = model_output.bse if hasattr(model_output, "bse") else None
+            pvalues = model_output.pvalues if hasattr(model_output, "pvalues") else None
+            interaction_se = safe_get_value(bse, interaction_name) if bse is not None else None
+            interaction_pval = safe_get_value(pvalues, interaction_name) if pvalues is not None else None
+        except Exception:
+            interaction_se = interaction_pval = None
+
+        # Confidence interval
+        try:
+            ci_df = model_output.conf_int()
+            # conf_int may be a DataFrame with index matching param names
+            if interaction_name in ci_df.index:
+                ci_low, ci_high = float(ci_df.loc[interaction_name, 0]), float(ci_df.loc[interaction_name, 1])
+                interaction_ci = [ci_low, ci_high]
+            else:
+                interaction_ci = None
+        except Exception:
+            interaction_ci = None
+
+        result_obj["interaction_coef"] = interaction_coef
+        result_obj["interaction_se"] = interaction_se
+        result_obj["interaction_pval"] = interaction_pval
+        result_obj["interaction_ci"] = interaction_ci
+    else:
+        interaction_coef = interaction_se = interaction_pval = interaction_ci = None
+
+    # Extract reader_view main effect stats (non-dyslexic effect)
+    if reader_view_name is not None:
+        rv_coef = safe_get_value(params, reader_view_name)
+        try:
+            bse = model_output.bse if hasattr(model_output, "bse") else None
+            pvalues = model_output.pvalues if hasattr(model_output, "pvalues") else None
+            rv_se = safe_get_value(bse, reader_view_name) if bse is not None else None
+            rv_pval = safe_get_value(pvalues, reader_view_name) if pvalues is not None else None
+        except Exception:
+            rv_se = rv_pval = None
+
+        try:
+            ci_df = model_output.conf_int()
+            if reader_view_name in ci_df.index:
+                ci_low, ci_high = float(ci_df.loc[reader_view_name, 0]), float(ci_df.loc[reader_view_name, 1])
+                rv_ci = [ci_low, ci_high]
+            else:
+                rv_ci = None
+        except Exception:
+            rv_ci = None
+
+        result_obj["reader_view_coef_non_dyslexic"] = rv_coef
+        result_obj["reader_view_se_non_dyslexic"] = rv_se
+        result_obj["reader_view_pval_non_dyslexic"] = rv_pval
+        result_obj["reader_view_ci_non_dyslexic"] = rv_ci
+    else:
+        rv_coef = rv_se = rv_pval = rv_ci = None
+
+    # Compute combined effect for dyslexic readers: reader_view + interaction
+    if (rv_coef is not None) and (interaction_coef is not None):
+        combined_coef = rv_coef + interaction_coef
+        result_obj["reader_view_effect_dyslexic_log"] = combined_coef
+
+        # Try to compute SE of combined effect using covariance matrix
+        try:
+            cov = model_output.cov_params()
+            # ensure keys present
+            if interaction_name in cov.index and reader_view_name in cov.index:
+                var_rv = float(cov.loc[reader_view_name, reader_view_name])
+                var_int = float(cov.loc[interaction_name, interaction_name])
+                cov_rv_int = float(cov.loc[reader_view_name, interaction_name])
+                combined_var = var_rv + var_int + 2.0 * cov_rv_int
+                combined_se = math.sqrt(max(combined_var, 0.0))
+                result_obj["reader_view_effect_dyslexic_se"] = combined_se
+                # p-value using normal approx
+                z = combined_coef / combined_se if combined_se and combined_se > 0 else None
+                combined_p = two_sided_p_from_z(z) if z is not None else None
+                result_obj["reader_view_effect_dyslexic_pval"] = combined_p
+            else:
+                # Cov matrix present but keys missing
+                result_obj["reader_view_effect_dyslexic_se"] = None
+                result_obj["reader_view_effect_dyslexic_pval"] = None
+        except Exception:
+            result_obj["reader_view_effect_dyslexic_se"] = None
+            result_obj["reader_view_effect_dyslexic_pval"] = None
+
+        # Percent change in wpm (log outcome): (exp(coef)-1)*100
+        try:
+            pct_change = (math.exp(combined_coef) - 1.0) * 100.0
+            result_obj["reader_view_effect_dyslexic_pct_change"] = pct_change
+        except Exception:
+            result_obj["reader_view_effect_dyslexic_pct_change"] = None
+    else:
+        # if missing either element, cannot compute combined
+        result_obj["reader_view_effect_dyslexic_log"] = None
+        result_obj["reader_view_effect_dyslexic_se"] = None
+        result_obj["reader_view_effect_dyslexic_pval"] = None
+        result_obj["reader_view_effect_dyslexic_pct_change"] = None
+
+    # Build brief description / interpretation
+    if result_obj["reader_view_effect_dyslexic_log"] is None:
         description = (
-            f"No reader_view × dyslexia interaction parameter was found. The estimated effect of turning Reader View ON "
-            f"(applies equally to dyslexic readers under this model) is a log-coefficient of {beta_main:.4f} "
-            f"(SE={se_main:.4f}, z={z_main:.2f}, p={p_main:.3g}). On the original reading-speed scale this corresponds "
-            f"to a {pct_change:.1f}% {direction} in reading speed (95% CI: {pct_ci_lo:.1f}% to {pct_ci_hi:.1f}%). "
-            f"The effect is {sig_text}."
+            "Could not locate required parameter(s) to compute the effect of Reader View for dyslexic readers. "
+            "Searched model parameters for 'reader_view' and an interaction with 'dyslexia'/'dyslexia_bin'. "
+            "Returned object contains whatever statistics were found."
+        )
+    else:
+        coef = result_obj["reader_view_effect_dyslexic_log"]
+        pct = result_obj["reader_view_effect_dyslexic_pct_change"]
+        p_comb = result_obj["reader_view_effect_dyslexic_pval"]
+        # Interpret significance
+        if p_comb is None:
+            sig_text = "p-value unavailable for the combined effect (could not compute SE/covariance)."
+        else:
+            sig_text = (
+                f"the combined effect has p = {p_comb:.3g}; "
+                + ("statistically significant (p < 0.05)." if p_comb < 0.05 else "not statistically significant (p >= 0.05).")
+            )
+        description = (
+            f"Estimated effect of Reader View for dyslexic readers (log scale) = {coef:.4g}. "
+            f"This corresponds to ~{pct:.2f}% change in predicted reading speed (wpm). "
+            f"According to the model, {sig_text} "
+            "Positive percent change means Reader View is associated with faster reading; negative means slower. "
+            "All effects are on the natural-log scale of wpm; reported CIs, SEs, and p-values are in the returned 'object'."
         )
 
-    return {"object": result_obj, "description": description}
+    return {"object": dict(result_obj), "description": description}

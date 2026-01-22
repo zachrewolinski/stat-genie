@@ -1,166 +1,224 @@
 def extract_final_answer(model_output):
     """
-    Extract statistics testing whether modern humans (Homo sapiens) have different
-    antemortem tooth loss (AMTL) than non-human primates, controlling for age,
-    sex, and tooth class.
+    Extracts pairwise adjusted comparisons of AMTL odds for Homo sapiens vs each non-human genus
+    from a fitted statsmodels GLMResultsWrapper (binomial with formula including C(genus)).
 
-    Expects model_output to be the dict returned by the model() function:
-      {
-        'full_genus_model': GLMResultsWrapper,
-        'human_contrast_model': GLMResultsWrapper
-      }
-
-    Returns a dict with:
-      - "object": dict of extracted numeric results (coef, se, z, p, conf int, OR, OR CI, n)
-      - "description": short interpretation of the result in the context of the task
+    Returns a dictionary with:
+      - "object": a dict mapping each non-human genus to its comparison stats vs Homo:
+          { genus: {
+              "odds_ratio": float,
+              "ci_lower": float,
+              "ci_upper": float,
+              "p_value": float,
+              "significant": bool,
+              "conclusion": str  # 'Homo higher', 'Homo lower', or 'no significant difference'
+            }, ...
+          }
+      - "description": short textual interpretation of the results in context.
     """
+    import re
     import numpy as np
+    from scipy.stats import norm
 
-    # Try to find the human-contrast model first (it directly includes IsHuman)
-    res = None
-    if isinstance(model_output, dict):
-        # prefer explicit human model if present
-        if 'human_contrast_model' in model_output:
-            res = model_output['human_contrast_model']
-        elif 'full_genus_model' in model_output:
-            # fallback to full model if human_contrast_model missing
-            res = model_output['full_genus_model']
-    else:
-        # If a raw results object was passed accidentally, treat it as the result
-        res = model_output
+    res = model_output
 
-    if res is None:
+    # Basic extracts
+    params = res.params  # Series
+    conf = res.conf_int()  # DataFrame with two columns
+    cov = res.cov_params()  # DataFrame covariance of params
+
+    # Find all parameter names that correspond to genus dummies
+    gen_param_names = [n for n in params.index if ('C(genus)' in n) or ('genus' in n and ('C(' not in n))]
+    # Keep only those that look like categorical encodings "C(genus)[T.<level>]" if possible
+    gen_param_names = [n for n in gen_param_names if 'genus' in n]  # defensive
+
+    # Try to recover the full list of genus levels from the original data if available
+    full_levels = None
+    try:
+        if hasattr(res.model, 'data') and hasattr(res.model.data, 'frame') and res.model.data.frame is not None:
+            df = res.model.data.frame
+            if 'genus' in df.columns:
+                # preserve observed order as list
+                full_levels = list(pd.Index(df['genus']).unique())
+    except Exception:
+        full_levels = None
+
+    # Parse level name out of parameter name, building mapping level -> param_name
+    level_to_param = {}
+    param_to_level = {}
+    pattern = re.compile(r"C\(genus\)\[T\.(.+)\]")  # common statsmodels naming
+    for pname in gen_param_names:
+        m = pattern.search(pname)
+        if m:
+            level = m.group(1)
+        else:
+            # fallback: try to extract between '[' and ']'
+            if '[' in pname and ']' in pname:
+                between = pname.split('[')[1].split(']')[0]
+                # remove leading 'T.' if present
+                level = between[2:] if between.startswith('T.') else between
+            else:
+                # as last resort use entire pname
+                level = pname
+        level_to_param[level] = pname
+        param_to_level[pname] = level
+
+    # If we have full_levels, ensure they include parsed levels; otherwise construct full_levels
+    if full_levels is None:
+        # Attempt to construct full levels as parsed levels plus inferred reference (if any)
+        parsed_levels = list(level_to_param.keys())
+        # We can't know the reference level exactly without the data; assume reference is any level not in parsed_levels
+        full_levels = parsed_levels.copy()
+        # If there's reason to suspect a reference not among parsed (i.e. model had 4 levels but only 3 params),
+        # we cannot recover its name here; we'll mark it as "<reference>".
+        # Determine number of levels by checking unique categories in model design_info if available
+        try:
+            design_info = res.model.data.design_info
+            # attempt to find categories for genus
+            for term in design_info.term_names:
+                if 'genus' in term:
+                    # not guaranteed to provide levels; skip
+                    pass
+        except Exception:
+            pass
+
+    # Identify whether 'Homo' (Homo sapiens) is among parsed levels or among full_levels
+    # Match flexibly: look for any level string containing 'Homo' or 'sapiens'
+    homo_level = None
+    for lev in full_levels:
+        if isinstance(lev, str) and ('Homo' in lev or 'sapiens' in lev or 'sapiens' in lev.lower()):
+            homo_level = lev
+            break
+    # If not found in full_levels, try the parsed keys
+    if homo_level is None:
+        for lev in list(level_to_param.keys()):
+            if ('Homo' in lev) or ('sapiens' in lev) or ('sapiens' in lev.lower()):
+                homo_level = lev
+                break
+
+    if homo_level is None:
+        # Cannot find Homo sapiens label in the model's genus levels: return informative message
         return {
             "object": None,
-            "description": "No model results found in model_output. Expected keys 'human_contrast_model' or 'full_genus_model'."
+            "description": "Could not identify a genus level corresponding to 'Homo sapiens' in the fitted model. "
+                           "Check the genus category labels used when fitting the model."
         }
 
-    # Determine which parameter corresponds to the human effect.
-    params_index = list(res.params.index)
+    # Determine non-human genera to compare: take all full_levels excluding homo_level
+    other_genera = [lev for lev in full_levels if lev != homo_level]
+    # If full_levels only contained parsed (i.e., non-reference only), it's possible the reference (a genus) is missing.
+    # We try to supplement by adding parsed levels that are not homo and not already included.
+    for lev in level_to_param.keys():
+        if lev != homo_level and lev not in other_genera:
+            other_genera.append(lev)
 
-    # Preferred parameter name from the constructed contrast model
-    param_name = None
-    if 'IsHuman' in params_index:
-        param_name = 'IsHuman'
-    else:
-        # try substrings (defensive): look for a Genus.*Homo or Homo.*Genus or any param containing 'Homo'
-        for nm in params_index:
-            if ('Homo' in nm) or ('sapiens' in nm) or ('Is_Human' in nm) or ('IsHuman' in nm):
-                param_name = nm
-                break
-        # As an additional fallback, look for any parameter that starts with 'Genus' (and then contains Homo)
-        if param_name is None:
-            for nm in params_index:
-                if nm.startswith('Genus') and ('Homo' in nm or 'sapiens' in nm):
-                    param_name = nm
-                    break
-
-    if param_name is None:
-        # Cannot find a direct human parameter: return a helpful message and the available param names
+    # If still empty (no other genera), return message
+    if len(other_genera) == 0:
         return {
-            "object": {"available_params": params_index},
-            "description": ("Could not locate a model parameter corresponding to a human vs non-human contrast. "
-                            "Available parameter names are returned in 'object'. If the contrast variable was named "
-                            "differently, re-run the model or provide the correct parameter name.")
+            "object": None,
+            "description": "No other genus levels were found in the model to compare with Homo sapiens."
         }
 
-    # Extract statistics for the chosen parameter
-    coef = float(res.params[param_name])
-    se = float(res.bse[param_name]) if hasattr(res, 'bse') else None
-    # statsmodels provides pvalues; if not, compute z statistic and two-sided p via normal approx
-    pval = None
-    zstat = None
-    if hasattr(res, 'pvalues') and param_name in res.pvalues.index:
-        pval = float(res.pvalues[param_name])
-        # try to get z from tvalues or zvalues if present
-        if hasattr(res, 'tvalues') and param_name in res.tvalues.index:
-            zstat = float(res.tvalues[param_name])
-        elif hasattr(res, 'zvalues') and param_name in res.zvalues.index:
-            zstat = float(res.zvalues[param_name])
+    results = {}
+
+    # Helper to get param value, variance, cov between two params; if param missing (i.e., reference), treat value=0, var=0, cov=0
+    def _get_param_info_for_level(level):
+        if level in level_to_param:
+            pname = level_to_param[level]
+            coef = params[pname]
+            var = cov.loc[pname, pname]
+            return coef, var, pname
         else:
-            # approximate z
-            zstat = coef / se if se not in (None, 0) else None
-    else:
-        # fallback: compute z and p from coef and se using normal approx
-        if se not in (None, 0):
-            zstat = coef / se
-            from math import erf, sqrt
-            # two-sided p from normal
-            pval = float(2 * (1 - 0.5 * (1 + erf(abs(zstat) / sqrt(2)))))
+            # reference (omitted) level
+            return 0.0, 0.0, None
+
+    # Check whether Homo is a non-reference (i.e., has a parameter)
+    homo_is_nonref = homo_level in level_to_param
+
+    for other in other_genera:
+        # Skip if other equals homo (shouldn't happen)
+        if other == homo_level:
+            continue
+
+        # Get coef and var for Homo and for other
+        coef_h, var_h, pname_h = _get_param_info_for_level(homo_level)
+        coef_o, var_o, pname_o = _get_param_info_for_level(other)
+
+        # Compute contrast log-odds: logit(Homo) - logit(other)
+        # Cases:
+        # - If Homo and other both non-reference: both have params -> contrast = coef_h - coef_o
+        # - If Homo nonref and other is reference: coef_o=0 -> contrast=coef_h
+        # - If Homo is reference (coef_h=0) and other nonref: coef_o != 0 -> contrast = -coef_o
+        contrast = coef_h - coef_o
+
+        # Compute variance of contrast:
+        # Var(contrast) = Var(coef_h) + Var(coef_o) - 2*Cov(coef_h, coef_o)
+        if (pname_h is None) or (pname_o is None):
+            # if one is reference, covariance is zero and var for reference is zero
+            var_contrast = var_h + var_o
         else:
-            pval = None
+            cov_h_o = cov.loc[pname_h, pname_o]
+            var_contrast = var_h + var_o - 2.0 * cov_h_o
 
-    # Confidence interval
-    try:
-        ci = res.conf_int().loc[param_name].values.astype(float)
-        ci_lower, ci_upper = float(ci[0]), float(ci[1])
-    except Exception:
-        ci_lower, ci_upper = None, None
-
-    # Odds ratio and CI on OR scale
-    try:
-        or_val = float(np.exp(coef))
-        or_ci = (float(np.exp(ci_lower)) if ci_lower is not None else None,
-                 float(np.exp(ci_upper)) if ci_upper is not None else None)
-    except Exception:
-        or_val = None
-        or_ci = (None, None)
-
-    # Sample size / effective observations
-    try:
-        n_obs = int(res.nobs)
-    except Exception:
-        # fallback: try model.endog
-        try:
-            n_obs = int(res.model.endog.shape[0])
-        except Exception:
-            n_obs = None
-
-    # Prepare object to return
-    result_object = {
-        "parameter_name": param_name,
-        "coef_log_odds": coef,
-        "se": se,
-        "z": zstat,
-        "p_value": pval,
-        "conf_int_log_odds": (ci_lower, ci_upper),
-        "odds_ratio": or_val,
-        "odds_ratio_conf_int": or_ci,
-        "n_obs": n_obs
-    }
-
-    # Short interpretation relative to the research question
-    if pval is None:
-        interpretation = (
-            "Could not compute a p-value for the human contrast parameter. Extracted coefficient and CIs are provided "
-            "in 'object'."
-        )
-    else:
-        alpha = 0.05
-        if pval < alpha:
-            if coef > 0:
-                interpretation = (
-                    f"Yes — the model indicates a statistically significant higher AMTL in modern humans compared to "
-                    f"non-human primates after controlling for age, sex, and tooth class (parameter '{param_name}': "
-                    f"log-odds = {coef:.4f}, SE = {se:.4f}, z = {zstat:.3f}, p = {pval:.3e}; "
-                    f"OR = {or_val:.3f}, 95% CI = [{or_ci[0]:.3f}, {or_ci[1]:.3f}])."
-                )
+        # Numerical safety
+        if var_contrast < 0:
+            # Numerical issues may create tiny negative numbers; clip to small positive
+            if var_contrast > -1e-8:
+                var_contrast = max(var_contrast, 0.0)
             else:
-                interpretation = (
-                    f"No — the model indicates a statistically significant lower AMTL in modern humans compared to "
-                    f"non-human primates (parameter '{param_name}': log-odds = {coef:.4f}, SE = {se:.4f}, "
-                    f"z = {zstat:.3f}, p = {pval:.3e}; OR = {or_val:.3f}, 95% CI = [{or_ci[0]:.3f}, {or_ci[1]:.3f}])."
-                )
-        else:
-            # not statistically significant
-            interpretation = (
-                f"No — there is no statistically significant difference in AMTL between modern humans and non-human "
-                f"primates after controlling for age, sex, and tooth class (parameter '{param_name}': "
-                f"log-odds = {coef:.4f}, SE = {se:.4f}, z = {zstat:.3f}, p = {pval:.3e}; "
-                f"OR = {or_val:.3f}, 95% CI = [{or_ci[0]:.3f}, {or_ci[1]:.3f}])."
-            )
+                # fallback: set to NaN to signal
+                var_contrast = np.nan
 
-    return {
-        "object": result_object,
-        "description": interpretation
-    }
+        se_contrast = np.sqrt(var_contrast) if (not np.isnan(var_contrast)) else np.nan
+
+        # Odds ratio and CI on odds ratio scale
+        or_est = np.exp(contrast)
+        if not np.isnan(se_contrast):
+            z = contrast / se_contrast if se_contrast > 0 else np.nan
+            pval = 2.0 * (1.0 - norm.cdf(abs(z))) if not np.isnan(z) else np.nan
+            ci_low = np.exp(contrast - 1.96 * se_contrast)
+            ci_upp = np.exp(contrast + 1.96 * se_contrast)
+        else:
+            pval = np.nan
+            ci_low = np.nan
+            ci_upp = np.nan
+
+        # Determine significance and conclusion
+        significant = (not np.isnan(pval)) and (pval < 0.05)
+        if significant:
+            if or_est > 1.0:
+                conclusion = "Homo sapiens have significantly higher AMTL than " + str(other)
+            elif or_est < 1.0:
+                conclusion = "Homo sapiens have significantly lower AMTL than " + str(other)
+            else:
+                conclusion = "No significant difference"
+        else:
+            conclusion = "No significant difference"
+
+        results[str(other)] = {
+            "odds_ratio": float(or_est),
+            "ci_lower": float(ci_low) if not np.isnan(ci_low) else None,
+            "ci_upper": float(ci_upp) if not np.isnan(ci_upp) else None,
+            "p_value": float(pval) if not np.isnan(pval) else None,
+            "significant": bool(significant),
+            "conclusion": conclusion
+        }
+
+    # Summarize overall: if Homo is higher than all other genera with significance
+    homo_higher_all = all((v["significant"] and v["odds_ratio"] > 1.0) for v in results.values())
+    homo_lower_all = all((v["significant"] and v["odds_ratio"] < 1.0) for v in results.values())
+
+    if homo_higher_all:
+        overall = "Homo sapiens show significantly higher AMTL than all listed non-human genera after adjustment."
+    elif homo_lower_all:
+        overall = "Homo sapiens show significantly lower AMTL than all listed non-human genera after adjustment."
+    else:
+        overall = "Homo sapiens do not show a consistent significant difference vs all non-human genera after adjustment. See pairwise comparisons."
+
+    description = (
+        f"Pairwise adjusted comparisons (odds ratios) of AMTL for Homo sapiens vs each other genus.\n"
+        f"Odds ratios >1 indicate higher odds of AMTL in Homo sapiens compared to that genus, <1 indicate lower odds.\n"
+        f"Significance assessed with a two-sided Wald test (alpha=0.05).\nOverall summary: {overall}"
+    )
+
+    return {"object": results, "description": description}

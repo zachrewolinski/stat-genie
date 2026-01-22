@@ -13,95 +13,124 @@ df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/anal
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Prepare the dataset for modeling the effect of gender on mortgage approval.
-    - Coerce relevant columns to numeric
-    - Drop rows with missing values in the dependent, independent, or control variables
-    - Ensure binary indicators are integer-typed
-    Returns the cleaned dataframe with the exact column names used in the model.
+    Prepare the dataset for modeling the effect of gender on mortgage acceptance.
+
+    Steps:
+    - Keep only columns needed for the analysis.
+    - Drop rows with missing values in any required variable.
+    - Create the dependent variable 'Accepted' from 'accept'.
+    - Ensure binary columns are integer typed.
+    - Standardize continuous / ordinal predictors and place them in new columns prefixed with 's_'.
+
+    Final dataframe contains both original raw control columns (binary) and standardized continuous controls used in the model.
     """
     df = df.copy()
 
-    # Columns required for the analysis (IV, DV, and controls)
+    # Columns we will use (original names from the dataset schema)
     required_cols = [
-        'accept', 'female', 'black', 'mortgage_credit', 'consumer_credit', 'bad_history',
-        'PI_ratio', 'loan_to_value', 'married', 'self_employed', 'housing_expense_ratio',
-        'denied_PMI', 'religiousness', 'occupation'
+        'accept', 'female', 'black', 'married', 'self_employed', 'bad_history', 'denied_PMI',
+        'PI_ratio', 'loan_to_value', 'housing_expense_ratio', 'mortgage_credit', 'consumer_credit',
+        'religiousness', 'occupation'
     ]
 
-    # Coerce to numeric where possible (this will set non-convertible to NaN)
-    for c in required_cols:
-        # preserve original values for non-numeric columns -- convert coercively
-        df[c] = pd.to_numeric(df[c], errors='coerce')
+    # Keep only required columns and drop rows with missing values in any of them
+    df = df.loc[:, df.columns.intersection(required_cols)].copy()
+    df = df.dropna(subset=required_cols)
 
-    # Drop rows with missing values in any required column
-    df = df.dropna(subset=required_cols).reset_index(drop=True)
+    # Dependent variable: Accepted (1 if accepted, 0 if denied)
+    df['Accepted'] = df['accept'].astype(int)
 
-    # Ensure binary indicator columns are integer 0/1
-    for b in ['accept', 'female', 'black', 'bad_history', 'married', 'self_employed', 'denied_PMI']:
-        # round then cast to int to guard against floats like 0.0/1.0
-        df[b] = df[b].round().astype(int)
+    # Independent variable: female (ensure integer 0/1)
+    df['female'] = df['female'].astype(int)
 
-    # Keep only the columns we will use in the model (cleaned)
-    # This also ensures the final dataframe contains exactly the column names listed in cvars
-    final_cols = required_cols
-    df = df[final_cols].copy()
+    # Binary control columns: ensure integer dtype
+    binary_cols = ['black', 'married', 'self_employed', 'bad_history', 'denied_PMI']
+    for c in binary_cols:
+        if c in df.columns:
+            df[c] = df[c].astype(int)
 
+    # Continuous / ordinal columns to standardize (create new s_ columns)
+    cont_to_standardize = {
+        'PI_ratio': 's_PI_ratio',
+        'loan_to_value': 's_loan_to_value',
+        'housing_expense_ratio': 's_housing_expense_ratio',
+        'mortgage_credit': 's_mortgage_credit',
+        'consumer_credit': 's_consumer_credit',
+        'religiousness': 's_religiousness',
+        'occupation': 's_occupation'
+    }
+
+    # Standardize (z-score) each continuous/ordinal variable using sample std (ddof=0 for population-style)
+    for orig, sname in cont_to_standardize.items():
+        if orig in df.columns:
+            mean = df[orig].mean()
+            std = df[orig].std(ddof=0)
+            # avoid division by zero
+            if std == 0 or pd.isna(std):
+                df[sname] = 0.0
+            else:
+                df[sname] = (df[orig] - mean) / std
+
+    # Return the transformed dataframe containing all columns required by the model
     return df
 
 
 # ======== MODEL CODE ========
-def model(df: pd.DataFrame) -> Any:
+def model(df: pd.DataFrame) -> dict:
     """
-    Fit a logistic regression (binomial) model estimating the effect of applicant gender (female)
-    on mortgage acceptance, controlling for observed applicant and loan characteristics.
+    Fit a logistic regression (binomial GLM) predicting mortgage acceptance from applicant gender,
+    controlling for applicant financial and demographic characteristics. Returns the fitted model
+    and a table of odds ratios with 95% CIs.
 
-    Model form (logit):
-        logit(P(accept=1)) = alpha + beta_female*female + sum(gamma_k * control_k)
+    Model specification:
+    Accepted ~ female + black + married + self_employed + bad_history + denied_PMI
+               + s_PI_ratio + s_loan_to_value + s_housing_expense_ratio
+               + s_mortgage_credit + s_consumer_credit + s_religiousness + s_occupation
 
-    Returns the fitted statsmodels LogitResults object. Also computes and prints odds ratios
-    and 95% confidence intervals for interpretation.
+    Uses statsmodels Logit for maximum likelihood estimation.
     """
     import statsmodels.api as sm
     import numpy as np
+    import pandas as pd
 
     df = df.copy()
 
-    # Columns used in the model (must match transform output)
-    model_cols = [
-        'female', 'black', 'mortgage_credit', 'consumer_credit', 'bad_history',
-        'PI_ratio', 'loan_to_value', 'married', 'self_employed', 'housing_expense_ratio',
-        'denied_PMI', 'religiousness', 'occupation'
+    # Define the columns used in the model (must match transform output)
+    feature_cols = [
+        'female',
+        'black', 'married', 'self_employed', 'bad_history', 'denied_PMI',
+        's_PI_ratio', 's_loan_to_value', 's_housing_expense_ratio',
+        's_mortgage_credit', 's_consumer_credit', 's_religiousness', 's_occupation'
     ]
 
-    # Ensure no missingness (transform should have dropped NA already, but be safe)
-    df = df.dropna(subset=['accept'] + model_cols)
+    # Ensure all features are present
+    missing = [c for c in feature_cols if c not in df.columns]
+    if len(missing) > 0:
+        raise ValueError(f"Missing columns required for modeling: {missing}")
 
-    X = df[model_cols]
+    # Drop any remaining rows with NA in the model columns (defensive)
+    model_df = df[[ 'Accepted' ] + feature_cols].dropna()
+
+    y = model_df['Accepted'].astype(int)
+    X = model_df[feature_cols]
     X = sm.add_constant(X)
-    y = df['accept']
 
-    # Fit logistic regression
-    logit = sm.Logit(y, X)
-    results = logit.fit(disp=False)
+    # Fit logistic regression (Logit). Use disp=False to suppress optimization output.
+    logit_res = sm.Logit(y, X).fit(disp=False)
 
-    # Calculate odds ratios and 95% CI for easier interpretation
-    params = results.params
-    conf = results.conf_int()
-    odds_ratios = np.exp(params)
-    conf_odds = np.exp(conf)
+    # Compute odds ratios and 95% confidence intervals
+    params = logit_res.params
+    conf = logit_res.conf_int()
+    or_df = pd.DataFrame({
+        'OR': np.exp(params),
+        'CI_lower': np.exp(conf[0]),
+        'CI_upper': np.exp(conf[1])
+    })
 
-    # Attach readable summary information to the results object (non-invasive)
-    try:
-        results.odds_ratios = odds_ratios
-        results.conf_odds = conf_odds
-    except Exception:
-        # If the results object is immutable in some environment, return a dict instead
-        return {
-            'fit': results,
-            'odds_ratios': odds_ratios,
-            'conf_odds': conf_odds
-        }
-
-    return results
+    # Return result objects: the fitted model and the odds-ratio table
+    return {
+        'model_result': logit_res,
+        'odds_ratios': or_df
+    }
 
 

@@ -12,100 +12,96 @@ df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/anal
 
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Prepare variables for modeling the probability that the focal group wins an intergroup contest.
-
-    Input columns required (must be present in df):
-      - win, n_focal, n_other, dist_focal, dist_other, m_focal, m_other, f_focal, f_other, dyad
-
-    New columns added to the returned dataframe (these are used in the model):
-      - size_diff: numeric, n_focal - n_other
-      - size_ratio: numeric, n_focal / n_other (auxiliary)
-      - male_diff: m_focal - m_other
-      - female_diff: f_focal - f_other
-      - dist_adv: dist_other - dist_focal (positive => focal closer to its center)
-      - ContestLocation: categorical with values 'FocalHome', 'Neutral', 'OtherHome' (moderator)
-
-    Rows with missing values in required variables are dropped.
-    """
+    # Work on a copy
     df = df.copy()
 
-    # Drop rows with missing essential fields for the planned model
-    required = ['win', 'n_focal', 'n_other', 'dist_focal', 'dist_other', 'm_focal', 'm_other', 'f_focal', 'f_other', 'dyad']
+    # Ensure required columns exist and drop rows with missing critical values
+    required = ['win', 'n_focal', 'n_other', 'dist_focal', 'dist_other', 'm_focal', 'm_other', 'dyad']
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"Input dataframe is missing required columns: {missing}")
+
     df = df.dropna(subset=required)
 
-    # Ensure numeric types where appropriate
-    for col in ['win', 'n_focal', 'n_other', 'dist_focal', 'dist_other', 'm_focal', 'm_other', 'f_focal', 'f_other']:
-        # try to coerce to numeric; errors -> NaN which will be dropped above
-        df[col] = pd.to_numeric(df[col], errors='coerce')
+    # Force numeric types for numeric columns
+    num_cols = ['win', 'n_focal', 'n_other', 'dist_focal', 'dist_other', 'm_focal', 'm_other']
+    for c in num_cols:
+        df[c] = pd.to_numeric(df[c], errors='coerce')
 
-    # Derived predictors
-    df['size_diff'] = df['n_focal'] - df['n_other']
-    # also keep ratio for diagnostics/robustness checks
-    # guard division by zero (n_other should not be zero in this dataset but be safe)
-    df['size_ratio'] = df['n_focal'] / df['n_other'].replace({0: np.nan})
+    # Drop rows that became NA after coercion
+    df = df.dropna(subset=num_cols)
 
-    df['male_diff'] = df['m_focal'] - df['m_other']
-    df['female_diff'] = df['f_focal'] - df['f_other']
-
-    # Distance advantage: positive means focal is closer to its home-range center than other
-    df['dist_adv'] = df['dist_other'] - df['dist_focal']
-
-    # Create a categorical ContestLocation moderator based on which group is closer to its center
-    # Use a small distance threshold to define 'Neutral' when distances are similar
-    threshold_meters = 20  # adjustable threshold for 'neutral' zone
-    df['ContestLocation'] = pd.Series(np.where(
-        df['dist_focal'] + threshold_meters < df['dist_other'],
-        'FocalHome',
-        np.where(df['dist_other'] + threshold_meters < df['dist_focal'], 'OtherHome', 'Neutral')
-    ), index=df.index)
-
-    df['ContestLocation'] = pd.Categorical(df['ContestLocation'], categories=['FocalHome', 'Neutral', 'OtherHome'])
-
-    # Ensure win is integer 0/1
+    # Make sure win is integer 0/1
     df['win'] = df['win'].astype(int)
 
-    # Return only columns needed for modeling (keep originals that might be useful)
-    # We'll keep original group sizes and distances plus derived columns and dyad
-    keep_cols = list(df.columns)  # keep full frame by default; model will select necessary columns
-    return df
+    # Relative group size measures
+    # Ratio: focal size / other size (continuous, >1 means focal larger)
+    df['RelSizeRatio'] = df['n_focal'] / df['n_other']
+    # Absolute difference: focal - other (useful for diagnostics)
+    df['RelSizeDiff'] = df['n_focal'] - df['n_other']
+
+    # Location advantage: dist_other - dist_focal
+    # Positive => contest is relatively closer to the focal group's center (focal advantage)
+    df['RelDistance'] = df['dist_other'] - df['dist_focal']
+
+    # Create a coarse categorical location variable for descriptive checks
+    # Threshold chosen as 50 meters (reasonable relative to observed distances); tune if needed
+    threshold = 50
+    df['LocationCategory'] = pd.cut(
+        df['RelDistance'],
+        bins=[-float('inf'), -threshold, threshold, float('inf')],
+        labels=['OtherSide', 'Neutral', 'FocalSide']
+    ).astype('category')
+
+    # Relative number of adult males
+    df['RelMales'] = df['m_focal'] - df['m_other']
+
+    # Keep dyad as a categorical variable (string) for use in model formula
+    df['dyad'] = df['dyad'].astype('category')
+
+    # Keep other descriptive columns that may be useful
+    keep_cols = [
+        'win', 'RelSizeRatio', 'RelSizeDiff', 'RelDistance', 'LocationCategory', 'RelMales', 'dyad',
+        'n_focal', 'n_other', 'm_focal', 'm_other', 'f_focal', 'f_other', 'focal', 'other'
+    ]
+    # Some columns may not exist (f_focal, f_other, focal, other) depending on input; keep those that do
+    keep_cols = [c for c in keep_cols if c in df.columns]
+
+    return df[keep_cols]
 
 
 # ======== MODEL CODE ========
 def model(df: pd.DataFrame):
+    """Fit a binomial (logistic) regression predicting focal win.
+
+    Primary predictors: RelSizeRatio (relative group size), RelDistance (location advantage).
+    Include their interaction to test whether the effect of relative size depends on contest location.
+    Control for relative number of males and dyad fixed effects.
+
+    Returns a fitted model object with cluster-robust standard errors clustered by dyad (if possible).
     """
-    Fit a logistic regression predicting probability focal group wins (win = 1) from relative group size
-    and contest location, with an interaction between size_diff and ContestLocation, and control variables.
-
-    Model: win ~ size_diff * ContestLocation + male_diff + female_diff + dist_adv
-
-    Clusters standard errors by dyad to account for non-independence within dyads.
-
-    Returns:
-      - results: statsmodels results object with cluster-robust covariance (if available)
-    """
+    import statsmodels.api as sm
     import statsmodels.formula.api as smf
 
-    # Ensure the expected columns exist
-    required = ['win', 'size_diff', 'ContestLocation', 'male_diff', 'female_diff', 'dist_adv', 'dyad']
+    # Ensure required columns exist
+    required = ['win', 'RelSizeRatio', 'RelDistance', 'RelMales', 'dyad']
     missing = [c for c in required if c not in df.columns]
     if missing:
-        raise ValueError(f"Missing required columns for modeling: {missing}")
+        raise ValueError(f"Transformed dataframe is missing required columns for modeling: {missing}")
 
-    # Formula with interaction between size_diff and ContestLocation (ContestLocation acts as moderator)
-    formula = 'win ~ size_diff * ContestLocation + male_diff + female_diff + dist_adv'
+    # Formula: main effects + interaction + dyad fixed effects
+    formula = 'win ~ RelSizeRatio + RelDistance + RelMales + RelSizeRatio:RelDistance + C(dyad)'
 
-    # Fit logistic regression (maximum likelihood)
-    model = smf.logit(formula, data=df)
-    fitted = model.fit(disp=False)
+    # Fit GLM (logistic)
+    glm_model = smf.glm(formula=formula, data=df, family=sm.families.Binomial()).fit()
 
-    # Attempt cluster-robust covariance on dyad. If it fails, return the plain fitted model.
+    # Attempt to compute cluster-robust SE clustered on dyad
     try:
-        results = fitted.get_robustcov_results(cov_type='cluster', groups=df['dyad'])
+        clustered_results = glm_model.get_robustcov_results(cov_type='cluster', groups=df['dyad'])
     except Exception:
-        # If clustering fails for any reason, return the standard fitted object
-        results = fitted
+        # If clustering fails for any reason, return the original model fit
+        clustered_results = glm_model
 
-    return results
+    return clustered_results
 
 

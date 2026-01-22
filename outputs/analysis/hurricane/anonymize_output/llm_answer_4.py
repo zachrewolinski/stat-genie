@@ -1,206 +1,271 @@
 def extract_final_answer(model_output):
     """
-    Extracts key statistics about the effect of hurricane name femininity on fatalities
-    from the provided model_output dict.
+    Extracts coefficients, standard errors, confidence intervals, p-values, and
+    interpretable effect sizes for the femininity predictors from the model_output.
 
-    Expects model_output to be a dict with keys:
-      - 'ols_logfatalities_masfem' : statsmodels OLS results (LogFatalities ~ MasFem_z + ...)
-      - 'ols_logfatalities_femalebin' : statsmodels OLS results (LogFatalities ~ Female + ...)
-      - 'count_model_fatalities_nb_or_poisson' : statsmodels GLM (NB or Poisson) results on raw Fatalities
-
-    Returns a dict:
-      - "object": dict with extracted numeric summaries for each model (coef, se, p, CI, effect interpretation)
-      - "description": short natural-language interpretation about whether evidence supports the hypothesis
+    Returns a dictionary with:
+      - "object": structured numeric summaries for each model and variable
+      - "description": short plain-language interpretation about whether results
+                       support the hypothesis that more feminine names lead to fewer fatalities.
     """
-    import math
     import numpy as np
+    import pandas as pd
+    import math
 
-    def safe_get_stats(res, var):
-        """Attempt to extract coefficient, se, pvalue, conf_int for variable var from a statsmodels result."""
+    out = {"ols": {}, "nb": {}, "conclusion": None}
+
+    # Helper to coerce various param-like objects into a pandas Series
+    def to_series(raw, names=None):
+        if raw is None:
+            return None
+        # If already a Series, return as-is
+        if isinstance(raw, pd.Series):
+            return raw
+        # If dict-like
+        if isinstance(raw, dict):
+            try:
+                return pd.Series(raw)
+            except Exception:
+                pass
+        # If numpy array or list/tuple
+        if isinstance(raw, (np.ndarray, list, tuple)):
+            arr = np.array(raw)
+            # If names provided and lengths match, use them
+            if names is not None and len(names) == arr.shape[0]:
+                try:
+                    return pd.Series(arr, index=names)
+                except Exception:
+                    pass
+            # If no names, create numeric/string index
+            try:
+                return pd.Series(arr, index=[str(i) for i in range(arr.shape[0])])
+            except Exception:
+                pass
+        # Try convert directly
+        try:
+            return pd.Series(raw)
+        except Exception:
+            return None
+
+    # Helper to extract stats from a statsmodels Results-like object
+    def summarize_res(res, varname, model_type):
         if res is None:
             return None
         try:
-            params = getattr(res, "params", None)
-            if params is None:
-                return None
-            coef = float(params[var])
+            # Try to obtain parameter names from the model if available
+            param_names = None
+            if hasattr(res, "model"):
+                # statsmodels common attribute
+                param_names = getattr(res.model, "exog_names", None)
+                # some result objects keep names in model.data.param_names
+                if param_names is None:
+                    model_data = getattr(res.model, "data", None)
+                    if model_data is not None:
+                        param_names = getattr(model_data, "param_names", None)
+
+            raw_params = getattr(res, "params", None)
+            raw_pvalues = getattr(res, "pvalues", None)
+            raw_bse = getattr(res, "bse", None)
+            raw_ci = None
+            try:
+                raw_ci = res.conf_int()
+            except Exception:
+                raw_ci = None
+
+            params = to_series(raw_params, names=param_names)
+            pvalues = to_series(raw_pvalues, names=param_names)
+            bse = to_series(raw_bse, names=param_names)
+
+            ci = None
+            if raw_ci is not None:
+                try:
+                    ci_df = pd.DataFrame(raw_ci)
+                    # Standardize column names
+                    if ci_df.shape[1] >= 2:
+                        ci_df = ci_df.iloc[:, :2]
+                        ci_df.columns = ["ci_lower", "ci_upper"]
+                    else:
+                        ci_df.columns = ["ci_lower"]
+                    # Assign index based on available names
+                    if param_names is not None and len(param_names) == ci_df.shape[0]:
+                        ci_df.index = param_names
+                    elif params is not None and hasattr(params, "index") and len(params.index) == ci_df.shape[0]:
+                        ci_df.index = params.index
+                    ci = ci_df
+                except Exception:
+                    ci = None
         except Exception:
-            # var not found
             return None
 
-        # standard error
+        # Ensure params exist and varname is present
+        if params is None or varname not in params.index:
+            return None
+
+        # Extract numeric values safely
+        try:
+            coef = float(params[varname])
+        except Exception:
+            try:
+                coef = float(params.loc[varname])
+            except Exception:
+                return None
+
         se = None
         try:
-            bse = getattr(res, "bse", None)
-            if bse is not None:
-                se = float(bse[var])
+            if bse is not None and varname in bse.index:
+                se = float(bse[varname])
+            elif isinstance(bse, (int, float, np.floating, np.integer)):
+                se = float(bse)
         except Exception:
             se = None
 
-        # p-value
         pval = None
         try:
-            pvals = getattr(res, "pvalues", None)
-            if pvals is not None:
-                pval = float(pvals[var])
+            if pvalues is not None and varname in pvalues.index:
+                pval = float(pvalues[varname])
+            elif isinstance(pvalues, (int, float, np.floating, np.integer)):
+                pval = float(pvalues)
         except Exception:
             pval = None
 
-        # conf int
-        ci_lower, ci_upper = (None, None)
+        ci_lower = None
+        ci_upper = None
         try:
-            ci = res.conf_int()
-            # conf_int may return a DataFrame or ndarray; handle both
-            if hasattr(ci, "loc"):
-                ci_lower, ci_upper = float(ci.loc[var].iloc[0]), float(ci.loc[var].iloc[1])
-            else:
-                # assume rows correspond to params in order
-                idx = list(res.params.index).index(var)
-                ci_lower, ci_upper = float(ci[idx, 0]), float(ci[idx, 1])
+            if ci is not None and varname in ci.index:
+                ci_lower = float(ci.loc[varname, "ci_lower"]) if "ci_lower" in ci.columns else None
+                ci_upper = float(ci.loc[varname, "ci_upper"]) if "ci_upper" in ci.columns else None
         except Exception:
-            ci_lower, ci_upper = (None, None)
+            ci_lower = None
+            ci_upper = None
 
-        # test stat (t or z)
-        teststat = None
-        try:
-            tvals = getattr(res, "tvalues", None)
-            if tvals is None:
-                tvals = getattr(res, "zvalues", None)
-            if tvals is not None:
-                teststat = float(tvals[var])
-            else:
-                # fallback compute
-                if se and se != 0:
-                    teststat = coef / se
-        except Exception:
-            teststat = None
-
-        return {
+        summary = {
             "coef": coef,
-            "se": se,
-            "teststat": teststat,
-            "pvalue": pval,
-            "ci_lower": ci_lower,
-            "ci_upper": ci_upper
+            "std_err": se,
+            "p_value": pval,
+            "ci_95": (ci_lower, ci_upper),
         }
 
-    def interpret_ols_logcoef(stats):
-        """Interpret coef from OLS where DV = log(1 + Fatalities)."""
-        if stats is None:
-            return None
-        coef = stats["coef"]
-        # multiplicative change in (1 + Fatalities)
-        try:
-            mult = math.exp(coef)
-            pct_change = (mult - 1.0) * 100.0
-        except Exception:
-            mult = None
-            pct_change = None
-        return {
-            "coef": coef,
-            "se": stats["se"],
-            "pvalue": stats["pvalue"],
-            "t_or_z": stats["teststat"],
-            "ci_lower": stats["ci_lower"],
-            "ci_upper": stats["ci_upper"],
-            "multiplicative_change_in_1_plus_fatalities": mult,
-            "percent_change_in_1_plus_fatalities": pct_change
-        }
+        # Interpretability adjustments
+        if model_type == "ols":
+            # Outcome = LogDeaths. Coef on log-outcome -> multiplicative effect on Deaths.
+            try:
+                pct_change = (math.exp(coef) - 1.0) * 100.0
+            except Exception:
+                pct_change = None
+            try:
+                pct_ci_lower = (math.exp(ci_lower) - 1.0) * 100.0 if ci_lower is not None else None
+            except Exception:
+                pct_ci_lower = None
+            try:
+                pct_ci_upper = (math.exp(ci_upper) - 1.0) * 100.0 if ci_upper is not None else None
+            except Exception:
+                pct_ci_upper = None
 
-    def interpret_countcoef(stats):
-        """Interpret coef from count GLM: log(expected Fatalities) coefficient."""
-        if stats is None:
-            return None
-        coef = stats["coef"]
-        try:
-            mult = math.exp(coef)
-            pct_change = (mult - 1.0) * 100.0
-        except Exception:
-            mult = None
-            pct_change = None
-        return {
-            "coef": coef,
-            "se": stats["se"],
-            "pvalue": stats["pvalue"],
-            "z_or_t": stats["teststat"],
-            "ci_lower": stats["ci_lower"],
-            "ci_upper": stats["ci_upper"],
-            "multiplicative_change_in_expected_count": mult,
-            "percent_change_in_expected_count": pct_change
-        }
+            summary.update({
+                "interpretation": {
+                    "outcome": "LogDeaths",
+                    "approx_percent_change_per_unit_in_predictor": pct_change,
+                    "percent_change_95ci": (pct_ci_lower, pct_ci_upper),
+                    "note": "For Femininity_z (standardized), this is percent change in expected Deaths per 1 SD increase in femininity. For FemaleNameBinary, this is percent change comparing female vs male name."
+                }
+            })
+        elif model_type == "nb":
+            # Count model: exponentiate coef -> incidence rate ratio (IRR)
+            try:
+                irr = math.exp(coef)
+            except Exception:
+                irr = None
+            try:
+                irr_ci_lower = math.exp(ci_lower) if ci_lower is not None else None
+            except Exception:
+                irr_ci_lower = None
+            try:
+                irr_ci_upper = math.exp(ci_upper) if ci_upper is not None else None
+            except Exception:
+                irr_ci_upper = None
+            try:
+                irr_pct = (irr - 1.0) * 100.0 if irr is not None else None
+            except Exception:
+                irr_pct = None
+            irr_pct_ci = (
+                ((irr_ci_lower - 1.0) * 100.0) if irr_ci_lower is not None else None,
+                ((irr_ci_upper - 1.0) * 100.0) if irr_ci_upper is not None else None,
+            )
+            summary.update({
+                "interpretation": {
+                    "outcome": "Deaths (count model)",
+                    "IRR": irr,
+                    "IRR_95ci": (irr_ci_lower, irr_ci_upper),
+                    "percent_change_in_rate": irr_pct,
+                    "percent_change_95ci": irr_pct_ci,
+                    "note": "IRR < 1 means fewer deaths associated with higher predictor; IRR > 1 means more deaths."
+                }
+            })
+        return summary
 
-    # Prepare outputs
-    out = {"masfem_ols": None, "female_bin_ols": None, "count_model": None}
-    reasons = []
+    # Variables of interest
+    vars_of_interest = ["Femininity_z", "FemaleNameBinary"]
 
-    # Extract OLS on log fatalities with MasFem_z
-    ols_masfem = model_output.get("ols_logfatalities_masfem")
-    stats_masfem = safe_get_stats(ols_masfem, "MasFem_z")
-    out["masfem_ols"] = interpret_ols_logcoef(stats_masfem)
+    # Summaries for OLS (LogDeaths)
+    ols_res = model_output.get("ols", None)
+    for v in vars_of_interest:
+        s = summarize_res(ols_res, v, model_type="ols")
+        out["ols"][v] = s
 
-    # Extract OLS on log fatalities with Female binary
-    ols_female = model_output.get("ols_logfatalities_femalebin")
-    stats_female = safe_get_stats(ols_female, "Female")
-    out["female_bin_ols"] = interpret_ols_logcoef(stats_female)
+    # Summaries for NB (Deaths)
+    nb_res = model_output.get("nb", None)
+    for v in vars_of_interest:
+        s = summarize_res(nb_res, v, model_type="nb")
+        out["nb"][v] = s
 
-    # Extract count model (Negative Binomial or Poisson) on raw Fatalities
-    count_model = model_output.get("count_model_fatalities_nb_or_poisson")
-    stats_count = safe_get_stats(count_model, "MasFem_z")
-    out["count_model"] = interpret_countcoef(stats_count)
+    # Form a simple conclusion based on sign and p-value from both models:
+    # We say evidence supports hypothesis if both models show negative effect
+    # (coef < 0 or IRR < 1) and at least one is statistically significant at p < 0.05,
+    # and none show a significant effect in the opposite direction.
+    def evidence_for_hypothesis():
+        sig_negative = False
+        sig_positive = False
+        any_result = False
 
-    # Build concise interpretation for the hypothesis:
-    # Hypothesis: more feminine names -> perceived less threatening -> fewer precautions -> MORE fatalities.
-    # So we expect a POSITIVE association between femininity and fatalities.
-    def assess_direction_and_significance(entry, name, expected_positive=True):
-        if entry is None:
-            return f"{name}: no result available."
-        coef = entry.get("coef")
-        p = entry.get("pvalue")
-        if coef is None:
-            return f"{name}: coefficient missing."
-        sign = "positive" if coef > 0 else ("zero" if coef == 0 else "negative")
-        signif = None
-        if p is None:
-            signif = "p-value not available"
-        else:
-            if p < 0.05:
-                signif = f"statistically significant (p = {p:.3g})"
-            elif p < 0.1:
-                signif = f"weak evidence (p = {p:.3g})"
-            else:
-                signif = f"not statistically significant (p = {p:.3g})"
-        # Determine support: expected_positive True means positive coef supports hypothesis
-        supports = False
-        if p is not None and p < 0.05:
-            supports = (coef > 0) if expected_positive else (coef < 0)
-        elif p is not None and p < 0.1:
-            supports = (coef > 0) if expected_positive else (coef < 0)
-            # mark as weak
-        else:
-            supports = False
-        support_text = "supports" if supports else "does not provide statistically significant support for"
-        return f"{name}: coefficient {coef:+.3f} ({sign}), {signif}; this {support_text} the hypothesis."
+        for model_key in ["ols", "nb"]:
+            for var in vars_of_interest:
+                summary = out[model_key].get(var)
+                if summary is None:
+                    continue
+                any_result = True
+                coef = summary.get("coef")
+                p = summary.get("p_value")
+                if coef is None:
+                    continue
+                if coef < 0:
+                    if p is not None and p < 0.05:
+                        sig_negative = True
+                elif coef > 0:
+                    if p is not None and p < 0.05:
+                        sig_positive = True
+                # coef == 0 or p is None -> treated as non-significant/no-direction
 
-    # For our advertised hypothesis, we expect a POSITIVE coefficient (more feminine -> more fatalities).
-    assessments = [
-        assess_direction_and_significance(out["masfem_ols"], "OLS (LogFatalities ~ MasFem_z)", expected_positive=True),
-        assess_direction_and_significance(out["female_bin_ols"], "OLS (LogFatalities ~ Female)", expected_positive=True),
-        assess_direction_and_significance(out["count_model"], "Count model (Fatalities ~ MasFem_z)", expected_positive=True)
-    ]
+        if not any_result:
+            return "No model results available to evaluate the hypothesis."
 
-    # Compose description
-    description_lines = [
-        "Extracted model summaries for the focal IVs (MasFem_z and Female):",
-        "",
-        assessments[0],
-        assessments[1],
-        assessments[2],
-        "",
-        "Notes:",
-        "- For OLS models with LogFatalities = log(1 + Fatalities), coefficient c implies multiplicative change in (1 + Fatalities) of exp(c).",
-        "- For the count GLM, coefficient is on log(expected count); exp(coef) is the multiplicative effect on expected fatalities.",
-        "- 'supports' is used only when coefficient sign aligns with the hypothesized direction and p < 0.05 (or weak evidence if 0.05 <= p < 0.1)."
-    ]
-    description = "\n".join(description_lines)
+        if sig_negative and not sig_positive:
+            return "Evidence supports the hypothesis: more feminine names are associated with fewer fatalities (negative effect; statistically significant in at least one model and no significant positive effects)."
+        if sig_positive and not sig_negative:
+            return "Evidence contradicts the hypothesis: more feminine names are associated with more fatalities (positive effect; statistically significant in at least one model and no significant negative effects)."
+        # Mixed or no significant results
+        return "Inconclusive evidence: either effects are not statistically significant or models show mixed directions."
 
-    return {"object": out, "description": description}
+    out["conclusion"] = evidence_for_hypothesis()
+
+    # Short human-readable description
+    desc_lines = []
+    desc_lines.append("Extracted estimates for 'Femininity_z' and 'FemaleNameBinary' from the two fitted models.")
+    desc_lines.append("For OLS (LogDeaths): coefficients are changes in log(Deaths); exp(coef)-1 gives approximate percent change in Deaths.")
+    desc_lines.append("For Negative Binomial (Deaths): exp(coef) gives an incidence rate ratio (IRR); IRR-1 gives percent change in expected count.")
+    desc_lines.append("Summaries (numeric) are in the 'object' field. Final verdict on the hypothesis is in 'conclusion'.")
+
+    out_verbose = {
+        "object": out,
+        "description": " ".join(desc_lines)
+    }
+    return out_verbose

@@ -1,138 +1,186 @@
-from typing import Dict, FrozenSet, List, Literal, Optional, Set, Tuple, Any
+from typing import Any, Dict
 import numpy as np
 import pandas as pd
-import sklearn
-import scipy
 import statsmodels.api as sm
 import statsmodels.formula.api as smf
-import matplotlib.pyplot as plt
-import pickle
+from statsmodels.tools import add_constant
+from statsmodels.stats.sandwich_covariance import cov_cluster, cov_hc1
+from scipy.stats import norm
 
-df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/analysis/boxes/add_features_output/boxes.csv')
 
-# ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Prepare the dataset for modeling the developmental trajectory of majority reliance across cultures.
-    Produces the following new columns used in modeling:
-      - MajorityChoice: binary outcome (1 if y==2 (majority), else 0)
-      - age_c: age centered around the sample mean
-      - age_c2: squared term for age_c to capture nonlinearity
-      - IsBoy: 1 if gender==2, else 0
-      - culture: converted to categorical (keeps original codes but as category dtype)
-      - school: school identifier as string (used for clustering)
-    Also drops rows with missing values in variables required for the model.
+    Transform the raw dataset into a modeling dataframe. Adds derived variables used in the statistical models:
+      - is_female: binary female indicator
+      - age_centered, age_squared
+      - age_group: coarse categorical bins for descriptive checks
+      - MajorityChoice: binary (1 if chose majority option (y==2), 0 otherwise)
+      - y_mn: zero-based integer encoding for multinomial model (0,1,2 corresponding to original 1,2,3)
+
+    Drops rows with missing data in key variables used by the models.
+    Returns the dataframe containing all columns listed in the conceptual variables.
     """
-    # Work on a copy
     df = df.copy()
 
-    # Required columns for analysis
-    required = ['y', 'age', 'culture', 'gender', 'majority_first', 'religiousness', 'calworks', 'school']
-    # Drop rows missing any required column
-    df = df.dropna(subset=required)
+    # Ensure required columns exist
+    required_cols = ['y', 'age', 'culture', 'gender', 'majority_first', 'religiousness', 'school']
+    missing = [c for c in required_cols if c not in df.columns]
+    if len(missing) > 0:
+        raise KeyError(f"Missing required columns for transform: {missing}")
 
-    # Create binary dependent variable: 1 if chose majority (y == 2), else 0
+    # Drop rows missing essential predictors/outcomes
+    df = df.dropna(subset=required_cols)
+
+    # Make sure y is integer-coded 1,2,3 (as documented). If not, try coercion.
+    df['y'] = df['y'].astype(int)
+
+    # Binary majority choice: 1 if the child selected the majority option (y == 2), else 0
     df['MajorityChoice'] = (df['y'] == 2).astype(int)
 
-    # Center age for interpretability and create quadratic term to allow non-linear growth
-    df['age_c'] = df['age'] - df['age'].mean()
-    df['age_c2'] = df['age_c'] ** 2
+    # Create zero-based multinomial outcome for MNLogit (0,1,2 <-> original 1,2,3)
+    df['y_mn'] = df['y'].astype(int) - 1
 
-    # Gender: create male indicator (IsBoy = 1 for boys (gender==2), 0 for girls)
-    df['IsBoy'] = (df['gender'] == 2).astype(int)
+    # Gender: original coding 1 = girl, 2 = boy. Create is_female indicator (1 = girl)
+    df['is_female'] = (df['gender'] == 1).astype(int)
 
-    # Ensure majority_first is numeric 0/1
-    df['majority_first'] = pd.to_numeric(df['majority_first'], errors='coerce').astype(int)
+    # Age: center and add quadratic term to capture nonlinear development
+    df['age'] = df['age'].astype(float)
+    df['age_centered'] = df['age'] - df['age'].mean()
+    df['age_squared'] = df['age_centered'] ** 2
 
-    # Keep culture as categorical for modeling with factor notation
-    df['culture'] = df['culture'].astype('category')
+    # Coarse age groups for descriptive checks (not required by the core models but useful)
+    # bins: 4-6, 7-9, 10-14 (adjust boundaries inclusive on the left)
+    bins = [3.9, 6.0, 9.0, 14.1]
+    labels = ['4-6', '7-9', '10-14']
+    df['age_group'] = pd.cut(df['age'], bins=bins, labels=labels, include_lowest=True)
 
-    # Ensure school is treated as an identifier (string) for clustering
-    df['school'] = df['school'].astype(str)
+    # Culture: treat as categorical (keep original numeric codes but as string/category for formulas)
+    df['culture'] = df['culture'].astype(str).astype('category')
 
-    # Final safety drop in case any new columns have NAs
-    model_cols = ['MajorityChoice', 'age_c', 'age_c2', 'culture', 'IsBoy', 'majority_first', 'religiousness', 'calworks', 'school']
+    # majority_first and religiousness ensure numeric types
+    df['majority_first'] = df['majority_first'].astype(int)
+    # religiousness may be integer-coded; coerce to numeric
+    df['religiousness'] = pd.to_numeric(df['religiousness'], errors='coerce')
+
+    # School: keep as-is for clustering, but ensure no missing and cast to category
+    df['school'] = df['school'].astype(str).astype('category')
+
+    # Final drop of rows with NA in any column we will use in the models
+    model_cols = [
+        'y_mn', 'MajorityChoice', 'age', 'age_centered', 'age_squared', 'age_group',
+        'culture', 'is_female', 'majority_first', 'religiousness', 'school'
+    ]
     df = df.dropna(subset=model_cols)
+
+    # Reset index for a clean returned dataframe
+    df = df.reset_index(drop=True)
 
     return df
 
 
-# ======== MODEL CODE ========
-def model(df: pd.DataFrame) -> dict:
+def model(df: pd.DataFrame) -> Dict[str, Any]:
     """
-    Fit a logistic regression predicting the probability of choosing the majority option.
-    The model includes an interaction between centered age and culture to test whether
-    developmental trajectories differ across cultural contexts. Controls include gender,
-    demonstration order, religiousness, and calworks (SES proxy). Standard errors are
-    clustered by school to account for within-school dependence.
+    Runs two complementary statistical models to answer the research question:
+      1) A logistic regression (GLM with binomial family) predicting MajorityChoice (binary) to test how reliance on majority information varies with age and culture. The model includes an age x culture interaction to test whether developmental trajectories differ across cultures. Cluster-robust standard errors at the school level are reported.
+      2) A multinomial logistic regression (MNLogit) predicting the full 3-way choice (unchosen / majority / minority) with the same predictors (age terms, culture, controls) to examine preference patterns across options. Cluster-robust standard errors at the school level are reported.
 
-    Returns a dictionary with:
-      - 'fit': the fitted (cluster-robust) results object if available (or the regular results object)
-      - 'model_raw': the raw fitted LogitResults (before clustering if clustering was applied at fit)
-      - 'predicted_prob_grid': a DataFrame with predicted probabilities across ages (min..max)
-        for each culture (useful for plotting trajectories)
+    Returns a dictionary with the fitted (robust-cov) results objects for both models.
     """
-    import statsmodels.formula.api as smf
-    import numpy as np
-    import pandas as pd
+    results: Dict[str, Any] = {}
 
-    # Formula: main effects of age (centered), culture, their interaction, and controls
-    # Use C(culture) so culture is treated as categorical
-    formula = 'MajorityChoice ~ age_c * C(culture) + IsBoy + majority_first + religiousness + calworks'
+    # Ensure the transformed dataframe contains required columns
+    required = ['MajorityChoice', 'y_mn', 'age_centered', 'age_squared', 'culture', 'is_female', 'majority_first', 'religiousness', 'school']
+    if any(c not in df.columns for c in required):
+        raise KeyError(f"Transformed dataframe is missing required columns. Required: {required}")
 
-    # Fit the logistic regression (maximum likelihood)
-    # First fit a plain model to keep a reference to the raw results
-    model_raw = smf.logit(formula=formula, data=df).fit(disp=False)
+    # ---------------------------
+    # 1) Logistic GLM for MajorityChoice
+    # ---------------------------
+    # Formula: test main effects of age and culture plus their interaction, controlling for sex, order, religiousness
+    formula_glm = 'MajorityChoice ~ age_centered * C(culture) + is_female + majority_first + religiousness'
+    glm_model = smf.glm(formula=formula_glm, data=df, family=sm.families.Binomial())
+    glm_res = glm_model.fit()
 
-    # Attempt to obtain cluster-robust results. Some statsmodels versions support
-    # get_robustcov_results on discrete model results; otherwise refit with cov_type.
-    try:
-        clustered_results = model_raw.get_robustcov_results(cov_type='cluster', groups=df['school'])
-    except AttributeError:
-        # Refit specifying cov_type='cluster' so that the returned results have cluster-robust cov
-        clustered_results = smf.logit(formula=formula, data=df).fit(disp=False, cov_type='cluster', cov_kwds={'groups': df['school']})
-
-    # Prepare predicted probabilities across ages for each culture for visualization
-    age_min = int(df['age'].min())
-    age_max = int(df['age'].max())
-    ages = np.arange(age_min, age_max + 1)
-
-    cultures = df['culture'].cat.categories
-    mean_relig = df['religiousness'].mean()
-    mean_calworks = df['calworks'].mean()
-    # For majority_first use mode if available, otherwise mean then round to nearest 0/1
-    if not df['majority_first'].mode().empty:
-        mean_majority_first = int(df['majority_first'].mode().iloc[0])
+    # Obtain cluster-robust covariance (cluster on school).
+    # Some statsmodels result classes expose get_robustcov_results; GLMResults in some versions may not.
+    # We handle both cases: prefer get_robustcov_results when available, otherwise compute cluster cov manually
+    if hasattr(glm_res, 'get_robustcov_results'):
+        try:
+            glm_res_clust = glm_res.get_robustcov_results(cov_type='cluster', groups=df['school'])
+        except Exception:
+            # Fallback: HC1
+            glm_res_clust = glm_res.get_robustcov_results(cov_type='HC1')
     else:
-        mean_majority_first = int(round(df['majority_first'].mean()))
-    mean_IsBoy = df['IsBoy'].mean()
+        # Compute covariance matrices manually and wrap the original results in a small adapter that exposes commonly used attributes
+        try:
+            cluster_cov = cov_cluster(glm_res, df['school'])
+        except Exception:
+            # If cluster fails, fallback to HC1
+            cluster_cov = cov_hc1(glm_res)
 
-    pred_rows = []
-    for c in cultures:
-        for a in ages:
-            age_c = a - df['age'].mean()
-            age_c2 = age_c ** 2
-            pred_rows.append({
-                'age_c': age_c,
-                'age_c2': age_c2,
-                'culture': c,
-                'IsBoy': mean_IsBoy,
-                'majority_first': mean_majority_first,
-                'religiousness': mean_relig,
-                'calworks': mean_calworks
-            })
-    pred_df = pd.DataFrame(pred_rows)
+        class RobustResultWrapper:
+            def __init__(self, base_res, cov_matrix):
+                self._res = base_res
+                self._cov = np.asarray(cov_matrix)
+                # params as Series
+                self.params = base_res.params
+                # compute bse aligned to params.index
+                self.bse = pd.Series(np.sqrt(np.diag(self._cov)), index=self.params.index)
+                # t-values / z-values
+                self.tvalues = self.params / self.bse
+                # two-sided p-values using normal approximation
+                self.pvalues = 2 * (1 - norm.cdf(np.abs(self.tvalues)))
+                # keep original summary available
+            def cov_params(self):
+                return self._cov
+            def summary(self, *args, **kwargs):
+                # Return the original summary; it will not reflect cluster SEs, but is available.
+                return self._res.summary(*args, **kwargs)
+            def __getattr__(self, name):
+                # Delegate other attributes to the underlying results object
+                return getattr(self._res, name)
 
-    # Ensure culture dtype matches training data
-    pred_df['culture'] = pred_df['culture'].astype(df['culture'].dtype)
+        glm_res_clust = RobustResultWrapper(glm_res, cluster_cov)
 
-    # Predicted probability using the fitted results (clustered_results has predict method)
-    pred_df['pred_prob'] = clustered_results.predict(pred_df)
+    results['glm_majority'] = glm_res_clust
 
-    results = {
-        'model_raw': model_raw,
-        'fit': clustered_results,
-        'predicted_prob_grid': pred_df
-    }
+    # ---------------------------
+    # 2) Multinomial logistic regression for the full 3-way choice
+    # ---------------------------
+    # Prepare exogenous variables: include age_centered, age_squared, is_female, majority_first, religiousness and culture dummies
+    exog_vars = ['age_centered', 'age_squared', 'is_female', 'majority_first', 'religiousness']
+    # Create dummies for culture (drop_first=True to avoid multicollinearity); keep names stable
+    culture_dummies = pd.get_dummies(df['culture'], prefix='culture', drop_first=True)
+    exog = pd.concat([df[exog_vars].reset_index(drop=True), culture_dummies.reset_index(drop=True)], axis=1)
+    exog = add_constant(exog, has_constant='add')
 
+    # Endogenous variable must be 0..(J-1)
+    endog = df['y_mn'].astype(int)
+
+    mn_model = sm.MNLogit(endog, exog)
+    # Fit: increase maxiter in case of slow convergence
+    mn_res = mn_model.fit(method='newton', maxiter=200, disp=False)
+
+    # Cluster-robust SEs for MNLogit
+    if hasattr(mn_res, 'get_robustcov_results'):
+        try:
+            mn_res_clust = mn_res.get_robustcov_results(cov_type='cluster', groups=df['school'])
+        except Exception:
+            mn_res_clust = mn_res.get_robustcov_results(cov_type='HC1')
+        results['mnlogit_choice'] = mn_res_clust
+    else:
+        # If get_robustcov_results is not available, attempt to compute cluster covariance and return the base result,
+        # while also storing the cluster covariance matrix for downstream inspection.
+        try:
+            mn_cluster_cov = cov_cluster(mn_res, df['school'])
+        except Exception:
+            mn_cluster_cov = cov_hc1(mn_res)
+        # Return the original results object and also provide the cluster covariance matrix.
+        results['mnlogit_choice'] = mn_res
+        results['mnlogit_choice_cluster_cov'] = mn_cluster_cov
+
+    # Also provide some helper objects useful for downstream inspection (design matrices)
+    results['mnlogit_exog_names'] = exog.columns.tolist()
+
+    # Return the results dict. Each results entry is a statsmodels Results object (or a wrapper) with .summary() available.
     return results

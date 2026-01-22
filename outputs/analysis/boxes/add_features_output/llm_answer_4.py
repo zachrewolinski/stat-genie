@@ -1,235 +1,264 @@
 def extract_final_answer(model_output):
     """
-    Extracts statistics about the effect of age (and age-by-culture interactions)
-    from the fitted logistic regression model stored in model_output.
+    Extracts age-related effects (slopes) on choosing the majority option from the
+    fitted GLM (binary MajorityChoice) and tests whether those age slopes differ
+    across cultures (age x culture interactions).
 
-    Returns:
-      {
-        "object": { ... }  # detailed numeric extraction
-        "description": "..."  # brief interpretation in context
-      }
+    Returns a dict with:
+      - "object": dict mapping each culture (including the reference/base culture)
+                  to the estimated age slope (beta), SE, z, p, 95% CI.
+                 Also includes a joint-test p-value for the set of interaction terms
+                 (if available) under the key "interaction_joint_test_p".
+      - "description": short textual interpretation of the results in context.
+
+    The function is defensive: it tries to use robust covariance information
+    from the provided fitted results and falls back to reasonable defaults if
+    a particular extraction step fails.
     """
+    import re
     import numpy as np
     import pandas as pd
+    from scipy import stats
 
-    # Get fitted results object (prefer cluster-robust 'fit' if available)
-    fit = model_output.get('fit') or model_output.get('model_raw')
-    if fit is None:
-        raise ValueError("No fitted model found in model_output (expected keys 'fit' or 'model_raw').")
+    out = {
+        "object": None,
+        "description": None
+    }
 
-    params = fit.params
-    pvalues = fit.pvalues
+    # Check we have the GLM result
     try:
-        conf = fit.conf_int()
+        glm_res = model_output.get('glm_majority') if isinstance(model_output, dict) else model_output['glm_majority']
     except Exception:
-        # fallback: if conf_int not available, create NaN placeholders
-        conf = pd.DataFrame(index=params.index, columns=[0, 1], data=np.nan)
+        glm_res = None
 
-    # 1) Extract main age coefficient information
-    age_param_name = None
-    for name in params.index:
-        # find the plain 'age_c' main effect parameter name (exact match or token)
-        if name == 'age_c' or name.endswith('.age_c') or name.startswith('age_c'):
-            # prefer exact 'age_c' name if present
-            if name == 'age_c':
-                age_param_name = name
+    if glm_res is None:
+        raise KeyError("model_output must contain key 'glm_majority' with fitted GLM results.")
+
+    # Extract parameter estimates and (robust) covariance matrix
+    try:
+        params = glm_res.params.copy()  # pandas Series expected
+        # ensure it's a pandas Series
+        if not isinstance(params, pd.Series):
+            params = pd.Series(params)
+    except Exception as e:
+        raise RuntimeError(f"Couldn't extract params from glm_majority: {e}")
+
+    # Try to get covariance matrix; coerce to DataFrame indexed by parameter names
+    cov = None
+    try:
+        cov_raw = glm_res.cov_params()
+    except Exception:
+        # try common alternative attribute names
+        cov_raw = None
+        for attr in ("normalized_cov_params", "cov_params_default", "bse_cov"):
+            cov_raw = getattr(glm_res, attr, None)
+            if cov_raw is not None:
                 break
-            else:
-                # keep if no exact match found yet
-                if age_param_name is None:
-                    age_param_name = name
-    if age_param_name is None:
-        # try more general search
-        matches = [n for n in params.index if 'age_c' in n and 'C(culture)' not in n]
-        age_param_name = matches[0] if matches else None
+    if cov_raw is None:
+        raise RuntimeError("Couldn't extract covariance matrix from glm_majority result.")
 
-    if age_param_name is None:
-        raise ValueError("Could not find a main 'age_c' parameter in model parameters.")
-
-    age_coef = float(params.loc[age_param_name])
-    age_p = float(pvalues.loc[age_param_name]) if age_param_name in pvalues.index else np.nan
-    age_ci = tuple(conf.loc[age_param_name]) if age_param_name in conf.index else (np.nan, np.nan)
-
-    # 2) Identify interaction parameters (age_c x culture)
-    interaction_names = [n for n in params.index if ('age_c' in n) and ('culture' in n)]
-    # Normalize to unique set
-    interaction_names = list(dict.fromkeys(interaction_names))
-
-    interaction_info = {}
-    for name in interaction_names:
-        # Attempt to infer culture level label from the parameter name
-        # Common forms: 'age_c:C(culture)[T.2]' or 'C(culture)[T.2]:age_c'
-        # Extract the substring between 'T.' and ']' if present, else fallback to name
-        label = None
+    # Coerce cov_raw into a pandas DataFrame with proper index/columns corresponding to params
+    try:
+        if isinstance(cov_raw, pd.DataFrame):
+            cov = cov_raw.copy()
+        else:
+            # assume array-like
+            cov = pd.DataFrame(np.asarray(cov_raw), index=params.index, columns=params.index)
+    except Exception:
+        # final fallback: create diagonal from parameter standard errors if available
         try:
-            if 'C(culture)' in name:
-                start = name.find('T.')
-                end = name.find(']', start)
-                if start != -1 and end != -1:
-                    label = name[start+2:end]
-        except Exception:
-            label = None
-        if label is None:
-            label = name
+            bse = glm_res.bse
+            if isinstance(bse, (pd.Series, dict, list, np.ndarray)):
+                bse_s = pd.Series(bse, index=params.index) if not isinstance(bse, pd.Series) else bse
+                cov = pd.DataFrame(np.zeros((len(params), len(params))), index=params.index, columns=params.index)
+                for i, nm in enumerate(params.index):
+                    cov.loc[nm, nm] = float(bse_s.loc[nm]) ** 2
+            else:
+                raise RuntimeError("No usable covariance or bse found.")
+        except Exception as e:
+            raise RuntimeError(f"Couldn't build covariance matrix from glm_majority result: {e}")
 
-        interaction_info[label] = {
-            'param_name': name,
-            'coef': float(params.loc[name]),
-            'pvalue': float(pvalues.loc[name]) if name in pvalues.index else np.nan,
-            'conf_int': tuple(conf.loc[name]) if name in conf.index else (np.nan, np.nan)
+    # Identify baseline age coefficient name and interaction names
+    param_index = list(params.index)
+
+    # Find exact baseline age term
+    baseline_age_name = None
+    for n in param_index:
+        if n == 'age_centered':
+            baseline_age_name = n
+            break
+    if baseline_age_name is None:
+        # try more flexibly: a name that contains 'age_centered'
+        for n in param_index:
+            if re.search(r'(^|[:\[\]\W])age_centered($|[:\[\]\W])', n):
+                baseline_age_name = n
+                break
+    if baseline_age_name is None:
+        # final fallback: any param that contains 'age' and 'center'
+        for n in param_index:
+            if 'age' in n and 'center' in n:
+                baseline_age_name = n
+                break
+    if baseline_age_name is None:
+        raise RuntimeError("Could not find a baseline 'age_centered' parameter in model parameters.")
+
+    # Find culture main effect names and interaction names
+    culture_main = []      # entries like 'C(culture)[T.2]'
+    interaction_names = [] # entries like 'age_centered:C(culture)[T.2]'
+    for n in param_index:
+        if 'C(culture)' in n and ':' not in n:
+            culture_main.append(n)
+        if 'C(culture)' in n and 'age_centered' in n:
+            interaction_names.append(n)
+
+    # Extract culture labels from names
+    culture_labels = []
+    culture_label_map = {}  # map from main effect name -> label
+    for name in culture_main:
+        m = re.search(r"C\(culture\)\[T\.?([^\]]+)\]$", name)
+        label = m.group(1) if m else name
+        culture_labels.append(label)
+        culture_label_map[name] = label
+
+    # The baseline (reference) culture is the one not listed in dummies.
+    all_cultures_report = ['REFERENCE'] + culture_labels
+
+    # For each culture (REFERENCE and each labeled dummy), compute combined age slope:
+    results = {}
+    try:
+        beta_age = float(params[baseline_age_name])
+    except Exception:
+        beta_age = float(np.asarray(params.loc[baseline_age_name]))
+    try:
+        var_age = float(cov.loc[baseline_age_name, baseline_age_name])
+    except Exception:
+        var_age = float(np.asarray(cov.diagonal()[param_index.index(baseline_age_name)])) if hasattr(cov, "values") else np.nan
+
+    # helper to get covariance between two params (0 if missing)
+    def cov_param(a, b):
+        try:
+            return float(cov.loc[a, b])
+        except Exception:
+            return 0.0
+
+    # Reference (baseline) result
+    se_ref = np.sqrt(var_age) if (var_age is not None and var_age >= 0) else np.nan
+    z_ref = beta_age / se_ref if (not np.isnan(se_ref) and se_ref != 0) else np.nan
+    p_ref = 2 * (1 - stats.norm.cdf(abs(z_ref))) if not np.isnan(z_ref) else np.nan
+    ci_ref = (beta_age - 1.96 * se_ref, beta_age + 1.96 * se_ref) if (not np.isnan(se_ref)) else (np.nan, np.nan)
+    results['REFERENCE'] = {
+        "slope": beta_age,
+        "se": se_ref,
+        "z": z_ref,
+        "p_value": p_ref,
+        "ci_95": ci_ref
+    }
+
+    # For each culture dummy, find its corresponding interaction param (if any)
+    for main_name, label in culture_label_map.items():
+        # look for interaction param that contains this label
+        interact_name = None
+        for iname in interaction_names:
+            # accept patterns where the label appears inside the bracket or at end
+            if re.search(rf"\[T\.?{re.escape(label)}\]$", iname) and 'age_centered' in iname:
+                interact_name = iname
+                break
+            # also accept order reversed like 'C(culture)[T.x]:age_centered'
+            if re.search(rf"C\(culture\)\[T\.?{re.escape(label)}\]", iname) and 'age_centered' in iname:
+                interact_name = iname
+                break
+
+        # compute combined slope and its variance
+        if interact_name is not None and interact_name in params.index:
+            try:
+                beta_int = float(params[interact_name])
+            except Exception:
+                beta_int = float(np.asarray(params.loc[interact_name]))
+            try:
+                var_int = float(cov.loc[interact_name, interact_name]) if interact_name in cov.index else 0.0
+            except Exception:
+                var_int = 0.0
+            cov_ai = cov_param(baseline_age_name, interact_name)
+            combined_beta = beta_age + beta_int
+            combined_var = var_age + var_int + 2.0 * cov_ai
+        else:
+            # no interaction term found -> slope equals baseline
+            combined_beta = beta_age
+            combined_var = var_age
+
+        se = np.sqrt(combined_var) if (combined_var is not None and combined_var >= 0) else np.nan
+        z = combined_beta / se if (not np.isnan(se) and se != 0) else np.nan
+        p = 2 * (1 - stats.norm.cdf(abs(z))) if not np.isnan(z) else np.nan
+        ci = (combined_beta - 1.96 * se, combined_beta + 1.96 * se) if (not np.isnan(se)) else (np.nan, np.nan)
+
+        results[label] = {
+            "slope": combined_beta,
+            "se": se,
+            "z": z,
+            "p_value": p,
+            "ci_95": ci,
+            "interaction_param": interact_name  # None if no interaction term
         }
 
-    # 3) Compute per-culture age effect on the logit scale:
-    # For reference culture: age_effect = age_coef
-    # For other cultures: age_effect = age_coef + interaction_coef
-    # We need the list of cultures; get from predicted_prob_grid if available
-    pred_df = model_output.get('predicted_prob_grid')
-    if pred_df is None:
-        # fallback: infer culture levels from parameter names (less desirable)
-        culture_levels = []
-        for name in params.index:
-            if 'C(culture)' in name and '[' in name:
-                # extract label as above
-                start = name.find('T.')
-                end = name.find(']', start)
-                if start != -1 and end != -1:
-                    label = name[start+2:end]
-                    if label not in culture_levels:
-                        culture_levels.append(label)
-        # We cannot determine reference level precisely; leave empty if unknown
-        pred_df = None
-    else:
-        if 'culture' in pred_df.columns:
-            culture_levels = list(pd.Categorical(pred_df['culture']).categories) if hasattr(pred_df['culture'], 'cat') else list(pd.unique(pred_df['culture']))
-        else:
-            culture_levels = []
-
-    age_effects_logit = {}
-    for c in culture_levels:
-        # find matching interaction param for this culture if any
-        # possible param strings include the culture label; search interaction_info keys
-        match_key = None
-        for k in interaction_info.keys():
-            if str(k) == str(c) or (isinstance(k, str) and str(c) in k):
-                match_key = k
-                break
-        if match_key is not None:
-            inter_coef = interaction_info[match_key]['coef']
-        else:
-            inter_coef = 0.0
-        age_effects_logit[c] = age_coef + inter_coef
-
-    # 4) Compute per-culture slope on predicted probability scale using predicted_prob_grid
-    prob_slopes = {}
-    if pred_df is not None:
-        # ensure age_c numeric
-        pred_df = pred_df.copy()
-        pred_df['age_c'] = pd.to_numeric(pred_df['age_c'])
-        for c in culture_levels:
-            subset = pred_df[pred_df['culture'] == c]
-            if len(subset) >= 2:
-                # linear fit pred_prob ~ age_c; slope is change in probability per 1 year
-                slope, intercept = np.polyfit(subset['age_c'], subset['pred_prob'], 1)
-                prob_slopes[c] = float(slope)
-            else:
-                prob_slopes[c] = float('nan')
-    else:
-        prob_slopes = {c: float('nan') for c in culture_levels}
-
-    # 5) Joint test: are all age-by-culture interactions equal to zero?
+    # Attempt a joint Wald test of all interaction coefficients == 0
     joint_p = None
-    if interaction_names:
-        try:
-            # Construct Wald test string like "param1 = 0, param2 = 0, ..."
-            restr = ", ".join([f"{name} = 0" for name in interaction_names])
-            wtest = fit.wald_test(restr)
-            # wtest.pvalue may be nested; attempt to extract robustly
-            pval = None
-            if hasattr(wtest, 'pvalue') and wtest.pvalue is not None:
-                pval = wtest.pvalue
-            elif hasattr(wtest, 'pvalue_raw') and wtest.pvalue_raw is not None:
-                pval = wtest.pvalue_raw
-            # Try to convert to float if possible
-            if pval is not None:
-                try:
-                    joint_p = float(pval)
-                except Exception:
-                    # if it's array-like, take first element
-                    try:
-                        joint_p = float(getattr(pval, 'item', lambda: pval)())
-                    except Exception:
-                        joint_p = None
+    try:
+        if len(interaction_names) > 0:
+            # Build restriction matrix R that tests each interaction coefficient = 0
+            n_params = len(param_index)
+            R = np.zeros((len(interaction_names), n_params))
+            name_to_pos = {name: i for i, name in enumerate(param_index)}
+            for r_i, iname in enumerate(interaction_names):
+                pos = name_to_pos.get(iname, None)
+                if pos is None:
+                    # try alternate matching (e.g., different formatting)
+                    matches = [i for i, nm in enumerate(param_index) if iname == nm or iname in nm or nm in iname]
+                    pos = matches[0] if matches else None
+                if pos is None:
+                    raise KeyError(f"interaction param name {iname} not found in params index")
+                R[r_i, pos] = 1.0
+            # Use the model's wald_test method which should account for the result's covariance
+            wres = glm_res.wald_test(R)
+            # wres may have attribute .pvalue or .p_f
+            joint_p = getattr(wres, "pvalue", None)
+            if joint_p is None:
+                joint_p = getattr(wres, "p_f", None)
+            # ensure numeric
+            if hasattr(joint_p, "__len__") and not isinstance(joint_p, (str, bytes)):
+                joint_p = float(np.asarray(joint_p).ravel()[0])
             else:
-                joint_p = None
-        except Exception:
-            # fallback: if wald_test fails, set None
-            joint_p = None
+                joint_p = float(joint_p)
+    except Exception:
+        joint_p = None  # leave as None if we cannot compute
 
-    # 6) Build a concise interpretation
-    # Interpret overall age effect
-    if np.isfinite(age_p):
-        if age_p < 0.05:
-            overall_trend = "There is a statistically significant overall effect of age on choosing the majority (age coefficient = {:.3f}, p = {:.3g}).".format(age_coef, age_p)
-            if age_coef > 0:
-                overall_trend += " On the logit scale, older children are more likely to choose the majority (positive coefficient)."
-            else:
-                overall_trend += " On the logit scale, older children are less likely to choose the majority (negative coefficient)."
-        else:
-            overall_trend = "No statistically significant overall age effect was detected (age coefficient = {:.3f}, p = {:.3g}).".format(age_coef, age_p)
-    else:
-        overall_trend = "Could not determine statistical significance for the overall age effect (p-value not available)."
+    # Compose final object
+    final_object = {
+        "age_term_name": baseline_age_name,
+        "per_culture_age_slopes": results,
+        "interaction_terms": interaction_names,
+        "interaction_joint_test_p": joint_p
+    }
 
-    # Interpret interactions
-    if interaction_names:
+    # Prepare description: concise interpretation
+    lines = []
+    lines.append("Estimated age slopes for choosing the majority (positive => greater reliance on majority with age):")
+    for cult in final_object["per_culture_age_slopes"].keys():
+        r = final_object["per_culture_age_slopes"][cult]
+        slope = r.get("slope", np.nan)
+        p = r.get("p_value", np.nan)
+        ci = r.get("ci_95", (np.nan, np.nan))
+        se_val = r.get("se", np.nan)
+        sig = ("p<0.05" if (p is not None and not (isinstance(p, float) and np.isnan(p)) and p < 0.05) else "ns")
+        lines.append(f" - {cult}: slope={slope:.4f}, se={se_val:.4f}, 95%CI=({ci[0]:.4f}, {ci[1]:.4f}), {sig}")
+    if final_object["interaction_terms"]:
         if joint_p is not None:
-            if joint_p < 0.05:
-                interaction_trend = "The age-by-culture interaction terms collectively are statistically significant (joint test p = {:.3g}), indicating developmental trajectories differ across cultures.".format(joint_p)
-            else:
-                interaction_trend = "The age-by-culture interaction terms collectively are NOT statistically significant (joint test p = {:.3g}), indicating no strong evidence that developmental trajectories differ across cultures.".format(joint_p)
+            lines.append(f"Joint test of age x culture interactions: p = {joint_p:.4g} "
+                         f"({'evidence of differences' if joint_p < 0.05 else 'no strong evidence of differences'}).")
         else:
-            interaction_trend = "Interaction parameters are present but a joint test could not be computed. Individual interaction coefficients are reported below."
+            lines.append("Could not compute a joint test for age x culture interactions; see per-culture p-values above.")
     else:
-        interaction_trend = "No age-by-culture interaction terms were found in the model."
+        lines.append("No age x culture interaction terms were present in the GLM (no evidence in model specification that slopes differ).")
 
-    # Summarize magnitude range of predicted-probability slopes
-    if prob_slopes:
-        finite_slopes = [v for v in prob_slopes.values() if np.isfinite(v)]
-        if finite_slopes:
-            min_slope = float(np.min(finite_slopes))
-            max_slope = float(np.max(finite_slopes))
-            magnitude_summary = "Predicted-probability change per 1-year of age ranges from {:.3f} to {:.3f} across cultures (slope in probability points per year).".format(min_slope, max_slope)
-        else:
-            magnitude_summary = "Could not compute predicted-probability slopes across cultures (insufficient predicted data)."
-    else:
-        magnitude_summary = "No predicted probability grid available to compute slopes."
-
-    # Safely check whether confidence interval values are available (not NaN)
-    has_ci = (
-        isinstance(age_ci, (list, tuple))
-        and len(age_ci) == 2
-        and not (pd.isna(age_ci[0]) or pd.isna(age_ci[1]))
-    )
-
-    description = "Overall age effect: {} {} Interaction summary: {} {}".format(
-        overall_trend,
-        ("95% CI (age coef): [{:.3f}, {:.3f}].".format(age_ci[0], age_ci[1]) if has_ci else ""),
-        interaction_trend,
-        magnitude_summary
-    )
-
-    # Construct the return object with numeric details
-    result_object = {
-        'age_param_name': age_param_name,
-        'age_coef_logit': age_coef,
-        'age_pvalue': age_p,
-        'age_conf_int_logit': age_ci,
-        'interaction_params': interaction_info,  # dict keyed by extracted label -> details
-        'age_effects_logit_by_culture': age_effects_logit,  # per-culture logit-scale age slopes
-        'pred_prob_slope_by_culture': prob_slopes,  # per-culture probability-scale slopes (per 1 yr)
-        'joint_interaction_pvalue': joint_p
-    }
-
-    return {
-        "object": result_object,
-        "description": description
-    }
+    out["object"] = final_object
+    out["description"] = "\n".join(lines)
+    return out

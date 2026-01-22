@@ -1,176 +1,151 @@
 def extract_final_answer(model_output):
     """
-    Extracts statistics about the effect of the independent variable 'masfem_z'
-    from the model_output returned by the modeling function.
-
-    Returns a dictionary with keys:
-      - "object": dict with extracted stats for each fitted model (or None)
-      - "description": human-readable explanation of the extracted stats (or errors and remediation)
-
-    The function handles:
-      - statsmodels result objects under keys 'nb_model' and 'ols_damage'
-      - error messages under 'nb_model_error' and 'ols_damage_error'
-      - absence of models
+    Extract key statistics for the hypothesis test from the supplied model output.
+    Expects either:
+      - a dict-like object with keys 'model_primary', optionally 'model_winsor', 'model_deaths'
+        each mapping to a statsmodels RegressionResultsWrapper, or
+      - a single statsmodels RegressionResultsWrapper (treated as the primary model).
+    Returns a dictionary with:
+      - "object": nested dict of numeric summaries for masfem_z and FemaleName for each available model
+      - "description": a plain-language interpretation of the primary-model results relative to the hypothesis
     """
-    import math
-    out = {"object": None, "description": ""}
+    import numpy as np
+    import pandas as pd
 
-    extracted = {}
-    errors = {}
+    def summarize_result(res, varname):
+        """Return summary stats for a variable in a statsmodels result object."""
+        out = {"present": False}
+        if res is None:
+            return out
+        params = res.params
+        if varname not in params.index:
+            return out
+        out["present"] = True
+        coef = float(params[varname])
+        se = float(res.bse[varname]) if varname in res.bse.index else None
+        t = float(res.tvalues[varname]) if varname in res.tvalues.index else None
+        p = float(res.pvalues[varname]) if varname in res.pvalues.index else None
+        # confidence interval (robust to conf_int returning ndarray or DataFrame)
+        ci = res.conf_int()
+        try:
+            lower, upper = ci.loc[varname].astype(float).tolist()
+        except Exception:
+            # fallback: find position
+            try:
+                idx = list(params.index).index(varname)
+                lower, upper = float(ci[idx, 0]), float(ci[idx, 1])
+            except Exception:
+                lower, upper = None, None
+        # approximate percent change on original (1 + damage) scale:
+        try:
+            pct_change = (np.expm1(coef)) * 100.0  # percent
+        except Exception:
+            pct_change = None
 
-    if not isinstance(model_output, dict):
-        out["description"] = "model_output is not a dict. Expected the dict returned by the modeling function."
+        out.update({
+            "coef": coef,
+            "se": se,
+            "t": t,
+            "p": p,
+            "ci_lower": lower,
+            "ci_upper": upper,
+            "approx_pct_change_in_1_plus_damage": pct_change
+        })
         return out
 
-    # Helper to extract from a statsmodels result object
-    def _extract_from_result(res, varname="masfem_z", is_count_model=False):
-        info = {}
-        try:
-            params = getattr(res, "params", None)
-            pvalues = getattr(res, "pvalues", None)
-            conf = None
-            try:
-                conf = res.conf_int()
-            except Exception:
-                conf = None
-
-            # locate the variable name in case it was transformed/named differently
-            if params is None or varname not in params.index:
-                # try to find a parameter name containing varname
-                candidates = [n for n in params.index] if params is not None else []
-                matches = [n for n in candidates if varname in n]
-                if len(matches) == 1:
-                    var = matches[0]
-                elif len(matches) > 1:
-                    var = matches[0]
-                else:
-                    raise KeyError(f"Variable '{varname}' not found in model parameters: {list(params.index) if params is not None else 'no params'}")
-            else:
-                var = varname
-
-            coef = float(params[var])
-            pval = float(pvalues[var]) if (pvalues is not None and var in pvalues.index) else None
-            ci_lower, ci_upper = (None, None)
-            if conf is not None and var in conf.index:
-                ci_lower, ci_upper = float(conf.loc[var, 0]), float(conf.loc[var, 1])
-
-            info["var"] = var
-            info["coef"] = coef
-            info["pvalue"] = pval
-            info["ci_lower"] = ci_lower
-            info["ci_upper"] = ci_upper
-
-            if is_count_model:
-                # For count model (negative binomial GLM with log link), exponentiate coef -> incidence rate ratio (IRR)
-                try:
-                    irr = math.exp(coef)
-                    info["irr"] = irr
-                    if ci_lower is not None and ci_upper is not None:
-                        info["irr_ci_lower"] = math.exp(ci_lower)
-                        info["irr_ci_upper"] = math.exp(ci_upper)
-                except Exception:
-                    pass
-            else:
-                # For OLS on logged damage: approximate percent change = 100*(exp(coef)-1)
-                try:
-                    pct_change = (math.exp(coef) - 1) * 100.0
-                    info["pct_change_approx"] = pct_change
-                    if ci_lower is not None and ci_upper is not None:
-                        info["pct_change_ci_lower"] = (math.exp(ci_lower) - 1) * 100.0
-                        info["pct_change_ci_upper"] = (math.exp(ci_upper) - 1) * 100.0
-                except Exception:
-                    pass
-
-            # significance flag
-            info["significant_p_lt_0.05"] = (pval is not None and pval < 0.05)
-            return info
-        except Exception as e:
-            raise
-
-    # Negative binomial model
-    if "nb_model" in model_output and model_output["nb_model"] is not None:
-        nb = model_output["nb_model"]
-        try:
-            nb_info = _extract_from_result(nb, varname="masfem_z", is_count_model=True)
-            extracted["nb_model"] = nb_info
-        except Exception as e:
-            errors["nb_model_extract_error"] = str(e)
-    elif "nb_model_error" in model_output and model_output["nb_model_error"]:
-        errors["nb_model_error"] = str(model_output["nb_model_error"])
-
-    # OLS damage model
-    if "ols_damage" in model_output and model_output["ols_damage"] is not None:
-        ols = model_output["ols_damage"]
-        try:
-            ols_info = _extract_from_result(ols, varname="masfem_z", is_count_model=False)
-            extracted["ols_damage"] = ols_info
-        except Exception as e:
-            errors["ols_damage_extract_error"] = str(e)
-    elif "ols_damage_error" in model_output and model_output["ols_damage_error"]:
-        errors["ols_damage_error"] = str(model_output["ols_damage_error"])
-    elif "ols_damage" in model_output and model_output["ols_damage"] is None:
-        # explicitly not fitted due to insufficient data; treat as no model
-        errors["ols_damage"] = "OLS damage model was not fit (None returned)."
-
-    # Build description
-    desc_lines = []
-    if extracted:
-        desc_lines.append("Extracted statistics for 'masfem_z':")
-        for key, info in extracted.items():
-            if key == "nb_model":
-                line = (
-                    f"- Negative Binomial (deaths): parameter '{info['var']}' coef = {info['coef']:.4f}, "
-                    f"p = {info['pvalue']:.4g}" + (
-                        f", 95% CI = [{info['ci_lower']:.4f}, {info['ci_upper']:.4f}]" if info.get("ci_lower") is not None else ""
-                    ) + (
-                        f". IRR = {info['irr']:.4f}" +
-                        (f" (95% CI [{info.get('irr_ci_lower', float('nan')):.4f}, {info.get('irr_ci_upper', float('nan')):.4f}])" if info.get('irr_ci_lower') is not None else "")
-                        if info.get("irr") is not None else ""
-                    ) + (
-                        f". Significant at p<0.05: {info['significant_p_lt_0.05']}"
-                    )
-                )
-                desc_lines.append(line)
-            elif key == "ols_damage":
-                line = (
-                    f"- OLS on log(damage): parameter '{info['var']}' coef = {info['coef']:.4f}, p = {info['pvalue']:.4g}" + (
-                        f", 95% CI = [{info['ci_lower']:.4f}, {info['ci_upper']:.4f}]" if info.get("ci_lower") is not None else ""
-                    ) + (
-                        f". Approx. percent change in damage per unit masfem_z = {info.get('pct_change_approx', float('nan')):.2f}%"
-                        + (f" (95% CI [{info.get('pct_change_ci_lower', float('nan')):.2f}%, {info.get('pct_change_ci_upper', float('nan')):.2f}%])" if info.get('pct_change_ci_lower') is not None else "")
-                    ) + (
-                        f". Significant at p<0.05: {info['significant_p_lt_0.05']}"
-                    )
-                )
-                desc_lines.append(line)
-        out["object"] = extracted
+    # Normalize model_output to a dict of models
+    models = {}
+    if model_output is None:
+        raise ValueError("model_output is None")
+    # If it's a dict-like with model_primary key, use that
+    if isinstance(model_output, dict):
+        # copy only expected keys
+        for k in ["model_primary", "model_winsor", "model_deaths"]:
+            models[k] = model_output.get(k, None)
     else:
-        out["object"] = None
-        desc_lines.append("No fitted models with extractable statistics were found.")
+        # assume it's a single statsmodels result -> treat as primary
+        models["model_primary"] = model_output
+        models["model_winsor"] = None
+        models["model_deaths"] = None
 
-    if errors:
-        desc_lines.append("Errors or issues encountered:")
-        for k, msg in errors.items():
-            desc_lines.append(f"- {k}: {msg}")
+    # Variables of interest
+    vars_of_interest = ["masfem_z", "FemaleName"]
 
-        # Provide a likely cause and a suggested fix for the specific error seen in the original run:
-        # Many recent runs fail with "Cannot interpret 'Int64Dtype()' as a data type" from statsmodels when pandas uses nullable integer dtype.
-        desc_lines.append(
-            "Likely cause: statsmodels does not accept pandas' nullable integer dtype ('Int64') for model matrices. "
-            "If you see messages like \"Cannot interpret 'Int64Dtype()' as a data type\", convert integer columns to standard numpy dtypes "
-            "(int64 or float64) and categorical columns to strings or pandas category dtype before fitting.\n"
-            "Suggested quick fixes (run before modeling):\n"
-            "  df['deaths'] = df['deaths'].astype(float)\n"
-            "  df['masfem_z'] = df['masfem_z'].astype(float)\n"
-            "  df['wind_z'] = df['wind_z'].astype(float)\n"
-            "  df['category_z'] = df['category_z'].astype(float)\n"
-            "  df['min_pressure_z'] = df['min_pressure_z'].astype(float)\n"
-            "  df['year_z'] = df['year_z'].astype(float)\n"
-            "  df['elapsedyrs_z'] = df['elapsedyrs_z'].astype(float)\n"
-            "  df['IsFemaleName'] = df['IsFemaleName'].astype(int)\n"
-            "  df['source'] = df['source'].astype(str)\n"
-            "Then re-run the modeling function. After models fit, re-call this extractor on the returned output."
-        )
+    summary = {}
+    for key, res in models.items():
+        if res is None:
+            summary[key] = None
+            continue
+        summary[key] = {}
+        for v in vars_of_interest:
+            summary[key][v] = summarize_result(res, v)
 
-    out["description"] = "\n".join(desc_lines)
-    return out
+    # Build a human-readable description focusing on the primary model
+    prim = summary.get("model_primary")
+    if prim is None:
+        description = "No primary model found in model_output."
+    else:
+        # masfem_z interpretation
+        m = prim.get("masfem_z", {})
+        f = prim.get("FemaleName", {})
+        lines = []
+        if not m or not m.get("present", False):
+            lines.append("Primary model: 'masfem_z' not present in model output.")
+        else:
+            coef = m["coef"]
+            p = m["p"]
+            se = m["se"]
+            ci_lo = m["ci_lower"]
+            ci_hi = m["ci_upper"]
+            pct = m["approx_pct_change_in_1_plus_damage"]
+            sig = ("statistically significant (p < 0.05)"
+                   if (p is not None and p < 0.05) else
+                   ("marginally significant (p < 0.10)" if (p is not None and p < 0.10) else "not statistically significant"))
+            lines.append(
+                "Primary model — masfem_z: coef = {coef:.4f}, SE = {se:.4f}, p = {p:.4g}, 95% CI [{lo:.4f}, {hi:.4f}]. "
+                .format(coef=coef, se=se, p=p, lo=ci_lo, hi=ci_hi)
+            )
+            if pct is not None:
+                lines.append(
+                    "This implies approximately a {pct:.2f}% change in (1 + damage) per 1 SD increase in name femininity (exp(coef)-1 approximation). "
+                    .format(pct=pct)
+                )
+            lines.append("Inference: " + sig + ".")
+        # FemaleName interpretation
+        if not f or not f.get("present", False):
+            lines.append("Primary model: 'FemaleName' not present in model output.")
+        else:
+            coef = f["coef"]
+            p = f["p"]
+            se = f["se"]
+            ci_lo = f["ci_lower"]
+            ci_hi = f["ci_upper"]
+            pct = f["approx_pct_change_in_1_plus_damage"]
+            sig = ("statistically significant (p < 0.05)"
+                   if (p is not None and p < 0.05) else
+                   ("marginally significant (p < 0.10)" if (p is not None and p < 0.10) else "not statistically significant"))
+            lines.append(
+                "Primary model — FemaleName (binary): coef = {coef:.4f}, SE = {se:.4f}, p = {p:.4g}, 95% CI [{lo:.4f}, {hi:.4f}]. "
+                .format(coef=coef, se=se, p=p, lo=ci_lo, hi=ci_hi)
+            )
+            if pct is not None:
+                lines.append(
+                    "This implies approximately a {pct:.2f}% difference in (1 + damage) for female vs male names (exp(coef)-1 approximation). "
+                    .format(pct=pct)
+                )
+            lines.append("Inference: " + sig + ".")
+
+        # Conclude relative to hypothesis
+        # If masfem_z coef > 0 and significant -> supports hypothesis; if not -> does not support.
+        if m and m.get("present", False) and (m.get("p") is not None):
+            if (m["coef"] > 0) and (m["p"] < 0.05):
+                lines.append("Net conclusion: The primary model provides statistical evidence consistent with the hypothesis (more feminine names → greater damage).")
+            elif (m["coef"] > 0) and (m["p"] >= 0.05):
+                lines.append("Net conclusion: The coefficient is positive (consistent with the hypothesis) but not statistically significant at conventional levels.")
+            elif (m["coef"] < 0) and (m["p"] < 0.05):
+                lines.append("Net conclusion: The primary model finds a statistically significant effect in the direction opposite the hypothesis (more feminine names → lower damage).")
+            else:
+                lines.append("Net conclusion: No statistically significant evidence supporting the hypothesis in the primary model.")
+        description = " ".join(lines)
+
+    return {"object": summary, "description": description}

@@ -1,178 +1,135 @@
 def extract_final_answer(model_output):
     """
-    Extracts the effect of 'HasChildren' from the provided model_output dict.
-    Expects model_output to contain keys 'logit_result' and 'nb_result' with
-    fitted statsmodels results objects (BinaryResultsWrapper / GLMResultsWrapper).
+    Extract the effect of 'children_binary' on extramarital affairs from the models
+    returned in `model_output`. Prefer the logistic model if it converged; otherwise
+    try to use the ZINB model if it converged. If a model did not converge, its
+    estimates are treated as unreliable and noted in the description.
 
-    Returns:
-      {
-        "object": {
-          "logit": {
-            "coef": float,
-            "se": float,
-            "pvalue": float,
-            "ci_lower": float,
-            "ci_upper": float,
-            "odds_ratio": float,
-            "or_ci_lower": float,
-            "or_ci_upper": float,
-            "significant": bool
-          },
-          "nb": {
-            "coef": float,
-            "se": float,
-            "pvalue": float,
-            "ci_lower": float,
-            "ci_upper": float,
-            "irr": float,
-            "irr_ci_lower": float,
-            "irr_ci_upper": float,
-            "significant": bool
-          }
-        },
-        "description": str
-      }
-    The description summarizes whether having children appears to decrease
-    engagement in extramarital affairs, based on coefficient signs and
-    significance in both models.
+    Returns a dict with keys:
+      - "object": a dict containing numeric results (coef, se, pvalue, CI, odds ratio where applicable)
+      - "description": a short plain-language interpretation focused on whether having children
+                       is associated with less engagement in extramarital affairs.
     """
     import numpy as np
 
-    def _get_param_info(res, param_name):
-        # Extract coef, se, pvalue, conf int robustly
-        if param_name not in res.params.index:
-            raise KeyError(f"Parameter '{param_name}' not found in model results.")
-        coef = float(res.params[param_name])
-        se = float(res.bse[param_name]) if hasattr(res, 'bse') else float(np.nan)
-        pval = float(res.pvalues[param_name]) if hasattr(res, 'pvalues') else float(np.nan)
+    result = {"object": None, "description": ""}
 
-        # conf_int may return array or DataFrame; handle both
-        try:
-            ci = res.conf_int().loc[param_name].astype(float)
-            ci_lower = float(ci.iloc[0])
-            ci_upper = float(ci.iloc[1])
-        except Exception:
-            # fallback: use position of param
-            try:
-                ci_arr = res.conf_int()
-                idx = list(res.params.index).index(param_name)
-                ci_lower = float(ci_arr[idx, 0])
-                ci_upper = float(ci_arr[idx, 1])
-            except Exception:
-                ci_lower = float(np.nan)
-                ci_upper = float(np.nan)
-
-        return {
-            "coef": coef,
-            "se": se,
-            "pvalue": pval,
-            "ci_lower": ci_lower,
-            "ci_upper": ci_upper
+    # Helper to format output dictionary
+    def make_obj(source, coef, se, pval, ci_low, ci_high, extra=None):
+        obj = {
+            "model": source,
+            "variable": "children_binary",
+            "coef": float(coef),
+            "se": float(se) if se is not None else None,
+            "pvalue": float(pval) if pval is not None else None,
+            "ci_lower": float(ci_low) if ci_low is not None else None,
+            "ci_upper": float(ci_high) if ci_high is not None else None
         }
+        # for logistic, add odds ratio info
+        if extra and extra.get("type") == "logit":
+            or_val = float(np.exp(coef))
+            or_low = float(np.exp(ci_low))
+            or_high = float(np.exp(ci_high))
+            obj.update({
+                "odds_ratio": or_val,
+                "odds_ratio_ci_lower": or_low,
+                "odds_ratio_ci_upper": or_high
+            })
+        if extra:
+            obj.update(extra)
+        return obj
 
-    # Validate input
-    if not isinstance(model_output, dict):
-        raise ValueError("model_output must be a dict with keys 'logit_result' and 'nb_result'.")
-
-    if 'logit_result' not in model_output or 'nb_result' not in model_output:
-        raise KeyError("model_output must contain 'logit_result' and 'nb_result' keys.")
-
-    logit_res = model_output['logit_result']
-    nb_res = model_output['nb_result']
-
-    # Extract parameter info for HasChildren from both models
+    # 1) Try logistic model first (robust / interpretable)
+    logit = model_output.get("logit_model")
     try:
-        logit_info = _get_param_info(logit_res, 'HasChildren')
-    except KeyError as e:
-        raise KeyError("Failed to extract 'HasChildren' from logit_result: " + str(e))
+        if logit is not None and getattr(logit, "converged", True):
+            # Extract coefficient, se, p-value, conf int for children_binary
+            coef = logit.params.loc["children_binary"]
+            se = logit.bse.loc["children_binary"]
+            pval = logit.pvalues.loc["children_binary"]
+            ci = logit.conf_int().loc["children_binary"]
+            ci_low, ci_high = ci[0], ci[1]
+
+            result["object"] = make_obj(
+                source="logit",
+                coef=coef, se=se, pval=pval,
+                ci_low=ci_low, ci_high=ci_high,
+                extra={"type": "logit"}
+            )
+
+            # Interpretation
+            # Positive coef => higher odds with children; check significance
+            if pval < 0.05:
+                sig_text = "statistically significant (p < 0.05)."
+            else:
+                sig_text = "not statistically significant (p >= 0.05)."
+
+            result["description"] = (
+                f"Logistic regression (any affair vs none): children_binary coef = {coef:.4f}, "
+                f"SE = {se:.4f}, p = {pval:.3f}. Odds ratio = {np.exp(coef):.3f} "
+                f"(95% CI {np.exp(ci_low):.3f} to {np.exp(ci_high):.3f}). This indicates a "
+                f"{'positive' if coef>0 else 'negative'} association between having children and "
+                f"reporting any extramarital affair, but it is {sig_text}"
+            )
+            # Also note ZINB convergence status if present
+            zinb = model_output.get("zinb_model")
+            if zinb is not None and not getattr(zinb, "converged", True):
+                result["description"] += " The complementary ZINB model did not converge, so its estimates are unreliable."
+            return result
+    except Exception:
+        # fall through to try ZINB or return failure
+        pass
+
+    # 2) If logistic unavailable/unconverged, try ZINB (count model)
+    zinb = model_output.get("zinb_model")
     try:
-        nb_info = _get_param_info(nb_res, 'HasChildren')
-    except KeyError as e:
-        raise KeyError("Failed to extract 'HasChildren' from nb_result: " + str(e))
+        if zinb is not None and getattr(zinb, "converged", False):
+            # For ZINB, children_binary appears both in the inflation and the count parts.
+            # We'll extract the count-part coefficient named 'children_binary' if present.
+            params = zinb.params
+            bse = zinb.bse if hasattr(zinb, "bse") else None
+            if "children_binary" in params.index:
+                coef = params.loc["children_binary"]
+                se = float(bse.loc["children_binary"]) if bse is not None else None
+                # p-values/conf_int may not be available; try to get them if possible
+                pval = float(zinb.pvalues.loc["children_binary"]) if hasattr(zinb, "pvalues") else None
+                ci = zinb.conf_int().loc["children_binary"] if hasattr(zinb, "conf_int") or hasattr(zinb, "conf_int") else (None, None)
+                ci_low, ci_high = (float(ci[0]), float(ci[1])) if ci is not None else (None, None)
 
-    # Compute odds ratio and IRR and their CIs
-    logit_or = float(np.exp(logit_info["coef"]))
-    logit_or_ci_lower = float(np.exp(logit_info["ci_lower"])) if not np.isnan(logit_info["ci_lower"]) else float(np.nan)
-    logit_or_ci_upper = float(np.exp(logit_info["ci_upper"])) if not np.isnan(logit_info["ci_upper"]) else float(np.nan)
+                result["object"] = make_obj(
+                    source="zinb_count",
+                    coef=coef, se=se, pval=pval,
+                    ci_low=ci_low, ci_high=ci_high
+                )
 
-    nb_irr = float(np.exp(nb_info["coef"]))
-    nb_irr_ci_lower = float(np.exp(nb_info["ci_lower"])) if not np.isnan(nb_info["ci_lower"]) else float(np.nan)
-    nb_irr_ci_upper = float(np.exp(nb_info["ci_upper"])) if not np.isnan(nb_info["ci_upper"]) else float(np.nan)
+                if pval is not None and pval < 0.05:
+                    sig_text = "statistically significant (p < 0.05)."
+                else:
+                    sig_text = "not statistically significant (or unavailable)."
 
-    # Determine significance at alpha=0.05
-    logit_sig = (not np.isnan(logit_info["pvalue"])) and (logit_info["pvalue"] < 0.05)
-    nb_sig = (not np.isnan(nb_info["pvalue"])) and (nb_info["pvalue"] < 0.05)
-
-    # Prepare object to return
-    output_object = {
-        "logit": {
-            "coef": logit_info["coef"],
-            "se": logit_info["se"],
-            "pvalue": logit_info["pvalue"],
-            "ci_lower": logit_info["ci_lower"],
-            "ci_upper": logit_info["ci_upper"],
-            "odds_ratio": logit_or,
-            "or_ci_lower": logit_or_ci_lower,
-            "or_ci_upper": logit_or_ci_upper,
-            "significant": logit_sig
-        },
-        "nb": {
-            "coef": nb_info["coef"],
-            "se": nb_info["se"],
-            "pvalue": nb_info["pvalue"],
-            "ci_lower": nb_info["ci_lower"],
-            "ci_upper": nb_info["ci_upper"],
-            "irr": nb_irr,
-            "irr_ci_lower": nb_irr_ci_lower,
-            "irr_ci_upper": nb_irr_ci_upper,
-            "significant": nb_sig
-        }
-    }
-
-    # Construct a concise human-readable description
-    parts = []
-    # Logit interpretation
-    parts.append(
-        "Logistic model (AnyAffair): coef={coef:.4f}, SE={se:.4f}, p={p:.4g}; "
-        "odds ratio={or_: .4f} (95% CI [{or_lo:.4f}, {or_hi:.4f}]).".format(
-            coef=logit_info["coef"], se=logit_info["se"], p=logit_info["pvalue"],
-            or_=logit_or, or_lo=logit_or_ci_lower, or_hi=logit_or_ci_upper
-        )
-    )
-    if logit_sig:
-        if logit_or < 1:
-            parts.append("Interpretation: having children is associated with statistically significant lower odds of any extramarital affair (logit).")
+                result["description"] = (
+                    f"ZINB count part: children_binary coef = {coef:.4f}"
+                    + (f", SE = {se:.4f}" if se is not None else "")
+                    + (f", p = {pval:.3f}" if pval is not None else "")
+                    + f". This is {sig_text}"
+                )
+                return result
+            else:
+                result["description"] = "ZINB model present and converged but 'children_binary' not found in parameters."
+                return result
         else:
-            parts.append("Interpretation: having children is associated with statistically significant higher odds of any extramarital affair (logit).")
-    else:
-        parts.append("Interpretation: effect not statistically significant in the logistic model (p >= 0.05).")
+            # ZINB not present or did not converge
+            # If a summary text mentions 'children_binary', we could try to parse, but safer to report inability.
+            zinb_summary = model_output.get("zinb_summary")
+            if zinb_summary and "converged: False" in zinb_summary:
+                result["description"] = "ZINB model did not converge; estimates from ZINB are unreliable. Logistic model could not be used/extracted."
+            else:
+                result["description"] = "Neither a converged logistic model nor a converged ZINB model with usable 'children_binary' parameter was found."
+            return result
+    except Exception:
+        result["description"] = "Error extracting parameters from available models."
+        return result
 
-    # NB interpretation
-    parts.append(
-        "Negative binomial (count of Affairs): coef={coef:.4f}, SE={se:.4f}, p={p:.4g}; "
-        "IRR={irr:.4f} (95% CI [{irr_lo:.4f}, {irr_hi:.4f}]).".format(
-            coef=nb_info["coef"], se=nb_info["se"], p=nb_info["pvalue"],
-            irr=nb_irr, irr_lo=nb_irr_ci_lower, irr_hi=nb_irr_ci_upper
-        )
-    )
-    if nb_sig:
-        if nb_irr < 1:
-            parts.append("Interpretation: having children is associated with a statistically significant lower expected count of affairs (negative binomial).")
-        else:
-            parts.append("Interpretation: having children is associated with a statistically significant higher expected count of affairs (negative binomial).")
-    else:
-        parts.append("Interpretation: effect not statistically significant in the negative binomial model (p >= 0.05).")
-
-    # Overall summary
-    if logit_sig and nb_sig and (logit_or < 1) and (nb_irr < 1):
-        summary = "Overall: Both models suggest having children decreases engagement in extramarital affairs (statistically significant)."
-    elif (logit_sig and (logit_or < 1)) or (nb_sig and (nb_irr < 1)):
-        summary = "Overall: Evidence is mixed but at least one model shows a statistically significant decrease in affairs associated with having children."
-    else:
-        summary = "Overall: There is no consistent statistically significant evidence that having children decreases engagement in extramarital affairs."
-
-    parts.append(summary)
-
-    description = " ".join(parts)
-
-    return {"object": output_object, "description": description}
+    # If reached here, nothing usable was found
+    result["description"] = "Could not extract a reliable estimate for 'children_binary' from the provided model output."
+    return result

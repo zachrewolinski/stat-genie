@@ -13,82 +13,111 @@ df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/anal
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Transform the raw dataset into the analysis dataframe.
+    Transform the raw dataset into the dataframe required for modeling.
 
-    Produces the following columns (kept/created):
-    - majority_choice: binary DV (1 if y==2 (majority), else 0)
-    - age_c: age mean-centered (continuous IV)
-    - culture: categorical site identifier (categorical IV)
-    - is_male: binary control (1 = boy, 0 = girl)
-    - majority_first: binary control (0/1), coerced to integer
-
-    The function drops rows with missing values in the variables needed for modeling.
+    Outputs (columns used in the model):
+      - y: outcome (1,2,3) unchanged
+      - age_c: centered age
+      - culture_2..culture_8: dummy variables for culture (reference = culture 1)
+      - age_c:culture_*: interaction terms between centered age and each culture dummy
+      - is_boy: gender recoded (0 = girl, 1 = boy)
+      - majority_first: kept as-is (0/1)
     """
-    # work on a copy
     df = df.copy()
 
-    # Ensure required columns exist
-    required = ['y', 'age', 'culture', 'gender', 'majority_first']
+    # Required columns present check (will raise if missing)
+    required = ['y', 'age', 'gender', 'culture', 'majority_first']
     missing = [c for c in required if c not in df.columns]
     if len(missing) > 0:
-        raise ValueError(f"Missing required columns for transform: {missing}")
+        raise ValueError(f"Missing required columns: {missing}")
 
-    # Drop rows with missing core variables
-    df = df.dropna(subset=['y', 'age', 'culture', 'gender', 'majority_first'])
+    # Drop rows with missing values in key columns
+    df = df.dropna(subset=required)
 
-    # Dependent variable: majority_choice (1 if chose majority option (y == 2), else 0)
-    df['majority_choice'] = (df['y'] == 2).astype(int)
-
-    # Age: ensure numeric and mean-center
+    # Ensure correct dtypes
+    df['y'] = df['y'].astype(int)
     df['age'] = pd.to_numeric(df['age'], errors='coerce')
-    # drop rows that became NaN after coercion
-    df = df.dropna(subset=['age'])
-    df['age_c'] = df['age'] - df['age'].mean()
-
-    # Culture: treat as categorical factor (keep original codes but set dtype to category)
-    # This column is used as C(culture) in the model formula
-    df['culture'] = df['culture'].astype('category')
-
-    # Gender -> is_male (1 = boy (gender==2), 0 = girl (gender==1))
-    df['is_male'] = (pd.to_numeric(df['gender'], errors='coerce') == 2).astype(int)
-
-    # majority_first: ensure numeric 0/1
+    df['gender'] = pd.to_numeric(df['gender'], errors='coerce').astype(int)
+    df['culture'] = pd.to_numeric(df['culture'], errors='coerce').astype(int)
     df['majority_first'] = pd.to_numeric(df['majority_first'], errors='coerce').astype(int)
 
-    # Final drop in case any coercion produced NaNs
-    df = df.dropna(subset=['majority_choice', 'age_c', 'culture', 'is_male', 'majority_first'])
+    # Re-drop rows if conversion produced NaNs
+    df = df.dropna(subset=['age', 'gender', 'culture', 'majority_first'])
 
-    # Return dataframe containing all columns (including originals); required analysis columns are present
+    # Create centered age
+    df['age_c'] = df['age'] - df['age'].mean()
+
+    # Recode gender: 1=girl, 2=boy in schema -> create is_boy (0/1)
+    df['is_boy'] = (df['gender'] == 2).astype(int)
+
+    # Create culture dummies, reference = culture 1
+    culture_dummies = pd.get_dummies(df['culture'].astype(int), prefix='culture', drop_first=True)
+    # Ensure dummy columns are named culture_2..culture_8 where applicable
+    # (get_dummies will produce those names automatically because prefix + category)
+    df = pd.concat([df.reset_index(drop=True), culture_dummies.reset_index(drop=True)], axis=1)
+
+    # Identify culture dummy columns that were created
+    culture_dummy_cols = [c for c in df.columns if c.startswith('culture_')]
+    culture_dummy_cols = sorted(culture_dummy_cols, key=lambda x: int(x.split('_')[1]))
+
+    # Create interactions between centered age and each culture dummy
+    for col in culture_dummy_cols:
+        inter_name = f'age_c:{col}'
+        df[inter_name] = df['age_c'] * df[col]
+
+    # Final housekeeping: keep only needed columns (but retain y)
+    model_cols = ['y', 'age_c'] + culture_dummy_cols + [f'age_c:{c}' for c in culture_dummy_cols] + ['is_boy', 'majority_first']
+    # Some cultures might not be present in a particular dataset subset; ensure only present columns are selected
+    final_cols = [c for c in model_cols if c in df.columns]
+    df = df[final_cols].reset_index(drop=True)
+
     return df
 
 
 # ======== MODEL CODE ========
-def model(df: pd.DataFrame):
+def model(df: pd.DataFrame) -> any:
     """
-    Fit a logistic regression predicting the probability of choosing the majority option.
+    Fit a multinomial logistic regression predicting categorical choice 'y' (1=undemonstrated, 2=majority, 3=minority)
+    from age, culture dummies, their interactions, and controls (is_boy, majority_first).
 
-    Model formula:
-      majority_choice ~ age_c * C(culture) + is_male + majority_first
-
-    Interpretation: main effect of age (developmental trend), main effects of culture (differences in baseline propensity
-    to follow majority), and age-by-culture interactions (different developmental trajectories across cultures). Controls
-    for child's gender and whether the majority was demonstrated first.
-
-    Returns the fitted statsmodels results object (LogitResults) so the caller can inspect summary, coefficients, CIs, etc.
+    Returns the fitted statsmodels MNLogit result object. Prints the model summary and, if available, average marginal effects.
     """
-    import statsmodels.formula.api as smf
+    # Copy to avoid modifying caller's frame
+    df = df.copy()
 
-    # Ensure the culture column is categorical (transform() should have done this)
-    if not pd.api.types.is_categorical_dtype(df['culture']):
-        df['culture'] = df['culture'].astype('category')
+    # Identify predictors dynamically (based on transform output)
+    culture_dummy_cols = [c for c in df.columns if c.startswith('culture_')]
+    interaction_cols = [c for c in df.columns if c.startswith('age_c:culture_')]
 
-    formula = 'majority_choice ~ age_c * C(culture) + is_male + majority_first'
+    # Base predictors
+    exog_cols = ['age_c'] + culture_dummy_cols + interaction_cols + ['is_boy', 'majority_first']
+    # Keep only columns that exist in df (in case some culture dummies were absent)
+    exog_cols = [c for c in exog_cols if c in df.columns]
 
-    # Fit logistic regression (binomial logit)
-    # Use disp=False to avoid printing during fit
-    model = smf.logit(formula=formula, data=df).fit(disp=False)
+    # Add constant
+    exog = sm.add_constant(df[exog_cols], has_constant='add')
+    endog = df['y']
 
-    # Return the fitted model object. The caller can call model.summary(), model.params, model.conf_int(), etc.
-    return model
+    # Fit multinomial logit
+    model = sm.MNLogit(endog, exog)
+    try:
+        results = model.fit(maxiter=200, disp=False)
+    except Exception as e:
+        # Retry with a different solver if convergence problem
+        results = model.fit(method='bfgs', maxiter=400, disp=False)
+
+    # Print summary
+    print(results.summary())
+
+    # Compute and print (optional) average marginal effects for the baseline specification if available
+    try:
+        marg = results.get_margeff()
+        print('\nAverage marginal effects:')
+        print(marg.summary())
+    except Exception:
+        # not critical; continue
+        pass
+
+    return results
 
 

@@ -1,149 +1,135 @@
 def extract_final_answer(model_output):
     """
-    Extracts the coefficient and inference for the 'masfem_z' variable from a fitted
-    statsmodels results object (GLM/GLMResultsWrapper or robust wrapper).
-    
-    Returns a dictionary with keys:
-      - "object": dict with numeric results (coef, se, pvalue, 95% CI, IRR, IRR 95% CI, nobs)
-      - "description": human-readable interpretation in the context of the hypothesis:
-                       "more feminine names -> more fatalities" (supports / does not support / inconclusive)
+    Extracts coefficient, SE, p-value, and 95% CI for 'masfem_z' from available models
+    in model_output. For Poisson/NegBin models, also returns the incidence-rate-ratio (IRR)
+    and its 95% CI (exp(coef), exp(CI)).
+
+    Returns a dict with keys:
+      - "object": dict keyed by model name with extracted numeric results (or error messages)
+      - "description": human-readable summary interpreting the direction and significance
+                       of the 'masfem_z' coefficient in the context of the task.
     """
+    import math
     import numpy as np
-    from math import erf, sqrt
 
-    var = 'masfem_z'
-    out = {
-        "coef": None,
-        "std_err": None,
-        "p_value": None,
-        "ci_lower": None,
-        "ci_upper": None,
-        "irr": None,
-        "irr_ci_lower": None,
-        "irr_ci_upper": None,
-        "nobs": None
-    }
+    available_models = ['ols_robust', 'poisson_robust', 'negbin_robust']
+    extracted = {}
+    summary_lines = []
+    any_model_found = False
+    any_successful_extraction = False
 
-    # helper to compute p-value from z-statistic (two-sided), avoids external dependencies
-    def p_from_z(z):
-        return 2 * (1.0 - 0.5 * (1.0 + erf(abs(z) / sqrt(2.0))))
+    for m in available_models:
+        if m in model_output:
+            any_model_found = True
+            model = model_output[m]
+            try:
+                params = getattr(model, 'params', None)
+                pvalues = getattr(model, 'pvalues', None)
+                bse = getattr(model, 'bse', None)
+                # conf_int may be a method or an attribute
+                try:
+                    ci_df = model.conf_int()
+                except Exception:
+                    ci_df = getattr(model, 'conf_int', None)
+                    if callable(ci_df):
+                        ci_df = ci_df()
+                if params is None:
+                    raise ValueError("model has no 'params' attribute")
 
-    # try to extract values robustly from common statsmodels result objects
-    try:
-        coef = float(model_output.params[var])
-        out["coef"] = coef
-    except Exception:
-        raise KeyError(f"Could not find parameter '{var}' in model_output.params")
+                if 'masfem_z' not in params.index:
+                    extracted[m] = {
+                        "error": "'masfem_z' not present in model parameters",
+                        "available_params": list(params.index)
+                    }
+                    summary_lines.append(f"{m}: 'masfem_z' not estimated in this model.")
+                else:
+                    coef = float(params.loc['masfem_z'])
+                    se = float(bse.loc['masfem_z']) if (bse is not None and 'masfem_z' in bse.index) else None
+                    pval = float(pvalues.loc['masfem_z']) if (pvalues is not None and 'masfem_z' in pvalues.index) else None
+                    ci_low, ci_high = (None, None)
+                    if ci_df is not None and 'masfem_z' in ci_df.index:
+                        # conf_int returns DataFrame with two columns; ensure numeric
+                        ci_low = float(ci_df.loc['masfem_z'].iloc[0])
+                        ci_high = float(ci_df.loc['masfem_z'].iloc[1])
 
-    # standard error
-    try:
-        se = float(model_output.bse[var])
-        out["std_err"] = se
-    except Exception:
-        # if bse missing, leave as None
-        se = None
+                    entry = {
+                        "coef": coef,
+                        "se": se,
+                        "pvalue": pval,
+                        "ci95": [ci_low, ci_high]
+                    }
 
-    # p-value (if present)
-    try:
-        pval = float(model_output.pvalues[var])
-        out["p_value"] = pval
-    except Exception:
-        # compute from z if possible
-        if se is not None and se > 0:
-            z = coef / se
-            pval = p_from_z(z)
-            out["p_value"] = pval
+                    # For count models, provide exponentiated effect (IRR)
+                    if m in ('poisson_robust', 'negbin_robust'):
+                        try:
+                            irr = float(np.exp(coef))
+                            irr_ci = [float(np.exp(ci_low)) if ci_low is not None else None,
+                                      float(np.exp(ci_high)) if ci_high is not None else None]
+                        except Exception:
+                            irr = None
+                            irr_ci = [None, None]
+                        entry.update({"irr": irr, "irr_ci95": irr_ci})
+
+                    extracted[m] = entry
+
+                    # Build summary line about direction and significance
+                    sign = "positive" if coef > 0 else ("zero" if coef == 0 else "negative")
+                    sig = ("statistically significant (p < 0.05)" if (pval is not None and pval < 0.05)
+                           else ("not statistically significant" if pval is not None else "p-value unavailable"))
+                    # Interpret in context: positive coef in OLS -> more-feminine -> more log deaths (less precaution)
+                    if m == 'ols_robust':
+                        interpretation = ("A positive coef implies more-feminine names are associated with higher "
+                                          "log(1+deaths) (interpreted as less precaution).")
+                    else:
+                        interpretation = ("A positive coef implies more-feminine names are associated with a multiplicative "
+                                          "increase in expected deaths; IRR > 1 indicates more deaths (less precaution).")
+                    summary_lines.append(
+                        f"{m}: coef={coef:.4g}, se={se:.4g} p={pval:.3g} 95%CI=[{ci_low:.4g}, {ci_high:.4g}] -> "
+                        f"{sign}, {sig}. {interpretation}"
+                    )
+                    any_successful_extraction = True
+
+            except Exception as e:
+                extracted[m] = {"error": f"failed to extract fields from model object: {str(e)}"}
+                summary_lines.append(f"{m}: extraction error: {str(e)}")
         else:
-            out["p_value"] = None
-
-    # confidence interval
-    try:
-        ci = model_output.conf_int()
-        # conf_int may be DataFrame or ndarray. Try to index by variable name.
-        if hasattr(ci, "loc"):
-            ci_row = ci.loc[var]
-            ci_lower, ci_upper = float(ci_row[0]), float(ci_row[1])
-        else:
-            # assume array-like with same ordering as params index
-            params_index = list(model_output.params.index)
-            idx = params_index.index(var)
-            ci_lower, ci_upper = float(ci[idx, 0]), float(ci[idx, 1])
-        out["ci_lower"], out["ci_upper"] = ci_lower, ci_upper
-    except Exception:
-        # fallback: compute Wald CI using normal approx (z_crit ~ 1.96)
-        if se is not None:
-            zcrit = 1.959963984540054
-            ci_lower = coef - zcrit * se
-            ci_upper = coef + zcrit * se
-            out["ci_lower"], out["ci_upper"] = ci_lower, ci_upper
-        else:
-            out["ci_lower"], out["ci_upper"] = None, None
-
-    # IRR (exp(coef)) and its CI
-    try:
-        if out["coef"] is not None:
-            irr = float(np.exp(out["coef"]))
-            out["irr"] = irr
-            if out["ci_lower"] is not None and out["ci_upper"] is not None:
-                out["irr_ci_lower"] = float(np.exp(out["ci_lower"]))
-                out["irr_ci_upper"] = float(np.exp(out["ci_upper"]))
-    except Exception:
-        out["irr"], out["irr_ci_lower"], out["irr_ci_upper"] = None, None, None
-
-    # nobs
-    try:
-        # try common attributes
-        if hasattr(model_output, 'nobs'):
-            out["nobs"] = int(model_output.nobs)
-        elif hasattr(model_output, 'model') and hasattr(model_output.model, 'nobs'):
-            out["nobs"] = int(model_output.model.nobs)
-        elif hasattr(model_output, 'model') and hasattr(model_output.model, 'endog'):
-            out["nobs"] = int(getattr(model_output.model.endog, "shape", (len(model_output.model.endog),))[0])
-    except Exception:
-        out["nobs"] = None
-
-    # Simple interpretation relative to the hypothesis:
-    # Hypothesis: more feminine names -> fewer precautions -> higher fatalities
-    # i.e., positive coef (and statistically significant) supports the hypothesis.
-    coef_val = out["coef"]
-    pval_val = out["p_value"]
-    desc_lines = []
-    desc_lines.append(f"Variable: {var}")
-    desc_lines.append(f"Estimated coefficient (log-IRR): {coef_val}")
-    if out["std_err"] is not None:
-        desc_lines.append(f"Standard error: {out['std_err']}")
-    if pval_val is not None:
-        desc_lines.append(f"Two-sided p-value: {pval_val}")
-    if out["ci_lower"] is not None and out["ci_upper"] is not None:
-        desc_lines.append(f"95% CI (log scale): [{out['ci_lower']}, {out['ci_upper']}]")
-    if out["irr"] is not None:
-        desc_lines.append(f"Incidence Rate Ratio (IRR) = exp(coef): {out['irr']}")
-    if out["irr_ci_lower"] is not None and out["irr_ci_upper"] is not None:
-        desc_lines.append(f"95% CI for IRR: [{out['irr_ci_lower']}, {out['irr_ci_upper']}]")
-    if out["nobs"] is not None:
-        desc_lines.append(f"Number of observations (approx): {out['nobs']}")
-
-    # Decision text
-    decision = "Inconclusive"
-    if coef_val is not None:
-        if pval_val is not None:
-            alpha = 0.05
-            if coef_val > 0 and pval_val < alpha:
-                decision = "Supports hypothesis (positive coef, statistically significant)"
-            elif coef_val > 0 and pval_val >= alpha:
-                decision = "Does not provide statistically significant evidence for the hypothesis (positive coef but not significant)"
-            elif coef_val <= 0 and pval_val < alpha:
-                decision = "Contradicts hypothesis (negative or zero coef, statistically significant)"
+            # If model missing, try to surface error message if present
+            err_key = m.replace('_robust', '_error')
+            if err_key in model_output:
+                msg = model_output[err_key]
+                extracted[m] = {"error": msg}
+                summary_lines.append(f"{m}: error reported when fitting model: {msg}")
             else:
-                decision = "Does not provide statistically significant evidence; coefficient not significantly different from zero"
-        else:
-            # no p-value available; base on sign only
-            if coef_val > 0:
-                decision = "Positive coefficient (no p-value available) — suggestive but not conclusive"
-            elif coef_val <= 0:
-                decision = "Non-positive coefficient (no p-value available) — does not support hypothesis"
-    desc_lines.append("Conclusion: " + decision)
+                summary_lines.append(f"{m}: not present in model_output.")
 
-    description = "; ".join(desc_lines)
+    if not any_model_found:
+        description = (
+            "No fitted model objects ('ols_robust', 'poisson_robust', 'negbin_robust') were found in model_output. "
+            "Model output keys present: " + ", ".join(list(model_output.keys())) + ". "
+            "Common cause: pandas columns used as predictors/outcome are dtype 'object' (strings). "
+            "Fix: ensure numeric columns (masfem_z, wind, min, category, elapsedyrs, log_ndam15, alldeaths) are "
+            "converted to numeric (e.g., df[col] = pd.to_numeric(df[col], errors='coerce')) and refit models."
+        )
+        return {"object": extracted, "description": description}
 
-    return {"object": out, "description": description}
+    # Compose a compact description
+    description = ""
+    if any_successful_extraction:
+        description = (
+            "Extracted 'masfem_z' estimates from available models. Summary:\n" +
+            "\n".join(summary_lines) +
+            "\n\nInterpretation: For the OLS on log(1+deaths), a positive and statistically significant "
+            "coefficient on 'masfem_z' would support the hypothesis that more-feminine hurricane names are "
+            "associated with higher fatalities (consistent with less precaution), conditional on controls. "
+            "For Poisson/NegBin, IRR > 1 (and significant) would similarly support the hypothesis."
+        )
+    else:
+        # No successful extraction but some models existed
+        description = (
+            "Models were present but extraction failed or 'masfem_z' was not estimated. Details:\n"
+            + "\n".join(summary_lines) +
+            "\nCheck that 'masfem_z' exists in the dataframe used to fit models and that model objects "
+            "are statsmodels result instances with attributes .params, .pvalues, .bse and method .conf_int()."
+        )
+
+    return {"object": extracted, "description": description}

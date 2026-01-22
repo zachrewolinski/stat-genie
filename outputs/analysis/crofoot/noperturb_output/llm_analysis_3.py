@@ -1,207 +1,119 @@
-from typing import Any
+from typing import Dict, FrozenSet, List, Literal, Optional, Set, Tuple, Any
 import numpy as np
 import pandas as pd
+import sklearn
+import scipy
+import statsmodels.api as sm
 import statsmodels.formula.api as smf
-from statsmodels.stats.sandwich_covariance import cov_cluster
-from scipy import stats as _scipy_stats
-
-# load data (path kept as in original)
+import matplotlib.pyplot as plt
+import pickle
+  
 df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/analysis/crofoot/noperturb_output/crofoot.csv')
-
 
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Transforms the raw data into the final dataframe used for modeling.
-
-    Adds the following columns:
-    - RelSize: n_focal - n_other
-    - dist_diff: dist_other - dist_focal (positive => contest closer to focal center)
-    - DistDiff_z: z-scored version of dist_diff (population std)
-    - Location: categorical label (FocalCenter / OtherCenter / Neutral) based on dist_diff threshold
-    - MaleDiff: m_focal - m_other
-    - RelSize_z, MaleDiff_z: z-scored versions of the above continuous predictors
-    - Ensures dyad is categorical and drops rows with missing values in required columns.
-
-    Additionally:
-    - Converts 'win' to numeric and drops dyad groups that provide no information
-      for estimating dyad fixed effects (i.e., groups with only one outcome or a single observation),
-      since such groups cause perfect separation / singularities in logistic regression
-      when dyad fixed effects are included.
+    Transform original dataframe to produce the columns required for modeling.
+    - Drops rows with missing values in key columns used to compute predictors/outcome.
+    - Creates relative size and composition differences.
+    - Creates distance difference and a binary focal-closer indicator.
+    - Standardizes continuous predictors (z-scores) and returns the dataframe with all required columns.
     """
-    # required columns for the analysis
-    required = ['win', 'n_focal', 'n_other', 'dist_focal', 'dist_other', 'm_focal', 'm_other', 'dyad']
-    # drop rows missing any of the required columns
-    df = df.dropna(subset=required).copy()
+    # copy to avoid modifying original
+    df = df.copy()
 
-    # ensure 'win' is numeric (0/1). Coerce non-numeric -> NaN and drop.
-    df['win'] = pd.to_numeric(df['win'], errors='coerce')
-    df = df.dropna(subset=['win']).copy()
-    # If win is boolean, convert to int
-    if df['win'].dtype == bool:
-        df['win'] = df['win'].astype(int)
-    # If it's floating but exactly integer-like, leave as is (logit will coerce), but ensure it's 0/1
-    # (do not enforce further here; assume input is correct)
+    # Ensure required columns exist
+    required = ['win', 'n_focal', 'n_other', 'm_focal', 'm_other', 'f_focal', 'f_other', 'dist_focal', 'dist_other', 'dyad']
+    missing = [c for c in required if c not in df.columns]
+    if len(missing) > 0:
+        raise ValueError(f"Missing required columns in input dataframe: {missing}")
 
-    # compute relative size (focal - other)
-    df['RelSize'] = df['n_focal'] - df['n_other']
+    # Drop rows with missing critical values
+    df = df.dropna(subset=required)
 
-    # compute distance difference: positive => contest is closer to the focal group's center
+    # Create relative size: difference (focal - other) and ratio
+    df['RelSize_diff'] = df['n_focal'] - df['n_other']
+    # ratio (keep for diagnostics; not required for the primary model but helpful)
+    # guard division by zero, though n_other >=5 in this dataset
+    df['RelSize_ratio'] = df['n_focal'] / df['n_other'].replace({0: np.nan})
+
+    # Composition differences (males, females)
+    df['RelMale_diff'] = df['m_focal'] - df['m_other']
+    df['RelFem_diff'] = df['f_focal'] - df['f_other']
+
+    # Location: other distance minus focal distance. Positive => focal is closer to its home center than other.
     df['dist_diff'] = df['dist_other'] - df['dist_focal']
 
-    # categorical location label
-    # threshold chosen to create a 'neutral' zone when distances are similar (here 50 meters); adjust if desired
-    thresh = 50.0
-    df['Location'] = np.where(df['dist_diff'] > thresh, 'FocalCenter',
-                              np.where(df['dist_diff'] < -thresh, 'OtherCenter', 'Neutral'))
+    # Binary indicator whether focal is closer to its home-range center than the other
+    df['FocalCloser'] = (df['dist_focal'] < df['dist_other']).astype(int)
 
-    # male difference
-    df['MaleDiff'] = df['m_focal'] - df['m_other']
-
-    # z-score continuous predictors (use population std; guard against zero std)
-    # Map raw column name -> desired z-column name
-    z_map = {
-        'RelSize': 'RelSize_z',
-        'dist_diff': 'DistDiff_z',  # note: standardized column must be named 'DistDiff_z' per contract
-        'MaleDiff': 'MaleDiff_z'
-    }
-    for raw_col, z_col in z_map.items():
-        mean = df[raw_col].mean()
-        std = df[raw_col].std(ddof=0)
-        if pd.isna(std) or std == 0:
-            # if zero variance, center to zero to avoid NaNs; this leaves a constant column (will be handled later)
-            df[z_col] = df[raw_col] - mean
+    # Standardize continuous predictors (z-scores). Use population std (ddof=0) for consistency.
+    for col in ['RelSize_diff', 'dist_diff']:
+        mean = df[col].mean()
+        std = df[col].std(ddof=0)
+        if std == 0 or np.isnan(std):
+            # if no variance, create zeroed z-score
+            df[col + '_z'] = 0.0
         else:
-            df[z_col] = (df[raw_col] - mean) / std
+            df[col + '_z'] = (df[col] - mean) / std
 
-    # ensure dyad is categorical (keeps it for formula and clustering)
-    df['dyad'] = df['dyad'].astype('category')
+    # Rename standardized columns to match those referenced in the conceptual variables
+    # RelSize_diff_z and dist_diff_z are created above
 
-    # Drop dyad groups that cannot contribute to estimating dyad fixed effects:
-    # - Groups with only a single observation
-    # - Groups where 'win' has no variation (all 0 or all 1)
-    # These groups can cause perfect separation / singular matrix errors when including C(dyad) as fixed effects.
-    group_counts = df.groupby('dyad')['win'].transform('count')
-    group_win_variation = df.groupby('dyad')['win'].transform('nunique')
-    keep_mask = (group_counts >= 2) & (group_win_variation > 1)
-    df = df[keep_mask].copy()
+    # Ensure win is integer 0/1
+    df['win'] = df['win'].astype(int)
 
-    # After filtering, ensure dyad categorical codes are clean (remove unused categories)
-    df['dyad'] = df['dyad'].cat.remove_unused_categories()
+    # Keep only columns necessary for modeling plus identifiers for inspection
+    keep_cols = ['focal', 'other', 'dyad', 'win',
+                 'RelSize_diff', 'RelSize_ratio', 'RelSize_diff_z',
+                 'RelMale_diff', 'RelFem_diff',
+                 'dist_diff', 'dist_diff_z', 'FocalCloser']
 
-    # keep all columns (including the required final columns)
+    # Some columns (e.g., focal/other) may have been missing in required earlier; they are optional but helpful
+    cols_present = [c for c in keep_cols if c in df.columns]
+    df = df[cols_present]
+
     return df
 
 
 # ======== MODEL CODE ========
 def model(df: pd.DataFrame) -> Any:
     """
-    Fits a logistic regression predicting the probability that the focal group won (win = 1).
+    Fit a logistic regression predicting probability focal group wins ('win').
+    - Primary predictors: RelSize_diff_z (standardized size difference) and dist_diff_z (standardized distance difference).
+    - Test for moderation by FocalCloser via an interaction between RelSize_diff_z and FocalCloser.
+    - Controls: RelMale_diff and RelFem_diff.
+    - Use dyad-clustered robust standard errors to account for non-independence of repeated dyad encounters.
 
-    Primary model:
-      win ~ RelSize_z * DistDiff_z + MaleDiff_z + C(Location) + C(dyad)
-
-    This includes an interaction between relative size and contest-location (continuous) to test whether the effect
-    of relative group size depends on where the contest occurred. Dyad is included as a categorical fixed effect,
-    and standard errors are clustered by dyad to account for non-independence.
-
-    Returns the model results object with cluster-robust covariance.
+    Returns the fitted results object with clustered robust covariance.
     """
-    # check that transform has been applied
-    required_cols = ['win', 'RelSize_z', 'DistDiff_z', 'MaleDiff_z', 'Location', 'dyad', 'RelSize', 'dist_diff', 'MaleDiff']
-    missing = [c for c in required_cols if c not in df.columns]
-    if missing:
-        raise ValueError(f"Dataframe is missing required columns for modeling: {missing}")
+    import statsmodels.formula.api as smf
 
-    # ensure 'win' is numeric
-    df = df.copy()
-    df['win'] = pd.to_numeric(df['win'], errors='coerce')
-    if df['win'].isnull().any():
-        raise ValueError("Column 'win' contains non-numeric values after coercion.")
+    # Check that required columns exist
+    needed = ['win', 'RelSize_diff_z', 'dist_diff_z', 'FocalCloser', 'RelMale_diff', 'RelFem_diff', 'dyad']
+    miss = [c for c in needed if c not in df.columns]
+    if len(miss) > 0:
+        raise ValueError(f"Missing required columns for modeling: {miss}")
 
-    # specify formula with interaction between relative size and distance-difference (continuous)
-    formula = 'win ~ RelSize_z * DistDiff_z + MaleDiff_z + C(Location) + C(dyad)'
+    # Build formula with interaction between size and focal-closer (moderation test)
+    formula = 'win ~ RelSize_diff_z * FocalCloser + dist_diff_z + RelMale_diff + RelFem_diff'
 
-    # fit logistic regression; wrap in try/except to provide a clearer error if singularity still occurs
+    # Fit binomial logistic regression
+    model = smf.logit(formula=formula, data=df)
+    res = model.fit(disp=False)
+
+    # Obtain cluster-robust standard errors clustered on dyad
     try:
-        logit_res = smf.logit(formula, data=df).fit(disp=False)
-    except np.linalg.LinAlgError:
-        # If we still hit linear algebra issues, attempt to refit after removing any remaining constant columns
-        # (defensive: drop any predictor columns that are constant)
-        const_cols = []
-        predictors = ['RelSize_z', 'DistDiff_z', 'MaleDiff_z']
-        for col in predictors:
-            if df[col].std(ddof=0) == 0:
-                const_cols.append(col)
-        # Build alternative formula without constant predictors (if any)
-        alt_parts = ['RelSize_z * DistDiff_z', 'MaleDiff_z', 'C(Location)', 'C(dyad)']
-        # remove parts containing constant cols
-        if 'RelSize_z' in const_cols or 'DistDiff_z' in const_cols:
-            # if either part of interaction is constant, drop the interaction and related main effects appropriately
-            alt_parts = [p for p in alt_parts if p not in ['RelSize_z * DistDiff_z']]
-            if 'RelSize_z' not in const_cols:
-                alt_parts.insert(0, 'RelSize_z')
-            if 'DistDiff_z' not in const_cols:
-                alt_parts.insert(0, 'DistDiff_z')
-        if 'MaleDiff_z' in const_cols:
-            alt_parts = [p for p in alt_parts if p != 'MaleDiff_z']
-        alt_formula = 'win ~ ' + ' + '.join([p for p in alt_parts if p])
-        logit_res = smf.logit(alt_formula, data=df).fit(disp=False)
+        res_cluster = res.get_robustcov_results(cov_type='cluster', groups=df['dyad'])
+    except Exception:
+        # Fallback: if clustering fails, return regular result but warn the user
+        import warnings
+        warnings.warn('Cluster-robust SEs failed; returning unclustered results.')
+        res_cluster = res
 
-    # obtain cluster-robust standard errors clustered by dyad
-    # Some versions of statsmodels provide get_robustcov_results on result objects, others do not.
-    # To be robust across versions, compute clustered covariance explicitly and wrap the results.
-    try:
-        # preferred when available
-        clustered_res = logit_res.get_robustcov_results(cov_type='cluster', groups=df['dyad'])
-        return clustered_res
-    except AttributeError:
-        # compute clustered covariance matrix and build a lightweight wrapper
-        clustered_cov = cov_cluster(logit_res, df['dyad'])
+    # Print summary for user inspection and also return the robust results object
+    print(res_cluster.summary())
 
-        class ClusteredResults:
-            def __init__(self, base_res, cov_mat):
-                self._base = base_res
-                self.params = base_res.params.copy()
-                # ensure cov_mat is a DataFrame aligned with params
-                try:
-                    cov_df = pd.DataFrame(cov_mat, index=self.params.index, columns=self.params.index)
-                except Exception:
-                    cov_df = pd.DataFrame(cov_mat)
-                    cov_df.index = self.params.index
-                    cov_df.columns = self.params.index
-                self._cov = cov_df
-                self.cov_params = lambda: self._cov.values
-                self.bse = np.sqrt(np.diag(self._cov.values))
-                # compute z-values and p-values (normal approximation)
-                self.zvalues = self.params.values / self.bse
-                self.tvalues = self.zvalues  # name alias
-                self.pvalues = 2 * (1 - _scipy_stats.norm.cdf(np.abs(self.zvalues)))
-                # make pvalues and bse aligned Series for convenience
-                self.bse = pd.Series(self.bse, index=self.params.index)
-                self.pvalues = pd.Series(self.pvalues, index=self.params.index)
-                self.zvalues = pd.Series(self.zvalues, index=self.params.index)
-                self.tvalues = self.zvalues
-
-            def summary(self, *args, **kwargs):
-                # fall back to base summary (note: it will show original s.e.; user can inspect self.bse)
-                return self._base.summary(*args, **kwargs)
-
-            def as_table(self):
-                # convenience: return a DataFrame with params, bse, z, p
-                return pd.DataFrame({
-                    'coef': self.params,
-                    'std_err': self.bse,
-                    'z': self.zvalues,
-                    'pval': self.pvalues
-                })
-
-            def __getattr__(self, item):
-                # proxy other attributes to base result
-                return getattr(self._base, item)
-
-        return ClusteredResults(logit_res, clustered_cov)
+    return res_cluster
 
 
-# If this module is imported, do not run model automatically. The df at top is just a convenience for quick interactive use.
-# Users should call transform(df) and then model(transformed_df) explicitly.

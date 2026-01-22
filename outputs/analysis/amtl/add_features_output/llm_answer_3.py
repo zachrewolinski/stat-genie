@@ -1,213 +1,133 @@
 def extract_final_answer(model_output):
     """
-    Extract contrasts comparing Homo sapiens to each non-human genus from a fitted
-    statsmodels GLM (binomial logit) stored in model_output['glm_results'].
-
-    Returns a dict with:
-      - "object": {
-            "baseline": <baseline genus or None if unknown>,
-            "homo_level": <detected Homo sapiens level name>,
-            "contrasts": [
-                {
-                  "other": <other genus name>,
-                  "log_odds_diff": float (Homo - other),
-                  "se": float,
-                  "z": float,
-                  "p": float,
-                  "odds_ratio": float,
-                  "ci_95_or": (lower, upper),
-                  "interpretation": one of
-                       "Homo > other (p<0.05)",
-                       "Homo < other (p<0.05)",
-                       "no significant difference (p>=0.05)"
-                }, ...
-            ],
-            "overall_higher_than_all_nonhuman": bool
-        }
-      - "description": short textual explanation of what was computed and how to interpret.
-
-    Notes:
-      - Assumes a logit link (default for Binomial GLM), so coefficients are log-odds.
-      - Contrasts are computed as log-odds(Homo) - log-odds(other). Positive => higher AMTL odds.
-      - Uses the model covariance matrix to compute standard errors for contrasts.
+    Extract statistics for the 'is_human' effect from a fitted statsmodels GLM/GLMResultsWrapper
+    (optionally with clustered robust covariance). Returns a dict with:
+      - "object": dict of extracted numeric results (coef, se, p, CI, OR, OR_CI, significance, conclusion)
+      - "description": brief plain-language interpretation of the result in the context of the task.
+    
+    The function is defensive about the exact parameter name (e.g. 'is_human' vs. alternatives).
     """
-    import re
-    import math
     import numpy as np
-    from scipy import stats
+    import pandas as pd
 
-    # Validate input
-    if not isinstance(model_output, dict) or 'glm_results' not in model_output:
-        raise ValueError("model_output must be a dict containing 'glm_results' (a fitted statsmodels GLM).")
+    res = model_output
 
-    res = model_output['glm_results']
-
-    # Try to use a robust covariance matrix if provided in the model_output
-    cov = None
-    if model_output.get('robust_results') is not None:
-        try:
-            cov = model_output['robust_results'].cov_params()
-        except Exception:
-            cov = None
-    if cov is None:
-        cov = res.cov_params()
-
-    params = res.params  # Series
-    param_names = list(params.index)
-
-    # Find genotype-related parameter names (C(genus)[T.<level>])
-    genus_param_pattern = re.compile(r"^C\(genus\)\[T\.(.+)\]$")
-    genus_params = {}
-    for pn in param_names:
-        m = genus_param_pattern.match(pn)
-        if m:
-            level = m.group(1)
-            genus_params[level] = pn
-
-    # Try to recover the observed genus levels and baseline from the model's data frame
-    baseline = None
-    observed_levels = None
+    # Helper to get parameter name for is_human (handles possible naming variations)
+    candidate_names = ['is_human', 'is_human[T.True]', 'C(is_human)[T.1]']
+    params_index = None
     try:
-        df = res.model.data.frame  # may exist
-        if 'genus' in df.columns:
-            observed_levels = list(pd.unique(df['genus'])) if 'pd' in globals() else list(df['genus'].unique())
-            # baseline is any observed level not appearing in genus_params
-            missing = [lev for lev in observed_levels if lev not in genus_params]
-            if len(missing) == 1:
-                baseline = missing[0]
-            else:
-                # multiple or zero missing => baseline unknown or model encoding different
-                baseline = None
+        params_index = list(res.params.index)
     except Exception:
-        # If the model's data frame is not available, leave baseline unknown
-        baseline = None
+        # If params not a Series with index, try to coerce to pandas Index
+        try:
+            params_index = list(pd.Index(res.params).tolist())
+        except Exception:
+            params_index = None
 
-    # Identify which level corresponds to Homo sapiens
-    homo_level = None
-    # Prefer exact match
-    for level in genus_params.keys():
-        if level == 'Homo sapiens':
-            homo_level = level
-            break
-    # Fallback: case-insensitive contains 'homo'
-    if homo_level is None:
-        for level in genus_params.keys():
-            if 'homo' in level.lower():
-                homo_level = level
+    param_name = None
+    if params_index is not None:
+        for n in candidate_names:
+            if n in params_index:
+                param_name = n
                 break
-    # If Homo is baseline (no param for Homo), and observed_levels known, detect that
-    if homo_level is None and observed_levels is not None:
-        for lev in observed_levels:
-            if lev == 'Homo sapiens' or 'homo' in str(lev).lower():
-                homo_level = lev
-                break
-        # If homo_level is in observed_levels but not in genus_params, that implies Homo is baseline.
+        # fallback: try to find any name that contains 'is_human'
+        if param_name is None:
+            for n in params_index:
+                if 'is_human' in str(n):
+                    param_name = n
+                    break
 
-    if homo_level is None:
-        # Could not find Homo sapiens level among parameter names or observed levels
-        return {
-            "object": None,
-            "description": "Could not identify a 'Homo sapiens' genus level in the fitted model's genus factor. "
-                           "No pairwise contrasts computed."
-        }
+    if param_name is None:
+        raise KeyError("Could not find a parameter name for 'is_human' in the model results. "
+                       "Available parameter names: %s" % (params_index,))
 
-    # Build list of other non-human genera to compare against
-    other_levels = []
-    if observed_levels is not None:
-        other_levels = [lev for lev in observed_levels if str(lev) != str(homo_level)]
+    # Extract coefficient, se, p-value
+    try:
+        coef = float(res.params[param_name])
+    except Exception:
+        coef = float(res.params.loc[param_name])
+
+    # Use robust/clustered SEs if available (res.bse should reflect that if res is robustcov_results)
+    try:
+        se = float(res.bse[param_name])
+    except Exception:
+        se = float(res.bse.loc[param_name])
+
+    try:
+        pvalue = float(res.pvalues[param_name])
+    except Exception:
+        pvalue = float(res.pvalues.loc[param_name])
+
+    # Confidence interval
+    try:
+        ci_df = res.conf_int()
+        # conf_int returns a DataFrame-like or ndarray. Prefer indexing by name.
+        try:
+            ci_low, ci_high = float(ci_df.loc[param_name, 0]), float(ci_df.loc[param_name, 1])
+        except Exception:
+            # ci_df might be a numpy array; find parameter position
+            if hasattr(res, 'model') and hasattr(res.model, 'exog_names'):
+                names = list(res.model.exog_names)
+                pos = names.index(param_name)
+                ci_low, ci_high = float(ci_df[pos, 0]), float(ci_df[pos, 1])
+            else:
+                # fallback: use param ordering in params
+                pos = list(res.params.index).index(param_name)
+                ci_low, ci_high = float(ci_df[pos, 0]), float(ci_df[pos, 1])
+    except Exception:
+        ci_low, ci_high = np.nan, np.nan
+
+    # Odds ratio and CI on odds ratio scale
+    or_coef = float(np.exp(coef))
+    or_ci_low = float(np.exp(ci_low)) if not np.isnan(ci_low) else np.nan
+    or_ci_high = float(np.exp(ci_high)) if not np.isnan(ci_high) else np.nan
+
+    # Significance at alpha = 0.05
+    significant = (pvalue < 0.05)
+
+    # Direction: positive coef => higher log-odds (and odds) of AMTL in humans
+    if np.isnan(coef):
+        conclusion = "Unable to determine: coefficient is NaN."
     else:
-        # If observed_levels not available, infer others from genus_params keys plus baseline if possible
-        inferred = list(genus_params.keys())
-        if baseline is not None and baseline not in inferred:
-            inferred = inferred + [baseline]
-        other_levels = [lev for lev in inferred if lev != homo_level]
-
-    contrasts = []
-    # For numeric computations, ensure we can reference parameter names in cov and params
-    for other in other_levels:
-        # Determine parameter names (if any) for homo and other
-        pn_homo = genus_params.get(homo_level, None)
-        pn_other = genus_params.get(other, None)
-
-        # Compute log-odds difference D = logit(Homo) - logit(Other)
-        # Cases:
-        # 1) both have params (both non-baseline): D = coef_homo - coef_other
-        # 2) homo has param, other does not (other is baseline): D = coef_homo - 0
-        # 3) homo has no param (homo is baseline), other has param: D = 0 - coef_other
-        # 4) neither has param: ambiguous -> skip
-        if (pn_homo is None) and (pn_other is None):
-            # ambiguous; cannot compute
-            continue
-
-        if pn_homo is not None and pn_other is not None:
-            coef_diff = float(params[pn_homo] - params[pn_other])
-            var = float(cov.loc[pn_homo, pn_homo] + cov.loc[pn_other, pn_other] - 2.0 * cov.loc[pn_homo, pn_other])
-        elif pn_homo is not None and pn_other is None:
-            coef_diff = float(params[pn_homo])
-            var = float(cov.loc[pn_homo, pn_homo])
-        elif pn_homo is None and pn_other is not None:
-            coef_diff = float(-params[pn_other])
-            var = float(cov.loc[pn_other, pn_other])
+        if significant:
+            if coef > 0:
+                conclusion = ("Yes — after adjusting for age, sex, stdev_age, and tooth class, "
+                              "modern humans have significantly higher odds of antemortem tooth loss (AMTL) "
+                              "compared to non-human primates (coef={:+.3f}, p={:.3g}).").format(coef, pvalue)
+            else:
+                conclusion = ("No — after adjusting for covariates, modern humans have significantly lower odds of AMTL "
+                              "compared to non-human primates (coef={:+.3f}, p={:.3g}).").format(coef, pvalue)
         else:
-            continue  # defensive
-
-        se = math.sqrt(var) if var >= 0 else float('nan')
-        z = coef_diff / se if se and not math.isnan(se) else float('nan')
-        p = 2.0 * float(stats.norm.sf(abs(z))) if not math.isnan(z) else float('nan')
-        or_est = math.exp(coef_diff)
-        # 95% CI on log-odds then exponentiate
-        ci_log_lower = coef_diff - 1.96 * se
-        ci_log_upper = coef_diff + 1.96 * se
-        ci_or = (math.exp(ci_log_lower), math.exp(ci_log_upper))
-
-        if (not math.isnan(p)) and (p < 0.05) and (coef_diff > 0):
-            interp = f"Homo > {other} (p={p:.3g})"
-        elif (not math.isnan(p)) and (p < 0.05) and (coef_diff < 0):
-            interp = f"Homo < {other} (p={p:.3g})"
-        else:
-            interp = f"No significant difference vs {other} (p={p:.3g})"
-
-        contrasts.append({
-            "other": other,
-            "log_odds_diff": coef_diff,
-            "se": se,
-            "z": z,
-            "p": p,
-            "odds_ratio": or_est,
-            "ci_95_or": ci_or,
-            "interpretation": interp
-        })
-
-    # Determine overall verdict: is Homo significantly higher than every non-human genus?
-    overall_higher = True
-    any_comparisons = False
-    for c in contrasts:
-        any_comparisons = True
-        if not (c["p"] < 0.05 and c["log_odds_diff"] > 0):
-            overall_higher = False
-            break
-
-    if not any_comparisons:
-        return {
-            "object": None,
-            "description": "No valid pairwise genus contrasts could be computed (insufficient parameterization)."
-        }
-
-    conclusion_text = ("Homo sapiens shows significantly higher AMTL odds than all listed non-human genera "
-                       "after adjustment." if overall_higher else
-                       "Homo sapiens is not significantly higher than all non-human genera after adjustment "
-                       "(see pairwise contrasts for details).")
+            # Not statistically significant
+            if coef > 0:
+                conclusion = ("No strong evidence — point estimate suggests higher AMTL in modern humans (coef={:+.3f}), "
+                              "but this difference is not statistically significant (p={:.3g}).").format(coef, pvalue)
+            elif coef < 0:
+                conclusion = ("No strong evidence — point estimate suggests lower AMTL in modern humans (coef={:+.3f}), "
+                              "but this difference is not statistically significant (p={:.3g}).").format(coef, pvalue)
+            else:
+                conclusion = ("No evidence of a difference in AMTL between modern humans and non-human primates "
+                              "(coef=0.0, p={:.3g}).").format(pvalue)
 
     result_object = {
-        "baseline": baseline,
-        "homo_level": homo_level,
-        "contrasts": contrasts,
-        "overall_higher_than_all_nonhuman": bool(overall_higher)
+        'param_name': param_name,
+        'coef_log_odds': coef,
+        'std_error': se,
+        'p_value': pvalue,
+        'conf_int_log_odds': (ci_low, ci_high),
+        'odds_ratio': or_coef,
+        'odds_ratio_ci': (or_ci_low, or_ci_high),
+        'significant_at_0.05': bool(significant),
+        'conclusion': conclusion
     }
 
-    description = ("Computed pairwise adjusted contrasts (log-odds differences and odds ratios) comparing "
-                   "Homo sapiens to each non-human genus using the fitted binomial-logit GLM. "
-                   "Positive log-odds_diff (and OR>1) indicate higher odds of AMTL in Homo; p-values test "
-                   "whether the contrast differs from zero. " + conclusion_text)
+    description = (
+        "Extracted the coefficient for the 'is_human' indicator from the fitted binomial (logit) GLM. "
+        "coef_log_odds is the estimated difference in log-odds of AMTL for modern humans vs non-human primates, "
+        "odds_ratio is exp(coef). conf_int_log_odds and odds_ratio_ci are 95% confidence intervals. "
+        "The 'conclusion' field gives a plain-language yes/no/uncertain answer about whether modern humans "
+        "have higher AMTL after adjusting for age, sex (prob_male), age uncertainty (stdev_age), and tooth class "
+        "(clustered SEs by specimen assumed to be applied in the supplied model object)."
+    )
 
-    return {"object": result_object, "description": description}
+    return {'object': result_object, 'description': description}

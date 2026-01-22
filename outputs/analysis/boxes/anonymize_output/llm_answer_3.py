@@ -1,173 +1,200 @@
 def extract_final_answer(model_output):
     """
-    Extract statistics relevant to how children's reliance on majority preference
-    develops with age across sites from a fitted statsmodels GLM (logistic).
-
+    Extract age-related developmental slopes (effect of Age_c) on choosing the majority option
+    for each cultural site from a fitted statsmodels logistic regression (majority_model).
+    
+    Input:
+      - model_output: dict containing at least key 'majority_model' with a fitted
+                      statsmodels BinaryResultsWrapper (or an Exception).
+    
     Returns a dict with:
-      - "object": a dict containing:
-          - "coef_table": pandas.DataFrame of model coefficients, SEs, p-values, 95% CI
-          - "site_age_slopes": pandas.DataFrame giving, for each Site level,
-                * slope (log-odds change per 1 unit of Age_centered),
-                * SE of slope, z, p (two-sided),
-                * odds ratio (OR) per year and 95% CI for the OR
-          These are the numeric objects you can inspect programmatically.
-      - "description": a short plain-language interpretation of what those numbers mean
+      - "object": dict mapping each site to the estimated age slope (log-odds per year),
+                  its SE, z, p, 95% CI (log-odds) and odds ratio with 95% CI.
+      - "description": short interpretation of what the numbers mean.
     """
     import numpy as np
-    import pandas as pd
-    from scipy.stats import norm
+    import math
 
-    res = model_output
+    out = {"object": None, "description": ""}
 
-    # Basic coefficient table
+    maj = model_output.get('majority_model', None)
+    if maj is None:
+        out["description"] = "No 'majority_model' found in model_output."
+        return out
+
+    # If an exception was stored instead of a fitted model, return it
+    if isinstance(maj, Exception):
+        out["description"] = "majority_model contains an Exception: " + repr(maj)
+        out["object"] = {"error": repr(maj)}
+        return out
+
+    # Check that it's a fitted statsmodels results object
     try:
-        params = res.params
-        bse = res.bse
-        pvalues = res.pvalues
-        conf = res.conf_int()
+        params = maj.params          # pandas Series
+        cov = maj.cov_params()       # DataFrame
+        pvalues = maj.pvalues
     except Exception as e:
-        raise ValueError("model_output does not look like a statsmodels results object: %s" % e)
+        out["description"] = "Could not read parameters from majority_model: " + repr(e)
+        out["object"] = {"error": repr(e)}
+        return out
 
-    coef_table = pd.DataFrame({
-        "coef": params,
-        "se": bse,
-        "pvalue": pvalues,
-        "ci_lower": conf[0],
-        "ci_upper": conf[1]
-    })
+    # Ensure Age_c is present
+    if 'Age_c' not in params.index:
+        out["description"] = "Model does not contain 'Age_c' term."
+        out["object"] = {"available_params": list(params.index)}
+        return out
 
-    # Attempt to get Site levels from the original data used to fit the model
+    # Identify interaction parameter names that correspond to Age_c by site
+    # statsmodels names interactions often like "Age_c:C(Site)[T.site_name]" or "Age_c:C(Site)[T.<site>]"
+    interaction_terms = [name for name in params.index if ('Age_c' in name) and (':' in name or 'C(Site)' in name) and name != 'Age_c']
+    # Fallback: also accept names containing "Age_c:C(Site)" explicitly
+    # Parse site names from the interaction term strings
+    nonref_sites = []
+    for it in interaction_terms:
+        # Try patterns like "Age_c:C(Site)[T.site]" or "Age_c:C(Site)[T.site_name]"
+        if 'T.' in it:
+            try:
+                # take substring after 'T.' up to ] or end
+                start = it.index('T.') + 2
+                # find closing bracket if present
+                end_idx = it.find(']', start)
+                if end_idx == -1:
+                    site_name = it[start:]
+                else:
+                    site_name = it[start:end_idx]
+                nonref_sites.append(site_name)
+            except Exception:
+                # fallback: use full interaction term
+                nonref_sites.append(it)
+        else:
+            # fallback: use entire interaction name
+            nonref_sites.append(it)
+
+    # Try to get the full list of Site levels from the original data if available
     site_levels = None
     try:
-        df = res.model.data.frame  # available when formula and DataFrame were used
-        if "Site" in df.columns:
-            # preserve categorical ordering if provided
-            site_levels = pd.Categorical(df["Site"]).categories.tolist()
+        df = maj.model.data.frame
+        if df is not None and 'Site' in df.columns:
+            # get unique preserving order
+            site_levels = list(pd.unique(df['Site']))
     except Exception:
-        # fallback: try to infer site names from parameter names (works only if C(Site)[T.<level>] present)
         site_levels = None
 
-    # If we couldn't get site levels from data, infer from param names (excluding baseline)
-    if site_levels is None:
-        site_tokens = []
-        for name in params.index:
-            if name.startswith("C(Site)[T."):
-                # extract between 'C(Site)[T.' and the closing ']'
-                start = name.find("C(Site)[T.") + len("C(Site)[T.")
-                end = name.find("]", start)
-                token = name[start:end]
-                site_tokens.append(token)
-        # We can't reliably know the baseline name; treat baseline as "baseline_ref"
-        # and the others as parsed tokens. Put baseline first.
-        if site_tokens:
-            site_levels = ["(baseline)"] + site_tokens
+    # If we have site_levels and nonref_sites, deduce reference site
+    ref_site = None
+    if site_levels is not None and len(nonref_sites) >= 0:
+        # convert to strings
+        nonref_simple = [str(x) for x in nonref_sites]
+        # find a site in site_levels not listed in nonref_sites
+        ref_candidates = [str(s) for s in site_levels if str(s) not in nonref_simple]
+        if len(ref_candidates) == 1:
+            ref_site = ref_candidates[0]
+        elif len(ref_candidates) > 1:
+            # multiple candidates: choose first as reference
+            ref_site = ref_candidates[0]
         else:
-            # no site terms at all: treat it as single-site case
-            site_levels = ["(only_site)"]
+            # no candidates found -> cannot determine, mark as 'Reference'
+            ref_site = 'Reference'
+    else:
+        # If site_levels not available, set generic label
+        ref_site = 'Reference'
 
-    # Compute age slopes (log-odds change per 1 unit of Age_centered) for each site:
-    # For baseline: slope = coef['Age_centered']
-    # For other sites: slope = coef['Age_centered'] + coef['Age_centered:C(Site)[T.<site>]']
-    cov = res.cov_params()  # covariance matrix of coefficients
+    # Prepare results dictionary
+    results_by_site = {}
 
-    # Ensure 'Age_centered' exists
-    if "Age_centered" not in params.index:
-        raise ValueError("Model does not contain 'Age_centered' term. Check model formula.")
+    # Base slope (reference site's Age_c effect)
+    base_beta = float(params['Age_c'])
+    base_var = float(cov.loc['Age_c', 'Age_c'])
+    base_se = math.sqrt(base_var)
+    base_z = base_beta / base_se if base_se > 0 else float('nan')
+    # Prefer p-value from model if available for the Age_c alone term
+    base_p = float(pvalues.get('Age_c', np.nan))
+    base_ci_low = base_beta - 1.96 * base_se
+    base_ci_high = base_beta + 1.96 * base_se
+    base_or = math.exp(base_beta)
+    base_or_ci = (math.exp(base_ci_low), math.exp(base_ci_high))
 
-    age_coef = params["Age_centered"]
-
-    rows = []
-    for i, site in enumerate(site_levels):
-        if i == 0 and site != "(baseline)":
-            # If we have a concrete baseline name (from categories), we need to find the correct
-            # parameter name for interactions for other sites. When categories were found from the data,
-            # the baseline is site_levels[0].
-            baseline_name = site_levels[0]
-        # Determine the interaction parameter name used by statsmodels for this site (if any)
-        if site == "(baseline)" or site == "(only_site)":
-            interaction_name = None
-        else:
-            interaction_name = f"Age_centered:C(Site)[T.{site}]"
-
-        # Get interaction coef if present
-        inter_coef = params.get(interaction_name, 0.0)
-        slope = age_coef + inter_coef
-
-        # Variance of sum: var(age) + var(inter) + 2*cov(age,inter)
-        var_age = cov.loc["Age_centered", "Age_centered"]
-        if interaction_name is not None and interaction_name in cov.index:
-            var_inter = cov.loc[interaction_name, interaction_name]
-            cov_age_inter = cov.loc["Age_centered", interaction_name]
-        else:
-            var_inter = 0.0
-            cov_age_inter = 0.0
-
-        var_slope = var_age + var_inter + 2.0 * cov_age_inter
-        se_slope = np.sqrt(var_slope) if var_slope > 0 else 0.0
-
-        # z and two-sided p-value
-        if se_slope > 0:
-            z = slope / se_slope
-            p_two = 2.0 * (1.0 - norm.cdf(abs(z)))
-        else:
-            z = np.nan
-            p_two = np.nan
-
-        # Convert to odds ratio per year and 95% CI
-        or_per_year = np.exp(slope)
-        ci_low = np.exp(slope - 1.96 * se_slope)
-        ci_high = np.exp(slope + 1.96 * se_slope)
-
-        rows.append({
-            "Site": site,
-            "slope_log_odds_per_year": slope,
-            "se_slope": se_slope,
-            "z": z,
-            "p_value_slope": p_two,
-            "OR_per_year": or_per_year,
-            "OR_95CI_lower": ci_low,
-            "OR_95CI_upper": ci_high
-        })
-
-    site_age_slopes = pd.DataFrame(rows)
-
-    # Also report the quadratic (Age_centered_sq) term summary because it indicates nonlinearity
-    quad_summary = None
-    if "Age_centered_sq" in params.index:
-        quad_coef = params["Age_centered_sq"]
-        quad_se = bse["Age_centered_sq"]
-        quad_p = pvalues["Age_centered_sq"]
-        quad_ci = conf.loc["Age_centered_sq"].tolist()
-        quad_summary = {
-            "coef": quad_coef,
-            "se": quad_se,
-            "pvalue": quad_p,
-            "ci_lower": quad_ci[0],
-            "ci_upper": quad_ci[1],
-            "interpretation": (
-                "A statistically significant quadratic term indicates a nonlinear (curved) "
-                "developmental trajectory in log-odds of choosing the majority option with age."
-            )
-        }
-
-    # Build the object to return
-    result_object = {
-        "coef_table": coef_table,
-        "site_age_slopes": site_age_slopes,
-        "age_quadratic_summary": quad_summary
+    results_by_site[ref_site] = {
+        "log_odds_per_year": base_beta,
+        "se": base_se,
+        "z": base_z,
+        "p": base_p,
+        "95%_CI_log_odds": (base_ci_low, base_ci_high),
+        "odds_ratio_per_year": base_or,
+        "95%_CI_OR": base_or_ci,
+        "note": "Reference site (intercept/site omitted in dummy coding)."
     }
 
-    # Build a short description of how to interpret the numbers
-    description_lines = [
-        "Extracted coefficients and tests relevant to developmental effects of age on choosing the majority option.",
-        "For each Site, 'slope_log_odds_per_year' is the estimated change in log-odds of choosing the majority per 1 unit increase in Age_centered.",
-        ("An OR_per_year > 1 indicates increasing reliance on the majority with age in that Site; "
-         "OR_per_year < 1 indicates decreasing reliance."),
-        "p_value_slope tests whether the slope (log-odds change per year) differs from zero for that Site.",
-        "Also included: the full coefficient table for the model and a summary for the quadratic age term (if present).",
-        "To conclude whether developmental trajectories differ across cultural contexts, inspect the p-values "
-        "of the age-by-site interaction coefficients (these are implicitly used when computing the site-specific slopes)."
-    ]
-    description = " ".join(description_lines)
+    # For each non-reference site, compute combined slope = Age_c + interaction term
+    for idx, site in enumerate(nonref_sites):
+        # corresponding interaction param name is the interaction_terms[idx]
+        # But safer: find matching interaction term name in params index that contains the site string
+        match_name = None
+        for name in params.index:
+            if ('Age_c' in name) and (str(site) in name) and (name != 'Age_c'):
+                match_name = name
+                break
+        if match_name is None:
+            # fallback: use the interaction_terms list positionally
+            if idx < len(interaction_terms):
+                match_name = interaction_terms[idx]
+            else:
+                # cannot find matching interaction parameter
+                results_by_site[str(site)] = {"error": f"Could not find interaction term for site {site}."}
+                continue
 
-    return {"object": result_object, "description": description}
+        beta_inter = float(params[match_name])
+        # variance of sum = var(Age_c) + var(inter) + 2*cov(Age_c, inter)
+        try:
+            var_inter = float(cov.loc[match_name, match_name])
+            cov_ai = float(cov.loc['Age_c', match_name])
+        except Exception:
+            # If cov elements not found, fall back to NaN
+            var_inter = np.nan
+            cov_ai = np.nan
+
+        combined_beta = base_beta + beta_inter
+        if not (np.isnan(var_inter) or np.isnan(cov_ai)):
+            combined_var = base_var + var_inter + 2 * cov_ai
+            combined_se = math.sqrt(combined_var) if combined_var >= 0 else float('nan')
+        else:
+            combined_se = float('nan')
+
+        combined_z = combined_beta / combined_se if (combined_se and not math.isnan(combined_se) and combined_se > 0) else float('nan')
+        # compute p using normal approx if se available
+        combined_p = float(2 * (1 - 0.5 * (1 + math.erf(abs(combined_z) / math.sqrt(2))))) if (not math.isnan(combined_z)) else float('nan')
+        if not math.isnan(combined_se):
+            ci_low = combined_beta - 1.96 * combined_se
+            ci_high = combined_beta + 1.96 * combined_se
+            or_val = math.exp(combined_beta)
+            or_ci = (math.exp(ci_low), math.exp(ci_high))
+        else:
+            ci_low = ci_high = or_val = or_ci = (float('nan'), float('nan'))
+
+        results_by_site[str(site)] = {
+            "interaction_param": match_name,
+            "log_odds_per_year": combined_beta,
+            "se": combined_se,
+            "z": combined_z,
+            "p": combined_p,
+            "95%_CI_log_odds": (ci_low, ci_high),
+            "odds_ratio_per_year": or_val,
+            "95%_CI_OR": or_ci
+        }
+
+    out["object"] = results_by_site
+
+    # Short description
+    out["description"] = (
+        "For each site, the returned 'log_odds_per_year' is the estimated change in log-odds of choosing "
+        "the majority option for a one-year increase in age. 'odds_ratio_per_year' is the exponentiated "
+        "value (multiplicative change in odds per year). The reference site is the category omitted by "
+        "dummy coding (labeled above). p-values and 95% CIs use normal approximation from the model covariance; "
+        "if any covariance elements were unavailable the corresponding SE/CIs are NaN."
+    )
+
+    return out
+
+# Note: This function expects the statsmodels results object to include .params, .cov_params(), and .pvalues.
+# If you want to also return raw parameter table (coef, se, p) for Age_c and each Age_c:Site interaction,
+# you can inspect maj.params and maj.pvalues directly.

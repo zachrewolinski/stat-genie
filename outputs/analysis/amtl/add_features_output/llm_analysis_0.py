@@ -13,104 +13,102 @@ df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/anal
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Transform the raw dataset to the analysis-ready dataframe.
-    Produces the following columns required for modeling:
-      - num_amtl: integer count of missing teeth for the observed tooth class (kept from original)
-      - sockets: integer count of observable sockets (kept from original)
-      - prop_missing: proportion missing = num_amtl / sockets (float 0..1)
-      - IsHuman: binary indicator (1 if genus == 'Homo sapiens', else 0)
-      - age_c: centered age (age - mean(age))
-      - prob_male: kept from original (estimate of male probability)
-      - tooth_class: categorical (kept from original)
-      - specimen: kept from original (used for clustering)
+    Transform the raw dataset into the analysis-ready dataframe.
 
-    Rows with missing or invalid values for these core variables are dropped.
+    Produces:
+    - amtl_prop: proportion of missing teeth (num_amtl / sockets)
+    - is_human: binary indicator for Homo specimens (1) vs non-human (0)
+    - age_c: age centered around the sample mean
+    - prob_male_c: prob_male centered around the sample mean
+    - ensures tooth_class and genus are categorical
+
+    Drops rows with missing critical values and rows with sockets <= 0.
     """
     df = df.copy()
 
-    # Required columns for the analysis
-    required_cols = ['num_amtl', 'sockets', 'age', 'prob_male', 'genus', 'tooth_class', 'specimen']
-
-    # Drop rows with missing values in any required column
+    # Required columns present in the dataset schema
+    required_cols = ['num_amtl', 'sockets', 'age', 'prob_male', 'genus', 'tooth_class']
+    # Drop rows missing any required columns
     df = df.dropna(subset=required_cols)
 
-    # Remove rows with non-positive sockets (cannot define binomial trials)
+    # Remove rows where sockets is zero or negative (cannot form proportion / binomial trials)
     df = df[df['sockets'] > 0]
 
-    # Ensure integer counts where appropriate
-    # (if the dataset has floats due to prior processing, cast safely)
-    df['num_amtl'] = df['num_amtl'].astype(float)
-    df['sockets'] = df['sockets'].astype(float)
-
-    # Binary indicator for modern human
-    df['IsHuman'] = (df['genus'].astype(str).str.strip() == 'Homo sapiens').astype(int)
-
-    # Center age for numerical stability and interpretability
-    df['age_c'] = df['age'].astype(float) - df['age'].astype(float).mean()
-
-    # Ensure prob_male is numeric and in [0,1]
+    # Ensure numeric types where appropriate
+    df['num_amtl'] = pd.to_numeric(df['num_amtl'], errors='coerce')
+    df['sockets'] = pd.to_numeric(df['sockets'], errors='coerce')
+    df['age'] = pd.to_numeric(df['age'], errors='coerce')
     df['prob_male'] = pd.to_numeric(df['prob_male'], errors='coerce')
-    df = df.dropna(subset=['prob_male'])
-    # Clip to [0,1] in case of slight measurement artifacts
-    df['prob_male'] = df['prob_male'].clip(0.0, 1.0)
 
-    # Ensure tooth_class is a categorical variable with consistent spelling/casing
-    df['tooth_class'] = df['tooth_class'].astype(str).str.strip().replace({'anterior': 'Anterior', 'posterior': 'Posterior', 'premolar': 'Premolar'})
+    # Re-drop rows that became NaN after coercion
+    df = df.dropna(subset=['num_amtl', 'sockets', 'age', 'prob_male'])
+
+    # Create proportion column (successes / trials) for binomial modeling
+    df['amtl_prop'] = df['num_amtl'] / df['sockets']
+
+    # Create binary human indicator. Match 'Homo' (case-insensitive) in genus.
+    # Use .astype(str) guard in case genus is categorical
+    df['is_human'] = df['genus'].astype(str).str.lower().str.contains('homo').astype(int)
+
+    # Center continuous covariates to improve interpretability and model stability
+    df['age_c'] = df['age'] - df['age'].mean()
+    df['prob_male_c'] = df['prob_male'] - df['prob_male'].mean()
+
+    # Ensure tooth_class and genus are categorical with consistent labels
     df['tooth_class'] = df['tooth_class'].astype('category')
+    df['genus'] = df['genus'].astype('category')
 
-    # Proportion missing for use with binomial GLM (endog in [0,1])
-    df['prop_missing'] = df['num_amtl'] / df['sockets']
+    # Optional: drop any rows where amtl_prop is outside [0,1] due to data issues
+    df = df[(df['amtl_prop'] >= 0) & (df['amtl_prop'] <= 1)]
 
-    # Final safety drops: ensure proportion within [0,1]
-    df = df[(df['prop_missing'] >= 0.0) & (df['prop_missing'] <= 1.0)]
-
-    # Keep only columns needed for modeling (but keep originals for traceability)
-    cols_to_keep = ['num_amtl', 'sockets', 'prop_missing', 'IsHuman', 'age_c', 'prob_male', 'tooth_class', 'specimen']
-    df = df[cols_to_keep].reset_index(drop=True)
-
+    # Return the dataframe containing all columns needed for modeling
     return df
 
 
 # ======== MODEL CODE ========
-def model(df: pd.DataFrame):
+def model(df: pd.DataFrame) -> dict:
     """
-    Fit a binomial (logistic) GLM comparing AMTL in modern humans vs non-human primates,
-    controlling for age, sex (prob_male), and tooth class. Uses sockets as the number of
-    trials via weighting and computes cluster-robust standard errors clustered by specimen.
+    Fit a binomial (logit) regression to test whether modern humans have higher AMTL than non-human primates,
+    controlling for age, sex (prob_male), and tooth class.
 
-    Returns:
-      - results_robust: a statsmodels results object with cluster-robust covariance
+    Modeling approach:
+    - Use the proportion amtl_prop as the response and supply freq_weights = sockets so the model treats
+      the data as num_amtl successes out of sockets trials (Binomial).
+    - Primary parameter of interest: coefficient for is_human (1 = Homo, 0 = non-human).
+    - Controls: age_c (centered age), prob_male_c (centered sex estimate), C(tooth_class) (categorical).
+
+    Returns a dictionary with the fitted model, summary, and an odds-ratio table with 95% CIs.
     """
-    import statsmodels.api as sm
     import statsmodels.formula.api as smf
+    import statsmodels.api as sm
 
-    # Work on a copy to be safe
-    df = df.copy()
+    # Build formula: proportion outcome modeled with freq_weights = sockets (trials)
+    formula = 'amtl_prop ~ is_human + age_c + prob_male_c + C(tooth_class)'
 
-    # Ensure the proportion outcome exists (transform should have created it)
-    if 'prop_missing' not in df.columns:
-        df['prop_missing'] = df['num_amtl'] / df['sockets']
+    # Fit GLM with Binomial family; use freq_weights to indicate number of trials per observation
+    # (this treats amtl_prop as successes/trials = num_amtl / sockets)
+    glm_model = smf.glm(formula=formula, data=df, family=sm.families.Binomial(), freq_weights=df['sockets']).fit()
 
-    # Formula: proportion missing explained by human status, age, sex estimate, and tooth class
-    # C(tooth_class) tells patsy/statsmodels to treat tooth_class as categorical
-    formula = 'prop_missing ~ IsHuman + age_c + prob_male + C(tooth_class)'
+    # Create a table with exponentiated coefficients (odds ratios) and 95% CIs
+    params = glm_model.params
+    bse = glm_model.bse
+    conf = glm_model.conf_int()
+    or_table = pd.DataFrame({
+        'coef': params,
+        'se': bse,
+        'z_or_t': glm_model.tvalues,
+        'pvalue': glm_model.pvalues,
+        'OR': np.exp(params),
+        'OR_CI_lower': np.exp(conf[0]),
+        'OR_CI_upper': np.exp(conf[1])
+    })
 
-    # Fit GLM with binomial family using sockets as weights (number of trials)
-    # Using weights here models the binomial denominator when endog is a proportion
-    glm_model = smf.glm(formula=formula, data=df, family=sm.families.Binomial(), weights=df['sockets'])
-    results = glm_model.fit()
+    results = {
+        'model': glm_model,
+        'summary': glm_model.summary(),
+        'or_table': or_table
+    }
 
-    # Compute cluster-robust standard errors clustered by specimen to account for
-    # within-specimen correlation (multiple tooth classes per specimen)
-    try:
-        results_robust = results.get_robustcov_results(cov_type='cluster', groups=df['specimen'])
-    except Exception:
-        # If cluster robust fails for some reason, fall back to default results
-        results_robust = results
-
-    # Print model summary (user can inspect coefficients and significance)
-    print(results_robust.summary())
-
-    return results_robust
+    return results
 
 

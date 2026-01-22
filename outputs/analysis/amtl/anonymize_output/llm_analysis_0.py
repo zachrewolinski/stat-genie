@@ -1,214 +1,164 @@
-from typing import Any, Dict, List, Optional
-import re
-
+from typing import Any, Dict, FrozenSet, List, Literal, Optional, Set, Tuple
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
-
+import statsmodels.formula.api as smf
 
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Transform the raw dataset into the analysis-ready dataframe.
+    Transform the raw dataset into a dataframe ready for binomial modelling of AMTL.
 
-    Produces the following REQUIRED final columns used by the model:
-      - MissingCount: number of teeth missing for that tooth class (counts)
-      - Trials: number of observable sockets (number of teeth that could be scored)
-      - NonMissing: derived = Trials - MissingCount (helper)
-      - PropMissing: derived = MissingCount / Trials (helper)
-      - Age: estimated age at death (numeric)
-      - Sex: numeric sex estimate
-      - ToothClass: categorical (Anterior/Posterior/Premolar)
-      - Genus: original genus string (used to compute IsHuman)
-      - IsHuman: binary indicator for Homo sapiens (1) vs non-human (0)
-      - SpecimenID: specimen identifier (string)
+    Produces/keeps these columns required for modeling:
+      - MissingCount: integer count of missing teeth for the tooth class
+      - ObservableSockets: integer count of observable sockets (trials)
+      - Genus: genus string (kept for QA / potential further contrasts)
+      - IsHuman: binary indicator (1 if Homo sapiens, 0 otherwise)
+      - AgeAtDeath: original age estimate
+      - AgeUncertainty: original uncertainty estimate (kept but not required for the primary model)
+      - Age_c: centered age (AgeAtDeath - mean(AgeAtDeath)) used in model
+      - SexEstimate: numeric sex estimate
+      - ToothClass: categorical tooth class
+      - SpecimenID, Region: retained for reference / clustering if needed
     """
     df = df.copy()
 
-    # Helper to find a source column in the input dataframe from a list of candidates.
-    def find_col(candidates: List[str]) -> Optional[str]:
-        cols_lower = {c.lower(): c for c in df.columns}
-
-        # 1) exact match or case-insensitive exact match
-        for cand in candidates:
-            if cand in df.columns:
-                return cand
-            if cand.lower() in cols_lower:
-                return cols_lower[cand.lower()]
-
-        # 2) pattern match for feature-like names with numbers (e.g., feature1, feature_1)
-        for cand in candidates:
-            m = re.match(r'feature\W*([0-9]+)', cand, flags=re.I)
-            if m:
-                digit = m.group(1)
-                for col in df.columns:
-                    if re.search(rf'feature\W*{digit}', col, flags=re.I):
-                        return col
-                    if re.search(rf'\b{digit}\b', col):
-                        return col
-
-        # 3) token-based fuzzy match: split candidate into alphabetic tokens (handle camelCase)
-        def tokens(s: str) -> List[str]:
-            # insert spaces between camelCase boundaries then extract alpha tokens
-            s2 = re.sub(r'([a-z])([A-Z])', r'\1 \2', s)
-            return [t.lower() for t in re.findall(r'[A-Za-z]+', s2)]
-
-        cand_tokens_list = [tokens(cand) for cand in candidates]
-
-        for cand_tokens in cand_tokens_list:
-            for col in df.columns:
-                col_tokens = [t.lower() for t in re.findall(r'[A-Za-z]+', col)]
-                # if any token matches or is substring of any column token (or vice versa), accept
-                for ct in cand_tokens:
-                    for colt in col_tokens:
-                        if not ct or not colt:
-                            continue
-                        if ct == colt or ct in colt or colt in ct:
-                            return col
-                        # handle simple plural/singular mismatch
-                        if ct.rstrip('s') == colt.rstrip('s'):
-                            return col
-
-        return None
-
-    # Candidate source names for each required final column (including the final name itself)
-    # Include common alternate column names expected in input datasets.
-    source_map = {
-        'MissingCount': [
-            'MissingCount', 'missingcount', 'missing', 'num_amtl', 'numamtl', 'num_amtl',
-            'num-amtl', 'amtl', 'num_missing', 'num missing', 'numMissing'
-        ],
-        'Trials': [
-            'Trials', 'trials', 'SocketCount', 'socketcount', 'sockets', 'sockets_count',
-            'socketscount', 'num_sockets', 'num sockets', 'observed_sockets'
-        ],
-        'Age': [
-            'Age', 'age', 'estimated_age', 'est_age', 'age_at_death'
-        ],
-        'Sex': [
-            'Sex', 'sex', 'prob_male', 'probmale', 'prob male', 'sex_prob', 'male_prob',
-            'sex_probability'
-        ],
-        'ToothClass': [
-            'ToothClass', 'toothclass', 'tooth_class', 'tooth class', 'tooth', 'class', 'tooth_type'
-        ],
-        'Genus': [
-            'Genus', 'genus'
-        ],
-        'SpecimenID': [
-            'SpecimenID', 'specimenid', 'specimen', 'specimen_id', 'specimen id', 'id', 'sample_id'
-        ]
+    # If input uses a schema with generic feature names, try renaming them.
+    # Keep this defensive: only rename if those generic columns exist.
+    rename_map = {
+        'feature1': 'ToothClass',
+        'feature2': 'SpecimenID',
+        'feature3': 'MissingCount',
+        'feature4': 'ObservableSockets',
+        'feature5': 'AgeAtDeath',
+        'feature6': 'AgeUncertainty',
+        'feature7': 'SexEstimate',
+        'feature8': 'Genus',
+        'feature9': 'Region'
     }
+    existing_renames = {k: v for k, v in rename_map.items() if k in df.columns}
+    if existing_renames:
+        df = df.rename(columns=existing_renames)
 
-    found: Dict[str, str] = {}
-    missing_sources: List[str] = []
-    for target, candidates in source_map.items():
-        col = find_col(candidates)
-        if col is None:
-            missing_sources.append(target)
-        else:
-            found[target] = col
+    # Drop rows missing essential fields for binomial modeling
+    df = df.dropna(subset=['MissingCount', 'ObservableSockets', 'AgeAtDeath', 'SexEstimate', 'ToothClass', 'Genus'])
 
-    if missing_sources:
-        # If any absolutely required conceptual variable is missing, raise an informative error.
-        # These are required by the analysis contract.
-        raise KeyError(f"Input dataframe is missing required source columns for: {missing_sources}. "
-                       f"Available columns: {list(df.columns)}")
-
-    # Create final-named columns in the dataframe from the found source columns
-    for target, src in found.items():
-        df[target] = df[src]
-
-    # Ensure numeric types for counts and age/sex columns
+    # Ensure numeric types and sensible values
+    df['ObservableSockets'] = pd.to_numeric(df['ObservableSockets'], errors='coerce')
     df['MissingCount'] = pd.to_numeric(df['MissingCount'], errors='coerce')
-    df['Trials'] = pd.to_numeric(df['Trials'], errors='coerce')
-    df['Age'] = pd.to_numeric(df['Age'], errors='coerce')
-    df['Sex'] = pd.to_numeric(df['Sex'], errors='coerce')
+    df = df.dropna(subset=['ObservableSockets', 'MissingCount'])
 
-    # Remove rows with missing critical values
-    required_final_cols = ['MissingCount', 'Trials', 'Age', 'Sex', 'ToothClass', 'Genus', 'SpecimenID']
-    df = df.dropna(subset=required_final_cols)
+    # Ensure integer counts
+    # Use floor to be conservative if floats are present; then cast to int
+    df['ObservableSockets'] = np.floor(df['ObservableSockets']).astype(int)
+    df['MissingCount'] = np.floor(df['MissingCount']).astype(int)
 
-    # Remove rows with non-positive or invalid trial counts
-    df = df[df['Trials'] > 0]
+    # Remove any rows with zero or negative observable sockets (cannot model binomial trials)
+    df = df[df['ObservableSockets'] > 0].copy()
 
-    # Remove rows where MissingCount is greater than Trials (invalid)
-    df = df[df['MissingCount'] <= df['Trials']]
+    # Cap MissingCount to ObservableSockets (cleaning potential data entry errors)
+    df['MissingCount'] = df[['MissingCount', 'ObservableSockets']].min(axis=1).astype(int)
+    df.loc[df['MissingCount'] < 0, 'MissingCount'] = 0
 
-    # Cast counts to integers (safely)
-    # Use round for any fractional counts after coercion (shouldn't occur but be robust)
-    df['Trials'] = df['Trials'].astype(float).round().astype(int)
-    df['MissingCount'] = df['MissingCount'].astype(float).round().astype(int)
+    # Create binary indicator for Homo sapiens (IsHuman = 1) vs others (0)
+    df['Genus'] = df['Genus'].astype(str).str.strip()
+    df['IsHuman'] = (df['Genus'] == 'Homo sapiens').astype(int)
 
-    # Derived helper columns
-    df['NonMissing'] = df['Trials'] - df['MissingCount']
-    df['PropMissing'] = df['MissingCount'] / df['Trials']
+    # Center AgeAtDeath for numerical stability and interpretability
+    df['AgeAtDeath'] = pd.to_numeric(df['AgeAtDeath'], errors='coerce')
+    df = df.dropna(subset=['AgeAtDeath'])
+    df['Age_c'] = df['AgeAtDeath'] - df['AgeAtDeath'].mean()
 
-    # Create binary indicator for modern humans from Genus column
-    df['Genus'] = df['Genus'].astype(str)
-    df['IsHuman'] = (df['Genus'].str.strip().str.lower() == 'homo sapiens').astype(int)
+    # Ensure SexEstimate numeric (dataset gives an estimate between 0 and 1)
+    df['SexEstimate'] = pd.to_numeric(df['SexEstimate'], errors='coerce')
+    df = df.dropna(subset=['SexEstimate'])
 
-    # Normalize ToothClass and set as categorical
-    df['ToothClass'] = df['ToothClass'].astype(str).str.strip().str.capitalize()
+    # Ensure ToothClass is categorical and standardized
+    df['ToothClass'] = df['ToothClass'].astype(str).str.strip()
     df['ToothClass'] = df['ToothClass'].astype('category')
 
-    # Ensure SpecimenID is string (for clustering later)
-    df['SpecimenID'] = df['SpecimenID'].astype(str)
+    # Keep only the columns needed for modeling plus useful metadata
+    keep_cols = [
+        'SpecimenID', 'ToothClass', 'MissingCount', 'ObservableSockets',
+        'AgeAtDeath', 'AgeUncertainty', 'Age_c', 'SexEstimate', 'Genus', 'Region', 'IsHuman'
+    ]
+    # Some datasets may not have Region/SpecimenID after cleaning; filter defensively
+    keep_cols = [c for c in keep_cols if c in df.columns]
 
-    # Final drop of any rows with missing model-critical values introduced by coercion
-    model_cols = ['MissingCount', 'Trials', 'IsHuman', 'Age', 'Sex', 'ToothClass', 'SpecimenID']
-    df = df.dropna(subset=model_cols)
-
-    # Reset index for cleanliness
-    df = df.reset_index(drop=True)
-
-    return df
+    return df[keep_cols]
 
 
 # ======== MODEL CODE ========
 def model(df: pd.DataFrame) -> Any:
     """
-    Fit a binomial GLM to test whether modern humans have higher AMTL than non-human primates,
-    controlling for age, sex, and tooth class. Clustered standard errors by specimen are computed
-    to account for multiple tooth-class observations per specimen.
+    Fit a binomial GLM for AMTL with the following specification:
+      MissingCount ~ IsHuman + Age_c + SexEstimate + C(ToothClass)
+    The binomial trials (number of sockets) are passed via freq_weights so the model treats
+    MissingCount as the count of successes out of ObservableSockets trials.
 
-    Model specification (count form with Binomial family):
-      MissingCount ~ IsHuman + Age + Sex + C(ToothClass)
-    with endog provided as (successes, failures) per observation.
-
-    Returns the fitted GLM object and a clustered-robust-covariance version of the results.
+    Returns the fitted statsmodels GLMResults object.
     """
-    import patsy
-
-    # Ensure required columns exist
-    required = ['MissingCount', 'Trials', 'IsHuman', 'Age', 'Sex', 'ToothClass', 'SpecimenID', 'NonMissing']
+    # Ensure required columns are present
+    required = ['MissingCount', 'ObservableSockets', 'IsHuman', 'Age_c', 'SexEstimate', 'ToothClass']
     missing = [c for c in required if c not in df.columns]
     if missing:
-        raise KeyError(f"Dataframe passed to model() is missing required columns: {missing}")
+        raise ValueError(f"Missing required columns for modeling: {missing}")
 
-    # Drop any remaining rows with NA in columns used by the model
-    df = df.dropna(subset=required)
+    # Defensive checks to ensure valid values
+    if (df['ObservableSockets'] <= 0).any():
+        raise ValueError("ObservableSockets must be positive for all rows.")
+    if (df['MissingCount'] < 0).any():
+        raise ValueError("MissingCount must be non-negative for all rows.")
+    if (df['MissingCount'] > df['ObservableSockets']).any():
+        # Cap to be safe (should have been handled in transform, but be defensive)
+        df = df.copy()
+        df['MissingCount'] = df[['MissingCount', 'ObservableSockets']].min(axis=1).astype(int)
 
-    # Build design matrices using patsy. Use count-form binomial where endog is [successes, failures].
-    formula = 'MissingCount ~ IsHuman + Age + Sex + C(ToothClass)'
+    # Build formula: use raw counts as response and provide freq_weights=ObservableSockets
+    formula = 'MissingCount ~ IsHuman + Age_c + SexEstimate + C(ToothClass)'
 
-    # Create design matrices: y will be MissingCount, X will be the design matrix
-    y, X = patsy.dmatrices(formula, data=df, return_type='dataframe')
+    glm_binom = smf.glm(formula=formula,
+                        data=df,
+                        family=sm.families.Binomial(),
+                        freq_weights=df['ObservableSockets'])
 
-    # Construct endog as Nx2 array: [successes, failures]
-    endog = np.vstack([df['MissingCount'].values, df['NonMissing'].values]).T
-
-    # Fit binomial GLM using counts (successes, failures)
-    glm_model = sm.GLM(endog, X, family=sm.families.Binomial()).fit()
-
-    # Compute clustered (by specimen) robust covariance results
+    # Attempt a normal fit; if it fails due to initial deviance nan, retry with sensible start params
     try:
-        clustered_results = glm_model.get_robustcov_results(cov_type='cluster', groups=df['SpecimenID'])
-    except Exception:
-        clustered_results = glm_model
+        results = glm_binom.fit()
+    except ValueError as e:
+        # Prepare a fallback start_params using the overall proportion as intercept
+        msg = str(e)
+        # Only handle the specific deviance nan case here; re-raise otherwise
+        if "deviance function returned a nan" not in msg:
+            raise
 
-    # Return both the original glm fit and the clustered-results object
-    return {
-        'glm_fit': glm_model,
-        'clustered_results': clustered_results
-    }
+        # Compute overall proportion of successes
+        total_success = df['MissingCount'].sum()
+        total_trials = df['ObservableSockets'].sum()
+        if total_trials <= 0:
+            raise ValueError("Total ObservableSockets must be positive to initialize model.")
+        prop = total_success / total_trials
+        # Clip to avoid exact 0 or 1
+        eps = 1e-6
+        prop = np.clip(prop, eps, 1 - eps)
+        # logit intercept
+        intercept = np.log(prop / (1 - prop))
+
+        # Build start_params vector: intercept + zeros for remaining params
+        # glm_binom.exog_names is available on the model instance
+        try:
+            n_params = len(glm_binom.exog_names)
+        except Exception:
+            # Fallback: try to build design matrix to get shape
+            import patsy
+            _, X = patsy.dmatrices(formula, data=df, return_type='dataframe')
+            n_params = X.shape[1]
+
+        start_params = np.zeros(n_params)
+        start_params[0] = intercept
+
+        results = glm_binom.fit(start_params=start_params, maxiter=200)
+
+    print(results.summary())
+
+    return results

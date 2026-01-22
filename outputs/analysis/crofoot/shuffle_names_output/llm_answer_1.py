@@ -1,168 +1,185 @@
 def extract_final_answer(model_output):
     """
-    Extracts coefficients, p-values, odds ratios and 95% CIs for the main predictors
-    from a statsmodels-like logistic regression results object or from the placeholder
-    namespace returned when the dependent variable has a single class.
+    Extract key statistics from a fitted statsmodels GLM (possibly robust) results object
+    for the predictors of interest:
+      - size_ratio_z (relative group size, standardized)
+      - location_advantage_z (contest location advantage, standardized)
+      - interaction of size_ratio_z and location_advantage_z
+      - male_diff (control)
 
-    Returns a dict with keys:
-      - "object": dict keyed by predictor names with extracted numeric results (or None)
-      - "description": human-readable explanation of what the extracted values mean
-
-    Handles cases where params are all NaN (placeholder), or where a real fitted
-    results object is provided.
+    Returns a dict with:
+      - "object": dict mapping term -> stats (coef, se, z, p, 95% CI, odds ratio and CI, significant boolean)
+      - "description": human-readable summary interpretation in the context of the task
     """
     import numpy as np
-    import pandas as pd
-    import math
 
-    # Prepare safe access helpers
-    def _as_series(x):
-        if x is None:
-            return None
-        if isinstance(x, pd.Series):
-            return x
-        try:
-            return pd.Series(x)
-        except Exception:
-            return pd.Series(list(x))
-
+    # Attempt to access common result attributes (works for standard and robust results)
     try:
-        params = getattr(model_output, "params", None)
-        bse = getattr(model_output, "bse", None)
+        params = model_output.params
+        bse = model_output.bse
+        # conf_int() usually returns a DataFrame or ndarray with two columns [lower, upper]
+        conf = model_output.conf_int()
+        # pvalues usually exists for statsmodels results (robust results should have it too)
         pvalues = getattr(model_output, "pvalues", None)
-        nobs = getattr(model_output, "nobs", None)
-        converged = getattr(model_output, "converged", None)
+    except Exception as e:
+        raise ValueError(f"Provided model_output does not look like a statsmodels results object: {e}")
 
-        params_s = _as_series(params)
-        bse_s = _as_series(bse)
-        pvalues_s = _as_series(pvalues)
-
-        # If params are missing entirely
-        if params_s is None:
-            return {
-                "object": None,
-                "description": "Model output does not contain 'params'. Cannot extract estimates."
-            }
-
-        # If all params are NaN -> placeholder case (e.g., single-class outcome or failed fit)
-        if params_s.isna().all():
-            # Try to infer the constant prediction (class) from the predict function if present
-            const_pred = None
-            pred_fn = getattr(model_output, "predict", None)
-            if callable(pred_fn):
-                try:
-                    p = pred_fn(1)  # placeholder predict expects a row-count or exog; it will return an array/constant
-                    if hasattr(p, "__iter__"):
-                        const_pred = float(p[0])
-                    else:
-                        const_pred = float(p)
-                except Exception:
-                    const_pred = None
-
-            desc = (
-                "Model did not produce estimable coefficients (all parameter estimates are NaN). "
-                f"This commonly occurs when the dependent variable contains a single class or the fit failed. "
-                f"nobs={nobs}, converged={converged}."
-            )
-            if const_pred is not None:
-                desc += f" The model's predict function returns constant class {const_pred}, indicating all observed contests had that outcome. No inference about predictors is possible."
-
-            return {
-                "object": {
-                    "params": None,
-                    "pvalues": None,
-                    "odds_ratios": None,
-                    "nobs": int(nobs) if (nobs is not None and not pd.isna(nobs)) else None,
-                    "converged": bool(converged) if converged is not None else None,
-                    "constant_predicted_class": const_pred
-                },
-                "description": desc
-            }
-
-        # Normal case: compute odds ratios and 95% CIs where possible
-        # Align index names if available
+    # If p-values are not present, compute them using normal approximation
+    if pvalues is None:
         try:
-            params_s.index = params_s.index.astype(str)
+            from scipy.stats import norm
+            zvals = params / bse
+            pvalues = 2 * (1 - norm.cdf(np.abs(zvals)))
         except Exception:
-            pass
-        if bse_s is not None:
-            try:
-                bse_s.index = bse_s.index.astype(str)
-            except Exception:
-                pass
-        if pvalues_s is not None:
-            try:
-                pvalues_s.index = pvalues_s.index.astype(str)
-            except Exception:
-                pass
+            # fallback: set pvalues to NaN
+            pvalues = np.full_like(params, np.nan, dtype=float)
+            pvalues = type(params)(pvalues)
+            pvalues.index = params.index
 
-        coefs = params_s.to_dict()
-        bses = bse_s.to_dict() if bse_s is not None else {}
-        pvals = pvalues_s.to_dict() if pvalues_s is not None else {}
+    # Helper to find parameter name in params.index
+    def find_param_name(target):
+        # target can be 'a' or 'a:b' meaning both tokens must appear in param name (order-insensitive)
+        if ":" in target:
+            tokens = target.split(":")
+            for name in params.index:
+                if all(tok in name for tok in tokens):
+                    return name
+        else:
+            # exact match preferred, else substring match
+            if target in params.index:
+                return target
+            for name in params.index:
+                if target in name:
+                    return name
+        return None
 
-        def _safe_exp(x):
-            try:
-                return float(np.exp(x))
-            except Exception:
-                return None
+    # Define targets
+    targets = {
+        "size_ratio_z": "size_ratio_z",
+        "location_advantage_z": "location_advantage_z",
+        "interaction": "size_ratio_z:location_advantage_z",
+        "male_diff": "male_diff"
+    }
 
-        def _ci_from_coef_se(coef, se, z=1.96):
-            if coef is None or se is None or (isinstance(coef, float) and np.isnan(coef)) or (isinstance(se, float) and np.isnan(se)):
-                return (None, None)
-            lo = np.exp(coef - z * se)
-            hi = np.exp(coef + z * se)
-            return (float(lo), float(hi))
-
-        # Focus on the predictors named in the task
-        predictors = ['RelSizeRatio_z', 'ContestLocation_FocalHome', 'ContestLocation_OtherHome']
-        extracted = {}
-        for pred in predictors:
-            coef = coefs.get(pred, None)
-            pv = pvals.get(pred, None)
-            se = bses.get(pred, None)
-            or_ = _safe_exp(coef) if (coef is not None and not (isinstance(coef, float) and np.isnan(coef))) else None
-            ci = _ci_from_coef_se(coef, se)
-            extracted[pred] = {
-                "coef": None if (coef is None or (isinstance(coef, float) and np.isnan(coef))) else float(coef),
-                "pvalue": None if (pv is None or (isinstance(pv, float) and np.isnan(pv))) else float(pv),
-                "odds_ratio": or_,
-                "CI_95": ci
+    results = {}
+    for key, target in targets.items():
+        pname = find_param_name(target)
+        if pname is None:
+            results[key] = {
+                "found": False,
+                "note": f"No parameter matching '{target}' was found in the model."
             }
+            continue
 
-        # Build a compact human-readable description
-        lines = []
-        for pred in predictors:
-            info = extracted[pred]
-            if info["coef"] is None:
-                lines.append(f"{pred}: estimate not available.")
+        coef = float(params[pname])
+        se = float(bse[pname]) if pname in bse.index else float(np.nan)
+        zval = coef / se if se != 0 else float("nan")
+        pval = float(pvalues[pname]) if pname in pvalues.index else float("nan")
+        # confidence interval
+        try:
+            # conf may be a DataFrame or ndarray; rows correspond to param order
+            if hasattr(conf, "loc"):  # DataFrame-like
+                ci_low, ci_high = float(conf.loc[pname].iloc[0]), float(conf.loc[pname].iloc[1])
             else:
-                pv_txt = "p unavailable" if info["pvalue"] is None else f"p = {info['pvalue']:.3g}"
-                ci_txt = f"95% CI for OR = ({info['CI_95'][0]:.3g}, {info['CI_95'][1]:.3g})" if (info['CI_95'][0] is not None) else "95% CI unavailable"
-                lines.append(
-                    f"{pred}: coef = {info['coef']:.3f}, OR = {info['odds_ratio']:.3f}, {ci_txt}, {pv_txt}"
-                )
+                # conf is ndarray; map param name to its position
+                idx = list(params.index).index(pname)
+                ci_low, ci_high = float(conf[idx, 0]), float(conf[idx, 1])
+        except Exception:
+            ci_low, ci_high = float("nan"), float("nan")
 
-        description = (
-            f"Extracted estimates for the main predictors (n = {int(nobs) if nobs is not None else 'unknown'}, converged = {converged}). "
-            + " ".join(lines)
-            + " Interpretation: a positive coefficient (OR>1) means higher predictor value is associated with higher probability that the focal group wins; "
-            + "a negative coefficient (OR<1) means the opposite. Statistical significance should be judged from the p-values and CIs above."
+        # Odds ratio and CI (for logistic model)
+        try:
+            or_val = float(np.exp(coef))
+            or_ci_low = float(np.exp(ci_low)) if not np.isnan(ci_low) else float("nan")
+            or_ci_high = float(np.exp(ci_high)) if not np.isnan(ci_high) else float("nan")
+        except Exception:
+            or_val = or_ci_low = or_ci_high = float("nan")
+
+        significant = (not np.isnan(pval)) and (pval < 0.05)
+
+        results[key] = {
+            "found": True,
+            "param_name": pname,
+            "coef": coef,
+            "se": se,
+            "z": zval,
+            "p_value": pval,
+            "ci_95": [ci_low, ci_high],
+            "odds_ratio": or_val,
+            "odds_ratio_ci_95": [or_ci_low, or_ci_high],
+            "significant_0.05": bool(significant)
+        }
+
+    # Build a concise textual interpretation
+    lines = []
+    # summary for size_ratio_z
+    if results["size_ratio_z"].get("found", False):
+        r = results["size_ratio_z"]
+        sig_text = "statistically significant (p < 0.05)" if r["significant_0.05"] else "not statistically significant (p >= 0.05)"
+        lines.append(
+            f"Relative group size (size_ratio_z) — coef={r['coef']:.3f}, OR={r['odds_ratio']:.3f}, "
+            f"95% CI OR=[{r['odds_ratio_ci_95'][0]:.3f}, {r['odds_ratio_ci_95'][1]:.3f}], p={r['p_value']:.3g}; {sig_text}."
         )
+    else:
+        lines.append(results["size_ratio_z"]["note"])
 
-        return {
-            "object": {
-                "predictor_estimates": extracted,
-                "nobs": int(nobs) if (nobs is not None and not pd.isna(nobs)) else None,
-                "converged": bool(converged) if converged is not None else None,
-                "full_params": coefs,
-                "full_pvalues": pvals,
-                "full_bse": bses
-            },
-            "description": description
-        }
+    # summary for location_advantage_z
+    if results["location_advantage_z"].get("found", False):
+        r = results["location_advantage_z"]
+        sig_text = "statistically significant (p < 0.05)" if r["significant_0.05"] else "not statistically significant (p >= 0.05)"
+        lines.append(
+            f"Contest location (location_advantage_z) — coef={r['coef']:.3f}, OR={r['odds_ratio']:.3f}, "
+            f"95% CI OR=[{r['odds_ratio_ci_95'][0]:.3f}, {r['odds_ratio_ci_95'][1]:.3f}], p={r['p_value']:.3g}; {sig_text}."
+        )
+    else:
+        lines.append(results["location_advantage_z"]["note"])
 
-    except Exception as exc:
-        return {
-            "object": None,
-            "description": f"An error occurred while extracting information from model_output: {exc}"
-        }
+    # summary for interaction
+    if results["interaction"].get("found", False):
+        r = results["interaction"]
+        sig_text = "statistically significant (p < 0.05)" if r["significant_0.05"] else "not statistically significant (p >= 0.05)"
+        lines.append(
+            f"Interaction (size_ratio_z x location_advantage_z) — coef={r['coef']:.3f}, p={r['p_value']:.3g}; {sig_text}. "
+            "A significant interaction would indicate that the effect of relative group size on winning depends on contest location."
+        )
+    else:
+        lines.append(results["interaction"]["note"])
+
+    # male_diff
+    if results["male_diff"].get("found", False):
+        r = results["male_diff"]
+        sig_text = "statistically significant (p < 0.05)" if r["significant_0.05"] else "not statistically significant (p >= 0.05)"
+        lines.append(
+            f"Control male_diff — coef={r['coef']:.3f}, OR={r['odds_ratio']:.3f}, p={r['p_value']:.3g}; {sig_text}."
+        )
+    else:
+        lines.append(results["male_diff"]["note"])
+
+    # Overall interpretation about the research question
+    # If interaction significant, emphasize interaction; else comment on main effects
+    interaction_sig = results.get("interaction", {}).get("significant_0.05", False)
+    size_sig = results.get("size_ratio_z", {}).get("significant_0.05", False)
+    loc_sig = results.get("location_advantage_z", {}).get("significant_0.05", False)
+
+    if interaction_sig:
+        lines.append(
+            "Because the interaction term is significant, the influence of relative group size on the probability of winning "
+            "depends on contest location. Interpret main-effect coefficients with caution; consider plotting predicted probabilities "
+            "across combinations of size_ratio_z and location_advantage_z to visualize the interaction."
+        )
+    else:
+        # No interaction: interpret main effects
+        if size_sig and not loc_sig:
+            lines.append("Conclusion: Relative group size is associated with focal-group victory (larger focal groups have higher odds), "
+                         "while contest location shows no clear independent effect.")
+        elif loc_sig and not size_sig:
+            lines.append("Conclusion: Contest location (closer to focal home-range) is associated with focal-group victory, "
+                         "while relative group size shows no clear independent effect.")
+        elif size_sig and loc_sig:
+            lines.append("Conclusion: Both relative group size and contest location independently predict focal-group victory.")
+        else:
+            lines.append("Conclusion: No strong evidence that relative group size or contest location (as modeled) independently predict focal-group victory.")
+
+    description = "\n".join(lines)
+
+    return {"object": results, "description": description}

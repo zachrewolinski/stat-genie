@@ -1,138 +1,105 @@
-from typing import Dict, FrozenSet, List, Literal, Optional, Set, Tuple, Any
+from typing import Any
 import numpy as np
 import pandas as pd
-import sklearn
-import scipy
 import statsmodels.api as sm
 import statsmodels.formula.api as smf
-import matplotlib.pyplot as plt
-import pickle
-  
+
+# Load dataset (path kept from original code)
 df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/analysis/hurricane/add_features_output/hurricane.csv')
 
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Transform the raw hurricane dataframe for modeling.
+    Clean and transform the hurricane dataset for analysis.
 
-    Outputs (columns included in the returned df):
-      - alldeaths: original death counts (DV)
-      - log_alldeaths: np.log1p(alldeaths) (robustness DV)
-      - masfem_c: z-scored masfem (IV, continuous)
-      - gender_mf: original binary female-name indicator (0/1)
-      - wind_c: z-scored wind speed
-      - category: original category (1-5); treated as categorical in model
-      - min_c: z-scored minimum pressure
-      - elapsedyrs_c: z-scored elapsedyrs
+    Outputs (columns required by the statistical model):
+      - alldeaths: integer count of fatalities (kept as-is for count model)
+      - log_alldeaths: log(alldeaths + 1) for OLS robustness check
+      - masfem_z: standardized masculinity-femininity index (z-scored from 'masfem')
+      - wind, category, min, year, elapsedyrs: numeric controls
 
-    Rows with missing values on required columns are dropped.
+    The function coerces key columns to numeric, drops rows with missing values
+    in the variables required for the main models, and creates derived columns.
     """
-    # Make a copy to avoid modifying original
     df = df.copy()
 
-    # Required raw columns for the planned analysis
-    required_cols = [
-        'alldeaths',  # DV
-        'masfem',     # IV (continuous coder ratings)
-        'gender_mf',  # binary female/male name
-        'wind',       # control: wind speed
-        'category',   # control: Saffir-Simpson category
-        'min',        # control: minimum pressure
-        'elapsedyrs'  # control: elapsed years
-    ]
-
-    # Drop rows missing any of the required fields
-    df = df.dropna(subset=required_cols)
-
-    # Ensure numeric types where appropriate
-    for col in ['alldeaths', 'masfem', 'gender_mf', 'wind', 'category', 'min', 'elapsedyrs']:
-        # coerce to numeric if possible
+    # Ensure relevant columns exist and coerce to numeric where appropriate
+    numeric_cols = ['alldeaths', 'masfem', 'wind', 'category', 'min', 'year', 'elapsedyrs', 'masfem_mturk', 'ndam15']
+    for col in numeric_cols:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce')
-    # Drop rows that became NA after coercion
-    df = df.dropna(subset=required_cols)
 
-    # Derived outcome: log(1 + deaths) for OLS robustness
-    df['log_alldeaths'] = np.log1p(df['alldeaths'].astype(float))
+    # Drop rows missing the dependent variable or the main independent variable or core controls
+    required = ['alldeaths', 'masfem', 'wind', 'category', 'min', 'year', 'elapsedyrs']
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns in input dataframe: {missing}")
 
-    # Standardize continuous predictors (z-score). Use .std(ddof=0) to match population s.d.
-    def zscore(series):
-        s = series.astype(float)
-        return (s - s.mean()) / (s.std(ddof=0) if s.std(ddof=0) != 0 else 1.0)
+    df = df.dropna(subset=required).reset_index(drop=True)
 
-    df['masfem_c'] = zscore(df['masfem'])
-    df['wind_c'] = zscore(df['wind'])
-    df['min_c'] = zscore(df['min'])
-    df['elapsedyrs_c'] = zscore(df['elapsedyrs'])
+    # Ensure alldeaths is an integer count
+    # If alldeaths is float due to upstream formatting, cast to int after rounding (but preserve zeros)
+    df['alldeaths'] = df['alldeaths'].round().astype(int)
 
-    # Keep only the columns we need for modeling plus originals for reference
-    model_cols = [
-        'alldeaths', 'log_alldeaths',
-        'masfem_c', 'masfem', 'gender_mf',
-        'wind_c', 'wind', 'category', 'min_c', 'min', 'elapsedyrs_c', 'elapsedyrs'
-    ]
-    # If any of these are missing from the df (unlikely), keep what we have
-    model_cols = [c for c in model_cols if c in df.columns]
+    # Create log-transformed deaths for OLS robustness
+    df['log_alldeaths'] = np.log(df['alldeaths'] + 1)
 
-    df = df[model_cols].reset_index(drop=True)
+    # Create a binary indicator for any deaths (useful if doing alternative logistic models)
+    df['deaths_binary'] = (df['alldeaths'] > 0).astype(int)
+
+    # Standardize the masfem index for interpretability and numerical stability
+    # Use population std (ddof=0) to avoid potential division by zero
+    masfem_std = df['masfem'].std(ddof=0) if df['masfem'].std(ddof=0) != 0 else 1.0
+    df['masfem_z'] = (df['masfem'] - df['masfem'].mean()) / masfem_std
+
+    # Return full dataframe copy with new columns (ensures required final columns are present)
     return df
 
 
 # ======== MODEL CODE ========
-def model(df: pd.DataFrame) -> dict:
+def model(df: pd.DataFrame) -> Any:
     """
-    Fit the main Negative Binomial model (counts) and an OLS robustness model on log(1+deaths).
+    Fit the main statistical models testing whether more feminine hurricane names (higher masfem)
+    are associated with fewer precautionary measures as proxied by fatalities.
 
-    Returns a dict with fitted model results objects:
-      - 'nb_model': GLM NegativeBinomial fitted result (primary)
-      - 'ols_model': OLS fitted result on log(1+deaths) (robustness)
+    Primary model: Negative binomial regression on raw death counts (alldeaths) to account for
+    count data and over-dispersion.
 
-    Both models include masfem (standardized) as the main predictor and control for
-    gender_mf, storm severity (wind, category, min pressure), and elapsed years.
-    Category is treated as a categorical factor in the formulas (C(category)).
-    Robust (HC3) standard errors are requested for inference.
+    Robustness check: OLS on log(alldeaths + 1) with robust standard errors.
+
+    Returns a dictionary with fitted model objects and robust-covariance-adjusted results.
     """
-    import statsmodels.api as sm
-    import statsmodels.formula.api as smf
+    # Work on a copy
+    df = df.copy()
 
-    # Ensure required columns exist
-    required = ['alldeaths', 'log_alldeaths', 'masfem_c', 'gender_mf', 'wind_c', 'category', 'min_c', 'elapsedyrs_c']
-    missing = [c for c in required if c not in df.columns]
-    if len(missing) > 0:
-        raise ValueError(f'Missing required columns for modeling: {missing}')
+    # Verify required columns exist (helps surface clear errors)
+    required_final_cols = ['alldeaths', 'log_alldeaths', 'masfem_z', 'wind', 'category', 'min', 'year', 'elapsedyrs']
+    missing_final = [c for c in required_final_cols if c not in df.columns]
+    if missing_final:
+        raise ValueError(f"Transformed dataframe is missing required columns for modeling: {missing_final}")
 
-    # Formula: count model (Negative Binomial)
-    formula_nb = 'alldeaths ~ masfem_c + gender_mf + wind_c + C(category) + min_c + elapsedyrs_c'
+    # Define formula for main covariates. We use the standardized masfem index 'masfem_z'.
+    formula = 'alldeaths ~ masfem_z + wind + category + min + year + elapsedyrs'
 
-    # Fit GLM Negative Binomial
-    nb_model = smf.glm(formula=formula_nb, data=df, family=sm.families.NegativeBinomial()).fit(cov_type='HC3')
+    # Negative binomial (accounts for over-dispersed counts). Using GLM with NegativeBinomial family.
+    # Fit base model
+    nb_model = smf.glm(formula=formula, data=df, family=sm.families.NegativeBinomial()).fit()
+    # Fit again requesting robust covariance (some statsmodels GLM results may not support get_robustcov_results)
+    # so we obtain a results object with robust covariances by specifying cov_type at fit time.
+    nb_model_robust = smf.glm(formula=formula, data=df, family=sm.families.NegativeBinomial()).fit(cov_type='HC3')
 
-    # Robustness: OLS on log(1 + deaths)
-    formula_ols = 'log_alldeaths ~ masfem_c + gender_mf + wind_c + C(category) + min_c + elapsedyrs_c'
-    ols_model = smf.ols(formula=formula_ols, data=df).fit(cov_type='HC3')
+    # Robustness check: OLS on log transformed deaths
+    ols_formula = 'log_alldeaths ~ masfem_z + wind + category + min + year + elapsedyrs'
+    ols_model = smf.ols(formula=ols_formula, data=df).fit()
+    # For OLS, use get_robustcov_results which is available on RegressionResults
+    ols_model_robust = ols_model.get_robustcov_results(cov_type='HC3')
 
-    # Compute and attach a simple overdispersion diagnostic (variance/mean for counts)
-    mean_deaths = df['alldeaths'].mean()
-    var_deaths = df['alldeaths'].var()
-    overdispersion = None
-    if mean_deaths > 0:
-        overdispersion = float(var_deaths / mean_deaths)
-
+    # Pack results. Callers can inspect .summary() or use the returned fitted-objects directly.
     results = {
         'nb_model': nb_model,
-        'ols_model': ols_model,
-        'overdispersion_ratio_var_over_mean': overdispersion,
-        'n_observations': int(df.shape[0])
+        'nb_model_robust': nb_model_robust,
+        'ols_log_model': ols_model,
+        'ols_log_model_robust': ols_model_robust
     }
 
-    # Print brief summaries for quick inspection (optional)
-    print('Negative Binomial model summary:')
-    print(nb_model.summary())
-    print('\nOLS (log1p deaths) robustness summary:')
-    print(ols_model.summary())
-    if overdispersion is not None:
-        print(f'Overdispersion (var/mean) for alldeaths: {overdispersion:.3f}')
-
     return results
-
-

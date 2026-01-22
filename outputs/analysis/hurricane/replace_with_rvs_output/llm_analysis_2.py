@@ -15,90 +15,128 @@ def transform(df: pd.DataFrame) -> pd.DataFrame:
     # Work on a copy
     df = df.copy()
 
-    # Ensure numeric columns are numeric (coerce non-convertible values to NaN)
-    numeric_cols = ['masfem', 'gender_mf', 'alldeaths', 'ndam15', 'wind', 'category', 'min', 'year', 'elapsedyrs']
+    # Ensure numeric conversions for key columns
+    numeric_cols = ['masfem', 'masfem_mturk', 'wind', 'min', 'category', 'alldeaths', 'ndam15', 'year', 'elapsedyrs', 'gender_mf']
     for c in numeric_cols:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors='coerce')
 
-    # Keep only rows that have the key variables we need for analysis
-    # Primary variables: masfem (IV), alldeaths (DV), and intensity controls
-    required = ['masfem', 'alldeaths', 'wind', 'category', 'min', 'year']
-    present_required = [c for c in required if c in df.columns]
-    df = df.dropna(subset=present_required)
+    # Drop rows with missing essential variables for the primary model
+    required_for_primary = ['alldeaths', 'masfem', 'wind', 'min', 'category', 'year', 'elapsedyrs']
+    df = df.dropna(subset=required_for_primary)
 
-    # Standardized femininity score (z-score) for easier interpretation
-    df['Femininity_z'] = (df['masfem'] - df['masfem'].mean()) / (df['masfem'].std(ddof=0) if df['masfem'].std(ddof=0) != 0 else 1)
+    # Create primary DV and a logged alternative for diagnostics
+    df['alldeaths'] = df['alldeaths'].astype(int)
+    df['log1p_alldeaths'] = np.log1p(df['alldeaths'])
 
-    # Binary female-name indicator (0/1) from gender_mf
-    if 'gender_mf' in df.columns:
-        # Ensure values are 0/1; coerce anything else to NaN then fill with 0/1 cast
-        df['IsFemaleName'] = df['gender_mf'].round().astype('Int64').astype(float).fillna(0).astype(int)
-    else:
-        df['IsFemaleName'] = 0
-
-    # Dependent variables: log-transform deaths and damage to reduce skew and handle zeros
-    df['log_deaths'] = np.log1p(df['alldeaths'].astype(float))
+    # Create log-transformed damage variable (alternative DV for robustness)
     if 'ndam15' in df.columns:
-        df['log_ndam15'] = np.log1p(pd.to_numeric(df['ndam15'], errors='coerce').fillna(0))
+        df['ndam15'] = pd.to_numeric(df['ndam15'], errors='coerce')
+        df['log1p_ndam15'] = np.log1p(df['ndam15'].fillna(0))
+
+    # Binary female name indicator (ensure integer 0/1)
+    if 'gender_mf' in df.columns:
+        df['FemaleName'] = df['gender_mf'].fillna(0).astype(int)
     else:
-        df['log_ndam15'] = np.nan
+        df['FemaleName'] = 0
 
-    # Keep only columns needed for modeling plus original identifiers for traceability
-    keep_cols = ['ind', 'name'] if 'ind' in df.columns and 'name' in df.columns else []
-    keep_cols += ['masfem', 'Femininity_z', 'gender_mf', 'IsFemaleName', 'alldeaths', 'log_deaths', 'ndam15', 'log_ndam15', 'wind', 'category', 'min', 'year', 'elapsedyrs']
-    keep_cols = [c for c in keep_cols if c in df.columns]
+    # Standardize continuous predictors for interpretability in models
+    def standardize(series: pd.Series, new_name: str) -> None:
+        m = series.mean()
+        s = series.std(ddof=0)
+        if s == 0 or np.isnan(s):
+            df[new_name] = series - m
+        else:
+            df[new_name] = (series - m) / s
 
-    df = df[keep_cols]
+    standardize(df['masfem'], 'masfem_s')
 
-    # Final dropna for model columns to ensure model functions get complete rows
-    # (model function will also perform its own dropna to be safe)
-    model_req = ['Femininity_z', 'log_deaths', 'wind', 'category', 'min', 'year']
-    model_req = [c for c in model_req if c in df.columns]
-    df = df.dropna(subset=model_req)
+    if 'masfem_mturk' in df.columns:
+        df['masfem_mturk'] = pd.to_numeric(df['masfem_mturk'], errors='coerce')
+        df['masfem_mturk'] = df['masfem_mturk'].fillna(df['masfem_mturk'].mean())
+        standardize(df['masfem_mturk'], 'masfem_mturk_s')
+    else:
+        df['masfem_mturk_s'] = 0.0
 
+    standardize(df['wind'], 'wind_s')
+    standardize(df['min'], 'min_s')
+    standardize(df['year'], 'year_s')
+    standardize(df['elapsedyrs'], 'elapsedyrs_s')
+
+    # Ensure category numeric (use as numeric categorical predictor)
+    df['category'] = pd.to_numeric(df['category'], errors='coerce')
+
+    # Create dummies for data source (drop first to avoid multicollinearity)
+    if 'source' in df.columns:
+        src_dummies = pd.get_dummies(df['source'].astype(str), prefix='source', drop_first=False)
+        # Keep all dummies (we will include all and rely on statsmodels to drop collinearity if needed),
+        # but to follow a clear approach we will drop the most common category to avoid perfect multicollinearity.
+        # Choose to drop the first column alphabetically to be deterministic.
+        if src_dummies.shape[1] > 0:
+            drop_col = sorted(list(src_dummies.columns))[0]
+            src_dummies = src_dummies.drop(columns=[drop_col])
+        df = pd.concat([df, src_dummies], axis=1)
+    else:
+        # If no source column, create no-op
+        pass
+
+    # Keep only columns relevant for modeling and diagnostics to return
+    # (but preserve other columns in case user wants them)
     return df
 
 
 # ======== MODEL CODE ========
 def model(df: pd.DataFrame) -> dict:
-    # This function runs the primary and a robustness model.
-    # Primary test: does name femininity predict fatalities after controlling for objective storm severity?
+    import statsmodels.formula.api as smf
+    import statsmodels.api as sm
 
-    # Prepare model variables
-    X_cols = ['Femininity_z', 'wind', 'category', 'min', 'year', 'elapsedyrs', 'IsFemaleName']
-    X_cols = [c for c in X_cols if c in df.columns]
+    # Work with a copy of transformed df
+    df = df.copy()
 
-    # Ensure there are no missing values in the model matrix for the primary model
-    df_model = df.dropna(subset=X_cols + ['log_deaths'])
+    # Identify source dummies that were created in transform
+    source_dummies = [c for c in df.columns if c.startswith('source_')]
 
-    # If there are too few rows, raise a warning by returning an empty result dictionary
-    if df_model.shape[0] < 10:
-        return {'error': 'Not enough rows after cleaning to fit models', 'n_rows': int(df_model.shape[0])}
+    # Base covariates
+    covariates = [
+        'masfem_s',          # primary IV (standardized perceived femininity)
+        'masfem_mturk_s',    # robustness control (MTurk perceived femininity standardized)
+        'FemaleName',        # alternative IV (binary female name indicator)
+        'wind_s',
+        'min_s',
+        'category',
+        'year_s',
+        'elapsedyrs_s'
+    ]
 
-    # Build design matrix for fatalities model
-    X = sm.add_constant(df_model[X_cols])
-    y = df_model['log_deaths']
+    # Add any source dummies
+    covariates += source_dummies
 
-    # OLS with robust standard errors (HC3) to reduce sensitivity to heteroskedasticity
-    deaths_model = sm.OLS(y, X).fit(cov_type='HC3')
+    # Build formula for the negative binomial model on death counts
+    formula_nb = 'alldeaths ~ ' + ' + '.join(covariates)
 
-    # Robustness: run the same specification predicting monetary damage (if present)
-    damage_results = None
-    if 'log_ndam15' in df.columns:
-        df_damage = df.dropna(subset=X_cols + ['log_ndam15'])
-        if df_damage.shape[0] >= 10:
-            X2 = sm.add_constant(df_damage[X_cols])
-            y2 = df_damage['log_ndam15']
-            damage_model = sm.OLS(y2, X2).fit(cov_type='HC3')
-            damage_results = damage_model
+    # Fit Negative Binomial (GLM) for count DV (alldeaths)
+    # Use robust covariance (HC3) to protect against heteroskedasticity
+    nb_model = smf.glm(formula=formula_nb, data=df, family=sm.families.NegativeBinomial()).fit(cov_type='HC3')
 
-    # Return fitted model results objects so the caller can inspect summary(), params, etc.
+    # Secondary robustness: OLS on log(1 + deaths)
+    formula_ols = 'log1p_alldeaths ~ ' + ' + '.join(covariates)
+    ols_model = smf.ols(formula=formula_ols, data=df).fit(cov_type='HC3')
+
+    # Additional robustness: OLS on logged damage (if available)
+    damage_result = None
+    if 'log1p_ndam15' in df.columns:
+        formula_dam = 'log1p_ndam15 ~ ' + ' + '.join(covariates)
+        damage_model = smf.ols(formula=formula_dam, data=df).fit(cov_type='HC3')
+        damage_result = damage_model
+
+    # Return fitted results objects for downstream inspection
     return {
-        'n_obs_deaths_model': int(df_model.shape[0]),
-        'deaths_model': deaths_model,
-        'n_obs_damage_model': (int(df_damage.shape[0]) if 'df_damage' in locals() else 0),
-        'damage_model': damage_results
+        'nb_model': nb_model,
+        'ols_log_deaths': ols_model,
+        'ols_log_damage': damage_result,
+        'formula_nb': formula_nb,
+        'formula_ols': formula_ols,
+        'used_covariates': covariates
     }
 
 

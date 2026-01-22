@@ -1,162 +1,323 @@
 def extract_final_answer(model_output):
     """
-    Extracts statistics related to the 'female' coefficient from a fitted statsmodels Logit results object.
+    Extracts statistics on the effect of gender (female) on mortgage acceptance
+    from the model_output produced by the modeling function.
 
-    Returns a dictionary with:
-      - "object": a dict containing numeric estimates (coefficient, se, p-value, 95% CI,
-                  odds ratio and its 95% CI, and average marginal effect if available).
-      - "description": a short human-readable interpretation of the result in context,
-                       which states whether the effect is statistically significant
-                       (at the 5% level) and its direction.
+    Returns:
+      {
+        "object": {
+          "female": {coef_log_odds, se, z, p_value, OR, CI_lower_OR, CI_upper_OR, significant_at_0.05},
+          "female_black_interaction": {...},
+          "female_effect_for_black_applicants": {...}  # combined effect (female + interaction)
+        },
+        "description": <text explanation of what these numbers mean>
+      }
     """
     import numpy as np
-    import pandas as pd
+    from scipy import stats
 
-    res = model_output
+    # Expecting model_output to be the dict returned by the model() function
+    robust_res = model_output.get('robust_result')
+    or_table = model_output.get('odds_ratios_table')
 
-    # Basic sanity checks
-    if not hasattr(res, "params"):
-        raise ValueError("model_output does not appear to be a statsmodels results object (missing .params)")
+    if robust_res is None:
+        raise ValueError("model_output does not contain 'robust_result'")
 
-    # Find the parameter name for female
-    if "female" in res.params.index:
-        varname = "female"
+    # Obtain parameter values
+    params_raw = getattr(robust_res, 'params', None)
+    # Some result objects provide names via param_names or model.exog_names
+    if hasattr(params_raw, 'index'):
+        param_names = list(params_raw.index)
+        params_dict = {name: float(params_raw[name]) for name in param_names}
     else:
-        # try to find a close match containing 'female'
-        matches = [idx for idx in res.params.index if "female" in str(idx).lower()]
-        if matches:
-            varname = matches[0]
+        # params_raw may be ndarray
+        if hasattr(robust_res, 'param_names'):
+            param_names = list(robust_res.param_names)
+        elif hasattr(robust_res, 'model') and hasattr(robust_res.model, 'exog_names'):
+            param_names = list(robust_res.model.exog_names)
         else:
-            raise KeyError("No coefficient named 'female' found in model_output.params")
-
-    # Extract coefficient, se, p-value
-    coef = float(res.params[varname])
-    se = float(res.bse[varname]) if hasattr(res, "bse") else None
-    pvalue = float(res.pvalues[varname]) if hasattr(res, "pvalues") else None
-
-    # 95% confidence interval for coefficient
-    try:
-        ci_df = res.conf_int()
-        ci_lower = float(ci_df.loc[varname, 0])
-        ci_upper = float(ci_df.loc[varname, 1])
-    except Exception:
-        # fallback: compute using coef +/- 1.96*se if se available
-        if se is not None:
-            ci_lower = coef - 1.96 * se
-            ci_upper = coef + 1.96 * se
+            # fallback: try to infer length from params_raw
+            try:
+                length = len(params_raw)
+            except Exception:
+                param_names = []
+            else:
+                param_names = [str(i) for i in range(length)]
+        if params_raw is None:
+            params_dict = {}
         else:
-            ci_lower = ci_upper = None
+            try:
+                params_list = list(params_raw)
+            except Exception:
+                params_list = []
+            params_dict = {name: float(params_list[i]) if i < len(params_list) else float('nan') for i, name in enumerate(param_names)}
 
-    # Odds ratio and its CI
-    try:
-        odds_ratio = float(np.exp(coef))
-        or_ci_lower = float(np.exp(ci_lower)) if ci_lower is not None else None
-        or_ci_upper = float(np.exp(ci_upper)) if ci_upper is not None else None
-    except Exception:
-        odds_ratio = or_ci_lower = or_ci_upper = None
-
-    # Try to compute average marginal effect (AME) for 'female' if available
-    ame = ame_se = ame_p = None
-    try:
-        # get_margeff returns a MarginsResults; summary_frame is a DataFrame with dy/dx, Std.Err, P>|z|
-        margeff = res.get_margeff()
-        ame_df = margeff.summary_frame()
-        # Index may contain varname; otherwise try to match similarly
-        if varname in ame_df.index:
-            ame = float(ame_df.loc[varname, "dy/dx"])
-            # column label for std err may vary in versions; try common names
-            if "Std. Err." in ame_df.columns:
-                ame_se = float(ame_df.loc[varname, "Std. Err."])
-            elif "Std. Err" in ame_df.columns:
-                ame_se = float(ame_df.loc[varname, "Std. Err"])
-            elif "std err" in ame_df.columns:
-                ame_se = float(ame_df.loc[varname, "std err"])
-            elif "Std. Error" in ame_df.columns:
-                ame_se = float(ame_df.loc[varname, "Std. Error"])
-            # p-value columns
-            if "P>|z|" in ame_df.columns:
-                ame_p = float(ame_df.loc[varname, "P>|z|"])
-            elif "pvalue" in ame_df.columns:
-                ame_p = float(ame_df.loc[varname, "pvalue"])
+    # p-values: robust_res.pvalues might be Series or ndarray
+    pvalues_raw = getattr(robust_res, 'pvalues', None)
+    pvals_dict = {}
+    if pvalues_raw is not None:
+        if hasattr(pvalues_raw, 'index'):
+            for name in pvalues_raw.index:
+                try:
+                    pvals_dict[name] = float(pvalues_raw[name])
+                except Exception:
+                    pvals_dict[name] = float('nan')
         else:
-            # try case-insensitive match
-            lowered = [idx.lower() for idx in ame_df.index.astype(str)]
-            if varname.lower() in lowered:
-                matched = ame_df.index[lowered.index(varname.lower())]
-                ame = float(ame_df.loc[matched, "dy/dx"])
-                # attempt to extract se and p similarly as above
-                if "P>|z|" in ame_df.columns:
-                    ame_p = float(ame_df.loc[matched, "P>|z|"])
-    except Exception:
-        # margin effects may not be available; ignore silently
-        pass
+            # ndarray or list-like
+            try:
+                p_list = list(pvalues_raw)
+            except Exception:
+                p_list = []
+            for i, name in enumerate(param_names):
+                pvals_dict[name] = float(p_list[i]) if i < len(p_list) else float('nan')
 
-    # Build numeric output object
-    numeric_result = {
-        "variable": varname,
-        "coef": coef,
-        "se": se,
-        "p_value": pvalue,
-        "95%_CI_coef": [ci_lower, ci_upper],
-        "odds_ratio": odds_ratio,
-        "95%_CI_odds_ratio": [or_ci_lower, or_ci_upper],
-        "average_marginal_effect": ame,
-        "ame_se": ame_se,
-        "ame_p_value": ame_p
+    # Standard errors: try bse, then se
+    se_raw = getattr(robust_res, 'bse', None)
+    if se_raw is None:
+        se_raw = getattr(robust_res, 'se', None)
+    se_dict = {}
+    if se_raw is not None:
+        if hasattr(se_raw, 'index'):
+            for name in se_raw.index:
+                try:
+                    se_dict[name] = float(se_raw[name])
+                except Exception:
+                    se_dict[name] = float('nan')
+        else:
+            try:
+                se_list = list(se_raw)
+            except Exception:
+                se_list = []
+            for i, name in enumerate(param_names):
+                se_dict[name] = float(se_list[i]) if i < len(se_list) else float('nan')
+
+    # Confidence intervals: robust_res.conf_int() may be callable; try to get DataFrame/array
+    conf = None
+    try:
+        if hasattr(robust_res, 'conf_int') and callable(robust_res.conf_int):
+            conf = robust_res.conf_int()
+        else:
+            conf = getattr(robust_res, 'conf_int', None)
+    except Exception:
+        conf = None
+
+    # Covariance matrix: try cov_params(), then cov, then covariance attribute
+    cov = None
+    try:
+        if hasattr(robust_res, 'cov_params') and callable(robust_res.cov_params):
+            cov = robust_res.cov_params()
+        else:
+            cov = getattr(robust_res, 'cov', None)
+            if cov is None:
+                cov = getattr(robust_res, 'cov_params', None)
+    except Exception:
+        cov = getattr(robust_res, 'cov', None)
+
+    # Normalize cov to numpy array if it's a DataFrame-like
+    cov_array = None
+    if cov is not None:
+        try:
+            if hasattr(cov, 'values'):
+                cov_array = np.asarray(cov.values)
+            else:
+                cov_array = np.asarray(cov)
+        except Exception:
+            cov_array = None
+
+    # Normalize conf to a structure we can index by name
+    conf_is_df = False
+    conf_array = None
+    conf_dict = {}
+    if conf is not None:
+        if hasattr(conf, 'loc') and hasattr(conf, 'columns'):
+            # DataFrame-like
+            conf_is_df = True
+        else:
+            try:
+                conf_array = np.asarray(conf)
+            except Exception:
+                conf_array = None
+        # If conf_array and param_names available, build dict
+        if conf_array is not None and len(conf_array) == len(param_names):
+            for i, name in enumerate(param_names):
+                try:
+                    low = float(conf_array[i, 0])
+                    high = float(conf_array[i, 1])
+                except Exception:
+                    low = float('nan')
+                    high = float('nan')
+                conf_dict[name] = (low, high)
+        elif conf_is_df:
+            # fill conf_dict from DataFrame-like using loc
+            for name in param_names:
+                try:
+                    row = conf.loc[name]
+                    low = float(row.iloc[0])
+                    high = float(row.iloc[1])
+                except Exception:
+                    low = float('nan')
+                    high = float('nan')
+                conf_dict[name] = (low, high)
+
+    # Helper to get index of a parameter
+    def index_of(name):
+        try:
+            return param_names.index(name)
+        except ValueError:
+            return None
+
+    def get_conf(name):
+        if name in conf_dict:
+            return conf_dict[name]
+        if conf_is_df:
+            try:
+                row = conf.loc[name]
+                return (float(row.iloc[0]), float(row.iloc[1]))
+            except Exception:
+                return (float('nan'), float('nan'))
+        if conf_array is not None:
+            idx = index_of(name)
+            if idx is not None and idx < conf_array.shape[0]:
+                try:
+                    return (float(conf_array[idx, 0]), float(conf_array[idx, 1]))
+                except Exception:
+                    return (float('nan'), float('nan'))
+        return (float('nan'), float('nan'))
+
+    # Build term stats robustly
+    def term_stats(term):
+        if term not in param_names:
+            return None
+        coef = float(params_dict.get(term, float('nan')))
+        # standard error: prefer se_dict if present, else sqrt of cov diagonal
+        if term in se_dict:
+            se = float(se_dict[term])
+        elif cov_array is not None:
+            idx = index_of(term)
+            if idx is not None and idx < cov_array.shape[0]:
+                try:
+                    se = float(np.sqrt(cov_array[idx, idx]))
+                except Exception:
+                    se = float('nan')
+            else:
+                se = float('nan')
+        else:
+            se = float('nan')
+        z = float(coef / se) if (se and not np.isnan(se) and se != 0) else float('nan')
+        p = float(pvals_dict.get(term, float('nan')))
+        ci_low, ci_high = get_conf(term)
+        OR = float(np.exp(coef)) if (coef is not None and not np.isnan(coef)) else float('nan')
+        OR_low = float(np.exp(ci_low)) if (not np.isnan(ci_low)) else float('nan')
+        OR_high = float(np.exp(ci_high)) if (not np.isnan(ci_high)) else float('nan')
+        significant = (p < 0.05) if (not np.isnan(p)) else False
+        return {
+            'coef_log_odds': coef,
+            'se': se,
+            'z': z,
+            'p_value': p,
+            'OR': OR,
+            'CI_lower_OR': OR_low,
+            'CI_upper_OR': OR_high,
+            'significant_at_0.05': bool(significant)
+        }
+
+    female_stats = term_stats('female')
+    female_black_stats = term_stats('female_black')
+
+    # Combined effect for Black applicants: coef_sum = female + female_black
+    combined_stats = None
+    if ('female' in param_names) and ('female_black' in param_names):
+        coef_f = float(params_dict.get('female', float('nan')))
+        coef_fb = float(params_dict.get('female_black', float('nan')))
+        coef_sum = coef_f + coef_fb
+        # compute variance of sum if covariance matrix available
+        se_sum = float('nan')
+        if cov_array is not None:
+            idx_f = index_of('female')
+            idx_fb = index_of('female_black')
+            if idx_f is not None and idx_fb is not None and idx_f < cov_array.shape[0] and idx_fb < cov_array.shape[0]:
+                try:
+                    var_sum = cov_array[idx_f, idx_f] + cov_array[idx_fb, idx_fb] + 2.0 * cov_array[idx_f, idx_fb]
+                    se_sum = float(np.sqrt(var_sum)) if var_sum >= 0 else float('nan')
+                except Exception:
+                    se_sum = float('nan')
+        z_sum = float(coef_sum / se_sum) if (not np.isnan(se_sum) and se_sum != 0) else float('nan')
+        p_sum = float(2 * (1 - stats.norm.cdf(abs(z_sum)))) if (not np.isnan(z_sum)) and (not np.isnan(se_sum)) else float('nan')
+        if not np.isnan(se_sum):
+            ci_low_sum = float(coef_sum - stats.norm.ppf(0.975) * se_sum)
+            ci_high_sum = float(coef_sum + stats.norm.ppf(0.975) * se_sum)
+        else:
+            ci_low_sum = float('nan')
+            ci_high_sum = float('nan')
+        OR_sum = float(np.exp(coef_sum)) if (coef_sum is not None and not np.isnan(coef_sum)) else float('nan')
+        OR_low_sum = float(np.exp(ci_low_sum)) if (not np.isnan(ci_low_sum)) else float('nan')
+        OR_high_sum = float(np.exp(ci_high_sum)) if (not np.isnan(ci_high_sum)) else float('nan')
+        combined_stats = {
+            'coef_log_odds': coef_sum,
+            'se': se_sum,
+            'z': z_sum,
+            'p_value': p_sum,
+            'OR': OR_sum,
+            'CI_lower_OR': OR_low_sum,
+            'CI_upper_OR': OR_high_sum,
+            'significant_at_0.05': (p_sum < 0.05) if (not np.isnan(p_sum)) else False,
+            'note': "This is the effect of being female (vs male) for applicants who are Black (female + female_black interaction)."
+        }
+
+    # Build a concise object to return
+    result_object = {
+        'female': female_stats,
+        'female_black_interaction': female_black_stats,
+        'female_effect_for_black_applicants': combined_stats
     }
 
-    # Create a short interpretation string based on p-value and sign
-    def fmt(x):
+    # Short interpretation text
+    description_lines = []
+    description_lines.append(
+        "Interpretation: The model includes a gender main effect ('female') and an interaction ('female_black'). "
+        "The 'female' coefficient describes the effect of being female (vs male) when black==0 (i.e., non-Black applicants)."
+    )
+    description_lines.append(
+        "For Black applicants the effect of female is the sum of 'female' and 'female_black' (provided above as 'female_effect_for_black_applicants')."
+    )
+    # Add succinct numeric summary if available
+    if female_stats is not None:
         try:
-            return f"{x:.4f}"
+            OR = female_stats.get('OR', float('nan'))
+            CI_low = female_stats.get('CI_lower_OR', float('nan'))
+            CI_high = female_stats.get('CI_upper_OR', float('nan'))
+            pval = female_stats.get('p_value', float('nan'))
+            sig = female_stats.get('significant_at_0.05', False)
+            description_lines.append(
+                f"Non-Black applicants: OR = {OR:.3f} "
+                f"(95% CI: {CI_low:.3f} - {CI_high:.3f}), "
+                f"p = {pval:.3f}. "
+                f"{'Statistically significant.' if sig else 'Not statistically significant.'}"
+            )
         except Exception:
-            return str(x)
-
-    if pvalue is None:
-        significance_text = "p-value unavailable; cannot assess statistical significance."
-    else:
-        if pvalue < 0.01:
-            sig_level = "p < 0.01"
-        elif pvalue < 0.05:
-            sig_level = "p < 0.05"
-        elif pvalue < 0.1:
-            sig_level = "p < 0.10"
-        else:
-            sig_level = None
-
-        if sig_level is not None:
-            direction = "increase" if coef > 0 else "decrease"
-            significance_text = (
-                f"The effect is statistically significant ({sig_level}). "
-                f"Being female is associated with a {direction} in the log-odds of mortgage acceptance."
+            # If formatting fails, provide a fallback brief note
+            description_lines.append("Non-Black applicants: statistics available in the 'object' output.")
+    if combined_stats is not None:
+        try:
+            OR = combined_stats.get('OR', float('nan'))
+            CI_low = combined_stats.get('CI_lower_OR', float('nan'))
+            CI_high = combined_stats.get('CI_upper_OR', float('nan'))
+            pval = combined_stats.get('p_value', float('nan'))
+            sig = combined_stats.get('significant_at_0.05', False)
+            ptext = f"p = {pval:.3f}" if not np.isnan(pval) else "p = NA (covariance missing)"
+            sig_text = "Statistically significant." if sig else "Not statistically significant."
+            description_lines.append(
+                f"Black applicants: OR = {OR:.3f} "
+                f"(95% CI: {CI_low:.3f} - {CI_high:.3f}), {ptext}. {sig_text}"
             )
-        else:
-            significance_text = (
-                "The effect is not statistically significant at conventional levels (p >= 0.10). "
-                "We cannot reject the null hypothesis of no effect of gender on mortgage acceptance."
-            )
+        except Exception:
+            description_lines.append("Black applicants: combined statistics available in the 'object' output.")
 
-    # Add an interpretable magnitude statement using odds ratio and/or AME if available
-    magnitude_parts = []
-    if odds_ratio is not None:
-        if odds_ratio > 1:
-            magnitude_parts.append(
-                f"Odds ratio = {fmt(odds_ratio)} (95% CI: [{fmt(or_ci_lower) if or_ci_lower is not None else None}, {fmt(or_ci_upper) if or_ci_upper is not None else None}])"
-            )
-        else:
-            magnitude_parts.append(
-                f"Odds ratio = {fmt(odds_ratio)} (95% CI: [{fmt(or_ci_lower) if or_ci_lower is not None else None}, {fmt(or_ci_upper) if or_ci_upper is not None else None}])"
-            )
-    if ame is not None:
-        # AME is in probability units (change in probability)
-        magnitude_parts.append(f"Average marginal effect = {fmt(ame)} (approx. {float(ame)*100:.2f} percentage points change in probability); ame p-value = {fmt(ame_p) if ame_p is not None else 'N/A'}")
-
-    magnitude_text = " ".join(magnitude_parts) if magnitude_parts else "Magnitude metrics (odds ratio / AME) not available."
-
-    description = (
-        f"'female' coefficient = {fmt(coef)} (SE = {fmt(se) if se is not None else 'N/A'}, p = {fmt(pvalue) if pvalue is not None else 'N/A'}). "
-        f"95% CI for coefficient = [{fmt(ci_lower) if ci_lower is not None else 'N/A'}, {fmt(ci_upper) if ci_upper is not None else 'N/A'}]. "
-        f"{significance_text} {magnitude_text}"
+    description_lines.append(
+        "Conclusion: Based on the model output, interpret the reported odds ratios and p-values to assess whether gender "
+        "is associated with mortgage acceptance for non-Black applicants and whether the gender effect differs for Black applicants (interaction)."
     )
 
-    return {"object": numeric_result, "description": description}
+    description = " ".join(description_lines)
+
+    return {"object": result_object, "description": description}

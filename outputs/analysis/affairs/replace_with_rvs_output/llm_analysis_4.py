@@ -13,98 +13,120 @@ df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/anal
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Transform the raw Fair (1978) affairs dataset into a modeling dataframe.
+    Transform the raw Fair (1978) dataset into a modeling dataframe.
 
-    Outputs (columns required for the model):
-      - affair_count: integer count of extramarital affairs (from 'affairs')
-      - HasChildren: binary indicator (1 = 'yes', 0 = 'no') from 'children'
-      - gender_male: binary indicator (1 = male, 0 = female) from 'gender'
-      - age, yearsmarried, religiousness, education, occupation, rating: numeric controls
-
-    Steps:
-      - Coerce key columns to numeric where appropriate
-      - Map categorical yes/no to 1/0
-      - Drop rows with missing values in any variable needed for the model
+    Outputs (columns) included for modeling:
+    - affairs_count: integer count of extramarital affairs (from 'affairs')
+    - topcoded_affairs: indicator if affairs value is at or above the top-code (12)
+    - HasChildren: binary indicator for presence of children (1=yes, 0=no)
+    - female: binary indicator for female (1=female, 0=male)
+    - age, age_c: raw age and age centered
+    - yearsmarried, yearsmarried_c: raw years married and centered
+    - religiousness, education, occupation, rating: kept as numeric controls
     """
     df = df.copy()
 
-    # Create affair_count from 'affairs' (coerce non-numeric to NaN first)
-    df['affair_count'] = pd.to_numeric(df['affairs'], errors='coerce')
+    # Ensure key columns exist
+    expected_cols = ['affairs', 'children', 'gender', 'age', 'yearsmarried',
+                     'religiousness', 'education', 'occupation', 'rating']
 
-    # Map children (yes/no) to binary indicator HasChildren
-    # Be robust to capitalization / whitespace
-    df['HasChildren'] = df['children'].astype(str).str.strip().str.lower().map({'yes': 1, 'no': 0})
+    # Convert affairs to numeric and create count variable
+    df['affairs'] = pd.to_numeric(df['affairs'], errors='coerce')
+    df = df.dropna(subset=['affairs', 'children', 'gender'])
 
-    # Map gender to binary male indicator
-    df['gender_male'] = df['gender'].astype(str).str.strip().str.lower().map({'male': 1, 'female': 0})
+    # Keep original numeric as integer count. The dataset uses special codes (7,12) but they are numeric values
+    df['affairs_count'] = df['affairs'].astype(int)
 
-    # Ensure numeric controls are numeric (coerce invalids to NaN)
-    for col in ['age', 'yearsmarried', 'religiousness', 'education', 'occupation', 'rating']:
-        df[col] = pd.to_numeric(df[col], errors='coerce')
+    # Indicator for top-coding (12 used in this dataset for frequent affairs)
+    df['topcoded_affairs'] = (df['affairs_count'] >= 12).astype(int)
 
-    # Drop rows with missing values in any of the variables used in the model
-    required_cols = ['affair_count', 'HasChildren', 'gender_male', 'age', 'yearsmarried', 'religiousness', 'education', 'occupation', 'rating']
-    df = df.dropna(subset=required_cols)
+    # Map children to binary 1/0. Accept common string variants.
+    def map_children(x):
+        if pd.isna(x):
+            return np.nan
+        s = str(x).strip().lower()
+        if s in ('yes', 'y', '1', 'true', 't'):
+            return 1
+        if s in ('no', 'n', '0', 'false', 'f'):
+            return 0
+        return np.nan
+    df['HasChildren'] = df['children'].apply(map_children)
 
-    # Convert affair_count to integer (counts). If there are non-integer codes they will be truncated.
-    # The original coding uses values like 0,1,2,3,7,12; keep them as integers.
-    df['affair_count'] = df['affair_count'].astype(int)
+    # Map gender to binary female indicator
+    def map_female(x):
+        if pd.isna(x):
+            return np.nan
+        s = str(x).strip().lower()
+        if s.startswith('f'):
+            return 1
+        if s.startswith('m'):
+            return 0
+        return np.nan
+    df['female'] = df['gender'].apply(map_female)
 
-    # Make sure HasChildren and gender_male are integer type 0/1
-    df['HasChildren'] = df['HasChildren'].astype(int)
-    df['gender_male'] = df['gender_male'].astype(int)
+    # Ensure numeric controls are numeric; drop rows with missing control values used in the model
+    num_cols = ['age', 'yearsmarried', 'religiousness', 'education', 'occupation', 'rating']
+    for c in num_cols:
+        df[c] = pd.to_numeric(df[c], errors='coerce')
 
-    # Return dataframe containing at least the columns used in the model (keeps other columns too)
-    return df
+    # Drop rows with NA in any of the modeling variables
+    model_cols = ['affairs_count', 'HasChildren', 'female'] + num_cols
+    df = df.dropna(subset=model_cols)
+
+    # Center continuous covariates for interpretability
+    df['age_c'] = df['age'] - df['age'].mean()
+    df['yearsmarried_c'] = df['yearsmarried'] - df['yearsmarried'].mean()
+
+    # Final returned dataframe contains all columns necessary for the model
+    out_cols = [
+        'affairs_count', 'topcoded_affairs', 'HasChildren', 'female',
+        'age', 'age_c', 'yearsmarried', 'yearsmarried_c',
+        'religiousness', 'education', 'occupation', 'rating'
+    ]
+
+    return df[out_cols].reset_index(drop=True)
 
 
 # ======== MODEL CODE ========
-def model(df: pd.DataFrame) -> any:
+def model(df: pd.DataFrame) -> dict:
     """
-    Fit a count model appropriate for a dependent variable with many zeros and overdispersion.
+    Fit a primary Negative Binomial regression for count outcome 'affairs_count' and
+    provide an OLS robustness check. The primary specification estimates the effect
+    of having children (HasChildren) on the number of extramarital affairs, controlling
+    for gender, age, years married, religiousness, education, occupation, and marriage rating.
 
-    Primary approach: Zero-Inflated Negative Binomial (ZINB) with the same covariates in the
-    count and inflation equations. The model estimates whether having children is associated
-    with a lower expected count of extramarital affairs, controlling for demographic and
-    marriage-related covariates.
-
-    Returns the fitted results object (statsmodels result). If ZINB fails to converge, falls
-    back to a Negative Binomial GLM.
+    Returns a dictionary with fitted model results objects.
     """
-    import statsmodels.api as sm
-    try:
-        # Import ZINB implementation
-        from statsmodels.discrete.count_model import ZeroInflatedNegativeBinomialP
-    except Exception:
-        ZeroInflatedNegativeBinomialP = None
-
-    # Prepare exogenous matrix (controls + treatment)
-    exog_cols = ['HasChildren', 'gender_male', 'age', 'yearsmarried', 'religiousness', 'education', 'occupation', 'rating']
-    X = df[exog_cols].astype(float)
-    X = sm.add_constant(X)
-    y = df['affair_count'].astype(int)
-
-    # Try ZINB first
-    if ZeroInflatedNegativeBinomialP is not None:
-        try:
-            mod = ZeroInflatedNegativeBinomialP(endog=y, exog=X, exog_infl=X, inflation='logit')
-            # suppress optimizer output; increase iterations if necessary
-            res = mod.fit(method='newton', maxiter=200, disp=0)
-            print(res.summary())
-            return res
-        except Exception as e:
-            print('ZINB failed:', str(e))
-            print('Falling back to Negative Binomial GLM...')
-
-    # Fallback: Negative Binomial GLM (does not model zero-inflation explicitly)
     import statsmodels.formula.api as smf
-    # Recreate a dataframe for formula-based fitting
-    df_model = X.copy()
-    df_model['affair_count'] = y.values
-    formula = 'affair_count ~ HasChildren + gender_male + age + yearsmarried + religiousness + education + occupation + rating'
 
-    nb_res = smf.glm(formula=formula, data=df_model, family=sm.families.NegativeBinomial()).fit()
-    print(nb_res.summary())
-    return nb_res
+    # Formula: primary specification
+    formula = ('affairs_count ~ HasChildren + female + age_c + yearsmarried_c + '
+               'religiousness + education + occupation + rating')
+
+    # 1) Negative Binomial (recommended for over-dispersed count data)
+    try:
+        nb_res = smf.glm(formula=formula, data=df, family=sm.families.NegativeBinomial()).fit()
+    except Exception:
+        # Fallback: statsmodels discrete NegativeBinomial if GLM family fails
+        from statsmodels.discrete.count_model import NegativeBinomial
+        nb_mod = NegativeBinomial(df['affairs_count'], sm.add_constant(df[['HasChildren','female','age_c','yearsmarried_c','religiousness','education','occupation','rating']]))
+        nb_res = nb_mod.fit(disp=False)
+
+    # 2) OLS robustness check (linear model on counts)
+    ols_res = smf.ols(formula=formula, data=df).fit()
+
+    # Compute a simple overdispersion statistic (variance/mean) for affairs_count
+    mean_count = df['affairs_count'].mean()
+    var_count = df['affairs_count'].var()
+    overdispersion = var_count / mean_count if mean_count > 0 else np.nan
+
+    results = {
+        'negative_binomial': nb_res,
+        'ols': ols_res,
+        'overdispersion_stat': overdispersion,
+        'n_obs': int(df.shape[0])
+    }
+
+    return results
 
 

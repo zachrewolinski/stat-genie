@@ -13,51 +13,68 @@ df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/anal
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Transform the raw dataset into the analysis dataframe. Produces the following new/clean columns used in modeling:
-      - MajorityChoice: binary (1 if y==2 (majority), else 0)
-      - age_c: centered age (age - mean(age))
-      - is_male: 1 if gender==2 (boy), 0 if gender==1 (girl)
-      - culture: categorical dtype for site ID
-      - majority_first: ensured integer 0/1
+    Prepare the dataset for modeling. Transformations performed:
+      - Drop rows missing essential variables (y, age, culture).
+      - Create mean-centered age (age_centered).
+      - Create a categorical site variable (culture_cat) as a string/category.
+      - Recode gender to binary is_male (0 = girl, 1 = boy).
+      - Ensure majority_first is integer 0/1.
+      - Create two derived binary outcomes for follow-up analyses:
+          * SociallyGuided: 1 if child chose a demonstrated option (majority or minority), 0 if chose undemonstrated option.
+          * Majority_vs_Minority: among socially guided choices, 1 if majority (y==2), 0 if minority (y==3). For y==1 this column will be NaN.
+      - Create y_adj = y - 1 (0/1/2) which is convenient for some modeling functions.
 
-    Drops rows with missing values in required columns.
+    The returned dataframe contains all columns referenced in the modeling code: ['y','y_adj','age_centered','culture_cat','is_male','majority_first','SociallyGuided','Majority_vs_Minority']
     """
-    # work on a copy
     df = df.copy()
 
-    # Required columns for analysis
+    # Ensure required columns exist
     required = ['y', 'age', 'culture', 'gender', 'majority_first']
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"Input dataframe is missing required columns: {missing}")
 
-    # Coerce to numeric where appropriate and drop rows with missing values
-    for col in ['y', 'age', 'gender', 'majority_first']:
-        df[col] = pd.to_numeric(df[col], errors='coerce')
+    # Drop rows with missing core variables
+    df = df.dropna(subset=['y', 'age', 'culture'])
 
-    # Convert culture to categorical (it may be numeric IDs)
-    df['culture'] = df['culture'].astype('category')
+    # Coerce types
+    df['age'] = pd.to_numeric(df['age'], errors='coerce')
+    df = df.dropna(subset=['age'])
+    df['culture'] = pd.to_numeric(df['culture'], errors='coerce').astype(int)
 
-    # Drop rows with missing values in required columns after coercion
-    df = df.dropna(subset=required)
+    # Mean-center age for interpretability
+    df['age_centered'] = df['age'] - df['age'].mean()
 
-    # Ensure valid y values (1=unchosen, 2=majority, 3=minority). Keep only these rows
-    df = df[df['y'].isin([1, 2, 3])]
+    # Create a categorical label for culture (keep numeric id but as category)
+    # Use generic site labels (site_1, site_2, ...); if you have a mapping to real site names, replace here.
+    df['culture_cat'] = df['culture'].apply(lambda x: f"site_{int(x)}").astype('category')
 
-    # Create dependent variable: did the child choose the majority option?
-    df['MajorityChoice'] = (df['y'] == 2).astype(int)
+    # Recode gender to is_male (0 = girl (1), 1 = boy (2))
+    # If genders are encoded differently in some rows, non-matching values will become NaN and will be left as-is.
+    df['is_male'] = df['gender'].apply(lambda v: 1 if v == 2 else (0 if v == 1 else np.nan)).astype('float')
 
-    # Center age for interpretability and numerical stability
-    df['age_c'] = df['age'] - df['age'].mean()
+    # Ensure majority_first is 0/1
+    df['majority_first'] = pd.to_numeric(df['majority_first'], errors='coerce').fillna(0).astype(int)
 
-    # Create gender indicator: is_male (1 = boy (gender==2), 0 = girl (gender==1))
-    df['is_male'] = (df['gender'] == 2).astype(int)
+    # Primary dependent variable is y (1,2,3). Create y_adj = y-1 (0,1,2) for some modeling functions
+    df['y'] = pd.to_numeric(df['y'], errors='coerce').astype(int)
+    df = df[df['y'].isin([1, 2, 3])].copy()
+    df['y_adj'] = (df['y'] - 1).astype(int)
 
-    # Ensure majority_first is integer 0/1 (already 0/1 in schema, but coerce to int)
-    df['majority_first'] = df['majority_first'].astype(int)
+    # Derived binary outcomes for focused analyses
+    df['SociallyGuided'] = df['y'].isin([2, 3]).astype(int)  # 1 if chose a demonstrated option (majority or minority)
 
-    # Ensure culture remains categorical and has no unused categories
-    df['culture'] = df['culture'].cat.remove_unused_categories()
+    # Majority vs minority among socially guided choices: 1 = majority (y==2); 0 = minority (y==3); NaN for y==1
+    df['Majority_vs_Minority'] = df['y'].map({2: 1, 3: 0})
 
-    # Final drop of any rows that inadvertently got NaNs
-    df = df.dropna(subset=['MajorityChoice', 'age_c', 'is_male', 'majority_first', 'culture'])
+    # Optionally create coarse age groups (developmental stages) for descriptive tables or plots
+    # bins chosen to reflect early childhood, middle childhood, late childhood, early adolescence
+    bins = [3.5, 6.5, 9.5, 12.5, 14.5]
+    labels = ['4-6', '7-9', '10-12', '13-14']
+    df['age_group'] = pd.cut(df['age'], bins=bins, labels=labels, right=True)
+
+    # Final housekeeping: reset index
+    df = df.reset_index(drop=True)
 
     return df
 
@@ -65,24 +82,71 @@ def transform(df: pd.DataFrame) -> pd.DataFrame:
 # ======== MODEL CODE ========
 def model(df: pd.DataFrame):
     """
-    Fit a logistic regression predicting the binary MajorityChoice outcome.
-    The primary predictor is centered age (age_c). Culture is included as a categorical moderator via an interaction (age_c * C(culture)).
-    Gender (is_male) and majority_first are included as covariates.
+    Run the statistical models to answer whether reliance on social information and preference for majority vary across cultures and development.
 
-    Model formula:
-      MajorityChoice ~ age_c * C(culture) + is_male + majority_first
+    Analyses performed:
+      1) Multinomial logistic regression predicting the three-category choice (y: 1=unchosen, 2=majority, 3=minority)
+         from age_centered, culture (as categorical dummies), their interaction, and controls (is_male, majority_first).
+      2) Binary logistic regression predicting SociallyGuided (1 if chose a demonstrated option (2 or 3), 0 if undemonstrated (1)).
+      3) Among socially-guided trials only, logistic regression predicting Majority_vs_Minority (1=majority, 0=minority).
 
-    Returns the fitted statsmodels results object (LogitResults).
+    Returns a dictionary of fitted statsmodels result objects for each model.
     """
-    import statsmodels.formula.api as smf
+    import patsy
+    import statsmodels.api as sm
 
-    # Ensure the culture column is treated as categorical in the formula via C(culture).
-    formula = 'MajorityChoice ~ age_c * C(culture) + is_male + majority_first'
+    results = {}
 
-    # Fit logistic regression (binomial) using statsmodels' formula API
-    # Use disp=False to suppress iterative output in normal usage
-    model_res = smf.logit(formula=formula, data=df).fit(disp=False)
+    # Check required columns
+    req = ['y_adj', 'age_centered', 'culture_cat', 'is_male', 'majority_first', 'SociallyGuided', 'Majority_vs_Minority']
+    missing = [c for c in req if c not in df.columns]
+    if missing:
+        raise ValueError(f"Transformed dataframe missing columns required for modeling: {missing}")
 
-    return model_res
+    # Build design matrix for predictors. Use patsy to get consistent dummy coding for culture.
+    # We include interaction between age_centered and culture_cat to test whether developmental change differs across sites.
+    formula_exog = 'age_centered * C(culture_cat) + is_male + majority_first'
+
+    # 1) Multinomial logistic regression (three-category outcome)
+    try:
+        exog = patsy.dmatrix(formula_exog, df, return_type='dataframe')
+        exog = sm.add_constant(exog, has_constant='add')
+        endog = df['y_adj'].astype(int)  # 0,1,2
+
+        mnlogit = sm.MNLogit(endog, exog)
+        mnlogit_res = mnlogit.fit(method='newton', maxiter=200, disp=False)
+        results['multinomial'] = mnlogit_res
+    except Exception as e:
+        results['multinomial'] = e
+
+    # 2) Logistic regression for SociallyGuided (demonstrated vs undemonstrated)
+    try:
+        exog_bin = patsy.dmatrix(formula_exog, df, return_type='dataframe')
+        exog_bin = sm.add_constant(exog_bin, has_constant='add')
+        y_bin = df['SociallyGuided'].astype(int)
+        logit = sm.Logit(y_bin, exog_bin)
+        logit_res = logit.fit(disp=False)
+        results['social_use_logit'] = logit_res
+    except Exception as e:
+        results['social_use_logit'] = e
+
+    # 3) Majority vs Minority among socially-guided choices
+    df_sg = df[df['SociallyGuided'] == 1].copy()
+    if df_sg.shape[0] < 10:
+        # Not enough data to fit a reliable model
+        results['majority_vs_minority_logit'] = ValueError('Not enough socially-guided observations to fit majority/minority model')
+    else:
+        try:
+            exog_mm = patsy.dmatrix(formula_exog, df_sg, return_type='dataframe')
+            exog_mm = sm.add_constant(exog_mm, has_constant='add')
+            y_mm = df_sg['Majority_vs_Minority'].astype(int)
+            logit_mm = sm.Logit(y_mm, exog_mm)
+            logit_mm_res = logit_mm.fit(disp=False)
+            results['majority_vs_minority_logit'] = logit_mm_res
+        except Exception as e:
+            results['majority_vs_minority_logit'] = e
+
+    # Return the fitted result objects (or exceptions) so the caller can inspect summaries.
+    return results
 
 

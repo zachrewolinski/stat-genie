@@ -13,59 +13,58 @@ df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/anal
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Transform the raw district-level dataframe to create the variables needed for the analysis.
+    Transform the original dataframe to produce the columns used in modeling.
 
-    Produces these new columns used in the model:
-      - AvgScore: mean of 'read' and 'math'
+    Output columns (added/modified):
       - StudentTeacherRatio: students / teachers
-      - ComputersPerStudent: computer / students
+      - AvgScore: mean of 'read' and 'math'
+      - ComputerPerStudent: computer / students
+      - LogStudents: log1p(students)
+      - county, grades converted to categorical
 
-    Also ensures categorical typing for 'grades' and 'county' and drops rows with missing values
-    in variables required for the analysis.
+    The function drops rows with missing core variables (students, teachers, read, math)
+    and drops rows where teachers <= 0 to avoid division-by-zero.
     """
     df = df.copy()
 
-    # Ensure required numeric columns are present and convert if necessary
-    required_cols = ['students', 'teachers', 'read', 'math', 'computer', 'expenditure', 'lunch', 'calworks', 'english', 'income', 'grades', 'county']
-    # Drop rows missing core numeric or score variables
-    df = df.dropna(subset=['students', 'teachers', 'read', 'math'])
+    # Coerce core numeric columns to numeric (safe conversion)
+    numeric_cols = ['students', 'teachers', 'read', 'math', 'computer', 'expenditure', 'income', 'english', 'lunch', 'calworks']
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
 
-    # Create dependent variable: average of reading and math scores
+    # Drop rows missing core variables required to compute the IV and DV
+    required_core = ['students', 'teachers', 'read', 'math']
+    present_required = [c for c in required_core if c in df.columns]
+    df = df.dropna(subset=present_required)
+
+    # Remove rows with non-positive teacher counts to avoid division by zero
+    df = df[df['teachers'] > 0]
+
+    # Student-teacher ratio (students per teacher)
+    df['StudentTeacherRatio'] = df['students'] / df['teachers']
+
+    # Dependent variable: average of reading and math
     df['AvgScore'] = df[['read', 'math']].mean(axis=1)
 
-    # Create independent variable: student-teacher ratio
-    # Protect against division by zero just in case (teachers should be > 0)
-    df['TeacherCountSafe'] = df['teachers'].replace({0: np.nan})
-    df['StudentTeacherRatio'] = df['students'] / df['TeacherCountSafe']
+    # Computers per student
+    if 'computer' in df.columns:
+        # avoid division by zero (students>0 preserved above)
+        df['ComputerPerStudent'] = df['computer'] / df['students']
+    else:
+        df['ComputerPerStudent'] = np.nan
 
-    # Create computers per student control
-    # If students==0 (shouldn't happen), set to NaN
-    df['ComputersPerStudent'] = df['computer'] / df['students']
+    # Log of student count to control for district size (use log1p to be safe)
+    df['LogStudents'] = np.log1p(df['students'])
 
-    # Cast categorical controls to category dtype
-    if 'grades' in df.columns:
-        df['grades'] = df['grades'].astype('category')
+    # Cast categorical controls to category dtype for modeling convenience
     if 'county' in df.columns:
         df['county'] = df['county'].astype('category')
+    if 'grades' in df.columns:
+        df['grades'] = df['grades'].astype('category')
 
-    # Drop rows with missing values in constructed variables or key controls used in the model
-    model_vars = ['AvgScore', 'StudentTeacherRatio', 'ComputersPerStudent', 'expenditure', 'lunch', 'calworks', 'english', 'income', 'grades', 'county']
-    # Only drop those model vars that exist in the dataframe (to be robust)
-    existing_model_vars = [v for v in model_vars if v in df.columns]
-    df = df.dropna(subset=existing_model_vars)
-
-    # Optionally: remove extreme outliers in ratio (e.g., top 0.5%) to avoid undue influence
-    if 'StudentTeacherRatio' in df.columns:
-        high_cut = df['StudentTeacherRatio'].quantile(0.995)
-        low_cut = df['StudentTeacherRatio'].quantile(0.005)
-        df = df[(df['StudentTeacherRatio'] <= high_cut) & (df['StudentTeacherRatio'] >= low_cut)]
-
-    # Drop helper column
-    if 'TeacherCountSafe' in df.columns:
-        df = df.drop(columns=['TeacherCountSafe'])
-
-    # Reset index for downstream modeling convenience
-    df = df.reset_index(drop=True)
+    # Keep original numeric control columns as-is (expenditure, income, english, lunch, calworks)
+    # Note: rows with missing control vars will be handled by the modeling function (dropped in model-ready subset)
 
     return df
 
@@ -73,26 +72,44 @@ def transform(df: pd.DataFrame) -> pd.DataFrame:
 # ======== MODEL CODE ========
 def model(df: pd.DataFrame):
     """
-    Estimate the association between student-teacher ratio and average standardized test scores.
+    Estimate the association between student-teacher ratio and district average academic performance.
 
-    Model specification (primary):
-      AvgScore ~ StudentTeacherRatio + expenditure + lunch + calworks + english + income
-                 + ComputersPerStudent + C(grades) + C(county)
+    Model specification (linear OLS with county and grade-span fixed effects):
+      AvgScore ~ StudentTeacherRatio + expenditure + income + english + lunch + calworks
+                 + ComputerPerStudent + LogStudents + C(county) + C(grades)
 
-    We use OLS with robust (HC3) standard errors to reduce sensitivity to heteroskedasticity.
-    Returns the fitted regression results object.
+    Robust (HC3) standard errors are used.
+
+    Returns the fitted statsmodels results object with robust covariance.
     """
     import statsmodels.formula.api as smf
 
-    # Build formula. Include categorical controls for grades and county (fixed effects).
+    # Work on a copy; assume transform() has been applied already
+    df = df.copy()
+
+    # List of variables used in the model; only keep rows with non-missing values here
+    model_vars = [
+        'AvgScore', 'StudentTeacherRatio', 'expenditure', 'income', 'english', 'lunch', 'calworks',
+        'ComputerPerStudent', 'LogStudents', 'county', 'grades'
+    ]
+    present_vars = [v for v in model_vars if v in df.columns]
+    df_model = df.dropna(subset=present_vars)
+
+    # Construct formula
     formula = (
-        'AvgScore ~ StudentTeacherRatio + expenditure + lunch + calworks + english + income '
-        '+ ComputersPerStudent + C(grades) + C(county)'
+        'AvgScore ~ StudentTeacherRatio + expenditure + income + english + lunch + calworks '
+        '+ ComputerPerStudent + LogStudents + C(county) + C(grades)'
     )
 
-    # Fit OLS with robust standard errors (HC3). The fit() call returns the results object.
-    model = smf.ols(formula=formula, data=df).fit(cov_type='HC3')
+    # Fit OLS
+    mod = smf.ols(formula=formula, data=df_model).fit()
 
-    return model
+    # Convert to robust covariance (HC3) for heteroskedasticity-robust SEs
+    robust_res = mod.get_robustcov_results(cov_type='HC3')
+
+    # Print brief summary (user can inspect robust_res.summary())
+    print(robust_res.summary())
+
+    return robust_res
 
 

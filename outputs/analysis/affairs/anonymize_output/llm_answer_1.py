@@ -1,218 +1,141 @@
 def extract_final_answer(model_output):
     """
-    Extracts the effect of 'Children' on extramarital affairs from model_output.
-
-    Expects model_output to be a dict possibly containing:
-      - 'tobit' : a fitted Tobit model result object (statsmodels GenericLikelihoodModelResults or similar)
-      - 'tobit_error' : an error string (if Tobit failed)
-      - 'logit' : a fitted Logit model result object (statsmodels results)
-      - 'logit_error' : an error string (if Logit failed)
-
+    Extracts the effect of 'HasChildren' from the provided model_output dictionary.
     Returns a dict with keys:
-      - "object": a dict with extracted statistics for Tobit and Logit (or error messages)
-      - "description": a short plain-English interpretation about whether having children
-                       decreases engagement in extramarital affairs based on available models.
+      - "object": a dict containing numeric results and metadata (or error messages)
+      - "description": a short English interpretation of what the numbers mean
+    The function handles the case where the logistic model failed (as in the provided
+    model_output) and extracts OLS results (coefficient, p-value, 95% CI, nobs)
+    from the positive-sample OLS RegressionResultsWrapper if present.
     """
-    import numpy as np
-    from scipy import stats
+    import pandas as pd
 
-    def summarize_result(res, model_name):
-        """
-        Attempt to extract coefficient, SE, p-value and 95% CI for 'Children'.
-        Works if res has .params and either .bse or .cov_params or .pvalues or .conf_int().
-        If res.params has an index, use it; otherwise assume ordering:
-          ['const'] + ['Children','Age','YearsMarried','Male','Religiosity','Education','Occupation','MaritalSatisfaction']
-        """
-        summary = {}
-        if res is None:
-            return {"error": f"No {model_name} result object provided."}
-
-        # get params (as pandas Series or numpy array)
-        params = getattr(res, "params", None)
-        if params is None:
-            # some wrappers store params as .params if present; if not, try attribute 'beta' etc.
-            params = getattr(res, "beta", None)
-        if params is None:
-            return {"error": f"{model_name} result has no params attribute."}
-
-        # Convert to numpy array and obtain names if possible
-        try:
-            # If pandas Series
-            param_names = list(params.index)
-            param_values = np.asarray(params.values, dtype=float)
-        except Exception:
-            # assume numpy array
-            param_values = np.asarray(params, dtype=float)
-            param_names = None
-
-        # Known covariate order used in the modeling code
-        covariates = ['Children', 'Age', 'YearsMarried', 'Male', 'Religiosity', 'Education', 'Occupation', 'MaritalSatisfaction']
-        # try to determine name->index mapping
-        if param_names is None:
-            # common lengths: len(covariates)+1 if constant included, or len(covariates)
-            if param_values.size == len(covariates) + 1:
-                param_names = ['const'] + covariates
-            elif param_values.size == len(covariates):
-                param_names = covariates
-            else:
-                # fallback: create generic names
-                param_names = [f"param_{i}" for i in range(param_values.size)]
-
-        # create dict of params
-        param_dict = {name: float(val) for name, val in zip(param_names, param_values)}
-
-        if 'Children' not in param_dict:
-            # attempt case-insensitive match
-            match = None
-            for name in param_dict:
-                if name.lower() == 'children':
-                    match = name
-                    break
-            if match is None:
-                return {"error": f"'Children' not found among parameters for {model_name}. Available: {list(param_dict.keys())}"}
-            children_name = match
-        else:
-            children_name = 'Children'
-
-        beta = param_dict[children_name]
-        # standard errors
-        se = None
-        # try .bse
-        bse = getattr(res, 'bse', None)
-        if bse is not None:
-            try:
-                se_val = bse[children_name] if hasattr(bse, 'get') or hasattr(bse, 'index') else np.asarray(bse)[param_names.index(children_name)]
-                se = float(se_val)
-            except Exception:
-                # fallback if bse is array-like without names
-                try:
-                    se = float(np.asarray(bse)[param_names.index(children_name)])
-                except Exception:
-                    se = None
-        if se is None:
-            # try cov_params (matrix)
-            try:
-                cov = res.cov_params()
-                # cov could be DataFrame or ndarray
-                if hasattr(cov, 'loc'):
-                    se = float(np.sqrt(cov.loc[children_name, children_name]))
-                else:
-                    idx = param_names.index(children_name)
-                    se = float(np.sqrt(np.asarray(cov)[idx, idx]))
-            except Exception:
-                se = None
-
-        # compute p-value and CI if needed
-        pval = None
-        ci_lower = ci_upper = None
-        if se is not None and se > 0:
-            z = beta / se
-            pval = float(2 * (1 - stats.norm.cdf(abs(z))))
-            ci_lower = float(beta - 1.96 * se)
-            ci_upper = float(beta + 1.96 * se)
-        else:
-            # try pvalues attribute
-            pvals = getattr(res, 'pvalues', None)
-            if pvals is not None:
-                try:
-                    pval = float(pvals[children_name] if hasattr(pvals, 'get') or hasattr(pvals, 'index') else np.asarray(pvals)[param_names.index(children_name)])
-                except Exception:
-                    pval = None
-            # try conf_int method
-            try:
-                conf = res.conf_int()
-                if hasattr(conf, 'loc'):
-                    ci_lower = float(conf.loc[children_name, 0])
-                    ci_upper = float(conf.loc[children_name, 1])
-                else:
-                    ci_arr = np.asarray(conf)
-                    idx = param_names.index(children_name)
-                    ci_lower = float(ci_arr[idx, 0])
-                    ci_upper = float(ci_arr[idx, 1])
-            except Exception:
-                pass
-
-        # assemble summary
-        summary['parameter_name'] = children_name
-        summary['coef'] = float(beta)
-        summary['se'] = None if se is None else float(se)
-        summary['p_value'] = None if pval is None else float(pval)
-        summary['95%_ci'] = None if (ci_lower is None or ci_upper is None) else (ci_lower, ci_upper)
-
-        # brief interpretation for this model
-        if summary['p_value'] is not None:
-            if summary['p_value'] < 0.05:
-                if summary['coef'] < 0:
-                    summary['interpretation'] = "Statistically significant negative association: having children is associated with fewer reported extramarital acts."
-                else:
-                    summary['interpretation'] = "Statistically significant positive association: having children is associated with more reported extramarital acts."
-            else:
-                if summary['coef'] < 0:
-                    summary['interpretation'] = "Negative point estimate but not statistically significant at 0.05; evidence is weak that having children reduces extramarital acts."
-                elif summary['coef'] > 0:
-                    summary['interpretation'] = "Positive point estimate but not statistically significant at 0.05; evidence is weak that having children increases extramarital acts."
-                else:
-                    summary['interpretation'] = "Point estimate is zero."
-        else:
-            # no p-value available
-            if summary['coef'] < 0:
-                summary['interpretation'] = "Negative point estimate for 'Children' (no p-value available); cannot determine statistical significance."
-            elif summary['coef'] > 0:
-                summary['interpretation'] = "Positive point estimate for 'Children' (no p-value available); cannot determine statistical significance."
-            else:
-                summary['interpretation'] = "Point estimate is zero and no p-value available."
-
-        return summary
-
-    final_object = {}
+    out_object = {}
     messages = []
 
-    # Tobit
-    if 'tobit' in model_output and model_output['tobit'] is not None:
+    # 1) Logistic model: check if present or an error was recorded
+    if 'logit_model' in model_output and model_output['logit_model'] is not None:
+        # If a fitted logit model object is present, attempt to extract stats similarly.
+        logit = model_output['logit_model']
         try:
-            final_object['tobit'] = summarize_result(model_output['tobit'], 'tobit')
+            params = getattr(logit, 'params', None)
+            if params is not None:
+                names = list(params.index)
+                # find parameter name that corresponds to HasChildren
+                target = next((n for n in names if 'HasChildren' in n), None)
+                if target is not None:
+                    coef = float(params[target])
+                    pval = float(logit.pvalues[target])
+                    # conf_int may be method on result; build DataFrame for indexing
+                    ci_arr = logit.conf_int()
+                    ci_df = pd.DataFrame(ci_arr, index=names, columns=['ci_lower', 'ci_upper'])
+                    ci_lower, ci_upper = float(ci_df.loc[target, 'ci_lower']), float(ci_df.loc[target, 'ci_upper'])
+                    out_object['Logit'] = {
+                        'param_name': target,
+                        'coef': coef,
+                        'pvalue': pval,
+                        'ci_95': [ci_lower, ci_upper],
+                        'interpretation': ('coef is the log-odds change in probability of reporting any affair '
+                                           'for HasChildren=1 vs 0, holding controls constant.')
+                    }
+                else:
+                    out_object['Logit'] = {'error': "No parameter name containing 'HasChildren' found in logit params."}
+            else:
+                out_object['Logit'] = {'error': 'Logit model present but has no params attribute.'}
         except Exception as e:
-            final_object['tobit'] = {"error": f"Exception while extracting Tobit results: {str(e)}"}
-    elif 'tobit_error' in model_output:
-        final_object['tobit'] = {"error": f"Tobit failed: {model_output['tobit_error']}"}
+            out_object['Logit'] = {'error': f'Error extracting from logit model: {e}'}
     else:
-        final_object['tobit'] = {"error": "No Tobit result or error message found in model_output."}
+        # Logit missing or failed: capture error message if provided
+        logit_err = model_output.get('logit_error')
+        if logit_err:
+            out_object['Logit'] = {'error': f'Logistic model not available. Error: {logit_err}'}
+            messages.append('Logistic regression for AnyAffair was not estimated due to the error recorded in model_output.')
+        else:
+            out_object['Logit'] = {'error': 'Logistic model not provided in model_output.'}
+            messages.append('No logistic model present in model_output.')
 
-    # Logit
-    if 'logit' in model_output and model_output['logit'] is not None:
+    # 2) OLS among those with AffairCount > 0
+    ols_res = model_output.get('ols_positive_model')
+    if ols_res is None:
+        out_object['OLS_positive'] = {'error': 'No OLS positive-sample model in model_output.'}
+        messages.append('OLS on positive-sample not available.')
+    else:
         try:
-            final_object['logit'] = summarize_result(model_output['logit'], 'logit')
+            # statsmodels RegressionResultsWrapper: params, pvalues, conf_int(), nobs
+            params = ols_res.params
+            names = list(params.index)
+            target = next((n for n in names if 'HasChildren' in n), None)
+            if target is None:
+                out_object['OLS_positive'] = {'error': "No parameter name containing 'HasChildren' found in OLS params."}
+                messages.append("Could not find 'HasChildren' parameter in OLS model parameters.")
+            else:
+                coef = float(params[target])
+                pval = float(ols_res.pvalues[target])
+                # confidence intervals: conf_int returns an array; align with param names
+                try:
+                    ci_arr = ols_res.conf_int()
+                    ci_df = pd.DataFrame(ci_arr, index=names, columns=['ci_lower', 'ci_upper'])
+                    ci_lower = float(ci_df.loc[target, 'ci_lower'])
+                    ci_upper = float(ci_df.loc[target, 'ci_upper'])
+                except Exception:
+                    # fallback: try conf_int with alpha kw
+                    ci = ols_res.conf_int(alpha=0.05)
+                    ci_df = pd.DataFrame(ci, index=names, columns=['ci_lower', 'ci_upper'])
+                    ci_lower = float(ci_df.loc[target, 'ci_lower'])
+                    ci_upper = float(ci_df.loc[target, 'ci_upper'])
+
+                # number of observations used in OLS
+                try:
+                    n_obs = int(ols_res.nobs)
+                except Exception:
+                    # fallback: try attribute in model
+                    try:
+                        n_obs = int(len(ols_res.model.endog))
+                    except Exception:
+                        n_obs = None
+
+                # direction and significance interpretation
+                direction = 'decrease' if coef < 0 else 'increase'
+                sig = 'statistically significant (p < 0.05)' if pval < 0.05 else 'not statistically significant (p >= 0.05)'
+                interp = (f"Among respondents who reported any affair (positive-sample, n={n_obs}), "
+                          f"the OLS coefficient on '{target}' = {coef:.4g} (95% CI [{ci_lower:.4g}, {ci_upper:.4g}], p = {pval:.4g}). "
+                          f"This indicates that having children is associated with a {direction} of {abs(coef):.4g} units in the "
+                          f"AffairCount measure, controlling for the listed covariates. The effect is {sig}.")
+
+                out_object['OLS_positive'] = {
+                    'param_name': target,
+                    'coef': coef,
+                    'pvalue': pval,
+                    'ci_95': [ci_lower, ci_upper],
+                    'n_obs': n_obs,
+                    'interpretation_short': interp
+                }
+                messages.append('Extracted OLS positive-sample estimate for HasChildren.')
         except Exception as e:
-            final_object['logit'] = {"error": f"Exception while extracting Logit results: {str(e)}"}
-    elif 'logit_error' in model_output:
-        final_object['logit'] = {"error": f"Logit failed: {model_output['logit_error']}"}
+            out_object['OLS_positive'] = {'error': f'Error extracting from OLS model: {e}'}
+            messages.append(f'Error while extracting OLS results: {e}')
+
+    # Build a concise description summarizing results and limitations
+    summary_lines = []
+    # OLS summary line
+    ols_info = out_object.get('OLS_positive')
+    if ols_info and 'error' not in ols_info:
+        summary_lines.append(ols_info['interpretation_short'])
     else:
-        final_object['logit'] = {"error": "No Logit result or error message found in model_output."}
+        summary_lines.append('No usable OLS positive-sample estimate for HasChildren available.')
 
-    # Build description
-    # If either model produced a numeric summary, use that to give a concise answer.
-    interpretations = []
-    for m in ['tobit', 'logit']:
-        info = final_object.get(m, {})
-        if 'error' in info:
-            messages.append(f"{m.upper()}: {info['error']}")
-        else:
-            coef = info.get('coef')
-            p = info.get('p_value')
-            interp = info.get('interpretation', '')
-            interpretations.append(f"{m.upper()}: coef={coef}, p={p}. {interp}")
-
-    if len(interpretations) > 0:
-        description = " | ".join(interpretations)
-        if any("Statistically significant negative" in s for s in interpretations) and not any("Statistically significant positive" in s for s in interpretations):
-            description = "Overall: Evidence that having children decreases engagement in extramarital affairs (see model details). " + description
-        elif any("Statistically significant positive" in s for s in interpretations) and not any("Statistically significant negative" in s for s in interpretations):
-            description = "Overall: Evidence that having children increases engagement in extramarital affairs (see model details). " + description
-        else:
-            # either no significant results or mixed/uncertain
-            description = "Overall: No consistent statistically significant evidence that having children decreases engagement in extramarital affairs based on available model results. " + description
+    # Logit summary line
+    logit_info = out_object.get('Logit')
+    if logit_info and 'error' not in logit_info:
+        li = logit_info
+        summary_lines.append(
+            f"Logistic model: parameter '{li['param_name']}' coef = {li['coef']:.4g}, p = {li['pvalue']:.4g}, "
+            f"95% CI = [{li['ci_95'][0]:.4g}, {li['ci_95'][1]:.4g}]. Interpretation: {li.get('interpretation','')}"
+        )
     else:
-        # No numeric summaries; report errors
-        description = "Modeling failed or no fitted models available. Details: " + " ; ".join(messages) if messages else "No results available."
+        err_msg = logit_info.get('error') if logit_info else 'Logit result missing.'
+        summary_lines.append(f"Logistic model unavailable or failed: {err_msg}")
 
-    return {"object": final_object, "description": description}
+    description = " ".join(summary_lines)
+
+    return {'object': out_object, 'description': description}

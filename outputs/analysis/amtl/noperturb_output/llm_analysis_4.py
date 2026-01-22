@@ -13,134 +13,95 @@ df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/anal
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Transform the raw dataset into a dataframe ready for binomial GLM.
-
-    Adds/returns the following columns (used in modeling):
-      - n_missing: integer number of teeth missing for the row (num_amtl)
-      - trials: integer number of observable sockets (sockets)
-      - prop_missing: n_missing / trials (for inspection)
-      - is_homo: 1 if genus == 'Homo sapiens', otherwise 0
-      - age_c: centered age (age - mean(age))
-      - prob_male: carried through (should be between 0 and 1)
-      - tooth_Premolar, tooth_Posterior: dummy columns (Anterior reference)
-      - specimen: kept as-is (for clustering)
-
-    Cleaning rules:
-      - Drop rows with missing values in key columns: num_amtl, sockets, genus, tooth_class, age, prob_male, specimen
-      - Drop rows with non-positive sockets or where num_amtl > sockets
+    Prepare the dataset for binomial regression / GEE analysis.
+    - Drops rows with missing critical fields
+    - Removes rows with non-positive sockets
+    - Computes proportion of missing teeth (prop_amtl)
+    - Creates binary is_human indicator (Homo sapiens vs others)
+    - Centers age (age_c)
+    - Ensures tooth_class is categorical
+    Returns a dataframe containing columns used by the model:
+    ['num_amtl', 'sockets', 'prop_amtl', 'is_human', 'age', 'age_c', 'prob_male', 'tooth_class', 'specimen', 'genus', 'pop']
     """
-    # Make a copy to avoid modifying original
     df = df.copy()
 
-    # Required columns
-    required_cols = ['num_amtl', 'sockets', 'genus', 'tooth_class', 'age', 'prob_male', 'specimen']
-    missing_req = [c for c in required_cols if c not in df.columns]
-    if missing_req:
-        raise KeyError(f"Missing required columns in input df: {missing_req}")
+    # Required columns for analysis
+    required_cols = ['num_amtl', 'sockets', 'age', 'prob_male', 'genus', 'tooth_class', 'specimen']
+    missing = [c for c in required_cols if c not in df.columns]
+    if len(missing) > 0:
+        raise ValueError(f"Input dataframe is missing required columns: {missing}")
 
-    # Drop rows with NA in required fields
+    # Drop rows with missing values in critical columns
     df = df.dropna(subset=required_cols)
 
-    # Ensure numeric types where applicable
-    df['num_amtl'] = pd.to_numeric(df['num_amtl'], errors='coerce')
-    df['sockets'] = pd.to_numeric(df['sockets'], errors='coerce')
-    df['age'] = pd.to_numeric(df['age'], errors='coerce')
-    df['prob_male'] = pd.to_numeric(df['prob_male'], errors='coerce')
-
-    # Drop rows that became NA after coercion
-    df = df.dropna(subset=['num_amtl', 'sockets', 'age', 'prob_male'])
-
-    # Remove rows with invalid trial counts
+    # Remove rows where sockets is not positive
     df = df[df['sockets'] > 0]
 
-    # Remove rows where num_amtl is out of plausible range relative to sockets
-    df = df[(df['num_amtl'] >= 0) & (df['num_amtl'] <= df['sockets'])]
+    # Ensure integer counts
+    # (some datasets may store them as floats; cast carefully)
+    df['num_amtl'] = df['num_amtl'].astype(int)
+    df['sockets'] = df['sockets'].astype(int)
 
-    # Create modeling columns
-    df['n_missing'] = df['num_amtl'].astype(int)
-    df['trials'] = df['sockets'].astype(int)
-    df['prop_missing'] = df['n_missing'] / df['trials']
+    # Proportion of teeth missing in the observed sockets
+    df['prop_amtl'] = df['num_amtl'] / df['sockets']
 
-    # Independent variable: is_homo indicator
-    df['is_homo'] = (df['genus'].astype(str).str.strip() == 'Homo sapiens').astype(int)
+    # Binary indicator for modern humans (Homo sapiens)
+    # Use exact match to the expected label 'Homo sapiens' but be robust to whitespace
+    df['genus'] = df['genus'].astype(str).str.strip()
+    df['is_human'] = (df['genus'] == 'Homo sapiens').astype(int)
 
-    # Center age to improve numeric stability
-    age_mean = df['age'].mean()
-    df['age_c'] = df['age'] - age_mean
+    # Center age for model interpretability
+    df['age_c'] = df['age'] - df['age'].mean()
 
-    # Ensure prob_male is bounded [0,1]
-    df['prob_male'] = df['prob_male'].clip(0.0, 1.0)
+    # Ensure tooth_class is categorical and clean whitespace
+    df['tooth_class'] = df['tooth_class'].astype(str).str.strip()
+    df['tooth_class'] = pd.Categorical(df['tooth_class'], categories=pd.unique(df['tooth_class']))
 
-    # Create tooth_class dummies; use Anterior as reference by drop_first=True
-    tooth_dummies = pd.get_dummies(df['tooth_class'].astype(str).str.strip(), prefix='tooth', drop_first=True)
-    # Expected columns: tooth_Premolar, tooth_Posterior (if those categories present)
-    for col in tooth_dummies.columns:
-        df[col] = tooth_dummies[col]
+    # Keep commonly useful columns and return
+    keep_cols = ['num_amtl', 'sockets', 'prop_amtl', 'is_human', 'genus', 'age', 'age_c', 'prob_male', 'tooth_class', 'specimen', 'pop']
+    # Some columns (e.g., pop) may be missing in some inputs; keep those that exist
+    keep_cols = [c for c in keep_cols if c in df.columns]
 
-    # If a dummy column is missing because category not present, add it with zeros
-    for expected in ['tooth_Premolar', 'tooth_Posterior']:
-        if expected not in df.columns:
-            df[expected] = 0
-
-    # Keep specimen as string identifier for clustering
-    df['specimen'] = df['specimen'].astype(str)
-
-    # Final check: drop any rows where trials <= 0 or n_missing is NA
-    df = df.dropna(subset=['n_missing', 'trials'])
-    df = df[df['trials'] > 0]
-
-    # Return only columns needed for downstream analysis plus a few for inspection
-    cols_keep = [
-        'specimen', 'genus', 'tooth_class', 'n_missing', 'trials', 'prop_missing',
-        'is_homo', 'age_c', 'prob_male', 'tooth_Premolar', 'tooth_Posterior'
-    ]
-    # Add any columns that exist but were not in the list (safe-guard)
-    cols_present = [c for c in cols_keep if c in df.columns]
-    return df[cols_present]
+    return df[keep_cols]
 
 
 # ======== MODEL CODE ========
-def model(df: pd.DataFrame) -> Any:
+def model(df: pd.DataFrame):
     """
-    Fit a binomial GLM predicting the count of antemortem tooth loss (n_missing) out of trials (sockets)
-    with primary predictor is_homo and controls age_c, prob_male, and tooth class dummies.
+    Fit a clustered binomial model comparing AMTL frequency in modern humans versus non-human primates,
+    controlling for age (centered), sex probability, and tooth class.
 
-    Uses clustered (by specimen) robust standard errors to account for non-independence of observations
-    coming from the same specimen.
+    Approach:
+    - Use Generalized Estimating Equations (GEE) with binomial family to model counts/proportions
+      while accounting for correlation among observations from the same specimen.
+    - Endog is the proportion prop_amtl and sockets are provided as weights (binomial denominator).
+    - Exchangeable working correlation is used for within-specimen correlation.
 
-    Returns the fitted GLMResults object.
+    Returns the fitted GEE results object.
     """
-    # Ensure required transformed columns are present
-    required = ['n_missing', 'trials', 'is_homo', 'age_c', 'prob_male', 'tooth_Premolar', 'tooth_Posterior', 'specimen']
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        raise KeyError(f"Missing required columns for modeling: {missing}")
+    # Basic checks
+    for c in ['num_amtl', 'sockets', 'prop_amtl', 'is_human', 'age_c', 'prob_male', 'tooth_class', 'specimen']:
+        if c not in df.columns:
+            raise ValueError(f"Transformed dataframe must contain column: {c}")
 
-    # Build endogenous variable as a two-column array [[successes, failures], ...]
-    endog = np.vstack([df['n_missing'].values, (df['trials'] - df['n_missing']).values]).T
+    # Construct formula: main test is is_human (1 = Homo sapiens)
+    formula = 'prop_amtl ~ is_human + age_c + prob_male + C(tooth_class)'
 
-    # Build exogenous matrix (design matrix)
-    exog_cols = ['is_homo', 'age_c', 'prob_male', 'tooth_Premolar', 'tooth_Posterior']
-    exog = df[exog_cols].astype(float)
-    exog = sm.add_constant(exog, has_constant='add')
+    # Instantiate GEE with binomial family. Use sockets as weights (the binomial denominator).
+    # Group by specimen to account for multiple tooth-class observations per individual.
+    model_gee = sm.GEE.from_formula(
+        formula,
+        groups='specimen',
+        data=df,
+        family=sm.families.Binomial(),
+        cov_struct=sm.cov_struct.Exchangeable(),
+        weights=df['sockets']
+    )
 
-    # Fit binomial GLM
-    model_glm = sm.GLM(endog, exog, family=sm.families.Binomial())
+    result = model_gee.fit()
 
-    # Fit and obtain clustered robust standard errors by specimen
-    try:
-        results = model_glm.fit(cov_type='cluster', cov_kwds={'groups': df['specimen']})
-    except Exception:
-        # Fallback to default fit if clustering fails for some reason
-        results = model_glm.fit()
-
-    # Attach some metadata for interpretation
-    results.model_data = {
-        'exog_cols': exog_cols,
-        'n_obs': len(df),
-        'n_specimens': df['specimen'].nunique()
-    }
-
-    return results
+    # Print a brief summary for quick inspection; return full result for downstream use
+    print(result.summary())
+    return result
 
 
