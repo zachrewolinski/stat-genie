@@ -13,109 +13,120 @@ df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/anal
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Prepare data for logistic regression of mortgage acceptance on applicant gender.
+    Transform the raw dataset into a cleaned dataframe suitable for logistic regression.
+    - Keeps only columns required for the model
+    - Drops rows with missing values in those columns
+    - Ensures binary indicators are integer-typed
+    - Z-scores continuous predictors and appends them with "_z" suffix
 
-    Transformations performed:
-    - Make a copy of the input dataframe.
-    - Ensure necessary columns exist and coerce them to appropriate numeric types.
-    - Drop rows with missing values in dependent variable, independent variable, or controls.
-    - Ensure binary indicators are integer typed.
-
-    The returned dataframe contains the same column names used by the model:
-      'accept', 'female', 'black', 'mortgage_credit', 'consumer_credit',
-      'bad_history', 'PI_ratio', 'loan_to_value', 'housing_expense_ratio',
-      'self_employed', 'married', 'denied_PMI'
+    Final dataframe will contain the dependent variable 'accept', the independent variable
+    'female', binary controls ('black','bad_history','married','self_employed'), and
+    standardized continuous controls: 'mortgage_credit_z','consumer_credit_z',
+    'PI_ratio_z','loan_to_value_z','housing_expense_ratio_z'.
     """
     df = df.copy()
 
-    # Required columns for the analysis
+    # Columns needed for the model (use original names where available)
     required_cols = [
-        'accept', 'female', 'black', 'mortgage_credit', 'consumer_credit',
-        'bad_history', 'PI_ratio', 'loan_to_value', 'housing_expense_ratio',
-        'self_employed', 'married', 'denied_PMI'
+        'accept',
+        'female',
+        'black',
+        'mortgage_credit',
+        'consumer_credit',
+        'PI_ratio',
+        'loan_to_value',
+        'bad_history',
+        'married',
+        'self_employed',
+        'housing_expense_ratio'
     ]
 
-    missing = [c for c in required_cols if c not in df.columns]
-    if len(missing) > 0:
-        raise ValueError(f"Input dataframe is missing required columns: {missing}")
+    # Keep only required columns (if any are missing in the dataset this will raise KeyError)
+    df = df[required_cols]
 
-    # Coerce numeric columns (will convert strings that look numeric)
-    # Binary indicators -- allow coercion; later we'll drop rows with NaNs
-    binary_cols = ['female', 'black', 'bad_history', 'self_employed', 'married', 'denied_PMI', 'accept']
-    for c in binary_cols:
-        df[c] = pd.to_numeric(df[c], errors='coerce')
-
-    # Continuous / ordinal numeric columns
-    numeric_cols = ['mortgage_credit', 'consumer_credit', 'PI_ratio', 'loan_to_value', 'housing_expense_ratio']
-    for c in numeric_cols:
-        df[c] = pd.to_numeric(df[c], errors='coerce')
-
-    # Drop rows with missing values in any variable used by the model
-    model_cols = required_cols.copy()
-    df = df.dropna(subset=model_cols)
+    # Drop rows with missing values in any of the required columns
+    df = df.dropna(subset=required_cols).reset_index(drop=True)
 
     # Ensure binary columns are integer (0/1)
-    df[binary_cols] = df[binary_cols].astype(int)
+    binary_cols = ['accept', 'female', 'black', 'bad_history', 'married', 'self_employed']
+    for col in binary_cols:
+        # Some datasets may have floats like 0.0/1.0; cast to int
+        df[col] = df[col].astype(int)
 
-    # Keep the final set of columns (no renaming) - model expects these exact names
-    final_cols = required_cols
-    df = df[final_cols].reset_index(drop=True)
+    # Continuous predictors to standardize (z-score). Use sample std (ddof=0 or ddof=1 both acceptable).
+    cont_cols = ['mortgage_credit', 'consumer_credit', 'PI_ratio', 'loan_to_value', 'housing_expense_ratio']
+    for col in cont_cols:
+        mean = df[col].mean()
+        std = df[col].std(ddof=0)
+        # Avoid division by zero if std is zero
+        if std == 0 or np.isnan(std):
+            df[col + '_z'] = 0.0
+        else:
+            df[col + '_z'] = (df[col] - mean) / std
 
-    return df
+    # Return only the columns used in the model (keeping original binary columns and the standardized continuous ones)
+    out_cols = [
+        'accept', 'female', 'black', 'bad_history', 'married', 'self_employed',
+        'mortgage_credit_z', 'consumer_credit_z', 'PI_ratio_z', 'loan_to_value_z', 'housing_expense_ratio_z'
+    ]
+
+    return df[out_cols]
 
 
 # ======== MODEL CODE ========
-def model(df: pd.DataFrame) -> Any:
+def model(df: pd.DataFrame):
     """
-    Fit a logistic regression predicting mortgage acceptance ('accept') using applicant gender ('female')
-    and the listed controls. Returns the fitted statsmodels result object.
-
-    Model specification (logit):
-      accept ~ female + black + mortgage_credit + consumer_credit + bad_history
-               + PI_ratio + loan_to_value + housing_expense_ratio + self_employed
-               + married + denied_PMI
-
-    The function also constructs and returns a small dictionary with odds ratios and 95% CIs
-    for convenience.
+    Fit a logistic regression (binomial GLM) to estimate the effect of gender ('female')
+    on the probability of mortgage approval ('accept'), controlling for credit- and
+    income-related covariates. Returns the fitted model and a table of odds ratios
+    with 95% confidence intervals.
     """
     import statsmodels.api as sm
 
-    # Ensure required columns are present
-    cols = [
-        'female', 'black', 'mortgage_credit', 'consumer_credit', 'bad_history',
-        'PI_ratio', 'loan_to_value', 'housing_expense_ratio', 'self_employed',
-        'married', 'denied_PMI'
+    # Make a copy to avoid modifying input
+    data = df.copy()
+
+    # Define predictors (include constant)
+    predictors = [
+        'female',
+        'black',
+        'bad_history',
+        'married',
+        'self_employed',
+        'mortgage_credit_z',
+        'consumer_credit_z',
+        'PI_ratio_z',
+        'loan_to_value_z',
+        'housing_expense_ratio_z'
     ]
-    for c in cols + ['accept']:
-        if c not in df.columns:
-            raise ValueError(f"Required column '{c}' not found in dataframe")
 
-    X = df[cols]
+    X = data[predictors]
     X = sm.add_constant(X, has_constant='add')
-    y = df['accept']
+    y = data['accept']
 
-    # Fit logistic regression (maximum likelihood)
-    try:
-        logit_model = sm.Logit(y, X)
-        result = logit_model.fit(disp=False, maxiter=200)
-    except Exception:
-        # fallback to GLM with binomial family if Logit has convergence issues
-        glm_binom = sm.GLM(y, X, family=sm.families.Binomial())
-        result = glm_binom.fit()
+    # Fit binomial GLM (logistic regression)
+    glm_binom = sm.GLM(y, X, family=sm.families.Binomial())
+    res = glm_binom.fit()
 
-    # Compute odds ratios and 95% CI
-    params = result.params
-    conf = result.conf_int()
-    odds_ratios = np.exp(params)
-    conf_odds = np.exp(conf)
+    # Prepare odds ratios and 95% CI
+    params = res.params
+    conf = res.conf_int()
+    or_df = pd.DataFrame({
+        'coef': params,
+        'odds_ratio': np.exp(params),
+        'ci_lower': np.exp(conf[0]),
+        'ci_upper': np.exp(conf[1])
+    })
 
-    summary_dict = {
-        'model_result': result,
-        'odds_ratios': odds_ratios.to_dict() if hasattr(odds_ratios, 'to_dict') else odds_ratios,
-        'odds_CI_lower': conf_odds[0].to_dict() if hasattr(conf_odds, 'to_dict') else conf_odds[0],
-        'odds_CI_upper': conf_odds[1].to_dict() if hasattr(conf_odds, 'to_dict') else conf_odds[1]
+    # For clarity, print the summary and the odds ratios table
+    print(res.summary())
+    print('\nOdds ratios (with 95% CI):')
+    print(or_df)
+
+    # Return the fit object and the odds ratio table
+    return {
+        'model_result': res,
+        'odds_ratios': or_df
     }
-
-    return summary_dict
 
 

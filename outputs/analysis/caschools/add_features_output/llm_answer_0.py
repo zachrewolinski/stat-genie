@@ -1,110 +1,159 @@
 def extract_final_answer(model_output):
     """
-    Extracts the coefficient, robust p-value, 95% CI and a short interpretation
-    for the 'student_teacher_ratio' coefficient from a fitted statsmodels OLS
-    RegressionResultsWrapper (assumed to have been fit with robust (HC3)
-    covariance).
+    Extracts statistics for 'stu_teacher_ratio' from both unadjusted and adjusted models
+    inside the provided model_output dict and returns a concise interpretation.
 
     Returns:
       {
         "object": {
-          "coef": float,                # estimated coefficient (change in AvgScore per 1 unit increase in ratio)
-          "p_value": float,             # robust p-value
-          "ci_lower": float,            # 95% CI lower bound
-          "ci_upper": float,            # 95% CI upper bound
-          "significant": bool,          # whether p_value < 0.05
-          "direction": "negative"|"positive"  # sign of coef
+          "unadjusted": { "coef": ..., "std_err": ..., "t": ..., "pvalue": ...,
+                          "ci_lower": ..., "ci_upper": ..., "n": ... },
+          "adjusted":   { ... same fields ... },
+          "conclusion": "Yes / No / No evidence"  # based on adjusted model
         },
-        "description": str              # brief interpretation in context
+        "description": "Plain-language explanation of what the statistics mean"
       }
     """
-    import pandas as pd
-    import numpy as np
+    res = {"object": None, "description": None}
 
-    # Ensure the object looks like a statsmodels fitted result
-    if model_output is None:
-        raise ValueError("model_output is None")
+    # Basic checks
+    if not isinstance(model_output, dict):
+        raise ValueError("model_output must be a dict containing 'unadjusted' and 'adjusted' models.")
 
-    # The coefficient name we are interested in
-    var_name = 'student_teacher_ratio'
-
-    # Try to extract params, pvalues, and conf_int robustly
-    try:
-        params = model_output.params
-        pvalues = model_output.pvalues
-    except Exception as e:
-        raise ValueError(f"Provided model_output doesn't have expected attributes: {e}")
-
-    if var_name not in params.index:
-        raise KeyError(f"Variable '{var_name}' not found in model parameters. Available params: {list(params.index)}")
-
-    coef = float(params[var_name])
-    pval = float(pvalues[var_name])
-
-    # Confidence interval extraction (works whether conf_int returns DataFrame or ndarray)
-    try:
-        ci = model_output.conf_int()
-        if isinstance(ci, pd.DataFrame):
-            ci_lower, ci_upper = map(float, ci.loc[var_name])
-        else:
-            # ci as ndarray; find position of var_name in params index
-            pos = list(params.index).index(var_name)
-            ci_lower, ci_upper = map(float, ci[pos])
-    except Exception:
-        # Fallback: use coef +/- 1.96 * bse if conf_int fails
+    # Helper to safely extract stats for a given fitted model
+    def _extract_from_result(result, varname="stu_teacher_ratio"):
+        stats = {}
+        if result is None:
+            return None
+        # Try to extract core values; wrap in try/except to give useful errors if var missing
         try:
-            bse = float(model_output.bse[var_name])
-            ci_lower = coef - 1.96 * bse
-            ci_upper = coef + 1.96 * bse
+            params = result.params
+            pvals = result.pvalues
+            bse = result.bse
+            tvalues = result.tvalues
+            conf = result.conf_int()
         except Exception as e:
-            raise ValueError(f"Could not compute confidence interval: {e}")
+            raise RuntimeError(f"Unable to extract standard regression attributes from model result: {e}")
 
-    significant = (pval < 0.05)
-    direction = "negative" if coef < 0 else ("positive" if coef > 0 else "zero")
+        if varname not in params.index:
+            raise KeyError(f"Variable '{varname}' not found in model parameters. Available params: {list(params.index)}")
 
-    # Build a concise interpretation
-    # Note: coef is change in AvgScore per one-unit increase in student_teacher_ratio.
-    if direction == "negative" and significant:
-        interp = (
-            f"Yes. The estimated coefficient on student_teacher_ratio is {coef:.3f} "
-            f"(p = {pval:.3g}, 95% CI [{ci_lower:.3f}, {ci_upper:.3f}]). "
-            "Because the coefficient is negative and statistically significant, "
-            "a lower student-teacher ratio (fewer students per teacher) is associated "
-            "with higher average academic performance. "
-            f"Interpretation: decreasing the student-teacher ratio by 1 student is associated "
-            f"with an estimated increase of {abs(coef):.3f} points in AvgScore."
-        )
-    elif direction == "negative" and not significant:
-        interp = (
-            f"The estimated coefficient on student_teacher_ratio is {coef:.3f} "
-            f"(p = {pval:.3g}, 95% CI [{ci_lower:.3f}, {ci_upper:.3f}]). "
-            "The coefficient is negative (suggesting lower ratios link to higher scores) "
-            "but it is not statistically significant at the 5% level, so the evidence is "
-            "insufficient to conclude a reliable association."
-        )
-    elif direction == "positive" and significant:
-        interp = (
-            f"No. The estimated coefficient on student_teacher_ratio is {coef:.3f} "
-            f"(p = {pval:.3g}, 95% CI [{ci_lower:.3f}, {ci_upper:.3f}]). "
-            "Because the coefficient is positive and statistically significant, "
-            "a higher student-teacher ratio (more students per teacher) is associated "
-            "with higher average academic performance — the opposite of the hypothesis."
-        )
-    else:  # positive but not significant, or exactly zero
-        interp = (
-            f"The estimated coefficient on student_teacher_ratio is {coef:.3f} "
-            f"(p = {pval:.3g}, 95% CI [{ci_lower:.3f}, {ci_upper:.3f}]). "
-            "The coefficient is not statistically significant at the 5% level, so there is "
-            "no reliable evidence of an association between student-teacher ratio and average performance."
-        )
+        coef = float(params[varname])
+        se = float(bse[varname]) if varname in bse.index else float('nan')
+        t = float(tvalues[varname]) if varname in tvalues.index else float('nan')
+        p = float(pvals[varname]) if varname in pvals.index else float('nan')
+        # conf_int may be a DataFrame/ndarray; try to access by label then fallback to positional
+        try:
+            ci = conf.loc[varname]
+            ci_lower = float(ci.iloc[0])
+            ci_upper = float(ci.iloc[1])
+        except Exception:
+            # fallback: find position of var in params.index
+            try:
+                idx = list(params.index).index(varname)
+                ci_lower = float(conf[idx, 0])
+                ci_upper = float(conf[idx, 1])
+            except Exception:
+                ci_lower = float('nan')
+                ci_upper = float('nan')
 
+        # sample size
+        try:
+            nobs = int(result.nobs)
+        except Exception:
+            # fallback: if model_output provides model_data_adjusted for adjusted model
+            nobs = None
+
+        stats.update({
+            "coef": coef,
+            "std_err": se,
+            "t": t,
+            "pvalue": p,
+            "ci_lower": ci_lower,
+            "ci_upper": ci_upper,
+            "n": nobs
+        })
+        return stats
+
+    # Extract for unadjusted
+    if 'unadjusted' not in model_output:
+        raise KeyError("model_output missing key 'unadjusted'")
+    if 'adjusted' not in model_output:
+        raise KeyError("model_output missing key 'adjusted'")
+
+    unadj_stats = _extract_from_result(model_output['unadjusted'], varname='stu_teacher_ratio')
+    adj_stats = _extract_from_result(model_output['adjusted'], varname='stu_teacher_ratio')
+
+    # If model_data_adjusted present, prefer its row count for adjusted n
+    if 'model_data_adjusted' in model_output and hasattr(model_output['model_data_adjusted'], 'shape'):
+        try:
+            adj_stats['n'] = int(model_output['model_data_adjusted'].shape[0])
+        except Exception:
+            pass
+
+    # Determine conclusion based on adjusted model
+    conclusion = "No evidence (not statistically significant)"
+    try:
+        coef = adj_stats['coef']
+        p = adj_stats['pvalue']
+        if (p is not None) and (not (p != p)):  # check not NaN
+            if p < 0.05:
+                # significant: interpret sign
+                if coef < 0:
+                    conclusion = ("Yes: statistically significant. "
+                                  "Lower student-teacher ratio (fewer students per teacher) is associated "
+                                  "with higher academic performance (adjusted model).")
+                else:
+                    conclusion = ("No: statistically significant but in the opposite direction. "
+                                  "Higher student-teacher ratio is associated with higher academic performance "
+                                  "(adjusted model).")
+            else:
+                conclusion = "No evidence (estimate not statistically significant at alpha=0.05)."
+        else:
+            conclusion = "No conclusion: p-value is not available."
+    except Exception:
+        conclusion = "No conclusion: could not evaluate significance."
+
+    # Prepare returned object
     result_object = {
-        "coef": coef,
-        "p_value": pval,
-        "ci_lower": ci_lower,
-        "ci_upper": ci_upper,
-        "significant": bool(significant),
-        "direction": direction
+        "unadjusted": unadj_stats,
+        "adjusted": adj_stats,
+        "conclusion": conclusion
     }
 
-    return {"object": result_object, "description": interp}
+    # Short human-readable description
+    # Interpret coefficient: it's change in AvgScore per one-unit increase in stu_teacher_ratio.
+    # Therefore, a negative coef implies that decreasing the ratio (fewer students per teacher)
+    # is associated with higher AvgScore; effect per 1-student decrease = -coef.
+    if adj_stats is not None:
+        coef = adj_stats.get('coef', float('nan'))
+        p = adj_stats.get('pvalue', float('nan'))
+        ci_low = adj_stats.get('ci_lower', float('nan'))
+        ci_high = adj_stats.get('ci_upper', float('nan'))
+        n = adj_stats.get('n', None)
+        interp_lines = [
+            f"Adjusted model (n={n}): coefficient on stu_teacher_ratio = {coef:.4f},",
+            f"SE = {adj_stats.get('std_err', float('nan')):.4f}, p = {p:.4g},",
+            f"95% CI = [{ci_low:.4f}, {ci_high:.4f}]."
+        ]
+        if p < 0.05:
+            if coef < 0:
+                effect_sentence = (f"This implies that a one-student decrease in the student-teacher ratio "
+                                   f"is associated with an average increase of {abs(coef):.4f} points in AvgScore, "
+                                   f"holding controls constant. {conclusion}")
+            else:
+                effect_sentence = (f"This implies that a one-student decrease in the student-teacher ratio "
+                                   f"is associated with an average decrease of {coef:.4f} points in AvgScore, "
+                                   f"holding controls constant. {conclusion}")
+        else:
+            effect_sentence = ("The adjusted estimate is not statistically significant at the 0.05 level, "
+                               "so we do not have sufficient evidence to conclude that student-teacher ratio is "
+                               "associated with academic performance after controlling for the listed covariates.")
+        interp_lines.append(effect_sentence)
+        description = " ".join(interp_lines)
+    else:
+        description = "Could not extract adjusted-model statistics."
+
+    res["object"] = result_object
+    res["description"] = description
+    return res

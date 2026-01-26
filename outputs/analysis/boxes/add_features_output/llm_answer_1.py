@@ -1,341 +1,222 @@
 def extract_final_answer(model_output):
     """
-    Extracts coefficients, standard errors, z-stats, p-values and 95% CIs for:
-      - Age_c (linear age effect in the reference culture)
-      - Age_sq (quadratic age effect, global)
-      - Per-culture linear age slopes (Age_c + interaction term when present)
+    Extract key statistics about how reliance on the majority (Choice_code=1)
+    changes with age across cultures from the provided model_output.
 
     Returns:
       {
-        "object": {
-          "Age_c": {coef, se, z, p, ci_low, ci_high},
-          "Age_sq": { ... },
-          "per_culture_slopes": {
-              culture_level: {coef, se, z, p, ci_low, ci_high}, ...
-          }
-        },
-        "description": "<brief interpretation>"
+        "object": { ... numeric results ... },
+        "description": "Plain-language interpretation of the results"
       }
+    The function prefers to parse the precomputed marginal-effects text
+    stored in model_output['margeff']. If that is unavailable or parsing
+    fails, it returns an explanatory message.
     """
-    import numpy as np
-    from types import SimpleNamespace
-    try:
-        # stats for normal-based p-values / CIs
-        from scipy.stats import norm
-    except Exception:
-        # fallback: approximate normal cdf via numpy (very rare)
-        def _norm_cdf(x):
-            return 0.5 * (1 + np.erf(x / np.sqrt(2)))
-        class _N:
-            cdf = staticmethod(_norm_cdf)
-        norm = _N()
+    import re
 
-    # Retrieve robust results or fitted model
-    robust = model_output.get('robust_results', None)
-    fitted = model_output.get('fitted_model', None)
+    out = {"object": None, "description": None}
 
-    # Helper to get params (pd.Series), cov (DataFrame or ndarray), and bse if available
-    params = None
-    cov = None
-    bse = None
-
-    # Try robust first (preferred)
-    if robust is not None:
-        # robust may be a statsmodels Results object or a SimpleNamespace-like wrapper
-        if hasattr(robust, 'params'):
-            params = robust.params
-        if hasattr(robust, 'cov_params'):
-            try:
-                cov = robust.cov_params()
-            except Exception:
-                # cov_params might be a callable property or raise; ignore here
-                cov = None
-        if hasattr(robust, 'bse'):
-            bse = robust.bse
-
-    # Fall back to fitted model
-    if params is None and fitted is not None:
+    # Helper to convert string tokens to floats safely
+    def to_float(tok):
         try:
-            params = fitted.params
+            return float(tok)
         except Exception:
-            params = None
-    if cov is None and fitted is not None:
-        try:
-            cov = fitted.cov_params()
-        except Exception:
-            cov = None
-    if bse is None and fitted is not None:
-        try:
-            bse = fitted.bse
-        except Exception:
-            bse = None
-
-    if params is None:
-        raise ValueError("Could not find parameter estimates in model_output.")
-
-    # Ensure params is a pandas Series-like with index
-    try:
-        param_index = list(params.index)
-    except Exception:
-        # if params is ndarray, attempt to get names from fitted.model
-        raise ValueError("Parameter names not available; cannot proceed.")
-
-    # helper to get covariance between two parameter names
-    def get_cov(name1, name2):
-        nonlocal cov, params, param_index
-        if cov is None:
-            raise ValueError("Covariance matrix not available in model_output; cannot compute SE for combined terms.")
-        # If cov is a pandas DataFrame, use .loc
-        if hasattr(cov, 'loc'):
-            try:
-                return float(cov.loc[name1, name2])
-            except Exception as e:
-                raise KeyError(f"Could not find covariance entries for {name1}, {name2} in cov DataFrame: {e}")
-        else:
-            # assume numpy ndarray with ordering matching params.index
-            try:
-                i = param_index.index(name1)
-                j = param_index.index(name2)
-            except ValueError as e:
-                raise KeyError(f"Parameter name not found in parameter index: {e}")
-            return float(cov[i, j])
-
-    # helper to get var (cov(name,name))
-    def get_var(name):
-        return get_cov(name, name)
-
-    # compute stats for a single parameter name
-    def single_param_stats(name):
-        if name not in param_index:
             return None
-        coef = float(params[name])
-        # se
-        if bse is not None:
-            try:
-                # bse might be array aligned with params
-                if hasattr(bse, 'index'):
-                    se = float(bse.loc[name])
-                else:
-                    se = float(bse[param_index.index(name)])
-            except Exception:
-                se = float(np.sqrt(get_var(name)))
-        else:
-            se = float(np.sqrt(get_var(name)))
-        z = coef / se if se != 0 else np.nan
-        p = 2 * (1 - norm.cdf(abs(z)))
-        ci_low = coef - 1.96 * se
-        ci_high = coef + 1.96 * se
-        return {"coef": coef, "se": se, "z": z, "p": p, "ci_low": ci_low, "ci_high": ci_high}
 
-    results = {}
-    # Age_c
-    age_stats = single_param_stats('Age_c')
-    if age_stats is None:
-        raise KeyError("Parameter 'Age_c' not found in model parameters.")
-    results['Age_c'] = age_stats
+    mfx_text = model_output.get("margeff", None)
+    if not mfx_text or not isinstance(mfx_text, str):
+        out["description"] = "No marginal-effects text found in model_output['margeff']."
+        return out
 
-    # Age_sq
-    age_sq_stats = single_param_stats('Age_sq')
-    if age_sq_stats is None:
-        raise KeyError("Parameter 'Age_sq' not found in model parameters.")
-    results['Age_sq'] = age_sq_stats
+    # Find the Choice_code=1 block in the marginal effects text
+    try:
+        # Split on the header for the Choice_code=1 block
+        parts = mfx_text.split("\n  Choice_code=1")
+        if len(parts) < 2:
+            raise ValueError("Choice_code=1 block not found")
 
-    # Determine culture levels from predicted_by_age_and_culture (preferred) or from params naming
-    preds = model_output.get('predicted_by_age_and_culture', None)
-    culture_levels = None
-    if preds:
-        try:
-            # keys may be ints or strings; keep original representation
-            culture_levels = list(preds.keys())
-        except Exception:
-            culture_levels = None
+        block = parts[1]
+        # Trim everything after the next dashed separator (which precedes Choice_code=2)
+        block = block.split("\n-----------------------------------------------------------------------------------")[0]
 
-    # Parse interaction parameter names to find explicit T.* levels
-    interaction_prefix = 'Age_c:C(culture)[T.'
-    interacted_levels = []
-    for name in param_index:
-        if name.startswith(interaction_prefix):
-            # extract what's inside after prefix and before ]
-            tail = name[len(interaction_prefix):]
-            # tail like '2]' or " 'a']" etc. Remove trailing ]
-            if tail.endswith(']'):
-                level = tail[:-1]
+        # Each line with data typically looks like:
+        # varname (padded) dy/dx std err z P>|z| [0.025 0.975]
+        # We'll parse by taking the first 18 chars as varname area (matches formatting)
+        lines = block.strip().splitlines()
+
+        # Remove the header line if present (the column names)
+        # Usually the first non-empty line is the header, so detect and skip it
+        parsed = {}
+        for line in lines:
+            line_stripped = line.rstrip()
+            if not line_stripped:
+                continue
+            # skip header line that contains "dy/dx" or "std err"
+            if re.search(r"\bdy/dx\b", line_stripped) and re.search(r"\bstd err\b", line_stripped):
+                continue
+            # Defensive: if the line starts with dashes skip
+            if set(line_stripped.strip()) <= set("-"):
+                continue
+
+            # Extract varname from fixed-width region if possible
+            if len(line_stripped) >= 18:
+                varname = line_stripped[:18].strip()
+                rest = line_stripped[18:].strip()
             else:
-                level = tail
-            # Try convert to int if possible
-            try:
-                lvl = int(level)
-            except Exception:
-                lvl = level
-            interacted_levels.append(lvl)
+                pieces = line_stripped.split()
+                varname = pieces[0]
+                rest = " ".join(pieces[1:])
 
-    # Determine all levels if possible: if preds present use it; else try to infer from C(culture)[T.X] and C(culture)[T.X] main effects
-    if culture_levels is None:
-        # look for C(culture)[T.*] main-effects names to collect levels
-        main_prefix = 'C(culture)[T.'
-        main_levels = []
-        for name in param_index:
-            if name.startswith(main_prefix):
-                tail = name[len(main_prefix):]
-                if tail.endswith(']'):
-                    level = tail[:-1]
-                else:
-                    level = tail
-                try:
-                    lvl = int(level)
-                except Exception:
-                    lvl = level
-                main_levels.append(lvl)
-        # if we have main_levels plus interacted_levels, union them
-        all_levels = list(dict.fromkeys(main_levels + interacted_levels))
-        if all_levels:
-            culture_levels = all_levels
-        else:
-            # as a last resort, set culture_levels to interacted_levels
-            culture_levels = interacted_levels if interacted_levels else []
-
-    # Determine reference culture: the culture level present in data but omitted from main-effect dummies.
-    reference = None
-    if culture_levels:
-        # find which culture in culture_levels is NOT present as main-effect dummy C(culture)[T.X]
-        main_prefix = 'C(culture)[T.'
-        main_present = []
-        for name in param_index:
-            if name.startswith(main_prefix):
-                tail = name[len(main_prefix):]
-                if tail.endswith(']'):
-                    level = tail[:-1]
-                else:
-                    level = tail
-                try:
-                    lvl = int(level)
-                except Exception:
-                    lvl = level
-                main_present.append(lvl)
-        # If main_present is empty, likely reference is the smallest/first level found in preds
-        if main_present:
-            # choose a culture from culture_levels that is not in main_present
-            for lvl in culture_levels:
-                if lvl not in main_present:
-                    reference = lvl
-                    break
-            # if none found, pick the first culture_levels as reference
-            if reference is None and len(culture_levels) > 0:
-                reference = culture_levels[0]
-        else:
-            # use first culture_levels as reference
-            reference = culture_levels[0]
-    else:
-        # No culture information found; cannot compute per-culture slopes
-        reference = None
-
-    # Compute per-culture slopes for Age_c
-    per_culture = {}
-    for lvl in culture_levels:
-        # Build the expected interaction parameter name used in params
-        # interaction name in the model output was: 'Age_c:C(culture)[T.<lvl>]'
-        # But lvl might be int or string; ensure matching format
-        if isinstance(lvl, int):
-            inter_name = f'Age_c:C(culture)[T.{lvl}]'
-            main_name = f'C(culture)[T.{lvl}]'
-        else:
-            inter_name = f'Age_c:C(culture)[T.{lvl}]'
-            main_name = f'C(culture)[T.{lvl}]'
-
-        if reference is not None and lvl == reference:
-            # slope is simply Age_c
-            per_coef = float(params['Age_c'])
-            var = get_var('Age_c')
-            se = float(np.sqrt(var))
-            z = per_coef / se if se != 0 else np.nan
-            p = 2 * (1 - norm.cdf(abs(z)))
-            ci_low = per_coef - 1.96 * se
-            ci_high = per_coef + 1.96 * se
-            per_culture[lvl] = {"coef": per_coef, "se": se, "z": z, "p": p, "ci_low": ci_low, "ci_high": ci_high, "note": "reference"}
-        else:
-            # If interaction term present, slope = Age_c + Age_c:C(culture)[T.lvl]
-            if inter_name in param_index:
-                a = float(params['Age_c'])
-                b = float(params[inter_name])
-                coef = a + b
-                # var = var(a) + var(b) + 2*cov(a,b)
-                try:
-                    var_a = get_var('Age_c')
-                    var_b = get_var(inter_name)
-                    cov_ab = get_cov('Age_c', inter_name)
-                    var = var_a + var_b + 2.0 * cov_ab
-                    se = float(np.sqrt(max(var, 0.0)))
-                except Exception as e:
-                    # fallback: try to use bse elements if available (less accurate for sum)
-                    if bse is not None:
-                        try:
-                            if hasattr(bse, 'index'):
-                                se_a = float(bse.loc['Age_c'])
-                                se_b = float(bse.loc[inter_name])
-                            else:
-                                se_a = float(bse[param_index.index('Age_c')])
-                                se_b = float(bse[param_index.index(inter_name)])
-                            # approximate var by summing variances (ignoring covariance) - less accurate
-                            se = float(np.sqrt(se_a**2 + se_b**2))
-                            var = se**2
-                        except Exception:
-                            se = np.nan
-                            var = np.nan
-                    else:
-                        se = np.nan
-                        var = np.nan
-                z = coef / se if (se and not np.isnan(se)) else np.nan
-                p = 2 * (1 - norm.cdf(abs(z))) if (not np.isnan(z)) else np.nan
-                ci_low = coef - 1.96 * se if (not np.isnan(se)) else np.nan
-                ci_high = coef + 1.96 * se if (not np.isnan(se)) else np.nan
-                per_culture[lvl] = {"coef": coef, "se": se, "z": z, "p": p, "ci_low": ci_low, "ci_high": ci_high}
+            nums = re.split(r"\s+", rest)
+            # Expect at least 6 numeric tokens: dy/dx, std err, z, P>|z|, [0.025, 0.975]
+            if len(nums) >= 6:
+                dy_dx = to_float(nums[0])
+                std_err = to_float(nums[1])
+                z = to_float(nums[2])
+                p = to_float(nums[3])
+                ci_lower = to_float(nums[4])
+                ci_upper = to_float(nums[5])
+                parsed[varname] = {
+                    "dy/dx": dy_dx,
+                    "std_err": std_err,
+                    "z": z,
+                    "p": p,
+                    "ci_lower": ci_lower,
+                    "ci_upper": ci_upper,
+                }
             else:
-                # No interaction term found for this level: interpret as same slope as reference
-                # i.e., slope = Age_c
-                per_coef = float(params['Age_c'])
-                var = get_var('Age_c')
-                se = float(np.sqrt(var))
-                z = per_coef / se if se != 0 else np.nan
-                p = 2 * (1 - norm.cdf(abs(z)))
-                ci_low = per_coef - 1.96 * se
-                ci_high = per_coef + 1.96 * se
-                per_culture[lvl] = {"coef": per_coef, "se": se, "z": z, "p": p, "ci_low": ci_low, "ci_high": ci_high, "note": "no interaction term found; same as reference"}
+                # Skip lines we cannot parse reliably
+                continue
 
-    results['per_culture_slopes'] = per_culture
-    results['reference_culture'] = reference
+        if not parsed:
+            raise ValueError("No variables parsed from Choice_code=1 block")
 
-    # Prepare a short textual interpretation
-    # Use age linear p-value and age_sq p-value and collect which cultures show significant positive or negative slopes
-    interp_lines = []
-    # Age linear
-    p_age = results['Age_c']['p']
-    coef_age = results['Age_c']['coef']
-    interp_lines.append(f"Overall (reference culture) linear age effect (Age_c): coef={coef_age:.3f}, p={p_age:.3f}.")
-    # Age quadratic
-    p_age_sq = results['Age_sq']['p']
-    coef_age_sq = results['Age_sq']['coef']
-    interp_lines.append(f"Quadratic age effect (Age_sq): coef={coef_age_sq:.3f}, p={p_age_sq:.3f} (global, not interacted).")
+        # Pull out focal statistics
+        focal = {}
+        # main age terms
+        if "age_c" in parsed:
+            focal["age_c"] = parsed["age_c"]
+        if "age_c2" in parsed:
+            focal["age_c2"] = parsed["age_c2"]
 
-    # Per-culture summary
-    sig_pos = []
-    sig_neg = []
-    nonsig = []
-    for lvl, stats in per_culture.items():
-        p = stats.get('p', np.nan)
-        coef = stats.get('coef', np.nan)
-        if not np.isnan(p) and p < 0.05:
-            if coef > 0:
-                sig_pos.append(lvl)
-            elif coef < 0:
-                sig_neg.append(lvl)
-            else:
-                nonsig.append(lvl)
+        # interactions: any var that starts with 'age_c:culture_'
+        interactions = {}
+        for name, stats in parsed.items():
+            if name.startswith("age_c:culture_"):
+                interactions[name] = stats
+        focal["age_by_culture_interactions"] = interactions
+
+        # Also include strong controls relevant to interpretation
+        for ctrl in ("majority_first", "gender_b"):
+            if ctrl in parsed:
+                focal[ctrl] = parsed[ctrl]
+
+        # Build a concise interpretation string using extracted numbers
+        # Determine significance flags
+        def sig_label(p):
+            if p is None:
+                return "n/a"
+            if p < 0.01:
+                return "p<0.01"
+            if p < 0.05:
+                return "p<0.05"
+            if p < 0.10:
+                return "p<0.10"
+            return "ns"
+
+        # Interpret main age terms
+        age_interp_parts = []
+        if "age_c" in focal:
+            a = focal["age_c"]
+            age_interp_parts.append(
+                f"Linear age marginal effect on choosing the majority: dy/dx={a['dy/dx']:.4f}, "
+                f"SE={a['std_err']:.4f}, p={a['p']:.3f} ({sig_label(a['p'])})."
+            )
+        if "age_c2" in focal:
+            a2 = focal["age_c2"]
+            age_interp_parts.append(
+                f"Quadratic age (age^2) marginal effect: dy/dx={a2['dy/dx']:.4f}, "
+                f"SE={a2['std_err']:.4f}, p={a2['p']:.3f} ({sig_label(a2['p'])})."
+            )
+
+        # Interpret interactions: list significant or marginal ones first
+        inter_lines = []
+        for name, stats in sorted(interactions.items()):
+            inter_lines.append(
+                f"{name}: dy/dx={stats['dy/dx']:.4f}, SE={stats['std_err']:.4f}, "
+                f"p={stats['p']:.3f} ({sig_label(stats['p'])})"
+            )
+
+        # Controls
+        ctrl_lines = []
+        for ctrl in ("majority_first", "gender_b"):
+            if ctrl in focal:
+                s = focal[ctrl]
+                ctrl_lines.append(
+                    f"{ctrl}: dy/dx={s['dy/dx']:.4f}, SE={s['std_err']:.4f}, p={s['p']:.3f} ({sig_label(s['p'])})"
+                )
+
+        description_lines = []
+        description_lines.append(
+            "Key marginal effects for the probability of selecting the majority (Choice_code=1):"
+        )
+        description_lines += age_interp_parts
+        if inter_lines:
+            description_lines.append("Age-by-culture interaction marginal effects (per culture dummy):")
+            description_lines += inter_lines
+        if ctrl_lines:
+            description_lines.append("Important controls (order and gender):")
+            description_lines += ctrl_lines
+
+        # Short plain-language summary focusing on the substantive question
+        # Use the numbers to make the interpretation:
+        plain_summary_parts = []
+        # If age quadratic significant -> say non-linear change with age
+        if "age_c2" in focal and focal["age_c2"]["p"] is not None and focal["age_c2"]["p"] < 0.05:
+            plain_summary_parts.append(
+                "There is evidence of a non-linear (quadratic) developmental change in reliance on the majority: "
+                "the quadratic term is positive and statistically significant, indicating an accelerating change in the "
+                "probability of choosing the majority across ages (holding other variables constant)."
+            )
         else:
-            nonsig.append(lvl)
-    interp_lines.append(f"Significant positive age-related increase in reliance on majority observed in cultures: {sig_pos if sig_pos else 'none'}.")
-    interp_lines.append(f"Significant negative age-related decrease in cultures: {sig_neg if sig_neg else 'none'}.")
-    interp_lines.append("Note: Age_sq being significant indicates a nonlinear (accelerating/decelerating) change with age across all cultures; per-culture slopes above reflect linear marginal slopes (Age_c + interaction).")
+            plain_summary_parts.append(
+                "There is no strong evidence of a simple linear age effect on majority choice (linear age term not statistically significant at p<0.05)."
+            )
 
-    description = " ".join(interp_lines)
+        # Check culture moderators for significant differences
+        sig_interactions = {k: v for k, v in interactions.items() if v.get("p") is not None and v["p"] < 0.05}
+        marginal_interactions = {k: v for k, v in interactions.items() if v.get("p") is not None and 0.05 <= v["p"] < 0.10}
 
-    return {"object": results, "description": description}
+        if sig_interactions:
+            for k, v in sig_interactions.items():
+                plain_summary_parts.append(
+                    f"In {k.replace('age_c:culture_','culture_')}, the age slope differs significantly "
+                    f"(interaction dy/dx={v['dy/dx']:.4f}, p={v['p']:.3f}), meaning the developmental trajectory "
+                    "of majority preference is moderated by that culture."
+                )
+        if marginal_interactions:
+            for k, v in marginal_interactions.items():
+                plain_summary_parts.append(
+                    f"In {k.replace('age_c:culture_','culture_')}, there is a marginal (p<0.10) moderation of the age effect "
+                    f"(interaction dy/dx={v['dy/dx']:.4f}, p={v['p']:.3f})."
+                )
+
+        # Note strong order effect if present
+        if "majority_first" in focal and focal["majority_first"]["p"] is not None and focal["majority_first"]["p"] < 0.001:
+            plain_summary_parts.append(
+                "There is a strong demonstration order effect: showing the majority first substantially increases the probability of choosing the majority."
+            )
+
+        # Compose final description
+        description = "\n".join(description_lines) + "\n\nSummary:\n" + " ".join(plain_summary_parts)
+
+        out["object"] = {
+            "focal_marginal_effects": focal,
+            "parsed_marginal_effects_text_block": block.strip(),
+        }
+        out["description"] = description
+        return out
+
+    except Exception as e:
+        out["description"] = f"Failed to parse marginal-effects text for Choice_code=1: {e}"
+        return out

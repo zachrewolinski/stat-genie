@@ -1,186 +1,236 @@
 def extract_final_answer(model_output):
     """
-    Extracts statistics for the name-femininity variable from available fitted models.
+    Extracts coefficients, robust SEs, p-values, confidence intervals, and interpretable
+    effect sizes (IRR for NB, percent change for OLS on log outcome) for the two
+    predictors of interest: 'FemininityIndex_c' and 'FemaleNameBinary'.
 
-    Returns a dict with keys:
-      - "object": a dict containing extracted numeric results (model used, term name,
-                  coefficient, standard error, p-value, 95% CI, nobs, R-squared when available)
-                  or None if extraction was not possible.
-      - "description": a short textual interpretation of the effect of name femininity
-                       on the outcome and whether the result supports the hypothesis
-                       that more feminine names lead to fewer deaths (i.e., negative effect).
-
-    The function prefers the primary 'deaths_model' if present, otherwise falls back to
-    'bivariate_deaths_model' and then 'damage_model'. It looks for the parameter name
-    'masfem_z' (used in the modeling code) and then 'masfem' as a fallback.
+    Returns:
+      {
+        "object": {
+          "FemininityIndex_c": {
+             "nb_coef": float,
+             "nb_se": float,
+             "nb_pvalue": float,
+             "nb_ci": [lower, upper],
+             "nb_IRR": float,
+             "nb_IRR_ci": [lower, upper],
+             "ols_coef": float,
+             "ols_se": float,
+             "ols_pvalue": float,
+             "ols_ci": [lower, upper],
+             "ols_pct_change": float   # 100*(exp(beta)-1)
+          },
+          "FemaleNameBinary": { ... same fields ... }
+        },
+        "description": "Human-readable summary of statistical evidence and direction."
+      }
     """
-    # Helper to format a failure response
-    def _no_result(msg):
-        return {
-            "object": None,
-            "description": msg
-        }
+    import numpy as np
 
-    if not isinstance(model_output, dict):
-        return _no_result("model_output is not a dict as expected.")
+    # Names of predictors we care about
+    predictors = ['FemininityIndex_c', 'FemaleNameBinary']
 
-    # Preferential order of models to inspect
-    candidate_keys = ['deaths_model', 'bivariate_deaths_model', 'damage_model']
+    # Prepare output structure
+    out = {pred: {} for pred in predictors}
+    desc_lines = []
 
-    res = None
-    res_key = None
-    for k in candidate_keys:
-        if k in model_output and model_output[k] is not None:
-            res = model_output[k]
-            res_key = k
-            break
-
-    if res is None:
-        return _no_result("No fitted models found in model_output (all are None).")
-
-    # Basic validation that this looks like a statsmodels RegressionResults-like object
-    if not hasattr(res, 'params'):
-        return _no_result(f"Selected model '{res_key}' does not expose params; cannot extract estimates.")
-
-    params = res.params
-    # candidate parameter names used in the modeling code
-    term_candidates = ['masfem_z', 'masfem']
-    term = next((t for t in term_candidates if t in params.index), None)
-
-    if term is None:
-        return _no_result(
-            f"Selected model '{res_key}' does not contain the expected femininity term (searched for {term_candidates})."
-        )
-
-    # Extract statistics robustly
-    try:
-        coef = float(params[term])
-    except Exception:
-        return _no_result("Could not read coefficient value for term '{}'.".format(term))
-
-    # Standard error
-    se = None
-    if hasattr(res, 'bse') and term in res.bse.index:
+    # Helper to safe-extract from results object
+    def safe_get(result, attr, default=None):
         try:
-            se = float(res.bse[term])
+            return getattr(result, attr)
         except Exception:
-            se = None
+            return default
 
-    # p-value
-    pval = None
-    if hasattr(res, 'pvalues') and term in res.pvalues.index:
+    # Get negative binomial robust results if available, otherwise nb_model
+    nb_res = None
+    if isinstance(model_output, dict):
+        nb_res = model_output.get('nb_robust') or model_output.get('nb_model')
+        ols_res = model_output.get('ols_logfatalities')
+    else:
+        nb_res = None
+        ols_res = None
+
+    # Extract NB stats
+    if nb_res is not None:
         try:
-            pval = float(res.pvalues[term])
+            nb_params = np.asarray(nb_res.params)
+            nb_index = list(nb_res.params.index)
+            nb_bse = np.asarray(nb_res.bse)
+            nb_pvalues = np.asarray(nb_res.pvalues)
+            nb_ci = np.asarray(nb_res.conf_int())  # shape (k,2)
         except Exception:
-            pval = None
+            # Try dictionary-like access for older wrappers
+            try:
+                nb_params = np.asarray(nb_res['params'])
+                nb_index = list(nb_res['params'].index)
+                nb_bse = np.asarray(nb_res['bse'])
+                nb_pvalues = np.asarray(nb_res['pvalues'])
+                nb_ci = np.asarray(nb_res['conf_int']())
+            except Exception:
+                nb_params = nb_index = nb_bse = nb_pvalues = nb_ci = None
 
-    # 95% confidence interval: handle DataFrame or numpy array returns from conf_int()
-    ci_low = ci_high = None
-    try:
-        ci = res.conf_int()
-        # If conf_int() returned a DataFrame-like object with index
-        if hasattr(ci, 'loc') and term in ci.index:
-            ci_low, ci_high = float(ci.loc[term, 0]), float(ci.loc[term, 1])
-        else:
-            # assume numpy array; find index of term
-            idx = list(params.index).index(term)
-            ci_low, ci_high = float(ci[idx, 0]), float(ci[idx, 1])
-    except Exception:
-        ci_low = ci_high = None
+        if nb_index is not None:
+            for pred in predictors:
+                if pred in nb_index:
+                    i = nb_index.index(pred)
+                    coef = float(nb_params[i])
+                    se = float(nb_bse[i]) if nb_bse is not None else None
+                    pval = float(nb_pvalues[i]) if nb_pvalues is not None else None
+                    ci_low = float(nb_ci[i, 0]) if nb_ci is not None else None
+                    ci_high = float(nb_ci[i, 1]) if nb_ci is not None else None
+                    irr = float(np.exp(coef))
+                    irr_ci_low = float(np.exp(ci_low)) if ci_low is not None else None
+                    irr_ci_high = float(np.exp(ci_high)) if ci_high is not None else None
 
-    # nobs
-    nobs = None
-    try:
-        # statsmodels sometimes exposes nobs as attribute
-        if hasattr(res, 'nobs'):
-            nobs = int(res.nobs)
-        elif hasattr(res, 'model') and hasattr(res.model, 'nobs'):
-            nobs = int(res.model.nobs)
-    except Exception:
-        nobs = None
-
-    # R-squared when available (may not be meaningful for robust fits but is useful)
-    rsq = None
-    try:
-        if hasattr(res, 'rsquared'):
-            rsq = float(res.rsquared)
-    except Exception:
-        rsq = None
-
-    # Build the numeric result object
-    result_object = {
-        "model_used": res_key,
-        "term": term,
-        "coefficient": coef,
-        "std_error": se,
-        "p_value": pval,
-        "ci_95_low": ci_low,
-        "ci_95_high": ci_high,
-        "n_obs": nobs,
-        "r_squared": rsq
-    }
-
-    # Interpret the coefficient with respect to the hypothesis:
-    # Hypothesis: higher femininity -> fewer deaths (negative coef expected).
-    direction = "negative" if coef < 0 else ("zero" if coef == 0 else "positive")
-    significance = None
-    if pval is None:
-        significance = "p-value not available"
+                    out[pred].update({
+                        'nb_coef': coef,
+                        'nb_se': se,
+                        'nb_pvalue': pval,
+                        'nb_ci': [ci_low, ci_high],
+                        'nb_IRR': irr,
+                        'nb_IRR_ci': [irr_ci_low, irr_ci_high]
+                    })
+                else:
+                    out[pred].update({
+                        'nb_coef': None,
+                        'nb_se': None,
+                        'nb_pvalue': None,
+                        'nb_ci': [None, None],
+                        'nb_IRR': None,
+                        'nb_IRR_ci': [None, None]
+                    })
     else:
-        if pval < 0.01:
-            significance = "highly statistically significant (p < 0.01)"
-        elif pval < 0.05:
-            significance = "statistically significant (p < 0.05)"
-        elif pval < 0.10:
-            significance = "marginally significant (p < 0.10)"
-        else:
-            significance = "not statistically significant (p >= 0.10)"
+        # No NB results found
+        for pred in predictors:
+            out[pred].update({
+                'nb_coef': None,
+                'nb_se': None,
+                'nb_pvalue': None,
+                'nb_ci': [None, None],
+                'nb_IRR': None,
+                'nb_IRR_ci': [None, None]
+            })
+        desc_lines.append("No Negative Binomial results available in model_output.")
 
-    # Conclusion re: hypothesis
-    if pval is not None and coef < 0 and pval < 0.05:
-        conclusion = (
-            "The estimated effect of name femininity on the log number of deaths is negative "
-            "and statistically significant, which is consistent with the hypothesis that "
-            "hurricanes with more feminine names are associated with fewer fatalities (all else equal)."
-        )
-    elif pval is not None and coef < 0 and pval >= 0.05:
-        conclusion = (
-            "The estimated effect is negative (higher femininity -> fewer deaths) but not "
-            "statistically significant; there is not strong evidence to conclude a real effect."
-        )
-    elif pval is not None and coef >= 0:
-        conclusion = (
-            "The estimated effect is {} (higher femininity -> {} deaths) and {}. "
-            "This does not provide evidence supporting the hypothesis that more feminine names lead "
-            "to fewer fatalities.".format(direction, "fewer" if coef < 0 else "more", significance)
-        )
+    # Extract OLS on log(1+Fatalities) stats
+    if ols_res is not None:
+        try:
+            ols_params = np.asarray(ols_res.params)
+            ols_index = list(ols_res.params.index)
+            ols_bse = np.asarray(ols_res.bse)
+            ols_pvalues = np.asarray(ols_res.pvalues)
+            ols_ci = np.asarray(ols_res.conf_int())
+        except Exception:
+            try:
+                ols_params = np.asarray(ols_res['params'])
+                ols_index = list(ols_res['params'].index)
+                ols_bse = np.asarray(ols_res['bse'])
+                ols_pvalues = np.asarray(ols_res['pvalues'])
+                ols_ci = np.asarray(ols_res['conf_int']())
+            except Exception:
+                ols_params = ols_index = ols_bse = ols_pvalues = ols_ci = None
+
+        if ols_index is not None:
+            for pred in predictors:
+                if pred in ols_index:
+                    j = ols_index.index(pred)
+                    coef = float(ols_params[j])
+                    se = float(ols_bse[j]) if ols_bse is not None else None
+                    pval = float(ols_pvalues[j]) if ols_pvalues is not None else None
+                    ci_low = float(ols_ci[j, 0]) if ols_ci is not None else None
+                    ci_high = float(ols_ci[j, 1]) if ols_ci is not None else None
+                    # Convert coefficient on log(1+y) to percent change approx:
+                    pct_change = float((np.exp(coef) - 1) * 100) if coef is not None else None
+
+                    out[pred].update({
+                        'ols_coef': coef,
+                        'ols_se': se,
+                        'ols_pvalue': pval,
+                        'ols_ci': [ci_low, ci_high],
+                        'ols_pct_change': pct_change
+                    })
+                else:
+                    out[pred].update({
+                        'ols_coef': None,
+                        'ols_se': None,
+                        'ols_pvalue': None,
+                        'ols_ci': [None, None],
+                        'ols_pct_change': None
+                    })
     else:
-        # pval is None
-        conclusion = (
-            "Coefficient is {} but p-value is not available; cannot make a statistical conclusion. "
-            "See numeric results returned in 'object' for details.".format(direction)
-        )
+        for pred in predictors:
+            out[pred].update({
+                'ols_coef': None,
+                'ols_se': None,
+                'ols_pvalue': None,
+                'ols_ci': [None, None],
+                'ols_pct_change': None
+            })
+        desc_lines.append("No OLS (log fatalities) results available in model_output.")
 
-    # Compose description
-    description_lines = [
-        f"Model used: {res_key}. Term examined: '{term}'.",
-        f"Estimated coefficient = {coef:.4g}",
-    ]
-    if se is not None:
-        description_lines.append(f"SE = {se:.4g}")
-    if pval is not None:
-        description_lines.append(f"p-value = {pval:.4g} ({significance})")
-    if ci_low is not None and ci_high is not None:
-        description_lines.append(f"95% CI = [{ci_low:.4g}, {ci_high:.4g}]")
-    if nobs is not None:
-        description_lines.append(f"Number of observations used in this fit = {nobs}")
-    if rsq is not None:
-        description_lines.append(f"R-squared = {rsq:.4g}")
-    description_lines.append(conclusion)
+    # Build human-readable description interpreting NB primarily, with OLS robustness
+    for pred in predictors:
+        nb_p = out[pred].get('nb_pvalue')
+        nb_coef = out[pred].get('nb_coef')
+        irr = out[pred].get('nb_IRR')
 
-    description = " ".join(description_lines)
+        # Interpret NB if available
+        if nb_p is None:
+            desc_lines.append(f"{pred}: no NB estimate available.")
+        else:
+            sig = nb_p < 0.05
+            if nb_coef is None:
+                desc_lines.append(f"{pred}: NB estimate missing.")
+            else:
+                direction = "decrease" if nb_coef < 0 else "increase" if nb_coef > 0 else "no change"
+                sig_text = "statistically significant (p < 0.05)" if sig else "not statistically significant (p >= 0.05)"
+                # For FemininityIndex_c, interpret per one-unit increase in centered femininity index.
+                if pred == 'FemininityIndex_c':
+                    desc_lines.append(
+                        f"Negative Binomial: For a one-unit increase in femininity (centered), "
+                        f"the NB coefficient = {nb_coef:.3g} ({sig_text}), corresponding to an IRR = {irr:.3g}. "
+                        f"IRR < 1 implies a {100*(1-irr):.2f}% expected {direction} in fatalities per unit increase."
+                    )
+                else:
+                    # Female binary: from male(0) to female(1)
+                    desc_lines.append(
+                        f"Negative Binomial: Being female-named (vs. male-named) has coefficient = {nb_coef:.3g} ({sig_text}), "
+                        f"IRR = {irr:.3g}. IRR < 1 implies fewer expected fatalities for female-named storms; IRR > 1 implies more."
+                    )
 
-    return {
-        "object": result_object,
-        "description": description
-    }
+        # Add OLS robustness summary if present
+        ols_p = out[pred].get('ols_pvalue')
+        ols_coef = out[pred].get('ols_coef')
+        ols_pct = out[pred].get('ols_pct_change')
+        if ols_p is None:
+            desc_lines.append(f"{pred}: no OLS(log) estimate available for robustness.")
+        else:
+            sig2 = ols_p < 0.05
+            sig_text2 = "statistically significant (p < 0.05)" if sig2 else "not statistically significant (p >= 0.05)"
+            desc_lines.append(
+                f"OLS (log1p) robustness: coef = {ols_coef:.3g} ({sig_text2}); "
+                f"approx. percent change = {ols_pct:.2f}% for a one-unit increase (or moving to female name for binary)."
+            )
+
+    # Synthesize overall take-away (simple rule based on NB significance and sign for femininity variable)
+    fem_p = out['FemininityIndex_c'].get('nb_pvalue')
+    fem_coef = out['FemininityIndex_c'].get('nb_coef')
+    if fem_p is None:
+        overall = "No Negative Binomial result for FemininityIndex_c to judge evidence."
+    else:
+        if fem_p < 0.05:
+            if fem_coef < 0:
+                overall = "Evidence: Higher perceived femininity of a storm name is associated with significantly fewer fatalities (NB model)."
+            elif fem_coef > 0:
+                overall = "Evidence: Higher perceived femininity of a storm name is associated with significantly more fatalities (NB model)."
+            else:
+                overall = "No directional effect (coef ~ 0) despite statistical significance."
+        else:
+            overall = "No strong evidence in the NB model that femininity of name predicts fatalities (p >= 0.05)."
+
+    desc_lines.append("")  # blank line
+    desc_lines.append("Overall conclusion: " + overall)
+
+    description = " ".join(desc_lines)
+
+    return {"object": out, "description": description}

@@ -1,131 +1,137 @@
 def extract_final_answer(model_output):
     """
-    Extracts coefficient, standard error, p-value, 95% CI, and interprets the effect
-    of STR_log (student-teacher ratio, log-transformed) on AvgScore from a
-    statsmodels RegressionResultsWrapper object.
+    Extract key statistics about the StudentTeacherRatio coefficient from a statsmodels
+    RegressionResultsWrapper and provide a short interpretation answering whether a
+    lower student-teacher ratio (fewer students per teacher) is associated with higher
+    academic performance (AvgTestScore).
 
-    Returns a dictionary with keys:
-      - "object": a dict containing numeric results and boolean flags
-      - "description": a human-readable interpretation of the results
-
-    Example returned numeric fields:
-      coef, std_err, t_value, p_value, conf_int_95 (list), significant_at_0.05 (bool),
-      direction ("negative"/"positive"/"zero"), lower_STR_associated_with_higher_performance (bool),
-      effect_1pct_decrease (float, change in AvgScore for 1% decrease in STR),
-      effect_10pct_decrease (float, change in AvgScore for 10% decrease in STR),
-      r_squared (if available, else None)
+    Returns:
+      dict with keys:
+        - "object": dict of extracted numeric results and a final conclusion flag/text
+        - "description": human-readable explanation of the numbers and conclusion
     """
-    import numpy as np
+    # Name of the coefficient in the model
+    name = 'StudentTeacherRatio'
 
-    result = model_output  # statsmodels RegressionResultsWrapper
-
-    varname = 'STR_log'
-    # Check that the variable is present
-    params = getattr(result, 'params', None)
-    if params is None or varname not in params.index:
+    # Prepare a friendly error if the parameter is missing
+    try:
+        params = model_output.params
+    except Exception as e:
         return {
             "object": None,
-            "description": f"Variable '{varname}' not found in model output. Available params: {list(params.index) if params is not None else 'None'}"
+            "description": f"Could not access model parameters: {e}"
         }
 
-    # Extract basic statistics
-    coef = float(params[varname])
-    # standard error, t-value, p-value
-    std_err = float(result.bse[varname]) if hasattr(result, 'bse') else None
-    t_value = float(result.tvalues[varname]) if hasattr(result, 'tvalues') else None
-    p_value = float(result.pvalues[varname]) if hasattr(result, 'pvalues') else None
+    if name not in params.index:
+        return {
+            "object": None,
+            "description": f"Parameter '{name}' not found in the model output. Available parameters: {list(params.index)}"
+        }
 
-    # Confidence interval (try robust extraction)
+    # Extract coefficient and statistics (robust SEs should already be in model_output.bse)
+    coef = float(params[name])
     try:
-        ci = result.conf_int()  # might be DataFrame or ndarray
-        if hasattr(ci, 'loc'):
-            ci_low, ci_high = map(float, ci.loc[varname])
-        else:
-            # assume ndarray; find index of varname in params
-            idx = list(result.params.index).index(varname)
-            ci_low, ci_high = float(ci[idx, 0]), float(ci[idx, 1])
+        se = float(model_output.bse[name])
     except Exception:
-        ci_low, ci_high = None, None
+        # fallback: compute from t-values if available
+        try:
+            se = float(coef / model_output.tvalues[name])
+        except Exception:
+            se = None
 
-    # R-squared if available
-    r_squared = float(result.rsquared) if hasattr(result, 'rsquared') else None
+    try:
+        tval = float(model_output.tvalues[name])
+    except Exception:
+        tval = None
 
-    # Interpretation helpers
-    significant = (p_value is not None) and (p_value < 0.05)
-    if abs(coef) < 1e-12:
-        direction = "zero"
+    try:
+        pval = float(model_output.pvalues[name])
+    except Exception:
+        pval = None
+
+    # Confidence interval retrieval with robust handling
+    try:
+        ci = model_output.conf_int()  # may be DataFrame or ndarray-like
+        if hasattr(ci, 'loc'):
+            ci_lower, ci_upper = ci.loc[name].astype(float).tolist()
+        else:
+            # ci is ndarray; find index of parameter
+            idx = list(params.index).index(name)
+            ci_lower, ci_upper = float(ci[idx, 0]), float(ci[idx, 1])
+    except Exception:
+        ci_lower, ci_upper = None, None
+
+    # Interpret sign and statistical significance
+    significance_level = 0.05
+    significant = (pval is not None) and (pval < significance_level)
+
+    if coef < 0:
+        direction = "negative"
+        direction_text = ("A negative coefficient means that higher student-teacher ratios "
+                          "(more students per teacher, i.e., larger classes) are associated "
+                          "with lower average test scores. Equivalently, lower student-teacher "
+                          "ratios (fewer students per teacher, i.e., smaller classes) are "
+                          "associated with higher test scores.")
     elif coef > 0:
         direction = "positive"
+        direction_text = ("A positive coefficient means that higher student-teacher ratios "
+                          "(more students per teacher) are associated with higher average test scores.")
     else:
-        direction = "negative"
+        direction = "zero"
+        direction_text = "The coefficient is zero (no estimated association)."
 
-    # Lower STR (fewer students per teacher) corresponds to a decrease in STR.
-    # If coef < 0 then increasing STR reduces AvgScore, so lowering STR increases AvgScore.
-    lower_STR_associated_with_higher_performance = (coef < 0)
-
-    # Compute effect sizes for a 1% and 10% decrease in STR.
-    # A p% decrease corresponds to multiplicative factor (1 - p), delta_log = ln(1 - p).
-    # For a 1% decrease:
-    delta_log_1pct = np.log(0.99)   # ~ -0.01005
-    effect_1pct_decrease = coef * delta_log_1pct
-    # For a 10% decrease:
-    delta_log_10pct = np.log(0.90)  # ~ -0.10536
-    effect_10pct_decrease = coef * delta_log_10pct
-
-    # Build human-readable description
-    desc_parts = []
-    desc_parts.append(f"Estimated coefficient on {varname}: {coef:.4f}")
-    if std_err is not None:
-        desc_parts.append(f"(SE = {std_err:.4f})")
-    if t_value is not None:
-        desc_parts.append(f"(t = {t_value:.3f})")
-    if p_value is not None:
-        desc_parts.append(f"p = {p_value:.4f}")
-    if ci_low is not None and ci_high is not None:
-        desc_parts.append(f"95% CI = [{ci_low:.4f}, {ci_high:.4f}]")
-
-    interpretation = " ".join(desc_parts) + ". "
-
-    # Interpret direction and significance
-    if direction == "negative":
-        interpretation += ("The negative coefficient indicates that higher student-teacher ratios "
-                           "(more students per teacher) are associated with lower district AvgScore; "
-                           "conversely, lower student-teacher ratios are associated with higher AvgScore. ")
-    elif direction == "positive":
-        interpretation += ("The positive coefficient indicates that higher student-teacher ratios "
-                           "(more students per teacher) are associated with higher district AvgScore; "
-                           "conversely, lower student-teacher ratios are associated with lower AvgScore. ")
-    else:
-        interpretation += "The estimated effect is essentially zero. "
-
+    # Formulate a concise conclusion answering the yes/no question
     if significant:
-        interpretation += "This effect is statistically significant at the 0.05 level. "
+        if coef < 0:
+            conclusion_short = "Yes — statistically significant: lower student-teacher ratio is associated with higher academic performance."
+        elif coef > 0:
+            conclusion_short = "Yes — statistically significant: lower student-teacher ratio is associated with LOWER academic performance (coefficient positive)."
+        else:
+            conclusion_short = "No — coefficient is (near) zero despite statistical significance (unusual)."
     else:
-        interpretation += "This effect is not statistically significant at the 0.05 level. "
+        # Not statistically significant
+        if coef < 0:
+            conclusion_short = ("No statistically significant evidence that lower student-teacher ratio is associated "
+                                "with higher academic performance (coefficient negative but p >= 0.05).")
+        elif coef > 0:
+            conclusion_short = ("No statistically significant evidence that lower student-teacher ratio is associated "
+                                "with higher academic performance (coefficient positive and p >= 0.05).")
+        else:
+            conclusion_short = "No statistically significant association (coefficient near zero and p >= 0.05)."
 
-    interpretation += (f"Numerically, a 1% decrease in STR is associated with a change in AvgScore of "
-                       f"{effect_1pct_decrease:.4f} points, and a 10% decrease in STR with a change of "
-                       f"{effect_10pct_decrease:.4f} points (both computed using exact ln(1 - p) scaling). ")
-
-    if r_squared is not None:
-        interpretation += f"Model R-squared = {r_squared:.3f}. "
-
-    # Prepare the object to return
-    out_obj = {
-        "coef": coef,
-        "std_err": std_err,
-        "t_value": t_value,
-        "p_value": p_value,
-        "conf_int_95": [ci_low, ci_high],
-        "significant_at_0.05": significant,
+    # Build the object to return (serializable)
+    result_object = {
+        "variable": name,
+        "coef": float(coef),
+        "std_err": float(se) if se is not None else None,
+        "t_value": float(tval) if tval is not None else None,
+        "p_value": float(pval) if pval is not None else None,
+        "ci_lower_95": float(ci_lower) if ci_lower is not None else None,
+        "ci_upper_95": float(ci_upper) if ci_upper is not None else None,
+        "significant_at_0.05": bool(significant),
         "direction": direction,
-        "lower_STR_associated_with_higher_performance": lower_STR_associated_with_higher_performance,
-        "effect_1pct_decrease": float(effect_1pct_decrease),
-        "effect_10pct_decrease": float(effect_10pct_decrease),
-        "r_squared": r_squared
+        "conclusion": conclusion_short
     }
 
+    # Human-readable description
+    desc_lines = [
+        f"Coefficient for {name}: {result_object['coef']:.4f}",
+    ]
+    if result_object["std_err"] is not None:
+        desc_lines.append(f"Std. error (HC3 robust): {result_object['std_err']:.4f}")
+    if result_object["t_value"] is not None:
+        desc_lines.append(f"t-value: {result_object['t_value']:.3f}")
+    if result_object["p_value"] is not None:
+        desc_lines.append(f"p-value: {result_object['p_value']:.4f}")
+    if (result_object["ci_lower_95"] is not None) and (result_object["ci_upper_95"] is not None):
+        desc_lines.append(f"95% CI: [{result_object['ci_lower_95']:.4f}, {result_object['ci_upper_95']:.4f}]")
+    desc_lines.append(direction_text)
+    desc_lines.append(f"Statistical significance at alpha={significance_level}: {result_object['significant_at_0.05']}")
+    desc_lines.append("Conclusion: " + result_object["conclusion"])
+
+    description = " ".join(desc_lines)
+
     return {
-        "object": out_obj,
-        "description": interpretation
+        "object": result_object,
+        "description": description
     }

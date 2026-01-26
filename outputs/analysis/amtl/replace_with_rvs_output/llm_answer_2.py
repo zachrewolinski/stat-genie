@@ -1,177 +1,143 @@
 def extract_final_answer(model_output):
     """
-    Extracts statistics comparing non-human genera to the reference genus (Homo sapiens)
-    from a fitted statsmodels GLMResultsWrapper (fitted with Treatment(reference="Homo sapiens")
-    for genus). Returns a dict with:
-      - "object": a pandas.DataFrame summarizing coef, SE, p-value, conf. intervals,
-                  odds ratios and whether the result implies Homo sapiens has higher AMTL
-                  (at alpha=0.05) for each non-human genus.
-      - "description": a textual interpretation of those results in the context of the task.
+    Extract and interpret the effect of 'is_human' from the model output returned
+    by the provided modeling function.
 
-    Notes:
-    - The model is assumed to be a binomial GLM with logit link (so coefficients are
-      log-odds). The function exponentiates coefficients and CIs to produce odds ratios.
-    - It expects parameter names produced by Patsy/statsmodels such as
-      'C(genus, Treatment(reference="Homo sapiens"))[T.Pan]' (but will try to match
-      other common naming patterns that include 'genus' and 'T.').
+    Returns a dict with:
+      - "object": dict of extracted statistics for 'is_human' (log-odds coef, SE used,
+                  z, two-sided p-value, odds ratio, 95% CI for OR, method used for SE)
+      - "description": short plain-language interpretation answering whether modern
+                       humans have higher AMTL than the non-human genera after
+                       controlling for covariates.
     """
-    import re
     import numpy as np
-    import pandas as pd
+    from scipy.stats import norm
 
-    # Pull estimates, SEs, p-values, and confidence intervals from the fitted model output.
-    try:
-        params = model_output.params
-        bse = model_output.bse
-        pvalues = model_output.pvalues
-        conf = model_output.conf_int()  # DataFrame or array with two columns (lower, upper)
-    except Exception as e:
-        raise ValueError("model_output does not appear to be a statsmodels results object with "
-                         "params/bse/pvalues/conf_int attributes.") from e
+    # Helper to safely access items
+    fit = model_output.get('fit', None)
+    robust = model_output.get('robust_results', None)
 
-    # Locate genus-related parameter rows and extract genus names
-    genus_rows = []
-    genus_names = []
-    for name in params.index:
-        if 'genus' in name:
-            # try to extract the genus label after 'T.' (common pattern)
-            m = re.search(r'T\.([^\]\s]+)', name)
-            if m:
-                g = m.group(1)
-            else:
-                # fallback: take the last token after '.' or '['
-                if '.' in name:
-                    g = name.split('.')[-1].strip(']').strip()
-                else:
-                    g = name
-            genus_rows.append(name)
-            genus_names.append(g)
+    # Ensure we can access parameter estimates
+    if robust is None and fit is None:
+        raise ValueError("model_output must contain at least 'fit' or 'robust_results'.")
 
-    if len(genus_rows) == 0:
-        # No genus coefficients found; return a helpful error object
-        return {
-            "object": None,
-            "description": (
-                "No genus-level coefficients were found in the provided model_output. "
-                "Ensure the model was fitted with genus as a categorical predictor and that "
-                "the reference level was set to 'Homo sapiens' (e.g., via "
-                "C(genus, Treatment(reference='Homo sapiens'))). Parameter names in the model "
-                "were: {}".format(list(params.index))
-            )
-        }
-
-    # Build a summary table for the non-human genera
-    records = []
-    alpha = 0.05
-    for row_name, genus in zip(genus_rows, genus_names):
-        coef = float(params[row_name])
-        se = float(bse[row_name]) if row_name in bse.index else np.nan
-        pval = float(pvalues[row_name]) if row_name in pvalues.index else np.nan
-
-        # conf may be DataFrame or ndarray; handle both
+    # Preferred: use cluster-robust results for SEs/confidence intervals if available
+    use_robust = False
+    method_note = ""
+    # Try to pull params from robust wrapper if present
+    if robust is not None:
         try:
-            ci_low, ci_high = conf.loc[row_name].values
+            params = robust.params  # pandas Series
+            # check that 'is_human' is present
+            if 'is_human' in params.index:
+                use_robust = True
         except Exception:
-            try:
-                idx = list(params.index).index(row_name)
-                ci_low, ci_high = conf[idx, 0], conf[idx, 1]
-            except Exception:
-                ci_low, ci_high = (np.nan, np.nan)
+            use_robust = False
 
-        # Odds ratio interpretation (exp of log-odds coef)
-        or_est = float(np.exp(coef)) if np.isfinite(coef) else np.nan
-        or_ci_low = float(np.exp(ci_low)) if np.isfinite(ci_low) else np.nan
-        or_ci_high = float(np.exp(ci_high)) if np.isfinite(ci_high) else np.nan
-
-        # Since 'Homo sapiens' was the reference, a negative coefficient means the non-human genus
-        # has LOWER log-odds (and thus lower odds/probability) of AMTL relative to Homo sapiens.
-        # Therefore, Homo sapiens would have higher AMTL if coef < 0 and the difference is statistically significant.
-        humans_higher = (coef < 0) and (pval < alpha)
-
-        interpretation = ""
-        if np.isnan(pval):
-            interpretation = "No p-value available."
-        else:
-            if humans_higher:
-                interpretation = (
-                    "Homo sapiens shows significantly higher AMTL than {} "
-                    "(coef={:.3g}, p={:.3g}; OR={:.3g}, 95% CI [{:.3g}, {:.3g}])."
-                    .format(genus, coef, pval, or_est, or_ci_low, or_ci_high)
-                )
+    # Fallback to fit (non-robust)
+    if use_robust:
+        coef = float(robust.params.loc['is_human'])
+        # Try robust SE
+        try:
+            se = float(robust.bse.loc['is_human'])
+            if np.isnan(se) or se == 0.0:
+                raise ValueError("robust SE is NaN or zero")
+            method_note = "cluster-robust SEs (clustered by 'specimen')"
+        except Exception:
+            # fallback to fit's bse
+            if fit is not None and 'is_human' in fit.params.index:
+                se = float(fit.bse.loc['is_human'])
+                method_note = "non-robust SEs (fallback to model fit bse)"
             else:
-                # either non-significant or in opposite direction
-                if pval < alpha and coef > 0:
-                    interpretation = (
-                        "{} shows significantly higher AMTL than Homo sapiens "
-                        "(coef={:.3g}, p={:.3g}; OR={:.3g}, 95% CI [{:.3g}, {:.3g}])."
-                        .format(genus, coef, pval, or_est, or_ci_low, or_ci_high)
-                    )
-                else:
-                    interpretation = (
-                        "No statistically significant difference in AMTL between Homo sapiens and {} "
-                        "(coef={:.3g}, p={:.3g}; OR={:.3g}, 95% CI [{:.3g}, {:.3g}])."
-                        .format(genus, coef, pval, or_est, or_ci_low, or_ci_high)
-                    )
-
-        records.append({
-            "genus_param": row_name,
-            "genus": genus,
-            "coef_log_odds": coef,
-            "se": se,
-            "p_value": pval,
-            "ci95_low_logodds": ci_low,
-            "ci95_high_logodds": ci_high,
-            "odds_ratio": or_est,
-            "or_ci95_low": or_ci_low,
-            "or_ci95_high": or_ci_high,
-            "humans_higher_at_0.05": bool(humans_higher),
-            "interpretation": interpretation
-        })
-
-    summary_df = pd.DataFrame.from_records(records).set_index("genus")
-
-    # Create an overall textual conclusion based on the genus-level results
-    if summary_df["humans_higher_at_0.05"].all():
-        overall = (
-            "Overall conclusion: YES — after adjusting for age, prob_male, and tooth class, "
-            "modern humans (Homo sapiens) have higher AMTL than all examined non-human genera "
-            "(Pan, Pongo, Papio) at alpha = 0.05."
-        )
-    elif summary_df["humans_higher_at_0.05"].any():
-        sig_genera = list(summary_df[summary_df["humans_higher_at_0.05"]].index)
-        nonsig_genera = list(summary_df[~summary_df["humans_higher_at_0.05"]].index)
-        overall = (
-            "Overall conclusion: MIXED — Homo sapiens shows significantly higher AMTL than {} "
-            "but not (significantly) different from {} after adjustment (alpha = 0.05)."
-            .format(", ".join(sig_genera), ", ".join(nonsig_genera) if nonsig_genera else "none")
-        )
+                se = float(np.nan)
+                method_note = "no SE available"
+        # Confidence interval (log-odds)
+        try:
+            ci_log = robust.conf_int().loc['is_human']  # DataFrame-like with [0]=lower, [1]=upper
+            ci_lower_log, ci_upper_log = float(ci_log.iloc[0]), float(ci_log.iloc[1])
+        except Exception:
+            # fallback to fit.conf_int()
+            try:
+                ci_log = fit.conf_int().loc['is_human']
+                ci_lower_log, ci_upper_log = float(ci_log.iloc[0]), float(ci_log.iloc[1])
+                method_note += " (CI from non-robust fit)"
+            except Exception:
+                ci_lower_log, ci_upper_log = (np.nan, np.nan)
     else:
-        # No genus shows humans higher; check if any genus shows higher AMTL than humans
-        any_nonhuman_higher = (summary_df["p_value"] < alpha) & (summary_df["coef_log_odds"] > 0)
-        if any_nonhuman_higher.any():
-            higher_genera = list(summary_df[any_nonhuman_higher].index)
-            overall = (
-                "Overall conclusion: NO — there is no evidence that Homo sapiens has higher AMTL. "
-                "Some non-human genera ({}) have significantly higher AMTL than Homo sapiens."
-                .format(", ".join(higher_genera))
-            )
+        # No robust wrapper available: use fit
+        if fit is None:
+            raise ValueError("No usable fit object found in model_output.")
+        if 'is_human' not in fit.params.index:
+            raise ValueError("The fitted model does not contain a parameter named 'is_human'.")
+        coef = float(fit.params.loc['is_human'])
+        se = float(fit.bse.loc['is_human'])
+        ci_log = fit.conf_int().loc['is_human']
+        ci_lower_log, ci_upper_log = float(ci_log.iloc[0]), float(ci_log.iloc[1])
+        method_note = "non-robust SEs and CIs from the original fit"
+
+    # Compute z, two-sided p-value
+    if np.isnan(se) or se == 0.0:
+        z = np.nan
+        p_value = np.nan
+    else:
+        z = coef / se
+        p_value = 2 * (1 - norm.cdf(abs(z)))
+
+    # Odds ratio and CI on OR scale
+    try:
+        odds_ratio = float(np.exp(coef))
+    except Exception:
+        odds_ratio = np.nan
+    try:
+        ci_lower_or = float(np.exp(ci_lower_log)) if not np.isnan(ci_lower_log) else np.nan
+        ci_upper_or = float(np.exp(ci_upper_log)) if not np.isnan(ci_upper_log) else np.nan
+    except Exception:
+        ci_lower_or, ci_upper_or = (np.nan, np.nan)
+
+    # Formulate a concise conclusion relative to the hypothesis:
+    # Hypothesis: modern humans have higher AMTL frequency than non-human primates,
+    # i.e., is_human coefficient should be > 0 and statistically significant.
+    significance = None
+    if not np.isnan(p_value):
+        significance = (p_value < 0.05)
+    if significance is True:
+        if coef > 0:
+            conclusion = ("Yes — modern humans show significantly higher AMTL after "
+                          "controlling for age, sex, and tooth class (coef>0, p < 0.05).")
         else:
-            overall = (
-                "Overall conclusion: NO — there is no statistically significant evidence that modern humans "
-                "have higher AMTL than the examined non-human genera after adjusting for age, prob_male, "
-                "and tooth class (alpha = 0.05)."
-            )
+            conclusion = ("No — modern humans show significantly lower AMTL after "
+                          "controlling for covariates (coef<0, p < 0.05).")
+    elif significance is False:
+        conclusion = ("No — there is no statistically significant difference in AMTL "
+                      "between modern humans and the non-human primates after controlling for covariates "
+                      f"(two-sided p = {p_value:.3g}).")
+    else:
+        conclusion = ("Unable to determine statistical significance (SE or p-value missing).")
+
+    # Assemble object to return
+    result_obj = {
+        'parameter': 'is_human',
+        'coef_logit': coef,
+        'se_used': se,
+        'se_method': method_note,
+        'z_value': z,
+        'p_value_two_sided': p_value,
+        'odds_ratio': odds_ratio,
+        'ci_lower_or': ci_lower_or,
+        'ci_upper_or': ci_upper_or,
+        'ci_lower_logit': ci_lower_log,
+        'ci_upper_logit': ci_upper_log,
+        'n_obs': int(getattr(fit, 'nobs', np.nan)) if fit is not None else np.nan
+    }
 
     description = (
-        "This table shows, for each non-human genus, the model coefficient (log-odds difference vs. "
-        "Homo sapiens), its standard error, p-value, 95% confidence interval (log-odds), and the odds "
-        "ratio with 95% CI. Because the model used treatment coding with 'Homo sapiens' as the reference, "
-        "a negative coefficient means the given non-human genus has lower AMTL than Homo sapiens; if that "
-        "difference is statistically significant (p < 0.05) we conclude Homo sapiens has higher AMTL for that genus. "
-        + "Alpha = 0.05 was used to determine significance. " + overall
+        f"Extracted statistics for the predictor 'is_human': log-odds coef = {coef:.4g}, "
+        f"SE used = {se:.4g} ({method_note}), z = {np.nan if np.isnan(z) else f'{z:.3g}'}, "
+        f"two-sided p = {np.nan if np.isnan(p_value) else f'{p_value:.3g}'}. "
+        f"Odds ratio = {np.nan if np.isnan(odds_ratio) else f'{odds_ratio:.4g}'}, "
+        f"95% CI for OR = [{ci_lower_or if not np.isnan(ci_lower_or) else 'NA'}, "
+        f"{ci_upper_or if not np.isnan(ci_upper_or) else 'NA'}]. "
+        f"Conclusion: {conclusion}"
     )
 
-    return {
-        "object": summary_df,
-        "description": description
-    }
+    return {"object": result_obj, "description": description}

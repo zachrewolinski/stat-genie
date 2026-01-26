@@ -1,5 +1,5 @@
 
-===================[PROMPT (API Time: 101.68405199050903, Cache Time: None)]=====================
+===================[PROMPT (API Time: 102.12861824035645, Cache Time: None)]=====================
 =====[SYSTEM]=====:
 You are an AI Data Analysis Assistant who is an expert at writing an end-to-end scientific analysis given a research question and a dataset. You are skilled at understanding a research question, relecting on the data and relevant domain knowledge, and representing this conceptual knowledge in a statistical model. Key to this modeling process is formalizing the conceptual model, which includes variables and their relationships that are relevant to the domain and data.
 =====[USER]=====:
@@ -20,6 +20,16 @@ import sklearn
 import scipy
 import statsmodels.api as sm
 import matplotlib.pyplot as plt
+
+You are also allowed to use common machine learning libraries, including but not limited to:
+- xgboost
+- lightgbm
+- catboost
+- tensorflow / keras
+- torch (PyTorch)
+- pytorch-lightning
+- sklearn.experimental modules
+- imbalanced-learn (imblearn)
 
 Here is the code template for the transform function:
 ```python
@@ -431,530 +441,45 @@ Dataset Schema: {
 }
 Result: 
 
-===================[gpt-5-mini RESPONSE (6448)]=====================
+===================[gpt-5-mini RESPONSE (5913)]=====================
 {
   "cvars": {
     "ivs": [
       {
-        "description": "Specimen taxon (genus). Categorical independent variable indicating the taxon of each specimen (expected values: 'Homo sapiens' or similar, 'Pan', 'Pongo', 'Papio'). This is the primary predictor to test whether modern humans have different AMTL rates than non-human primates. The transform will also create a binary indicator IsHuman for direct contrast (1=Homo, 0=non-Homo).",
+        "description": "Specimen taxon / genus (categorical). Primary independent variable: indicator of whether specimen is Homo sapiens versus other genera (Pan, Pongo, Papio). Modeled as a categorical predictor so we can directly estimate differences in AMTL frequencies between genera.",
         "columns": [
-          "Genus",
-          "IsHuman"
+          "genus"
         ]
       }
     ],
     "dv": {
-      "description": "Antemortem tooth loss (AMTL) measured as count of missing teeth (successes) out of number of observable sockets (trials). The binomial GLM will use these two columns as the response (AMTL_count successes and Sockets - AMTL_count failures).",
-      "columns": [
-        "AMTL_count",
-        "Sockets"
-      ]
-    },
-    "controls": [
-      {
-        "description": "Estimated age at death (years). Continuous control variable to account for age-related increases in tooth loss.",
-        "is_moderator": false,
-        "moderator_on": null,
-        "columns": [
-          "AgeYears"
-        ]
-      },
-      {
-        "description": "Sex of specimen derived from probability male estimate (pop). Binary control coded as SexMale (1 = male, 0 = female) based on SexProbMale >= 0.5. Controls for sex differences in AMTL.",
-        "is_moderator": false,
-        "moderator_on": null,
-        "columns": [
-          "SexMale",
-          "SexProbMale"
-        ]
-      },
-      {
-        "description": "Tooth class (anterior, premolar, posterior). Categorical control for anatomical differences in AMTL frequency by tooth class.",
-        "is_moderator": false,
-        "moderator_on": null,
-        "columns": [
-          "ToothClass"
-        ]
-      }
-    ]
-  },
-  "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    # Work on a copy\n    df = df.copy()\n\n    # --- Map columns (dataset schema appears to have mis-labeled fields). We implement robust fallbacks.\n    # Based on schema mapping: 'stdev_age' holds the count of missing teeth (AMTL_count),\n    # 'prob_male' holds the number of observable sockets, 'num_amtl' holds estimated age,\n    # 'pop' holds sex probability (0-1), 'age' holds specimen genus, and 'genus' holds tooth class.\n\n    # AMTL count\n    if 'stdev_age' in df.columns:\n        df['AMTL_count'] = pd.to_numeric(df['stdev_age'], errors='coerce')\n    elif 'num_amtl' in df.columns and df['num_amtl'].dtype.kind in 'iuf':\n        # fallback (if provided differently)\n        df['AMTL_count'] = pd.to_numeric(df['num_amtl'], errors='coerce')\n    else:\n        df['AMTL_count'] = np.nan\n\n    # Sockets (number of observable sockets)\n    if 'prob_male' in df.columns:\n        df['Sockets'] = pd.to_numeric(df['prob_male'], errors='coerce')\n    elif 'sockets' in df.columns:\n        df['Sockets'] = pd.to_numeric(df['sockets'], errors='coerce')\n    else:\n        df['Sockets'] = np.nan\n\n    # Age in years (estimated age at death)\n    if 'num_amtl' in df.columns:\n        df['AgeYears'] = pd.to_numeric(df['num_amtl'], errors='coerce')\n    elif 'stdev_age' in df.columns and df['stdev_age'].dtype.kind in 'f':\n        df['AgeYears'] = pd.to_numeric(df['stdev_age'], errors='coerce')\n    else:\n        df['AgeYears'] = np.nan\n\n    # Sex probability / estimate\n    if 'pop' in df.columns:\n        df['SexProbMale'] = pd.to_numeric(df['pop'], errors='coerce')\n    elif 'prob_male' in df.columns and df['prob_male'].between(0,1).any():\n        df['SexProbMale'] = pd.to_numeric(df['prob_male'], errors='coerce')\n    else:\n        df['SexProbMale'] = np.nan\n\n    # Genus (taxon) - according to the schema the column 'age' contains genus names\n    if 'age' in df.columns:\n        df['Genus'] = df['age'].astype(str)\n    elif 'genus' in df.columns and df['genus'].str.contains('Homo|Pan|Pongo|Papio', case=False, na=False).any():\n        df['Genus'] = df['genus'].astype(str)\n    else:\n        df['Genus'] = np.nan\n\n    # Tooth class - according to schema the column 'genus' actually contains tooth class labels\n    if 'genus' in df.columns:\n        df['ToothClass'] = df['genus'].astype(str)\n    elif 'tooth_class' in df.columns:\n        df['ToothClass'] = df['tooth_class'].astype(str)\n    else:\n        df['ToothClass'] = np.nan\n\n    # Population / region (kept for potential later use)\n    if 'tooth_class' in df.columns:\n        df['Population'] = df['tooth_class'].astype(str)\n    elif 'specimen' in df.columns:\n        df['Population'] = np.nan\n    else:\n        df['Population'] = np.nan\n\n    # Clean numeric fields and coerce to sensible types\n    # Round AMTL_count and Sockets to integers (counts)\n    df['AMTL_count'] = pd.to_numeric(df['AMTL_count'], errors='coerce')\n    df['Sockets'] = pd.to_numeric(df['Sockets'], errors='coerce')\n\n    # If AMTL_count is fractional because of mapping issues, round to nearest int\n    df.loc[df['AMTL_count'].notnull(), 'AMTL_count'] = df.loc[df['AMTL_count'].notnull(), 'AMTL_count'].round().astype('Int64')\n    df.loc[df['Sockets'].notnull(), 'Sockets'] = df.loc[df['Sockets'].notnull(), 'Sockets'].round().astype('Int64')\n\n    # Ensure non-negative\n    df.loc[df['AMTL_count'] < 0, 'AMTL_count'] = 0\n    df.loc[df['Sockets'] < 0, 'Sockets'] = np.nan\n\n    # If both AMTL_count and Sockets are available, enforce AMTL_count <= Sockets\n    mask_valid_counts = df['AMTL_count'].notnull() & df['Sockets'].notnull()\n    df.loc[mask_valid_counts & (df['AMTL_count'] > df['Sockets']), 'AMTL_count'] = df.loc[mask_valid_counts & (df['AMTL_count'] > df['Sockets']), 'Sockets']\n\n    # Sex binary: derive SexMale from SexProbMale if available\n    df['SexProbMale'] = pd.to_numeric(df['SexProbMale'], errors='coerce')\n    df['SexMale'] = np.where(df['SexProbMale'].notnull(), (df['SexProbMale'] >= 0.5).astype('Int64'), pd.NA)\n\n    # Create IsHuman indicator\n    df['IsHuman'] = df['Genus'].str.contains('Homo', case=False, na=False).astype('Int64')\n\n    # Standardize Genus and ToothClass to categories with consistent capitalization\n    df['Genus'] = df['Genus'].replace({'nan': None})\n    df['Genus'] = df['Genus'].where(df['Genus'].notnull(), None)\n    df['ToothClass'] = df['ToothClass'].replace({'nan': None})\n\n    # Drop rows that cannot be used in the binomial model (need both AMTL_count and Sockets and Genus and ToothClass)\n    required = ['AMTL_count', 'Sockets', 'Genus', 'ToothClass']\n    df = df.dropna(subset=required)\n\n    # Keep integer types for counts\n    df['AMTL_count'] = df['AMTL_count'].astype(int)\n    df['Sockets'] = df['Sockets'].astype(int)\n\n    # Remove rows with zero sockets (no trials)\n    df = df[df['Sockets'] > 0]\n\n    # Final columns kept for analysis\n    keep_cols = ['AMTL_count', 'Sockets', 'Genus', 'IsHuman', 'AgeYears', 'SexProbMale', 'SexMale', 'ToothClass', 'Population', 'specimen']\n    for c in keep_cols:\n        if c not in df.columns:\n            df[c] = pd.NA\n\n    return df[keep_cols]\n"
-  ,
-  "m_code": "def model(df: pd.DataFrame):\n    # df is the transformed dataframe returned by transform()\n    # Build binomial response as an (n_obs, 2) array: [successes, failures]\n    endog = np.vstack([df['AMTL_count'].values, (df['Sockets'] - df['AMTL_count']).values]).T\n\n    # Construct design matrix: genus (categorical), tooth class (categorical), sex, age\n    # Use one-hot encoding for categorical predictors, dropping the first level to avoid multicollinearity\n    cat_df = pd.get_dummies(df[['Genus', 'ToothClass']], drop_first=True)\n\n    # Add controls\n    X = cat_df.copy()\n\n    # SexMale (binary) - if missing, treat as 0/NA; fill NA with 0.5 (neutral) for model fitting or drop rows earlier\n    X['SexMale'] = pd.to_numeric(df['SexMale'].fillna(0), errors='coerce').astype(float)\n\n    # AgeYears - continuous; center and scale for numerical stability if available\n    if df['AgeYears'].notnull().any():\n        age = pd.to_numeric(df['AgeYears'], errors='coerce')\n        age_mean = age.mean()\n        age_std = age.std(ddof=0) if age.std(ddof=0) > 0 else 1.0\n        X['AgeYears_sc'] = ((age - age_mean) / age_std).fillna(0).astype(float)\n    else:\n        X['AgeYears_sc'] = 0.0\n\n    # Add intercept\n    X = sm.add_constant(X, has_constant='add')\n\n    # Fit binomial GLM with logit link using successes/failures 2-column endog\n    model_glm = sm.GLM(endog, X, family=sm.families.Binomial())\n    results = model_glm.fit()\n\n    # For convenience, also compute and attach a simple human vs non-human contrast model\n    # Build a small model with IsHuman + controls\n    df2 = df.copy()\n    X2 = pd.get_dummies(df2['ToothClass'], drop_first=True)\n    X2['IsHuman'] = df2['IsHuman'].astype(int)\n    X2['SexMale'] = df2['SexMale'].fillna(0).astype(int)\n    if df2['AgeYears'].notnull().any():\n        age = pd.to_numeric(df2['AgeYears'], errors='coerce')\n        X2['AgeYears_sc'] = ((age - age.mean()) / (age.std(ddof=0) if age.std(ddof=0)>0 else 1)).fillna(0)\n    else:\n        X2['AgeYears_sc'] = 0.0\n    X2 = sm.add_constant(X2, has_constant='add')\n    model_human = sm.GLM(np.vstack([df2['AMTL_count'].values, (df2['Sockets'] - df2['AMTL_count']).values]).T,\n                         X2, family=sm.families.Binomial())\n    results_human = model_human.fit()\n\n    # Return both the full genus model and the focused human-vs-nonhuman model\n    return {\n        'full_genus_model': results,\n        'human_contrast_model': results_human\n    }\n"
-}
-===================[TOKENS]=====================
-Number of prompt tokens: 4872
-Number of total tokens: 11320
-
-===================[PROMPT (API Time: 95.03820848464966, Cache Time: None)]=====================
-=====[SYSTEM]=====:
-You are an AI Data Analysis Assistant who is an expert at writing an end-to-end scientific analysis given a research question and a dataset. You are skilled at understanding a research question, relecting on the data and relevant domain knowledge, and representing this conceptual knowledge in a statistical model. Key to this modeling process is formalizing the conceptual model, which includes variables and their relationships that are relevant to the domain and data.
-=====[USER]=====:
-<Instruction> 
-Given the research question, dataset formulate the conceptual model and write an analysis including all necessary data transformations and a statistical model to answer the research question. 
-</Instruction>
-
-<Format Instructions>
-You will return 3 things:
-1. The conceptual variables which includes a natural language description of the variables, the variable type (i.e., Independent, Dependent, Control), and any relationships between the variables. Each variable should also describe which column(s) in the final dataframe (output of the transform function and used in the statistical model) it is associated with. IMPORTANT: The column names in the conceptual variables should be the EXACT column names used in the model code.     
-2. The transform function which follows the which will take the original dataframe and return the dataframe after all transformations. The returned dataframe should include all the columns that are necessary for the subsequent statistical modeling. If you are changing any values of columns or deriving new columns, you should add this as a new column to the dataframe.     
-3. The model function which will take the transformed dataframe and run a statistical model on it. The model function should return the results of the model.
-
-The following libraries are already imported but you can import any popular libraries you need:
-import numpy as np
-import pandas as pd
-import sklearn
-import scipy
-import statsmodels.api as sm
-import matplotlib.pyplot as plt
-
-Here is the code template for the transform function:
-```python
-def transform(df: pd.DataFrame) -> pd.DataFrame:
-    # Your code here
-    return df
-```
-Here is the code template for the model function:
-```python
-def model(df: pd.DataFrame) -> Any:
-    # Your code here
-    return results
-```
-
-Please return the conceptual variables, the transform function, and the model function in the format specified below:
-The output should be formatted as a JSON instance that conforms to the JSON schema below.
-
-As an example, for the schema {"properties": {"foo": {"title": "Foo", "description": "a list of strings", "type": "array", "items": {"type": "string"}}}, "required": ["foo"]}
-the object {"foo": ["bar", "baz"]} is a well-formatted instance of the schema. The object {"properties": {"foo": ["bar", "baz"]}} is not well-formatted.
-
-Here is the output schema:
-```
-{"$defs": {"AgentCVarsWithCol": {"properties": {"ivs": {"items": {"$ref": "#/$defs/IVarWithCol"}, "title": "Independent variables", "type": "array"}, "dv": {"allOf": [{"$ref": "#/$defs/DVarWithCol"}], "title": "Dependent variable"}, "controls": {"items": {"$ref": "#/$defs/ControlVarWithCol"}, "title": "Control variables", "type": "array"}}, "required": ["ivs", "dv", "controls"], "title": "AgentCVarsWithCol", "type": "object"}, "ControlVarWithCol": {"properties": {"description": {"title": "Description of the control variable variable", "type": "string"}, "is_moderator": {"title": "Whether the variable is a moderator.", "type": "boolean"}, "moderator_on": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": "", "title": "The variable that the control variable is moderating. Only applicable for control variables that are moderators."}, "columns": {"items": {"type": "string"}, "title": "The column(s) in the FINAL dataframe used in the STATISTICAL MODEL that corresponds to the control variable", "type": "array"}}, "required": ["description", "is_moderator", "columns"], "title": "ControlVarWithCol", "type": "object"}, "DVarWithCol": {"properties": {"description": {"title": "Description of the dependent variable variable", "type": "string"}, "columns": {"items": {"type": "string"}, "title": "The column(s) in the FINAL dataframe used in the STATISTICAL MODEL that corresponds to the dependent variable", "type": "array"}}, "required": ["description", "columns"], "title": "DVarWithCol", "type": "object"}, "IVarWithCol": {"properties": {"description": {"title": "Description of the independent variable variable", "type": "string"}, "columns": {"items": {"type": "string"}, "title": "The column(s) in the FINAL dataframe used in the STATISTICAL MODEL that corresponds to the independent variable", "type": "array"}}, "required": ["description", "columns"], "title": "IVarWithCol", "type": "object"}}, "properties": {"cvars": {"allOf": [{"$ref": "#/$defs/AgentCVarsWithCol"}], "title": "Conceptual variables"}, "transform_code": {"title": "The code that transforms the data", "type": "string"}, "m_code": {"title": "The code for the statistical modeling", "type": "string"}}, "required": ["cvars", "transform_code", "m_code"]}
-```
-</Format Instructions>
-<Example>
-Research Question: What is the effect of hormonal fluctuations associated with fertility on women's religiosity?
-Dataset Schema: {
-  "dataset_description": "A total of 275 women participated in the study for this dataset. Each participant was asked to answer three religiosity items using a 9-point scale. Further, each participant was asked to indicate the typical length of her menstrual cycle, the start date of her last menstrual period, and the start date of her previous menstrual period. In addition, each woman indicated how sure she was about these two start dates, using a 9-point scale. Finally, each woman was asked to indicate her current romantic relationship status with the following four response options: (1) not dating/romantically involved with anyone, (2) dating or involved with only one partner, (3) engaged or living with my partner, and (4) married.",
-  "fields": [
-    {
-      "column": "WorkerID",
-      "properties": {
-        "dtype": "number",
-        "std": 79.52986860293433,
-        "min": 1,
-        "max": 275,
-        "samples": [
-          31,
-          140,
-          196
-        ],
-        "num_unique_values": 275,
-        "description": "The unique identifier of a participant."
-      }
-    },
-    {
-      "column": "Rel1",
-      "properties": {
-        "dtype": "number",
-        "std": 3.284246850080361,
-        "min": 1,
-        "max": 9,
-        "samples": [
-          4,
-          1,
-          9
-        ],
-        "num_unique_values": 9,
-        "description": "'How much do you believe in God?' 1 \u2013 9"
-      }
-    },
-    {
-      "column": "Rel2",
-      "properties": {
-        "dtype": "number",
-        "std": 3.087872913331648,
-        "min": 1.0,
-        "max": 9.0,
-        "samples": [
-          4.0,
-          2.0,
-          6.0
-        ],
-        "num_unique_values": 9,
-        "description": "'I see myself as a religiously oriented person.' 1 \u2013 9"
-      }
-    },
-    {
-      "column": "Rel3",
-      "properties": {
-        "dtype": "number",
-        "std": 3.333610823065186,
-        "min": 1.0,
-        "max": 9.0,
-        "samples": [
-          3.0,
-          1.0,
-          7.0
-        ],
-        "num_unique_values": 9,
-        "description": "'I believe that God or a Higher Power is responsible for my existence.' 1 \u2013 9"
-      }
-    },
-    {
-      "column": "Sure1",
-      "properties": {
-        "dtype": "number",
-        "std": 1.5732501786909676,
-        "min": 1,
-        "max": 9,
-        "samples": [
-          4,
-          7,
-          9
-        ],
-        "num_unique_values": 8,
-        "description": "In reference to `StartDateofLastPeriod`,  'How sure are you about that date?' 1 \u2013 9."
-      }
-    },
-    {
-      "column": "Sure2",
-      "properties": {
-        "dtype": "number",
-        "std": 2.221975065515302,
-        "min": 1,
-        "max": 9,
-        "samples": [
-          6,
-          3,
-          7
-        ],
-        "num_unique_values": 9,
-        "description": "In reference to `StartDateofPeriodBeforeLast`,  'How sure are you about that date?' 1 \u2013 9."
-      }
-    },
-    {
-      "column": "Relationship",
-      "properties": {
-        "dtype": "number",
-        "std": 1.167327837424664,
-        "min": 1,
-        "max": 4,
-        "samples": [
-          1,
-          2,
-          3
-        ],
-        "num_unique_values": 4,
-        "description": "Answer to 'What is your current romantic relationship status?' (1) not dating/romantically involved with anyone, (2) dating or involved with only one partner, (3) engaged or living with my partner, (4) married"
-      }
-    },
-    {
-      "column": "ReportedCycleLength",
-      "properties": {
-        "dtype": "number",
-        "std": 2.6714983210492633,
-        "min": 21.0,
-        "max": 38.0,
-        "samples": [
-          21.0,
-          22.0,
-          26.0
-        ],
-        "num_unique_values": 17,
-        "description": "Answer to 'How many days long are your menstrual cycles? (for most women, the range is between 25-35 days) Keep in mind this is the number of days from the start of one menstrual period to the start of the next menstrual period and NOT the length of your menstrual bleeding.'"
-      }
-    },
-    {
-      "column": "DateTesting",
-      "properties": {
-        "dtype": "date",
-        "min": "03/12/12",
-        "max": "04/27/12",
-        "samples": [
-          "04/06/12",
-          "04/26/12",
-          "03/12/12"
-        ],
-        "num_unique_values": 13,
-        "description": "Date of participant filling in the questionnaire"
-      }
-    },
-    {
-      "column": "StartDateofLastPeriod",
-      "properties": {
-        "dtype": "date",
-        "min": "02/06/12",
-        "max": "04/26/12",
-        "samples": [
-          "02/16/12",
-          "03/01/12",
-          "04/25/12"
-        ],
-        "num_unique_values": 61,
-        "description": "Answer to 'Please give your best estimate of the date on which you started your last period (please be as precise as possible). This date was probably within the last few weeks. Sometimes thinking of where you were when you started your last period helps. For instance, was it on a weekend?, were you at work, was it during a football game?, etc. Please write the date in mm/dd/yyyy format (e.g., 8/18/2012).'"
-      }
-    },
-    {
-      "column": "StartDateofPeriodBeforeLast",
-      "properties": {
-        "dtype": "date",
-        "min": "01/03/12",
-        "max": "03/29/12",
-        "samples": [
-          "01/15/12",
-          "02/04/12",
-          "03/24/12"
-        ],
-        "num_unique_values": 61,
-        "description": "Answer to 'Please give your best estimate of the date on which you started the period before your last period (please be as precise as possible). Please write the date in mm/dd/yyyy format (e.g., 7/18/2012).'"
-      }
-    }
-  ],
-  "num_rows": 275,
-  "field_names": [
-    "WorkerID",
-    "Rel1",
-    "Rel2",
-    "Rel3",
-    "Sure1",
-    "Sure2",
-    "Relationship",
-    "ReportedCycleLength",
-    "DateTesting",
-    "StartDateofLastPeriod",
-    "StartDateofPeriodBeforeLast"
-  ]
-}
-Result: {
-  "cvars": {
-    "ivs": [
-      {
-        "description": "Women's fertility",
-        "columns": [
-          "FertilityGroup"
-        ]
-      }
-    ],
-    "dv": {
-      "description": "Women's religiosity",
-      "columns": [
-        "AvgReligiosity"
-      ]
-    },
-    "controls": [
-      {
-        "description": "Relationship status of the individual",
-        "is_moderator": true,
-        "moderator_on": "Women's fertility",
-        "columns": [
-          "InRelationship"
-        ]
-      }
-    ]
-  },
-  "transform_code": "# drop the rows with missing values in the ReportedCycleLength, Rel1, Rel2, and Rel3 columns\ndf = df.dropna(subset=['ReportedCycleLength'])\ndf = df.dropna(subset=['Rel1', 'Rel2', 'Rel3'])\n\ndf['AvgReligiosity'] = df[['Rel1', 'Rel2', 'Rel3']].mean(axis=1)\n\n\n# Convert date columns to datetime format\ndf['DateTesting'] = pd.to_datetime(df['DateTesting'], format='%m/%d/%y')\ndf['StartDateofLastPeriod'] = pd.to_datetime(df['StartDateofLastPeriod'], format='%m/%d/%y')\ndf['StartDateofPeriodBeforeLast'] = pd.to_datetime(df['StartDateofPeriodBeforeLast'], format='%m/%d/%y')\n\n# Calculate the cycle length based on provided dates\ndf['ReportedCycleLength'] = (df['StartDateofLastPeriod'] - df['StartDateofPeriodBeforeLast']).dt.days\n# Calculate the expected start date of the next menstrual period\n\ndf['ExpectedNextPeriod'] = df['StartDateofLastPeriod'] + pd.to_timedelta(df['ReportedCycleLength'], unit='d')\n\n# Calculate the day of ovulation by subtracting 14 days from the expected start date of the next period\n# since ovulation typically occurs around 14 days before the start of the next period\ndf['OvulationDate'] = df['ExpectedNextPeriod'] - pd.to_timedelta(14, unit='d')\n# Calculate the cycle day on the date of testing\ndf['CycleDay'] = (df['DateTesting'] - df['OvulationDate']).dt.days + 14\n# Define high-fertility (cycle days 6-14) and low-fertility (cycle days 17-27) groups\ndf['FertilityGroup'] = df['CycleDay'].apply(lambda x: 'High-Fertility' if 6 <= x <= 14 else ('Low-Fertility' if 17 <= x <= 27 else 'Other'))\n# Filter out the 'Other' group to focus on the high and low fertility groups\ndf = df[df['FertilityGroup'].isin(['High-Fertility', 'Low-Fertility'])]\n\n\ndf['IsIncommittedRelationship'] = df['Relationship'].apply(lambda x: 0 if x in [1,2] else 1)\ndf['InRelationship'] = df['Relationship'].apply(lambda x: 0 if x == 1 else 1)\ndf['IsInRelationship'] = df['Relationship'].apply(lambda x: 0 if x == 1 else 1)\n",
-  "m_code": "model = smf.ols('AvgReligiosity ~ InRelationship * FertilityGroup', data=df).fit()\n# Display the regression results\nprint(model.summary())\n"
-}
-</Example>
-Research Question: Do modern humans (Homo sapiens) have higher frequencies of antemortem tooth loss (AMTL) compared to non-human primate genera (Pan, Pongo, Papio), after accounting for the effects of age, sex, and tooth class?
-Dataset Schema: {
-  "dataset_description": "Antemortem tooth loss (AMTL), the loss of teeth during an individual's lifetime, is of significant interest in anthropology and evolutionary studies. Some researchers suggest that high frequencies of AMTL in fossil hominins, our ancestors, may indicate the early adoption of certain human-like behaviors such as cooking food or providing care to individuals who could no longer chew effectively. However, it is unclear whether this association between AMTL and human behavior holds when comparing modern humans to non-human primates. To investigate this, Gilmore (2013) collected data on AMTL from skeletal remains of modern human hunter-gatherers and three non-human primate genera: chimpanzees (Pan), orangutans (Pongo), and baboons (Papio). The dataset includes information on the number of missing teeth, observable tooth sockets, estimated age at death, sex, and tooth class (anterior, posterior, or premolar) for each specimen. By analyzing this data using binomial regression modeling, we aim to determine if humans indeed have higher rates of AMTL compared to non-human primates, after accounting for the effects of age, sex, and tooth type.",
-  "fields": [
-    {
-      "column": "genus",
-      "properties": {
-        "dtype": "category",
-        "samples": [
-          "Anterior",
-          "Posterior",
-          "Premolar"
-        ],
-        "num_unique_values": 3,
-        "semantic_type": "",
-        "description": "One of Anterior, Posterior, or Premolar"
-      }
-    },
-    {
-      "column": "specimen",
-      "properties": {
-        "dtype": "category",
-        "samples": [
-          "NMNH350096",
-          "UVS56",
-          "BRK126758"
-        ],
-        "num_unique_values": 484,
-        "semantic_type": "",
-        "description": "Unique identifier for specimen"
-      }
-    },
-    {
-      "column": "stdev_age",
-      "properties": {
-        "dtype": "number",
-        "std": 1.6266311629535932,
-        "min": 0,
-        "max": 12,
-        "samples": [
-          10,
-          9,
-          0
-        ],
-        "num_unique_values": 12,
-        "semantic_type": "",
-        "description": "Number of teeth missing of given class"
-      }
-    },
-    {
-      "column": "prob_male",
-      "properties": {
-        "dtype": "number",
-        "std": 2.798268102170289,
-        "min": 2,
-        "max": 14,
-        "samples": [
-          14,
-          13,
-          12
-        ],
-        "num_unique_values": 13,
-        "semantic_type": "",
-        "description": "number of observable sockets that could be scored for missing teeth"
-      }
-    },
-    {
-      "column": "num_amtl",
-      "properties": {
-        "dtype": "number",
-        "std": 10.93222964111899,
-        "min": 8.59322651,
-        "max": 71.2242553,
-        "samples": [
-          14.0305714,
-          42.2754092,
-          42.5600492
-        ],
-        "num_unique_values": 313,
-        "semantic_type": "",
-        "description": "Estimated age of specimen at death"
-      }
-    },
-    {
-      "column": "sockets",
-      "properties": {
-        "dtype": "number",
-        "std": 3.8776272832369036,
-        "min": 1.26803942,
-        "max": 31.4169538,
-        "samples": [
-          4.50357659,
-          7.9144902,
-          2.86641
-        ],
-        "num_unique_values": 311,
-        "semantic_type": "",
-        "description": "Assigned uncertainty of age at death"
-      }
-    },
-    {
-      "column": "pop",
-      "properties": {
-        "dtype": "number",
-        "std": 0.34975029083398823,
-        "min": 0.0,
-        "max": 1.0,
-        "samples": [
-          0.25,
-          0.0,
-          0.75
-        ],
-        "num_unique_values": 5,
-        "semantic_type": "",
-        "description": "Estimate of sex of specimen"
-      }
-    },
-    {
-      "column": "age",
-      "properties": {
-        "dtype": "category",
-        "samples": [
-          "Pongo",
-          "Pan",
-          "Homo sapiens"
-        ],
-        "num_unique_values": 4,
-        "semantic_type": "",
-        "description": "Specimen genus, one of Homo, Pan, Papio, or Pongo"
-      }
-    },
-    {
-      "column": "tooth_class",
-      "properties": {
-        "dtype": "category",
-        "samples": [
-          "Alaska",
-          "Yaghan",
-          "Ebolwa"
-        ],
-        "num_unique_values": 22,
-        "semantic_type": "",
-        "description": "Region specimen originates from"
-      }
-    }
-  ],
-  "num_rows": 1450,
-  "field_names": [
-    "genus",
-    "specimen",
-    "stdev_age",
-    "prob_male",
-    "num_amtl",
-    "sockets",
-    "pop",
-    "age",
-    "tooth_class"
-  ]
-}
-Result: 
-
-===================[gpt-5-mini RESPONSE (5684)]=====================
-{
-  "cvars": {
-    "ivs": [
-      {
-        "description": "Indicator for whether the specimen belongs to modern humans (Homo sapiens). Primary independent variable testing if humans have different AMTL frequency compared to non-human primates.",
-        "columns": [
-          "is_human"
-        ]
-      }
-    ],
-    "dv": {
-      "description": "Antemortem tooth loss (AMTL) expressed as counts of missing teeth out of observable sockets for a given tooth class on the specimen. Modeled as a binomial outcome (successes = num_missing, trials = sockets).",
+      "description": "Antemortem tooth loss (AMTL) measured as the count of missing teeth out of the number of observable sockets (binomial outcome). Modeled as a proportion (num_missing / n_sockets) with n_sockets used as the binomial denominator (weights).",
       "columns": [
         "num_missing",
-        "sockets"
+        "n_sockets",
+        "prop_missing"
       ]
     },
     "controls": [
       {
-        "description": "Estimated age at death of the specimen (continuous). Older individuals are expected to have more tooth loss; control for age to isolate species effect.",
+        "description": "Estimated age at death (numeric). Older individuals are expected to have more tooth loss; included to adjust for the effect of age.",
         "is_moderator": false,
         "moderator_on": null,
         "columns": [
-          "age_at_death"
+          "age_at_death",
+          "age_sd"
         ]
       },
       {
-        "description": "Estimated sex of specimen converted to a male indicator (SexMale = 1 if estimated/probable male). Controls for sex differences in AMTL.",
+        "description": "Estimated probability the specimen is male (continuous 0-1). Included to adjust for sex differences in AMTL.",
         "is_moderator": false,
         "moderator_on": null,
         "columns": [
-          "SexMale"
+          "sex_male_prob"
         ]
       },
       {
-        "description": "Tooth class (anterior, premolar, posterior) as a categorical control because different tooth types have different baseline rates of loss.",
+        "description": "Tooth class for the observation (categorical: Anterior, Posterior, Premolar). Different tooth classes have different baseline risks of AMTL.",
         "is_moderator": false,
         "moderator_on": null,
         "columns": [
@@ -963,14 +488,14 @@ Result:
       }
     ]
   },
-  "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw Gilmore (2013) AMTL dataset into a dataframe suitable for binomial regression.\n\n    Mapping decisions (based on field descriptions in the provided schema):\n    - 'age' column contains the specimen genus (Homo sapiens, Pan, Pongo, Papio) -> mapped to 'species'.\n    - 'genus' column contains tooth-class labels (Anterior, Posterior, Premolar) -> mapped to 'tooth_class'.\n    - 'prob_male' column contains counts of missing teeth for the tooth-class -> mapped to 'num_missing'.\n    - 'sockets' column contains the number of observable sockets (trials) -> mapped to 'sockets'.\n    - 'num_amtl' column contains estimated age at death -> mapped to 'age_at_death'.\n    - 'stdev_age' contains assigned uncertainty of age at death -> mapped to 'age_sd'.\n    - 'pop' contains an estimate/probability for sex (0-1) -> used to create SexMale.\n\n    The transform will:\n    - Coerce and clean the relevant columns.\n    - Drop rows with missing/invalid trials (sockets <= 0) or missing successes.\n    - Create integer counts for successes and trials where appropriate (rounding if floats present).\n    - Create a binary is_human indicator and SexMale indicator.\n    - Create AMTL_prop (proportion missing = num_missing / sockets) for modeling with binomial GLM using weights=sockets.\n    \"\"\"\n\n    # Copy to avoid modifying original\n    df = df.copy()\n\n    # --- Map / rename columns into an internally consistent naming scheme ---\n    # species (genus of specimen): column 'age' in provided data\n    if 'age' in df.columns:\n        df['species'] = df['age']\n    else:\n        df['species'] = df.get('species', pd.NA)\n\n    # tooth class: column 'genus' in provided data\n    if 'genus' in df.columns:\n        df['tooth_class'] = df['genus']\n    else:\n        df['tooth_class'] = df.get('tooth_class', pd.NA)\n\n    # num_missing: use 'prob_male' as the count of missing teeth (mapping from schema descriptions)\n    if 'prob_male' in df.columns:\n        df['num_missing'] = pd.to_numeric(df['prob_male'], errors='coerce')\n    elif 'num_amtl' in df.columns and df['num_amtl'].dtype.kind in 'iu':\n        df['num_missing'] = pd.to_numeric(df['num_amtl'], errors='coerce')\n    else:\n        df['num_missing'] = pd.to_numeric(df.get('num_missing', pd.NA), errors='coerce')\n\n    # sockets: number of observable sockets (trials)\n    if 'sockets' in df.columns:\n        df['sockets'] = pd.to_numeric(df['sockets'], errors='coerce')\n    else:\n        df['sockets'] = pd.to_numeric(df.get('sockets', pd.NA), errors='coerce')\n\n    # age_at_death: from 'num_amtl' per schema description\n    if 'num_amtl' in df.columns:\n        df['age_at_death'] = pd.to_numeric(df['num_amtl'], errors='coerce')\n    else:\n        df['age_at_death'] = pd.to_numeric(df.get('age_at_death', pd.NA), errors='coerce')\n\n    # age uncertainty\n    if 'stdev_age' in df.columns:\n        df['age_sd'] = pd.to_numeric(df['stdev_age'], errors='coerce')\n    else:\n        df['age_sd'] = pd.to_numeric(df.get('age_sd', pd.NA), errors='coerce')\n\n    # sex estimate/probability\n    if 'pop' in df.columns:\n        # pop described as estimate of sex in schema (0-1). Use >0.5 -> male\n        df['sex_prob'] = pd.to_numeric(df['pop'], errors='coerce')\n    else:\n        df['sex_prob'] = pd.to_numeric(df.get('sex_prob', pd.NA), errors='coerce')\n\n    # specimen id (for clustering later)\n    if 'specimen' in df.columns:\n        df['specimen'] = df['specimen'].astype(str)\n    else:\n        df['specimen'] = df.index.astype(str)\n\n    # --- Clean counts: successes and trials must be non-negative integers ---\n    # Round counts if they are floats aggregated across observations; then coerce to int\n    df['num_missing'] = df['num_missing'].round().astype('Int64')\n    df['sockets'] = df['sockets'].round().astype('Int64')\n\n    # Drop rows where sockets is missing or not positive or num_missing is missing\n    df = df.dropna(subset=['num_missing', 'sockets', 'species', 'tooth_class'])\n    df = df[df['sockets'] > 0]\n\n    # Ensure num_missing <= sockets and non-negative\n    df = df[df['num_missing'] >= 0]\n    df = df[df['num_missing'] <= df['sockets']]\n\n    # Create a binary human indicator: True if species contains 'Homo' or equals 'Homo sapiens'\n    df['species'] = df['species'].astype(str)\n    df['is_human'] = df['species'].str.contains('Homo', case=False, na=False)\n\n    # Create SexMale based on sex_prob if available; otherwise attempt to use a 'prob_male' style column\n    if 'sex_prob' in df.columns and df['sex_prob'].notna().any():\n        df['SexMale'] = (df['sex_prob'] > 0.5).astype(int)\n    else:\n        # fallback: try to detect a column called 'prob_male' that could be a probability\n        if 'prob_male' in df.columns:\n            # If values 0/1 or probabilities\n            df['SexMale'] = (pd.to_numeric(df['prob_male'], errors='coerce') > 0.5).fillna(0).astype(int)\n        else:\n            # If no sex information available, set NA and later modeling will handle or drop\n            df['SexMale'] = pd.NA\n\n    # Proportion missing for GLM endog when using weights\n    df['AMTL_prop'] = (df['num_missing'] / df['sockets']).astype(float)\n\n    # Standardize tooth_class labels and species labels: strip whitespace\n    df['tooth_class'] = df['tooth_class'].astype(str).str.strip().str.capitalize()\n    df['species'] = df['species'].astype(str).str.strip()\n\n    # Final drop of any rows that still have NA in essential columns for the model\n    df = df.dropna(subset=['AMTL_prop', 'num_missing', 'sockets', 'is_human', 'tooth_class', 'age_at_death'])\n\n    # Cast sockets and num_missing to int (regular python int) for statsmodels' weights/fit\n    df['sockets'] = df['sockets'].astype(int)\n    df['num_missing'] = df['num_missing'].astype(int)\n\n    # Keep only the columns needed for modeling plus specimen id\n    model_cols = [\n        'specimen', 'species', 'is_human', 'tooth_class',\n        'num_missing', 'sockets', 'AMTL_prop', 'age_at_death', 'age_sd', 'SexMale'\n    ]\n    for c in model_cols:\n        if c not in df.columns:\n            df[c] = pd.NA\n\n    return df[model_cols]\n",
-  "m_code": "def model(df: pd.DataFrame):\n    \"\"\"\n    Fit a binomial (logistic) GLM for AMTL frequency with clustering by specimen.\n\n    Model specification:\n    - Dependent variable: AMTL proportion (AMTL_prop) with weights = sockets (number of trials).\n    - Key independent variable: is_human (binary; 1 = Homo sapiens, 0 = non-human primate).\n    - Controls: age_at_death (continuous), SexMale (binary), tooth_class (categorical).\n    - Clustered robust standard errors at the specimen level to account for within-specimen non-independence.\n\n    Returns a dict with the fitted model and a clustered-robust covariance result object.\n    \"\"\"\n    import statsmodels.api as sm\n    import statsmodels.formula.api as smf\n\n    # Ensure required columns exist\n    required = ['AMTL_prop', 'sockets', 'is_human', 'age_at_death', 'SexMale', 'tooth_class', 'specimen', 'num_missing']\n    missing = [c for c in required if c not in df.columns]\n    if missing:\n        raise ValueError(f\"The dataframe is missing required columns for modeling: {missing}\")\n\n    # Drop rows with NA in model variables\n    mod_df = df.dropna(subset=['AMTL_prop', 'sockets', 'is_human', 'age_at_death', 'tooth_class'])\n\n    # Convert categorical controls\n    mod_df['tooth_class'] = mod_df['tooth_class'].astype('category')\n    # is_human already boolean; coerce to int for modeling\n    mod_df['is_human'] = mod_df['is_human'].astype(int)\n    # SexMale: if NA (no sex information) we will impute as 0 and include an indicator if desired. Here drop NA to be conservative\n    if mod_df['SexMale'].isna().any():\n        mod_df = mod_df.dropna(subset=['SexMale'])\n    mod_df['SexMale'] = mod_df['SexMale'].astype(int)\n\n    # Formula: proportion outcome with weights = sockets. Use AMTL_prop as response.\n    formula = 'AMTL_prop ~ is_human + age_at_death + SexMale + C(tooth_class)'\n\n    # Fit GLM with binomial family using frequency weights = number of sockets (trials)\n    glm_binom = smf.glm(formula=formula, data=mod_df,\n                        family=sm.families.Binomial(),\n                        freq_weights=mod_df['sockets'])\n    res = glm_binom.fit()\n\n    # Obtain clustered robust standard errors clustered by specimen\n    # get_robustcov_results returns a results instance with adjusted covariances\n    try:\n        res_clustered = res.get_robustcov_results(cov_type='cluster', groups=mod_df['specimen'])\n    except Exception as e:\n        # If clustering fails, return the plain result and the exception message\n        res_clustered = None\n        cluster_error = str(e)\n    else:\n        cluster_error = None\n\n    # Prepare a concise output\n    output = {\n        'model_result': res,\n        'clustered_result': res_clustered,\n        'cluster_error': cluster_error,\n        'model_summary': res.summary().as_text()\n    }\n\n    return output\n"
+  "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Clean and harmonize the input dataset to produce the final dataframe used for modeling.\n\n    Expected original columns (per provided schema) and how they are mapped into the final dataframe:\n      - original 'genus' column actually encodes tooth class labels (e.g., 'Anterior','Posterior','Premolar')\n      - original 'specimen' kept as-is\n      - original 'stdev_age' contains the count of teeth missing of the given class -> mapped to num_missing\n      - original 'prob_male' contains the number of observable sockets that could be scored -> mapped to n_sockets\n      - original 'num_amtl' contains estimated age at death -> mapped to age_at_death\n      - original 'sockets' contains assigned uncertainty of age at death -> mapped to age_sd\n      - original 'pop' contains estimate/probability of being male (0-1) -> mapped to sex_male_prob\n      - original 'age' contains specimen genus (e.g., 'Homo sapiens','Pan','Pongo','Papio') -> mapped to genus\n      - original 'tooth_class' sometimes contains region/population info; we keep it as 'origin' if present but it is not required for the primary model.\n\n    The function will:\n      - create standardized columns: ['specimen','genus','tooth_class','num_missing','n_sockets','prop_missing','age_at_death','age_sd','sex_male_prob']\n      - drop rows with invalid or missing denominator (n_sockets <= 0) or missing key fields\n      - coerce types appropriately and standardize genus labels\n    \"\"\"\n    import numpy as np\n    import pandas as pd\n\n    # Work on a copy\n    df = df.copy()\n\n    # Map ambiguous/original columns to clear names used in modeling\n    # The provided schema contains mismatches between column names and descriptions. We map according to the documented descriptions.\n    # original column 'genus' in schema appears to be tooth class labels\n    if 'genus' in df.columns:\n        df['tooth_class'] = df['genus']\n\n    # specimen identifier\n    if 'specimen' in df.columns:\n        df['specimen'] = df['specimen']\n\n    # num_missing of given tooth class: described under 'stdev_age'\n    if 'stdev_age' in df.columns:\n        df['num_missing'] = pd.to_numeric(df['stdev_age'], errors='coerce')\n    else:\n        # fallback: if a proper 'num_missing' column already exists\n        df['num_missing'] = pd.to_numeric(df.get('num_missing', np.nan), errors='coerce')\n\n    # number of observable sockets that could be scored for missing teeth: described under 'prob_male'\n    if 'prob_male' in df.columns:\n        df['n_sockets'] = pd.to_numeric(df['prob_male'], errors='coerce')\n    else:\n        df['n_sockets'] = pd.to_numeric(df.get('n_sockets', np.nan), errors='coerce')\n\n    # age_at_death (numeric) described under 'num_amtl' in schema\n    if 'num_amtl' in df.columns:\n        df['age_at_death'] = pd.to_numeric(df['num_amtl'], errors='coerce')\n    else:\n        df['age_at_death'] = pd.to_numeric(df.get('age_at_death', np.nan), errors='coerce')\n\n    # age uncertainty described under 'sockets' column in schema\n    if 'sockets' in df.columns:\n        df['age_sd'] = pd.to_numeric(df['sockets'], errors='coerce')\n    else:\n        df['age_sd'] = pd.to_numeric(df.get('age_sd', np.nan), errors='coerce')\n\n    # sex estimate: 'pop' in schema (0-1)\n    if 'pop' in df.columns:\n        df['sex_male_prob'] = pd.to_numeric(df['pop'], errors='coerce')\n    else:\n        # if there's a column named 'sex' or 'prob_male' used differently, prefer 'sex_male_prob' if present\n        df['sex_male_prob'] = pd.to_numeric(df.get('sex_male_prob', np.nan), errors='coerce')\n\n    # genus (taxon) is stored in column named 'age' in the provided schema\n    if 'age' in df.columns:\n        df['genus'] = df['age'].astype(str)\n    else:\n        df['genus'] = df.get('genus_final', np.nan)\n\n    # Also keep an 'origin' or region column if present (original 'tooth_class' in schema)\n    if 'tooth_class' in df.columns and 'tooth_class' not in ['Anterior', 'Posterior', 'Premolar']:\n        # if original 'tooth_class' column means something else (region), keep as 'origin'\n        df['origin'] = df['tooth_class']\n\n    # Standardize genus labels (strip whitespace, consistent capitalization)\n    df['genus'] = df['genus'].str.strip()\n\n    # Common expected labels in dataset: 'Homo sapiens', 'Pan', 'Pongo', 'Papio'\n    # If some genus labels are abbreviated or different (e.g., 'Homo'), attempt simple normalization\n    df['genus'] = df['genus'].replace({\n        'Homo': 'Homo sapiens',\n        'H. sapiens': 'Homo sapiens',\n        'Homo_sapiens': 'Homo sapiens',\n        'pan': 'Pan',\n        'Pongo sp.': 'Pongo',\n        'Papio sp.': 'Papio'\n    })\n\n    # Standardize tooth_class to a small set (Anterior, Posterior, Premolar) if possible\n    if 'tooth_class' in df.columns:\n        df['tooth_class'] = df['tooth_class'].astype(str).str.strip()\n        # unify common representations\n        df['tooth_class'] = df['tooth_class'].replace({\n            'Ant': 'Anterior', 'ant': 'Anterior', 'Post': 'Posterior', 'post': 'Posterior',\n            'PM': 'Premolar', 'pm': 'Premolar'\n        })\n        # Where tooth_class is missing but origin contains tooth-type-like values, try to fill\n        df.loc[df['tooth_class'].str.lower().isin(['anterior','posterior','premolar']) == False, 'tooth_class'] = df.loc[df['tooth_class'].str.lower().isin(['anterior','posterior','premolar']) == False, 'tooth_class']\n    else:\n        df['tooth_class'] = np.nan\n\n    # Calculate proportion missing for binomial modeling; will be used as the endogenous variable in the GLM with weights\n    df['prop_missing'] = np.nan\n    has_valid_counts = (~df['num_missing'].isna()) & (~df['n_sockets'].isna())\n    df.loc[has_valid_counts, 'num_missing'] = df.loc[has_valid_counts, 'num_missing'].astype(float)\n    df.loc[has_valid_counts, 'n_sockets'] = df.loc[has_valid_counts, 'n_sockets'].astype(float)\n\n    # Clip num_missing to be within [0, n_sockets]\n    df.loc[has_valid_counts, 'num_missing'] = df.loc[has_valid_counts, 'num_missing'].clip(lower=0)\n    # Where num_missing might exceed n_sockets due to data issues, cap it\n    exceed_mask = has_valid_counts & (df['num_missing'] > df['n_sockets'])\n    if exceed_mask.any():\n        df.loc[exceed_mask, 'num_missing'] = df.loc[exceed_mask, 'n_sockets']\n\n    valid_for_prop = has_valid_counts & (df['n_sockets'] > 0)\n    df.loc[valid_for_prop, 'prop_missing'] = df.loc[valid_for_prop, 'num_missing'] / df.loc[valid_for_prop, 'n_sockets']\n\n    # Drop rows that cannot be used in binomial model: missing genus, missing num_missing or n_sockets or n_sockets <= 0\n    df = df[~df['genus'].isna()]\n    df = df[valid_for_prop]\n\n    # Keep only genera of interest (Homo sapiens, Pan, Pongo, Papio). If others are present, they will be dropped\n    allowed_genera = ['Homo sapiens', 'Pan', 'Pongo', 'Papio']\n    df = df[df['genus'].isin(allowed_genera)]\n\n    # Coerce types for modeling\n    df['tooth_class'] = df['tooth_class'].astype('category')\n    df['genus'] = df['genus'].astype('category')\n\n    # Reset index\n    df = df.reset_index(drop=True)\n\n    # Final columns relevant for modeling\n    final_cols = ['specimen', 'genus', 'tooth_class', 'num_missing', 'n_sockets', 'prop_missing', 'age_at_death', 'age_sd', 'sex_male_prob']\n    # Ensure all final columns exist in df (add missing ones as NaN)\n    for c in final_cols:\n        if c not in df.columns:\n            df[c] = np.nan\n\n    return df[final_cols]\n",
+  "m_code": "def model(df: pd.DataFrame) -> Any:\n    \"\"\"\n    Fit a binomial (logistic) regression to model AMTL frequency (num_missing / n_sockets) with genus as the main predictor\n    while controlling for age_at_death, sex_male_prob, and tooth_class.\n\n    Modeling approach:\n      - Use statsmodels' GLM with family=Binomial. Model prop_missing as the endogenous and supply n_sockets as weights.\n      - Formula: prop_missing ~ C(genus) + age_at_death + sex_male_prob + C(tooth_class)\n      - Return the fitted model object. Also print a concise summary and compute exponentiated coefficients (odds ratios) with 95% CIs.\n    \"\"\"\n    import statsmodels.api as sm\n    import statsmodels.formula.api as smf\n    import numpy as np\n\n    df = df.copy()\n\n    # Ensure required columns exist\n    required = ['prop_missing', 'n_sockets', 'genus', 'age_at_death', 'sex_male_prob', 'tooth_class', 'num_missing']\n    missing = [c for c in required if c not in df.columns]\n    if missing:\n        raise ValueError(f\"Dataframe missing required columns for modeling: {missing}\")\n\n    # Drop rows with missing predictors (we already cleaned much in transform but double-check)\n    model_df = df.dropna(subset=['prop_missing', 'n_sockets', 'genus', 'tooth_class', 'age_at_death', 'sex_male_prob'])\n\n    # If there are very small denominators, remove or warn\n    model_df = model_df[model_df['n_sockets'] > 0]\n\n    # Fit GLM (binomial) with proportion response and weights = n_sockets\n    # Using proportion as endog and weights allows modeling successes/trials in GLM\n    formula = 'prop_missing ~ C(genus) + age_at_death + sex_male_prob + C(tooth_class)'\n    glm_binom = smf.glm(formula=formula, data=model_df, family=sm.families.Binomial(), weights=model_df['n_sockets'])\n    res = glm_binom.fit()\n\n    # Print summary and odds ratios\n    print(res.summary())\n\n    # Compute odds ratios and 95% CI\n    params = res.params\n    conf = res.conf_int()\n    or_df = (np.exp(params).rename('odds_ratio')).to_frame()\n    or_df['ci_lower'] = np.exp(conf[0])\n    or_df['ci_upper'] = np.exp(conf[1])\n    print('\\nOdds ratios with 95% CI:')\n    print(or_df)\n\n    # Additional check for overdispersion: compare residual deviance to df_resid\n    deviance = res.deviance\n    df_resid = int(res.df_resid)\n    dispersion = deviance / df_resid if df_resid > 0 else np.nan\n    print(f\"\\nDeviance: {deviance:.2f}, df_resid: {df_resid}, dispersion (deviance/df_resid): {dispersion:.3f}\")\n    if dispersion > 1.5:\n        print(\"Note: dispersion > 1.5 suggests potential overdispersion. Consider a quasi-binomial/GEE or add random effects.\")\n\n    # Return the fitted results object (so the caller can inspect coefficients, contrasts, etc.)\n    return res\n"
 }
 ===================[TOKENS]=====================
-Number of prompt tokens: 4872
-Number of total tokens: 10556
+Number of prompt tokens: 4935
+Number of total tokens: 10848
 
-===================[PROMPT (API Time: 107.04088759422302, Cache Time: None)]=====================
+===================[PROMPT (API Time: 98.18209838867188, Cache Time: None)]=====================
 =====[SYSTEM]=====:
 You are an AI Data Analysis Assistant who is an expert at writing an end-to-end scientific analysis given a research question and a dataset. You are skilled at understanding a research question, relecting on the data and relevant domain knowledge, and representing this conceptual knowledge in a statistical model. Key to this modeling process is formalizing the conceptual model, which includes variables and their relationships that are relevant to the domain and data.
 =====[USER]=====:
@@ -991,6 +516,16 @@ import sklearn
 import scipy
 import statsmodels.api as sm
 import matplotlib.pyplot as plt
+
+You are also allowed to use common machine learning libraries, including but not limited to:
+- xgboost
+- lightgbm
+- catboost
+- tensorflow / keras
+- torch (PyTorch)
+- pytorch-lightning
+- sklearn.experimental modules
+- imbalanced-learn (imblearn)
 
 Here is the code template for the transform function:
 ```python
@@ -1402,546 +937,72 @@ Dataset Schema: {
 }
 Result: 
 
-===================[gpt-5-mini RESPONSE (6185)]=====================
+===================[gpt-5-mini RESPONSE (6770)]=====================
 {
   "cvars": {
     "ivs": [
       {
-        "description": "Specimen taxonomic group (species/genus). Primary independent variable: whether a specimen is a modern human (Homo sapiens) or a non-human primate (Pan, Pongo, Papio). Categorical variable used to compare AMTL frequencies across taxa.",
+        "description": "Whether the specimen belongs to modern humans (Homo sapiens) vs non-human primates. Binary indicator coded 1 for Homo and 0 for non-Homo (Pan, Pongo, Papio). This is the primary independent variable of interest comparing AMTL frequency in humans vs non-human primates.",
         "columns": [
-          "Species"
+          "IsHomo"
         ]
       }
     ],
     "dv": {
-      "description": "Antemortem tooth loss (AMTL) expressed as counts of missing teeth out of the number of observable tooth sockets (trial count). The model uses the number of missing teeth (successes) and the number of observable sockets (trials) to model AMTL frequency with a binomial family.",
+      "description": "Antemortem tooth loss (AMTL) measured as the number of missing teeth out of the number of observable sockets for the specimen/tooth-class record. The model will use AMTL_count (number of missing teeth) and Sockets (number of observable sockets) as the binomial outcome; AMTL_prop (AMTL_count / Sockets) is provided for inspection and plotting.",
       "columns": [
-        "amtl_count",
-        "n_sockets"
-      ]
-    },
-    "controls": [
-      {
-        "description": "Estimated age at death (continuous). Included because AMTL is strongly age-dependent.",
-        "is_moderator": false,
-        "moderator_on": null,
-        "columns": [
-          "AgeAtDeath",
-          "AgeScaled"
-        ]
-      },
-      {
-        "description": "Estimated sex of specimen (binary). Derived from sex estimate/probability (male = 1, female = 0). Included because sex can influence dental wear and tooth loss.",
-        "is_moderator": false,
-        "moderator_on": null,
-        "columns": [
-          "Male"
-        ]
-      },
-      {
-        "description": "Tooth class (categorical: Anterior, Premolar, Posterior). Included because different tooth classes have different risks of AMTL.",
-        "is_moderator": false,
-        "moderator_on": null,
-        "columns": [
-          "ToothClass"
-        ]
-      }
-    ]
-  },
-  "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw Gilmore (2013) AMTL dataset into a dataframe ready for binomial modeling.\n\n    Output columns required by the model:\n      - amtl_count : integer count of missing teeth (successes)\n      - n_sockets  : integer count of observable sockets (trials)\n      - Species    : taxonomic group / species (e.g., 'Homo sapiens', 'Pan', 'Pongo', 'Papio')\n      - ToothClass : tooth class (e.g., 'Anterior', 'Premolar', 'Posterior')\n      - AgeAtDeath : estimated age at death (continuous)\n      - AgeScaled  : standardized age (zero mean, unit sd)\n      - Male       : binary sex indicator (1 = male, 0 = female)\n\n    Notes on column mapping (based on dataset schema):\n      - 'stdev_age' is treated as the count of missing teeth for that specimen & tooth class (amtl_count).\n      - 'sockets' is treated as the number of observable tooth sockets (n_sockets, trials).\n      - 'num_amtl' is treated as the estimated age at death (AgeAtDeath) because its numeric range fits ages.\n      - 'age' column contains the taxonomic group (genus/species) and is renamed to 'Species'.\n      - 'genus' column in the raw data contains tooth class labels (Anterior, Posterior, Premolar) and is renamed to 'ToothClass'.\n      - 'pop' is treated as an estimate/probability of maleness (0-1); Male = (pop >= 0.5).\n\n    The function is robust to small inconsistencies: it rounds counts, ensures integer sockets > 0, and clips amtl_count to [0, n_sockets]. Rows missing critical information are dropped.\n    \"\"\"\n    df = df.copy()\n\n    # --- Ensure necessary columns exist; if not, raise an informative error ---\n    required = ['stdev_age', 'sockets', 'age', 'genus', 'num_amtl']\n    missing = [c for c in required if c not in df.columns]\n    if missing:\n        raise ValueError(f\"Input dataframe is missing required column(s): {missing}\")\n\n    # --- Derive amtl_count and n_sockets as integer counts ---\n    # 'stdev_age' is treated as the observed count of missing teeth for that specimen/tooth-class\n    df['amtl_count'] = pd.to_numeric(df['stdev_age'], errors='coerce').round().astype('Int64')\n    df['n_sockets'] = pd.to_numeric(df['sockets'], errors='coerce').round().astype('Int64')\n\n    # Drop rows where we cannot interpret sockets or amtl_count\n    df = df[~df['n_sockets'].isna()]\n    df = df[~df['amtl_count'].isna()]\n\n    # Convert to plain ints (pandas nullable int -> normal int) after dropping NA\n    df['n_sockets'] = df['n_sockets'].astype(int)\n    df['amtl_count'] = df['amtl_count'].astype(int)\n\n    # Drop rows with non-positive trial counts\n    df = df[df['n_sockets'] > 0]\n\n    # Clip amtl_count so 0 <= amtl_count <= n_sockets\n    df['amtl_count'] = df.apply(lambda r: max(0, min(r['amtl_count'], r['n_sockets'])), axis=1)\n\n    # --- Species and ToothClass ---\n    # 'age' column in schema contains genus/species labels\n    df['Species'] = df['age'].astype(str).str.strip()\n    # 'genus' column in schema contains tooth class labels (Anterior/Posterior/Premolar)\n    df['ToothClass'] = df['genus'].astype(str).str.strip()\n\n    # Normalize ToothClass labels (simple capitalization) and drop weird entries\n    df['ToothClass'] = df['ToothClass'].replace({'anterior': 'Anterior', 'posterior': 'Posterior', 'premolar': 'Premolar'})\n\n    # Keep only canonical tooth classes (safety filter)\n    df = df[df['ToothClass'].isin(['Anterior', 'Posterior', 'Premolar'])]\n\n    # --- Age at death ---\n    # According to the provided schema, 'num_amtl' can be interpreted as estimated age at death (numeric); use that.\n    df['AgeAtDeath'] = pd.to_numeric(df['num_amtl'], errors='coerce')\n\n    # Drop rows with missing AgeAtDeath, since age is an important control\n    df = df[~df['AgeAtDeath'].isna()]\n\n    # Standardize age for modeling\n    df['AgeScaled'] = (df['AgeAtDeath'] - df['AgeAtDeath'].mean()) / (df['AgeAtDeath'].std(ddof=0) if df['AgeAtDeath'].std(ddof=0) != 0 else 1.0)\n\n    # --- Sex / Male indicator ---\n    # Prefer 'pop' as a 0-1 estimate of maleness if available\n    if 'pop' in df.columns:\n        # treat values >= 0.5 as male\n        df['Male'] = pd.to_numeric(df['pop'], errors='coerce')\n        df['Male'] = df['Male'].fillna(0)\n        df['Male'] = (df['Male'] >= 0.5).astype(int)\n    else:\n        # Fallback: try 'prob_male' if present and its values are interpretable as probabilities\n        if 'prob_male' in df.columns:\n            pm = pd.to_numeric(df['prob_male'], errors='coerce')\n            # If values appear to be in [0,1], use threshold 0.5\n            if pm.between(0, 1).all():\n                df['Male'] = (pm >= 0.5).astype(int)\n            else:\n                # Otherwise, cannot reliably infer sex; set to NA (0) and flag\n                df['Male'] = 0\n        else:\n            df['Male'] = 0\n\n    # --- Final selection of columns required for modeling ---\n    out_cols = ['amtl_count', 'n_sockets', 'Species', 'ToothClass', 'AgeAtDeath', 'AgeScaled', 'Male']\n    df_out = df[out_cols].reset_index(drop=True)\n\n    return df_out\n",
-  "m_code": "def model(df: pd.DataFrame):\n    \"\"\"\n    Fit a binomial (logistic) regression (GLM) modeling AMTL frequency while accounting for species,\n    age at death, sex, and tooth class. The model uses the count of missing teeth (amtl_count) out of\n    the number of observable sockets (n_sockets) as the binomial response.\n\n    Returns the fitted GLMResults object from statsmodels.\n    \"\"\"\n    import statsmodels.api as sm\n    import statsmodels.formula.api as smf\n    import numpy as np\n\n    # Work on a copy\n    df = df.copy()\n\n    # Basic sanity checks\n    if not {'amtl_count', 'n_sockets', 'Species', 'ToothClass', 'AgeScaled', 'Male'}.issubset(df.columns):\n        raise ValueError('Dataframe must contain amtl_count, n_sockets, Species, ToothClass, AgeScaled, and Male columns')\n\n    # Remove rows with invalid socket counts\n    df = df[df['n_sockets'] > 0].copy()\n\n    # Compute observed proportion\n    df['prop_amtl'] = df['amtl_count'] / df['n_sockets']\n\n    # Use a GLM with binomial family. We model the proportion and pass the number of trials as freq_weights\n    # so that the binomial denominator is taken into account.\n    # Formula includes categorical Species (reference chosen automatically), ToothClass, and controls AgeScaled and Male.\n    formula = 'prop_amtl ~ C(Species) + AgeScaled + Male + C(ToothClass)'\n    model = smf.glm(formula=formula, data=df, family=sm.families.Binomial())\n\n    # Fit using freq_weights = number of trials (n_sockets) to reflect differing denominators\n    # Statsmodels' GLM.fit accepts 'freq_weights' keyword.\n    try:\n        results = model.fit(freq_weights=df['n_sockets'])\n    except TypeError:\n        # Older/newer versions may accept 'weights' instead; try that as a fallback\n        results = model.fit(weights=df['n_sockets'])\n\n    # Return the fitted model results (includes params, standard errors, p-values, etc.)\n    return results\n"
-}
-===================[TOKENS]=====================
-Number of prompt tokens: 4872
-Number of total tokens: 11057
-
-===================[PROMPT (API Time: 123.47283697128296, Cache Time: None)]=====================
-=====[SYSTEM]=====:
-You are an AI Data Analysis Assistant who is an expert at writing an end-to-end scientific analysis given a research question and a dataset. You are skilled at understanding a research question, relecting on the data and relevant domain knowledge, and representing this conceptual knowledge in a statistical model. Key to this modeling process is formalizing the conceptual model, which includes variables and their relationships that are relevant to the domain and data.
-=====[USER]=====:
-<Instruction> 
-Given the research question, dataset formulate the conceptual model and write an analysis including all necessary data transformations and a statistical model to answer the research question. 
-</Instruction>
-
-<Format Instructions>
-You will return 3 things:
-1. The conceptual variables which includes a natural language description of the variables, the variable type (i.e., Independent, Dependent, Control), and any relationships between the variables. Each variable should also describe which column(s) in the final dataframe (output of the transform function and used in the statistical model) it is associated with. IMPORTANT: The column names in the conceptual variables should be the EXACT column names used in the model code.     
-2. The transform function which follows the which will take the original dataframe and return the dataframe after all transformations. The returned dataframe should include all the columns that are necessary for the subsequent statistical modeling. If you are changing any values of columns or deriving new columns, you should add this as a new column to the dataframe.     
-3. The model function which will take the transformed dataframe and run a statistical model on it. The model function should return the results of the model.
-
-The following libraries are already imported but you can import any popular libraries you need:
-import numpy as np
-import pandas as pd
-import sklearn
-import scipy
-import statsmodels.api as sm
-import matplotlib.pyplot as plt
-
-Here is the code template for the transform function:
-```python
-def transform(df: pd.DataFrame) -> pd.DataFrame:
-    # Your code here
-    return df
-```
-Here is the code template for the model function:
-```python
-def model(df: pd.DataFrame) -> Any:
-    # Your code here
-    return results
-```
-
-Please return the conceptual variables, the transform function, and the model function in the format specified below:
-The output should be formatted as a JSON instance that conforms to the JSON schema below.
-
-As an example, for the schema {"properties": {"foo": {"title": "Foo", "description": "a list of strings", "type": "array", "items": {"type": "string"}}}, "required": ["foo"]}
-the object {"foo": ["bar", "baz"]} is a well-formatted instance of the schema. The object {"properties": {"foo": ["bar", "baz"]}} is not well-formatted.
-
-Here is the output schema:
-```
-{"$defs": {"AgentCVarsWithCol": {"properties": {"ivs": {"items": {"$ref": "#/$defs/IVarWithCol"}, "title": "Independent variables", "type": "array"}, "dv": {"allOf": [{"$ref": "#/$defs/DVarWithCol"}], "title": "Dependent variable"}, "controls": {"items": {"$ref": "#/$defs/ControlVarWithCol"}, "title": "Control variables", "type": "array"}}, "required": ["ivs", "dv", "controls"], "title": "AgentCVarsWithCol", "type": "object"}, "ControlVarWithCol": {"properties": {"description": {"title": "Description of the control variable variable", "type": "string"}, "is_moderator": {"title": "Whether the variable is a moderator.", "type": "boolean"}, "moderator_on": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": "", "title": "The variable that the control variable is moderating. Only applicable for control variables that are moderators."}, "columns": {"items": {"type": "string"}, "title": "The column(s) in the FINAL dataframe used in the STATISTICAL MODEL that corresponds to the control variable", "type": "array"}}, "required": ["description", "is_moderator", "columns"], "title": "ControlVarWithCol", "type": "object"}, "DVarWithCol": {"properties": {"description": {"title": "Description of the dependent variable variable", "type": "string"}, "columns": {"items": {"type": "string"}, "title": "The column(s) in the FINAL dataframe used in the STATISTICAL MODEL that corresponds to the dependent variable", "type": "array"}}, "required": ["description", "columns"], "title": "DVarWithCol", "type": "object"}, "IVarWithCol": {"properties": {"description": {"title": "Description of the independent variable variable", "type": "string"}, "columns": {"items": {"type": "string"}, "title": "The column(s) in the FINAL dataframe used in the STATISTICAL MODEL that corresponds to the independent variable", "type": "array"}}, "required": ["description", "columns"], "title": "IVarWithCol", "type": "object"}}, "properties": {"cvars": {"allOf": [{"$ref": "#/$defs/AgentCVarsWithCol"}], "title": "Conceptual variables"}, "transform_code": {"title": "The code that transforms the data", "type": "string"}, "m_code": {"title": "The code for the statistical modeling", "type": "string"}}, "required": ["cvars", "transform_code", "m_code"]}
-```
-</Format Instructions>
-<Example>
-Research Question: What is the effect of hormonal fluctuations associated with fertility on women's religiosity?
-Dataset Schema: {
-  "dataset_description": "A total of 275 women participated in the study for this dataset. Each participant was asked to answer three religiosity items using a 9-point scale. Further, each participant was asked to indicate the typical length of her menstrual cycle, the start date of her last menstrual period, and the start date of her previous menstrual period. In addition, each woman indicated how sure she was about these two start dates, using a 9-point scale. Finally, each woman was asked to indicate her current romantic relationship status with the following four response options: (1) not dating/romantically involved with anyone, (2) dating or involved with only one partner, (3) engaged or living with my partner, and (4) married.",
-  "fields": [
-    {
-      "column": "WorkerID",
-      "properties": {
-        "dtype": "number",
-        "std": 79.52986860293433,
-        "min": 1,
-        "max": 275,
-        "samples": [
-          31,
-          140,
-          196
-        ],
-        "num_unique_values": 275,
-        "description": "The unique identifier of a participant."
-      }
-    },
-    {
-      "column": "Rel1",
-      "properties": {
-        "dtype": "number",
-        "std": 3.284246850080361,
-        "min": 1,
-        "max": 9,
-        "samples": [
-          4,
-          1,
-          9
-        ],
-        "num_unique_values": 9,
-        "description": "'How much do you believe in God?' 1 \u2013 9"
-      }
-    },
-    {
-      "column": "Rel2",
-      "properties": {
-        "dtype": "number",
-        "std": 3.087872913331648,
-        "min": 1.0,
-        "max": 9.0,
-        "samples": [
-          4.0,
-          2.0,
-          6.0
-        ],
-        "num_unique_values": 9,
-        "description": "'I see myself as a religiously oriented person.' 1 \u2013 9"
-      }
-    },
-    {
-      "column": "Rel3",
-      "properties": {
-        "dtype": "number",
-        "std": 3.333610823065186,
-        "min": 1.0,
-        "max": 9.0,
-        "samples": [
-          3.0,
-          1.0,
-          7.0
-        ],
-        "num_unique_values": 9,
-        "description": "'I believe that God or a Higher Power is responsible for my existence.' 1 \u2013 9"
-      }
-    },
-    {
-      "column": "Sure1",
-      "properties": {
-        "dtype": "number",
-        "std": 1.5732501786909676,
-        "min": 1,
-        "max": 9,
-        "samples": [
-          4,
-          7,
-          9
-        ],
-        "num_unique_values": 8,
-        "description": "In reference to `StartDateofLastPeriod`,  'How sure are you about that date?' 1 \u2013 9."
-      }
-    },
-    {
-      "column": "Sure2",
-      "properties": {
-        "dtype": "number",
-        "std": 2.221975065515302,
-        "min": 1,
-        "max": 9,
-        "samples": [
-          6,
-          3,
-          7
-        ],
-        "num_unique_values": 9,
-        "description": "In reference to `StartDateofPeriodBeforeLast`,  'How sure are you about that date?' 1 \u2013 9."
-      }
-    },
-    {
-      "column": "Relationship",
-      "properties": {
-        "dtype": "number",
-        "std": 1.167327837424664,
-        "min": 1,
-        "max": 4,
-        "samples": [
-          1,
-          2,
-          3
-        ],
-        "num_unique_values": 4,
-        "description": "Answer to 'What is your current romantic relationship status?' (1) not dating/romantically involved with anyone, (2) dating or involved with only one partner, (3) engaged or living with my partner, (4) married"
-      }
-    },
-    {
-      "column": "ReportedCycleLength",
-      "properties": {
-        "dtype": "number",
-        "std": 2.6714983210492633,
-        "min": 21.0,
-        "max": 38.0,
-        "samples": [
-          21.0,
-          22.0,
-          26.0
-        ],
-        "num_unique_values": 17,
-        "description": "Answer to 'How many days long are your menstrual cycles? (for most women, the range is between 25-35 days) Keep in mind this is the number of days from the start of one menstrual period to the start of the next menstrual period and NOT the length of your menstrual bleeding.'"
-      }
-    },
-    {
-      "column": "DateTesting",
-      "properties": {
-        "dtype": "date",
-        "min": "03/12/12",
-        "max": "04/27/12",
-        "samples": [
-          "04/06/12",
-          "04/26/12",
-          "03/12/12"
-        ],
-        "num_unique_values": 13,
-        "description": "Date of participant filling in the questionnaire"
-      }
-    },
-    {
-      "column": "StartDateofLastPeriod",
-      "properties": {
-        "dtype": "date",
-        "min": "02/06/12",
-        "max": "04/26/12",
-        "samples": [
-          "02/16/12",
-          "03/01/12",
-          "04/25/12"
-        ],
-        "num_unique_values": 61,
-        "description": "Answer to 'Please give your best estimate of the date on which you started your last period (please be as precise as possible). This date was probably within the last few weeks. Sometimes thinking of where you were when you started your last period helps. For instance, was it on a weekend?, were you at work, was it during a football game?, etc. Please write the date in mm/dd/yyyy format (e.g., 8/18/2012).'"
-      }
-    },
-    {
-      "column": "StartDateofPeriodBeforeLast",
-      "properties": {
-        "dtype": "date",
-        "min": "01/03/12",
-        "max": "03/29/12",
-        "samples": [
-          "01/15/12",
-          "02/04/12",
-          "03/24/12"
-        ],
-        "num_unique_values": 61,
-        "description": "Answer to 'Please give your best estimate of the date on which you started the period before your last period (please be as precise as possible). Please write the date in mm/dd/yyyy format (e.g., 7/18/2012).'"
-      }
-    }
-  ],
-  "num_rows": 275,
-  "field_names": [
-    "WorkerID",
-    "Rel1",
-    "Rel2",
-    "Rel3",
-    "Sure1",
-    "Sure2",
-    "Relationship",
-    "ReportedCycleLength",
-    "DateTesting",
-    "StartDateofLastPeriod",
-    "StartDateofPeriodBeforeLast"
-  ]
-}
-Result: {
-  "cvars": {
-    "ivs": [
-      {
-        "description": "Women's fertility",
-        "columns": [
-          "FertilityGroup"
-        ]
-      }
-    ],
-    "dv": {
-      "description": "Women's religiosity",
-      "columns": [
-        "AvgReligiosity"
-      ]
-    },
-    "controls": [
-      {
-        "description": "Relationship status of the individual",
-        "is_moderator": true,
-        "moderator_on": "Women's fertility",
-        "columns": [
-          "InRelationship"
-        ]
-      }
-    ]
-  },
-  "transform_code": "# drop the rows with missing values in the ReportedCycleLength, Rel1, Rel2, and Rel3 columns\ndf = df.dropna(subset=['ReportedCycleLength'])\ndf = df.dropna(subset=['Rel1', 'Rel2', 'Rel3'])\n\ndf['AvgReligiosity'] = df[['Rel1', 'Rel2', 'Rel3']].mean(axis=1)\n\n\n# Convert date columns to datetime format\ndf['DateTesting'] = pd.to_datetime(df['DateTesting'], format='%m/%d/%y')\ndf['StartDateofLastPeriod'] = pd.to_datetime(df['StartDateofLastPeriod'], format='%m/%d/%y')\ndf['StartDateofPeriodBeforeLast'] = pd.to_datetime(df['StartDateofPeriodBeforeLast'], format='%m/%d/%y')\n\n# Calculate the cycle length based on provided dates\ndf['ReportedCycleLength'] = (df['StartDateofLastPeriod'] - df['StartDateofPeriodBeforeLast']).dt.days\n# Calculate the expected start date of the next menstrual period\n\ndf['ExpectedNextPeriod'] = df['StartDateofLastPeriod'] + pd.to_timedelta(df['ReportedCycleLength'], unit='d')\n\n# Calculate the day of ovulation by subtracting 14 days from the expected start date of the next period\n# since ovulation typically occurs around 14 days before the start of the next period\ndf['OvulationDate'] = df['ExpectedNextPeriod'] - pd.to_timedelta(14, unit='d')\n# Calculate the cycle day on the date of testing\ndf['CycleDay'] = (df['DateTesting'] - df['OvulationDate']).dt.days + 14\n# Define high-fertility (cycle days 6-14) and low-fertility (cycle days 17-27) groups\ndf['FertilityGroup'] = df['CycleDay'].apply(lambda x: 'High-Fertility' if 6 <= x <= 14 else ('Low-Fertility' if 17 <= x <= 27 else 'Other'))\n# Filter out the 'Other' group to focus on the high and low fertility groups\ndf = df[df['FertilityGroup'].isin(['High-Fertility', 'Low-Fertility'])]\n\n\ndf['IsIncommittedRelationship'] = df['Relationship'].apply(lambda x: 0 if x in [1,2] else 1)\ndf['InRelationship'] = df['Relationship'].apply(lambda x: 0 if x == 1 else 1)\ndf['IsInRelationship'] = df['Relationship'].apply(lambda x: 0 if x == 1 else 1)\n",
-  "m_code": "model = smf.ols('AvgReligiosity ~ InRelationship * FertilityGroup', data=df).fit()\n# Display the regression results\nprint(model.summary())\n"
-}
-</Example>
-Research Question: Do modern humans (Homo sapiens) have higher frequencies of antemortem tooth loss (AMTL) compared to non-human primate genera (Pan, Pongo, Papio), after accounting for the effects of age, sex, and tooth class?
-Dataset Schema: {
-  "dataset_description": "Antemortem tooth loss (AMTL), the loss of teeth during an individual's lifetime, is of significant interest in anthropology and evolutionary studies. Some researchers suggest that high frequencies of AMTL in fossil hominins, our ancestors, may indicate the early adoption of certain human-like behaviors such as cooking food or providing care to individuals who could no longer chew effectively. However, it is unclear whether this association between AMTL and human behavior holds when comparing modern humans to non-human primates. To investigate this, Gilmore (2013) collected data on AMTL from skeletal remains of modern human hunter-gatherers and three non-human primate genera: chimpanzees (Pan), orangutans (Pongo), and baboons (Papio). The dataset includes information on the number of missing teeth, observable tooth sockets, estimated age at death, sex, and tooth class (anterior, posterior, or premolar) for each specimen. By analyzing this data using binomial regression modeling, we aim to determine if humans indeed have higher rates of AMTL compared to non-human primates, after accounting for the effects of age, sex, and tooth type.",
-  "fields": [
-    {
-      "column": "genus",
-      "properties": {
-        "dtype": "category",
-        "samples": [
-          "Anterior",
-          "Posterior",
-          "Premolar"
-        ],
-        "num_unique_values": 3,
-        "semantic_type": "",
-        "description": "One of Anterior, Posterior, or Premolar"
-      }
-    },
-    {
-      "column": "specimen",
-      "properties": {
-        "dtype": "category",
-        "samples": [
-          "NMNH350096",
-          "UVS56",
-          "BRK126758"
-        ],
-        "num_unique_values": 484,
-        "semantic_type": "",
-        "description": "Unique identifier for specimen"
-      }
-    },
-    {
-      "column": "stdev_age",
-      "properties": {
-        "dtype": "number",
-        "std": 1.6266311629535932,
-        "min": 0,
-        "max": 12,
-        "samples": [
-          10,
-          9,
-          0
-        ],
-        "num_unique_values": 12,
-        "semantic_type": "",
-        "description": "Number of teeth missing of given class"
-      }
-    },
-    {
-      "column": "prob_male",
-      "properties": {
-        "dtype": "number",
-        "std": 2.798268102170289,
-        "min": 2,
-        "max": 14,
-        "samples": [
-          14,
-          13,
-          12
-        ],
-        "num_unique_values": 13,
-        "semantic_type": "",
-        "description": "number of observable sockets that could be scored for missing teeth"
-      }
-    },
-    {
-      "column": "num_amtl",
-      "properties": {
-        "dtype": "number",
-        "std": 10.93222964111899,
-        "min": 8.59322651,
-        "max": 71.2242553,
-        "samples": [
-          14.0305714,
-          42.2754092,
-          42.5600492
-        ],
-        "num_unique_values": 313,
-        "semantic_type": "",
-        "description": "Estimated age of specimen at death"
-      }
-    },
-    {
-      "column": "sockets",
-      "properties": {
-        "dtype": "number",
-        "std": 3.8776272832369036,
-        "min": 1.26803942,
-        "max": 31.4169538,
-        "samples": [
-          4.50357659,
-          7.9144902,
-          2.86641
-        ],
-        "num_unique_values": 311,
-        "semantic_type": "",
-        "description": "Assigned uncertainty of age at death"
-      }
-    },
-    {
-      "column": "pop",
-      "properties": {
-        "dtype": "number",
-        "std": 0.34975029083398823,
-        "min": 0.0,
-        "max": 1.0,
-        "samples": [
-          0.25,
-          0.0,
-          0.75
-        ],
-        "num_unique_values": 5,
-        "semantic_type": "",
-        "description": "Estimate of sex of specimen"
-      }
-    },
-    {
-      "column": "age",
-      "properties": {
-        "dtype": "category",
-        "samples": [
-          "Pongo",
-          "Pan",
-          "Homo sapiens"
-        ],
-        "num_unique_values": 4,
-        "semantic_type": "",
-        "description": "Specimen genus, one of Homo, Pan, Papio, or Pongo"
-      }
-    },
-    {
-      "column": "tooth_class",
-      "properties": {
-        "dtype": "category",
-        "samples": [
-          "Alaska",
-          "Yaghan",
-          "Ebolwa"
-        ],
-        "num_unique_values": 22,
-        "semantic_type": "",
-        "description": "Region specimen originates from"
-      }
-    }
-  ],
-  "num_rows": 1450,
-  "field_names": [
-    "genus",
-    "specimen",
-    "stdev_age",
-    "prob_male",
-    "num_amtl",
-    "sockets",
-    "pop",
-    "age",
-    "tooth_class"
-  ]
-}
-Result: 
-
-===================[gpt-5-mini RESPONSE (6982)]=====================
-{
-  "cvars": {
-    "ivs": [
-      {
-        "description": "Specimen taxonomic genus (categorical). Primary independent variable. We test whether modern humans (Homo sapiens) differ from non-human genera (Pan, Pongo, Papio) in AMTL frequency.",
-        "columns": [
-          "Genus"
-        ]
-      }
-    ],
-    "dv": {
-      "description": "Antemortem tooth loss (AMTL) frequency. Modeled as number of missing teeth out of observed tooth sockets (binomial outcome). Represented as counts (Num_AMTL), trials (Sockets), and the proportion (Proportion_AMTL) used in the GLM with binomial family and socket counts as frequency weights.",
-      "columns": [
-        "Num_AMTL",
+        "AMTL_count",
         "Sockets",
-        "Proportion_AMTL"
+        "AMTL_prop"
       ]
     },
     "controls": [
       {
-        "description": "Estimated age at death (continuous). Older individuals are expected to have more tooth loss; included as a linear control. The centered version (Age_at_death_centered) is used in the model to aid interpretation.",
+        "description": "Estimated age at death of the specimen (continuous). Age is included as a control because AMTL accumulates with age.",
         "is_moderator": false,
         "moderator_on": null,
         "columns": [
           "Age_at_death",
-          "Age_at_death_centered"
+          "Age_std"
         ]
       },
       {
-        "description": "Estimated probability of being male (continuous 0-1). Controls for sex differences in AMTL.",
+        "description": "Estimated probability of being male (continuous 0-1). Used as a control for sex effects on AMTL.",
         "is_moderator": false,
         "moderator_on": null,
         "columns": [
-          "Sex_prob_male"
+          "ProbMale",
+          "SexMale"
         ]
       },
       {
-        "description": "Tooth class (categorical): anterior, premolar, posterior. Different tooth classes have different susceptibility to loss; included as a categorical control.",
+        "description": "Tooth class (categorical): anterior, posterior, premolar. Different tooth classes show different baseline AMTL rates; included as categorical control (dummy-coded in the model).",
         "is_moderator": false,
         "moderator_on": null,
         "columns": [
-          "ToothClass"
+          "ToothClass",
+          "Tooth_Posterior",
+          "Tooth_Premolar"
+        ]
+      },
+      {
+        "description": "Specimen identifier used for clustering standard errors to account for within-specimen non-independence of multiple tooth-class observations.",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "SpecimenID"
         ]
       }
     ]
   },
-  "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Standardize and derive the columns needed for modeling.\n    Final dataframe will contain at minimum the following columns (these exact names are used by the model function):\n      - Genus (categorical)\n      - Specimen (identifier, optional)\n      - Num_AMTL (integer/float): number of teeth missing antemortem for the tooth class/row\n      - Sockets (integer): number of observable sockets (trials)\n      - Proportion_AMTL (float): Num_AMTL / Sockets\n      - Age_at_death (float): estimated age at death (if available)\n      - Age_at_death_centered (float): centered age (Age_at_death - mean(Age_at_death))\n      - Sex_prob_male (float in 0-1): estimated male probability (if available)\n      - ToothClass (categorical): anterior/posterior/premolar\n\n    Notes:\n    - The input dataset from the prompt has some inconsistent column descriptions. The code attempts to use the most likely columns by name and falls back to simple heuristics. If your actual dataframe uses different names, adapt the column-name mappings near the top of this function.\n    \"\"\"\n    df = df.copy()\n\n    # Normalize column names for flexible matching\n    lc_map = {c.lower(): c for c in df.columns}\n\n    # Helper to pick a column by a list of candidate names (case-insensitive)\n    def pick_col(candidates):\n        for cand in candidates:\n            if cand.lower() in lc_map:\n                return lc_map[cand.lower()]\n        return None\n\n    # Preferred column names (from schema / typical Gilmore-like data)\n    col_genus = pick_col(['age', 'genus'])  # note: in some metadata 'age' actually stores genus\n    col_num_amtl = pick_col(['num_amtl', 'num_amtl_count', 'num_missing', 'missing_teeth', 'stdev_age'])\n    col_sockets = pick_col(['sockets', 'num_sockets', 'observable_sockets', 'prob_male'])\n    col_age = pick_col(['num_amtl', 'age_at_death', 'age', 'estimated_age', 'stdev_age'])\n    col_sex_prob = pick_col(['pop', 'prob_male', 'sex_prob', 'probability_male'])\n    col_toothclass = pick_col(['tooth_class', 'genus', 'toothclass'])\n    col_specimen = pick_col(['specimen', 'Specimen', 'id', 'ID', 'workerid'])\n\n    # If the above guesses are ambiguous or missing, attempt data-driven heuristics\n    num_cols = df.select_dtypes(include=[np.number]).columns.tolist()\n\n    # Heuristic for sockets: prefer a numeric column with integer-like counts typically >=1\n    if col_sockets is None:\n        for c in ['sockets', 'prob_male', 'num_sockets']:\n            if c in df.columns:\n                col_sockets = c\n                break\n    if col_sockets is None:\n        for c in num_cols:\n            s = df[c].dropna()\n            if s.shape[0] == 0:\n                continue\n            # observable sockets typically integers >= 1 and not greater than ~32\n            if (s >= 1).all() and (s.max() <= 64) and (s.mean() > 1.5):\n                col_sockets = c\n                break\n\n    # Heuristic for num_amtl: prefer a numeric column with values between 0 and sockets\n    if col_num_amtl is None:\n        for c in num_cols:\n            if c == col_sockets:\n                continue\n            s = df[c].dropna()\n            if s.shape[0] == 0:\n                continue\n            # missing-teeth counts often non-negative and less than typical socket counts\n            if (s >= 0).all() and (s.max() <= 32) and (s.mean() <= 10):\n                col_num_amtl = c\n                break\n\n    # Heuristic for age_at_death: numeric column with plausible age range\n    if col_age is None:\n        for c in num_cols:\n            if c in [col_sockets, col_num_amtl]:\n                continue\n            s = df[c].dropna()\n            if s.shape[0] == 0:\n                continue\n            # ages typically between 0 and 100 and with many unique values\n            if (s >= 0).all() and (s.max() <= 120) and (s.nunique() > 8) and (s.mean() > 5):\n                col_age = c\n                break\n\n    # Heuristic for sex probability: prefer 0-1 valued numeric\n    if col_sex_prob is None:\n        for c in num_cols:\n            s = df[c].dropna()\n            if s.shape[0] == 0:\n                continue\n            if (s >= 0).all() and (s <= 1).all():\n                col_sex_prob = c\n                break\n\n    # Heuristic for tooth class: look for an obvious categorical column\n    if col_toothclass is None:\n        for c in df.columns:\n            if df[c].dtype == object or str(df[c].dtype).startswith('category'):\n                # look for indicative strings\n                sample = df[c].dropna().astype(str).head(20).str.lower().tolist()\n                if any(('anterior' in x or 'posterior' in x or 'premolar' in x or 'premolar' in x) for x in sample):\n                    col_toothclass = c\n                    break\n\n    # Explicitly create the final columns using the chosen source columns\n    # Genus\n    if col_genus is None:\n        raise ValueError('Could not find a genus column (looked for age/genus). Please provide a column containing taxon names like \"Homo sapiens\", \"Pan\", \"Pongo\", \"Papio\".')\n    df['Genus'] = df[col_genus].astype(str).str.strip()\n\n    # Num_AMTL and Sockets (required)\n    if col_num_amtl is None or col_sockets is None:\n        raise ValueError('Could not identify both the number of AMTL (Num_AMTL) and Sockets columns. Expected numeric columns like \"num_amtl\" and \"sockets\".')\n\n    df['Num_AMTL'] = pd.to_numeric(df[col_num_amtl], errors='coerce')\n    df['Sockets'] = pd.to_numeric(df[col_sockets], errors='coerce')\n\n    # Remove rows with missing essential values\n    df = df.dropna(subset=['Genus', 'Num_AMTL', 'Sockets']).copy()\n\n    # Ensure numeric consistency: Num_AMTL must be between 0 and Sockets\n    df = df[df['Sockets'] > 0].copy()\n    # If Num_AMTL > Sockets, set to Sockets (sometimes rounding/estimation errors); alternatively drop — here we cap\n    df.loc[df['Num_AMTL'] > df['Sockets'], 'Num_AMTL'] = df.loc[df['Num_AMTL'] > df['Sockets'], 'Sockets']\n    df.loc[df['Num_AMTL'] < 0, 'Num_AMTL'] = 0\n\n    # Compute proportion for modeling with binomial family (we will supply Sockets as freq_weights)\n    df['Proportion_AMTL'] = df['Num_AMTL'] / df['Sockets']\n\n    # Age at death (optional but used as control if available)\n    if col_age is not None:\n        df['Age_at_death'] = pd.to_numeric(df[col_age], errors='coerce')\n    else:\n        df['Age_at_death'] = np.nan\n\n    # Center age for model stability (create a separate column used in modeling)\n    if df['Age_at_death'].notna().any():\n        age_mean = df['Age_at_death'].mean()\n        df['Age_at_death_centered'] = df['Age_at_death'] - age_mean\n    else:\n        df['Age_at_death_centered'] = 0.0\n\n    # Sex probability\n    if col_sex_prob is not None:\n        df['Sex_prob_male'] = pd.to_numeric(df[col_sex_prob], errors='coerce')\n    else:\n        # If no sex-probability column is available, create NA column (model will effectively ignore or you can drop these rows)\n        df['Sex_prob_male'] = np.nan\n\n    # Tooth class\n    if col_toothclass is not None:\n        df['ToothClass'] = df[col_toothclass].astype(str).str.strip()\n    else:\n        # If no tooth-class column, create a generic category so modeling still runs (but this weakens inference)\n        df['ToothClass'] = 'unknown'\n\n    # Specimen id (optional)\n    if col_specimen is not None:\n        df['Specimen'] = df[col_specimen].astype(str)\n\n    # Restrict to rows with finite proportion values\n    df = df.replace([np.inf, -np.inf], np.nan).dropna(subset=['Proportion_AMTL'])\n\n    # Convert Genus and ToothClass to categorical with sensible ordering: ensure 'Homo sapiens' is present as a label if available\n    df['Genus'] = df['Genus'].astype('category')\n    df['ToothClass'] = df['ToothClass'].astype('category')\n\n    # Final housekeeping: reset index\n    df = df.reset_index(drop=True)\n\n    return df\n",
-  "m_code": "def model(df: pd.DataFrame):\n    \"\"\"\n    Fit a binomial (logistic) GLM to test whether genus (with Homo sapiens as reference) predicts AMTL frequency while controlling for age, sex, and tooth class.\n\n    Model specification (formula):\n      Proportion_AMTL ~ C(Genus, Treatment(reference=Homo_sapiens)) + Age_at_death_centered + Sex_prob_male + C(ToothClass)\n\n    We fit the model using statsmodels' GLM with Binomial family and pass the number of trials (Sockets) as freq_weights. The dependent variable is expressed as a proportion (Num_AMTL / Sockets).\n\n    Returns the fitted GLMResults object.\n    \"\"\"\n    import statsmodels.api as sm\n    import statsmodels.formula.api as smf\n\n    # Ensure required columns are present\n    required = ['Genus', 'Num_AMTL', 'Sockets', 'Proportion_AMTL', 'Age_at_death_centered', 'Sex_prob_male', 'ToothClass']\n    missing = [c for c in required if c not in df.columns]\n    if missing:\n        raise ValueError(f'Missing required columns for modeling: {missing}')\n\n    # Choose reference level for Genus. Prefer 'Homo sapiens' if available, else try 'Homo', otherwise first category\n    gen_levels = list(df['Genus'].cat.categories) if hasattr(df['Genus'].dtype, 'categories') else list(pd.Categorical(df['Genus']).categories)\n    if any(x for x in gen_levels if 'homo sapiens' in x.lower()):\n        ref = [x for x in gen_levels if 'homo sapiens' in x.lower()][0]\n    elif any(x for x in gen_levels if x.lower() == 'homo'):\n        ref = [x for x in gen_levels if x.lower() == 'homo'][0]\n    else:\n        ref = gen_levels[0]\n\n    # Build formula using Treatment coding to set the reference genus\n    formula = 'Proportion_AMTL ~ C(Genus, Treatment(reference=\"%s\")) + Age_at_death_centered + Sex_prob_male + C(ToothClass)'\n    formula = formula % ref\n\n    # Some rows may have missing Sex_prob_male or Age — statsmodels will drop them automatically in formula-based API.\n    # Fit GLM (binomial). We pass freq_weights=Sockets so the binomial is fit on counts.\n    # Note: endog is Proportion_AMTL and freq_weights are number of trials (Sockets).\n    model = smf.glm(formula=formula, data=df, family=sm.families.Binomial(), freq_weights=df['Sockets'])\n    results = model.fit()\n\n    # Return the fitted model results (caller can inspect .summary(), .params, etc.)\n    return results\n"
+  "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw dataset into a cleaned dataframe ready for binomial modeling of AMTL.\n\n    Expected behavior / mapping (robust to slight schema mismatches):\n    - AMTL_count: number of missing teeth for the given specimen/tooth-class record. Mapped from 'stdev_age' when present.\n    - Sockets: number of observable sockets (trials). Prefer 'prob_male' if it contains integer socket counts; fall back to 'sockets' if needed.\n    - Age_at_death: continuous age estimate mapped from 'num_amtl' (per dataset description alignment).\n    - ProbMale: continuous 0-1 sex estimate mapped from 'pop'.\n    - Genus: taxonomic genus (Homo, Pan, Pongo, Papio) taken from column 'age' (per dataset description mapping).\n    - ToothClass: tooth class (Anterior, Posterior, Premolar) taken from column 'genus' (per dataset description mapping).\n\n    The function will:\n    - parse numeric fields robustly\n    - round/cast counts to integers\n    - drop rows with missing critical fields\n    - create AMTL_prop, IsHomo, SexMale, and standardized age\n    - normalize ToothClass categories and mark unknown classes as 'Other'\n    \"\"\"\n    df = df.copy()\n\n    # --- Robust column mapping based on field names and provided descriptions ---\n    # Map candidate columns to the conceptual variables. The dataset schema appears to have\n    # mismatched descriptions; use column names but be defensive.\n    # AMTL count (number of missing teeth) -> prefer 'stdev_age'\n    if 'stdev_age' in df.columns:\n        df['AMTL_count'] = pd.to_numeric(df['stdev_age'], errors='coerce')\n    else:\n        # fallback: try 'num_amtl' (if dataset uses that name for counts)\n        df['AMTL_count'] = pd.to_numeric(df.get('num_amtl', np.nan), errors='coerce')\n\n    # Sockets (number of observable sockets) -> prefer 'prob_male' (schema suggests this holds socket counts)\n    if 'prob_male' in df.columns:\n        df['Sockets'] = pd.to_numeric(df['prob_male'], errors='coerce')\n    elif 'sockets' in df.columns:\n        df['Sockets'] = pd.to_numeric(df['sockets'], errors='coerce')\n    else:\n        df['Sockets'] = np.nan\n\n    # Age at death (continuous) -> prefer 'num_amtl' per schema mapping\n    if 'num_amtl' in df.columns:\n        df['Age_at_death'] = pd.to_numeric(df['num_amtl'], errors='coerce')\n    elif 'stdev_age' in df.columns:\n        # if no explicit age column, keep missing\n        df['Age_at_death'] = pd.to_numeric(df['stdev_age'], errors='coerce')\n    else:\n        df['Age_at_death'] = np.nan\n\n    # Sex probability (0-1) -> 'pop'\n    df['ProbMale'] = pd.to_numeric(df.get('pop', np.nan), errors='coerce')\n\n    # Genus (taxon) -> many datasets store genus under 'age' according to schema\n    if 'age' in df.columns:\n        df['Genus'] = df['age'].astype(str).str.strip()\n    elif 'genus' in df.columns:\n        df['Genus'] = df['genus'].astype(str).str.strip()\n    else:\n        df['Genus'] = df.get('genus', '').astype(str).str.strip()\n\n    # Tooth class -> schema indicates 'genus' may actually contain tooth class labels\n    if 'genus' in df.columns:\n        df['ToothClass'] = df['genus'].astype(str).str.strip()\n    elif 'tooth_class' in df.columns:\n        df['ToothClass'] = df['tooth_class'].astype(str).str.strip()\n    else:\n        df['ToothClass'] = df.get('tooth_class', '').astype(str).str.strip()\n\n    # Specimen identifier\n    df['SpecimenID'] = df.get('specimen', df.index).astype(str)\n\n    # --- Clean and validate numeric counts ---\n    # Drop rows missing critical fields\n    df = df.dropna(subset=['AMTL_count', 'Sockets', 'Genus', 'ToothClass'])\n\n    # Round counts to integers and ensure Sockets > 0\n    df['AMTL_count'] = pd.to_numeric(df['AMTL_count'], errors='coerce').round().astype('Int64')\n    df['Sockets'] = pd.to_numeric(df['Sockets'], errors='coerce').round().astype('Int64')\n    df = df[df['Sockets'].notna()]\n    df = df[df['AMTL_count'].notna()]\n    df = df[df['Sockets'] > 0]\n\n    # Clip AMTL_count to [0, Sockets]\n    df['AMTL_count'] = df.apply(lambda r: int(max(0, min(r['AMTL_count'], r['Sockets']))), axis=1)\n\n    # Compute proportion for inspection\n    df['AMTL_prop'] = df['AMTL_count'] / df['Sockets']\n\n    # --- Genus indicator for Homo sapiens ---\n    df['IsHomo'] = df['Genus'].str.contains('homo', case=False, na=False).astype(int)\n\n    # --- Age standardization for model stability ---\n    df['Age_at_death'] = pd.to_numeric(df['Age_at_death'], errors='coerce')\n    # If Age_at_death is completely missing, Age_std will be NaN (model will handle or we can drop)\n    if df['Age_at_death'].notna().sum() > 1:\n        df['Age_std'] = (df['Age_at_death'] - df['Age_at_death'].mean()) / (df['Age_at_death'].std(ddof=0) if df['Age_at_death'].std(ddof=0) != 0 else 1.0)\n    else:\n        df['Age_std'] = df['Age_at_death']\n\n    # --- Sex variables ---\n    df['ProbMale'] = pd.to_numeric(df['ProbMale'], errors='coerce')\n    # Clip to [0,1] where applicable\n    df.loc[df['ProbMale'].notna(), 'ProbMale'] = df.loc[df['ProbMale'].notna(), 'ProbMale'].clip(0, 1)\n    df['SexMale'] = (df['ProbMale'] >= 0.5).astype(int)\n\n    # --- Normalize ToothClass categories ---\n    # Standardize string to lower-case and detect keywords\n    def normalize_tooth(tc):\n        if pd.isna(tc) or tc == '':\n            return 'Other'\n        s = str(tc).lower()\n        if 'ante' in s or 'incis' in s or 'canin' in s:\n            return 'Anterior'\n        if 'post' in s or 'molar' in s:\n            return 'Posterior'\n        if 'prem' in s:\n            return 'Premolar'\n        # if exact matches\n        if s in ['anterior', 'posterior', 'premolar']:\n            return s.capitalize()\n        return 'Other'\n\n    df['ToothClass'] = df['ToothClass'].apply(normalize_tooth)\n\n    # Keep only records for which ToothClass is one of the known classes or 'Other' (we'll include dummies for known classes)\n    df['ToothClass'] = df['ToothClass'].astype(str)\n\n    # Final: drop rows with any remaining NA in key model inputs\n    key_cols = ['AMTL_count', 'Sockets', 'IsHomo', 'Age_std', 'ProbMale', 'ToothClass', 'SpecimenID']\n    # Age_std or ProbMale may be partially missing; we will allow rows with missing Age_std or ProbMale but recommend dropping them for the main model.\n    # For safety, only drop rows with AMTL_count or Sockets missing (we already did), keep others and let model drop if necessary.\n\n    return df\n",
+  "m_code": "def model(df: pd.DataFrame):\n    \"\"\"\n    Fit a binomial regression to test whether modern humans (IsHomo) have higher AMTL frequency\n    after controlling for age, sex, and tooth class.\n\n    Modeling approach:\n    - Use a Binomial GLM on counts: endog is a 2-column array [AMTL_count, Sockets - AMTL_count]\n      which is supported by statsmodels' GLM for Binomial.\n    - Predictors: IsHomo (primary IV), Age_std (continuous), ProbMale (continuous), SexMale (binary),\n      and dummy variables for ToothClass (Posterior and Premolar; Anterior as reference).\n    - Use cluster-robust standard errors clustered on SpecimenID to account for within-specimen correlation\n      when multiple tooth-class observations come from the same specimen.\n\n    Returns a dictionary with the raw GLM result and clustered-robust result (if clustering succeeds).\n    \"\"\"\n    import statsmodels.api as sm\n    import numpy as np\n\n    df = df.copy()\n\n    # Ensure necessary columns exist\n    required = ['AMTL_count', 'Sockets', 'IsHomo', 'Age_std', 'ProbMale', 'ToothClass', 'SpecimenID']\n    missing = [c for c in required if c not in df.columns]\n    if len(missing) > 0:\n        raise ValueError(f\"Missing required columns for modeling: {missing}\")\n\n    # Drop rows with missing counts (should be none after transform) and ensure integers\n    df = df[df['Sockets'].notna()]\n    df = df[df['AMTL_count'].notna()]\n\n    # Construct outcome matrix for binomial: successes and failures\n    successes = np.asarray(df['AMTL_count'], dtype=int)\n    trials = np.asarray(df['Sockets'], dtype=int)\n    failures = trials - successes\n    # Endog for Binomial GLM can be 2-column array [successes, failures]\n    y = np.column_stack((successes, failures))\n\n    # Build design matrix\n    X_base = pd.DataFrame({\n        'IsHomo': df['IsHomo'].astype(int),\n        'Age_std': df['Age_std'].astype(float),\n        'ProbMale': df['ProbMale'].astype(float),\n        'SexMale': df['SexMale'].astype(int),\n    }, index=df.index)\n\n    # ToothClass dummies: drop first (reference = Anterior). Keep 'Other' as additional category if present.\n    tooth_dummies = pd.get_dummies(df['ToothClass'], prefix='Tooth', drop_first=True)\n    X = pd.concat([X_base, tooth_dummies], axis=1)\n\n    # Add intercept\n    X = sm.add_constant(X, has_constant='add')\n\n    # Fit Binomial GLM\n    glm_binom = sm.GLM(y, X, family=sm.families.Binomial())\n    res = glm_binom.fit()\n\n    # Try to compute cluster-robust SEs by SpecimenID\n    clustered_res = None\n    try:\n        # This returns a results instance with robust covariance\n        clustered_res = res.get_robustcov_results(cov_type='cluster', groups=df['SpecimenID'])\n    except Exception as e:\n        # If clustering fails, keep clustered_res as None and return raw result\n        clustered_res = None\n\n    # Prepare a concise output object\n    out = {\n        'glm_result': res,\n        'glm_clustered_result': clustered_res,\n        'design_matrix_columns': X.columns.tolist()\n    }\n\n    # Print short model summaries for user inspection\n    try:\n        print('--- GLM (Binomial) summary (naive SE) ---')\n        print(res.summary())\n        if clustered_res is not None:\n            print('\\n--- GLM (Binomial) summary (clustered SE by SpecimenID) ---')\n            print(clustered_res.summary())\n        else:\n            print('\\nClustered SE by SpecimenID not available; see glm_result for naive SEs.')\n    except Exception:\n        # In non-interactive settings, summary printing may fail; ignore\n        pass\n\n    return out\n"
 }
 ===================[TOKENS]=====================
-Number of prompt tokens: 4872
-Number of total tokens: 11854
+Number of prompt tokens: 4935
+Number of total tokens: 11705
 
-===================[PROMPT (API Time: 89.37168312072754, Cache Time: None)]=====================
+===================[PROMPT (API Time: 102.56265830993652, Cache Time: None)]=====================
 =====[SYSTEM]=====:
 You are an AI Data Analysis Assistant who is an expert at writing an end-to-end scientific analysis given a research question and a dataset. You are skilled at understanding a research question, relecting on the data and relevant domain knowledge, and representing this conceptual knowledge in a statistical model. Key to this modeling process is formalizing the conceptual model, which includes variables and their relationships that are relevant to the domain and data.
 =====[USER]=====:
@@ -1962,6 +1023,16 @@ import sklearn
 import scipy
 import statsmodels.api as sm
 import matplotlib.pyplot as plt
+
+You are also allowed to use common machine learning libraries, including but not limited to:
+- xgboost
+- lightgbm
+- catboost
+- tensorflow / keras
+- torch (PyTorch)
+- pytorch-lightning
+- sklearn.experimental modules
+- imbalanced-learn (imblearn)
 
 Here is the code template for the transform function:
 ```python
@@ -2373,70 +1444,1093 @@ Dataset Schema: {
 }
 Result: 
 
-===================[gpt-5-mini RESPONSE (5053)]=====================
+===================[gpt-5-mini RESPONSE (6286)]=====================
 {
   "cvars": {
     "ivs": [
       {
-        "description": "Specimen taxonomic genus (primary predictor). Categorical variable indicating whether the specimen is Homo sapiens (modern human) or one of the non-human primate genera (Pan, Pongo, Papio). We will model this as a categorical predictor with indicator (dummy) variables.",
+        "description": "Binary indicator whether the specimen is a modern human (Homo sapiens). This is the main independent variable testing whether humans have higher AMTL than non-human primates.",
+        "columns": [
+          "is_human"
+        ]
+      }
+    ],
+    "dv": {
+      "description": "Antemortem tooth loss (AMTL) expressed as counts of missing teeth (successes) and total observable sockets (trials). The model uses the pair (n_missing, n_sockets) as the binomial outcome; an amtl proportion column is also created for convenience.",
+      "columns": [
+        "n_missing",
+        "n_sockets",
+        "amtl_prop"
+      ]
+    },
+    "controls": [
+      {
+        "description": "Estimated age at death of the specimen (numeric). Controls for effect of age on AMTL.",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "age_est"
+        ]
+      },
+      {
+        "description": "Estimated uncertainty / sd of the age-at-death estimate (numeric). Retained for potential sensitivity checks and descriptive stats.",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "age_sd"
+        ]
+      },
+      {
+        "description": "Estimated probability that the specimen is male (numeric between 0 and 1). Controls for sex differences in AMTL.",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "sex_prob_male"
+        ]
+      },
+      {
+        "description": "Tooth class (categorical): anterior / posterior / premolar. Controls for systematic differences in AMTL by tooth type.",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "tooth_class"
+        ]
+      },
+      {
+        "description": "Specimen unique identifier. Used for clustering standard errors to account for non-independence of rows from the same specimen (if multiple rows per specimen).",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "specimen"
+        ]
+      },
+      {
+        "description": "Original taxon / genus label (categorical): Homo, Pan, Pongo, Papio. Kept for descriptive comparisons and secondary models with genus dummies.",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "genus"
+        ]
+      }
+    ]
+  },
+  "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw dataframe into a cleaned dataframe with correctly mapped columns for AMTL analysis.\n\n    Important note on column mapping: the provided dataset schema has shifted/descriptive labels that do not match the logical contents.\n    Empirically the following mapping is applied (guided by dataset_description):\n      - stdev_age  -> number of missing teeth for the given tooth class (n_missing)\n      - prob_male  -> number of observable sockets (n_sockets)\n      - num_amtl   -> estimated age at death (age_est)\n      - sockets    -> assigned uncertainty / sd of age-at-death (age_sd)\n      - pop        -> sex estimate (probability male) (sex_prob_male)\n      - age        -> specimen genus (Pan, Pongo, Papio, Homo sapiens) (genus)\n      - genus      -> tooth class label (Anterior, Posterior, Premolar) (tooth_class)\n\n    The function performs type conversions, cleans/counts rounding, computes proportions, and creates an is_human indicator.\n    \"\"\"\n    df = df.copy()\n\n    # Map columns based on the schema's shifted descriptions\n    # Use the original column names but create logically-named new columns used in the model.\n    # If any of the source columns are missing, this will raise a KeyError so users can inspect the dataset.\n    # Convert to numeric where appropriate; coerce errors to NaN for later dropping.\n    df['n_missing'] = pd.to_numeric(df['stdev_age'], errors='coerce')\n    df['n_sockets'] = pd.to_numeric(df['prob_male'], errors='coerce')\n    df['age_est'] = pd.to_numeric(df['num_amtl'], errors='coerce')\n    df['age_sd'] = pd.to_numeric(df['sockets'], errors='coerce')\n    df['sex_prob_male'] = pd.to_numeric(df['pop'], errors='coerce')\n\n    # Genus (taxon) is provided in the column 'age' per the schema mapping\n    df['genus'] = df['age'].astype(str)\n\n    # Tooth class is actually in the column named 'genus' in the schema\n    df['tooth_class'] = df['genus'].astype(str)\n\n    # Standardize tooth_class labels (common expected values: Anterior, Posterior, Premolar)\n    df['tooth_class'] = df['tooth_class'].str.strip().str.title()\n\n    # Round sockets and n_missing to integers (sockets must be positive integer counts)\n    # Many source values appear as floats; round them sensibly. Keep nullable integer dtype to preserve NaNs.\n    df['n_sockets'] = df['n_sockets'].round().astype('Int64')\n    df['n_missing'] = df['n_missing'].round().astype('Int64')\n\n    # Ensure logical bounds: 0 <= n_missing <= n_sockets. If n_sockets is missing or <= 0, mark row for removal.\n    # Where n_missing is negative or greater than sockets, clip to feasible range.\n    valid_sockets_mask = df['n_sockets'].notna() & (df['n_sockets'] > 0)\n    df = df[valid_sockets_mask].copy()\n\n    # Clip n_missing between 0 and n_sockets; if n_missing is missing, set to 0 (conservative) or drop? We'll drop rows with missing n_missing.\n    df = df[df['n_missing'].notna()].copy()\n    df['n_missing'] = df.apply(lambda r: int(max(0, min(int(r['n_missing']), int(r['n_sockets'])))), axis=1)\n    df['n_sockets'] = df['n_sockets'].astype(int)\n\n    # Proportion of AMTL\n    df['amtl_prop'] = df['n_missing'] / df['n_sockets']\n\n    # Create is_human indicator from genus values. Accept common Homo labels such as 'Homo', 'Homo sapiens', 'Homo_sapiens'\n    df['genus'] = df['genus'].str.strip()\n    df['is_human'] = df['genus'].str.contains('Homo', case=False, na=False).astype(int)\n\n    # Some basic cleaning for age_est and sex_prob_male\n    df['age_est'] = pd.to_numeric(df['age_est'], errors='coerce')\n    df['sex_prob_male'] = pd.to_numeric(df['sex_prob_male'], errors='coerce')\n\n    # Drop rows missing critical model columns\n    required_cols = ['specimen', 'n_missing', 'n_sockets', 'amtl_prop', 'is_human', 'tooth_class']\n    df = df.dropna(subset=required_cols)\n\n    # Reset index and return only the columns needed downstream (plus helpful metadata)\n    out_cols = [\n        'specimen',\n        'n_missing',\n        'n_sockets',\n        'amtl_prop',\n        'is_human',\n        'genus',\n        'tooth_class',\n        'age_est',\n        'age_sd',\n        'sex_prob_male'\n    ]\n\n    # Ensure all requested out_cols are present in df; if not, add them as NA to preserve shape\n    for c in out_cols:\n        if c not in df.columns:\n            df[c] = pd.NA\n\n    return df[out_cols]\n",
+  "m_code": "def model(df: pd.DataFrame) -> dict:\n    \"\"\"\n    Fit a binomial (logistic) regression for AMTL counts with genus (human vs non-human) as main predictor,\n    controlling for age, sex, and tooth class. Clustered standard errors by specimen are used to account for\n    potential non-independence within specimen rows.\n\n    Returns a dictionary containing the fitted model object, exponentiated coefficients (odds ratios),\n    95% confidence intervals for odds ratios, and the textual summary.\n    \"\"\"\n    df = df.copy()\n\n    # Required modeling columns\n    required = ['n_missing', 'n_sockets', 'is_human', 'age_est', 'sex_prob_male', 'tooth_class', 'specimen']\n    missing = [c for c in required if c not in df.columns]\n    if missing:\n        raise ValueError(f\"Missing required columns for modeling: {missing}\")\n\n    # Build response as proportion with frequency weights = trials (n_sockets)\n    endog = df['n_missing'] / df['n_sockets']\n\n    # Build design matrix: is_human, age_est (centered), sex_prob_male, and tooth_class dummies\n    exog = pd.DataFrame()\n    exog['is_human'] = df['is_human'].astype(float)\n\n    # Center age_est to improve interpretability (if available)\n    if df['age_est'].notna().any():\n        exog['age_est_c'] = df['age_est'].astype(float) - df['age_est'].astype(float).mean()\n    else:\n        exog['age_est_c'] = 0.0\n\n    # sex probability (numeric 0-1) - fill missing with column mean for stability (flagging missing would be alternative)\n    if df['sex_prob_male'].notna().any():\n        exog['sex_prob_male'] = df['sex_prob_male'].astype(float).fillna(df['sex_prob_male'].mean())\n    else:\n        exog['sex_prob_male'] = 0.0\n\n    # Tooth class dummies (drop first to avoid multicollinearity)\n    tooth_dummies = pd.get_dummies(df['tooth_class'].astype(str), prefix='tooth', drop_first=True)\n    exog = pd.concat([exog, tooth_dummies], axis=1)\n\n    # Add constant\n    exog = sm.add_constant(exog, has_constant='add')\n\n    # Fit GLM Binomial using proportion endog and frequency weights = number of sockets\n    # Use clustered standard errors by specimen to account for multiple rows per specimen\n    glm_binom = sm.GLM(endog, exog, family=sm.families.Binomial(), freq_weights=df['n_sockets'])\n    try:\n        res = glm_binom.fit(cov_type='cluster', cov_kwds={'groups': df['specimen']})\n    except Exception:\n        # Fallback to default fit if clustering fails for any reason\n        res = glm_binom.fit()\n\n    # Exponentiate coefficients to get odds ratios and transform conf_int\n    params = res.params\n    conf = res.conf_int()\n    or_vals = np.exp(params)\n    conf_or = np.exp(conf)\n\n    # Package results\n    results = {\n        'model': res,\n        'odds_ratios': or_vals,\n        'conf_int_or': conf_or,\n        'summary': res.summary().as_text()\n    }\n\n    return results\n"
+}
+===================[TOKENS]=====================
+Number of prompt tokens: 4935
+Number of total tokens: 11221
+
+===================[PROMPT (API Time: 88.25365591049194, Cache Time: None)]=====================
+=====[SYSTEM]=====:
+You are an AI Data Analysis Assistant who is an expert at writing an end-to-end scientific analysis given a research question and a dataset. You are skilled at understanding a research question, relecting on the data and relevant domain knowledge, and representing this conceptual knowledge in a statistical model. Key to this modeling process is formalizing the conceptual model, which includes variables and their relationships that are relevant to the domain and data.
+=====[USER]=====:
+<Instruction> 
+Given the research question, dataset formulate the conceptual model and write an analysis including all necessary data transformations and a statistical model to answer the research question. 
+</Instruction>
+
+<Format Instructions>
+You will return 3 things:
+1. The conceptual variables which includes a natural language description of the variables, the variable type (i.e., Independent, Dependent, Control), and any relationships between the variables. Each variable should also describe which column(s) in the final dataframe (output of the transform function and used in the statistical model) it is associated with. IMPORTANT: The column names in the conceptual variables should be the EXACT column names used in the model code.     
+2. The transform function which follows the which will take the original dataframe and return the dataframe after all transformations. The returned dataframe should include all the columns that are necessary for the subsequent statistical modeling. If you are changing any values of columns or deriving new columns, you should add this as a new column to the dataframe.     
+3. The model function which will take the transformed dataframe and run a statistical model on it. The model function should return the results of the model.
+
+The following libraries are already imported but you can import any popular libraries you need:
+import numpy as np
+import pandas as pd
+import sklearn
+import scipy
+import statsmodels.api as sm
+import matplotlib.pyplot as plt
+
+You are also allowed to use common machine learning libraries, including but not limited to:
+- xgboost
+- lightgbm
+- catboost
+- tensorflow / keras
+- torch (PyTorch)
+- pytorch-lightning
+- sklearn.experimental modules
+- imbalanced-learn (imblearn)
+
+Here is the code template for the transform function:
+```python
+def transform(df: pd.DataFrame) -> pd.DataFrame:
+    # Your code here
+    return df
+```
+Here is the code template for the model function:
+```python
+def model(df: pd.DataFrame) -> Any:
+    # Your code here
+    return results
+```
+
+Please return the conceptual variables, the transform function, and the model function in the format specified below:
+The output should be formatted as a JSON instance that conforms to the JSON schema below.
+
+As an example, for the schema {"properties": {"foo": {"title": "Foo", "description": "a list of strings", "type": "array", "items": {"type": "string"}}}, "required": ["foo"]}
+the object {"foo": ["bar", "baz"]} is a well-formatted instance of the schema. The object {"properties": {"foo": ["bar", "baz"]}} is not well-formatted.
+
+Here is the output schema:
+```
+{"$defs": {"AgentCVarsWithCol": {"properties": {"ivs": {"items": {"$ref": "#/$defs/IVarWithCol"}, "title": "Independent variables", "type": "array"}, "dv": {"allOf": [{"$ref": "#/$defs/DVarWithCol"}], "title": "Dependent variable"}, "controls": {"items": {"$ref": "#/$defs/ControlVarWithCol"}, "title": "Control variables", "type": "array"}}, "required": ["ivs", "dv", "controls"], "title": "AgentCVarsWithCol", "type": "object"}, "ControlVarWithCol": {"properties": {"description": {"title": "Description of the control variable variable", "type": "string"}, "is_moderator": {"title": "Whether the variable is a moderator.", "type": "boolean"}, "moderator_on": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": "", "title": "The variable that the control variable is moderating. Only applicable for control variables that are moderators."}, "columns": {"items": {"type": "string"}, "title": "The column(s) in the FINAL dataframe used in the STATISTICAL MODEL that corresponds to the control variable", "type": "array"}}, "required": ["description", "is_moderator", "columns"], "title": "ControlVarWithCol", "type": "object"}, "DVarWithCol": {"properties": {"description": {"title": "Description of the dependent variable variable", "type": "string"}, "columns": {"items": {"type": "string"}, "title": "The column(s) in the FINAL dataframe used in the STATISTICAL MODEL that corresponds to the dependent variable", "type": "array"}}, "required": ["description", "columns"], "title": "DVarWithCol", "type": "object"}, "IVarWithCol": {"properties": {"description": {"title": "Description of the independent variable variable", "type": "string"}, "columns": {"items": {"type": "string"}, "title": "The column(s) in the FINAL dataframe used in the STATISTICAL MODEL that corresponds to the independent variable", "type": "array"}}, "required": ["description", "columns"], "title": "IVarWithCol", "type": "object"}}, "properties": {"cvars": {"allOf": [{"$ref": "#/$defs/AgentCVarsWithCol"}], "title": "Conceptual variables"}, "transform_code": {"title": "The code that transforms the data", "type": "string"}, "m_code": {"title": "The code for the statistical modeling", "type": "string"}}, "required": ["cvars", "transform_code", "m_code"]}
+```
+</Format Instructions>
+<Example>
+Research Question: What is the effect of hormonal fluctuations associated with fertility on women's religiosity?
+Dataset Schema: {
+  "dataset_description": "A total of 275 women participated in the study for this dataset. Each participant was asked to answer three religiosity items using a 9-point scale. Further, each participant was asked to indicate the typical length of her menstrual cycle, the start date of her last menstrual period, and the start date of her previous menstrual period. In addition, each woman indicated how sure she was about these two start dates, using a 9-point scale. Finally, each woman was asked to indicate her current romantic relationship status with the following four response options: (1) not dating/romantically involved with anyone, (2) dating or involved with only one partner, (3) engaged or living with my partner, and (4) married.",
+  "fields": [
+    {
+      "column": "WorkerID",
+      "properties": {
+        "dtype": "number",
+        "std": 79.52986860293433,
+        "min": 1,
+        "max": 275,
+        "samples": [
+          31,
+          140,
+          196
+        ],
+        "num_unique_values": 275,
+        "description": "The unique identifier of a participant."
+      }
+    },
+    {
+      "column": "Rel1",
+      "properties": {
+        "dtype": "number",
+        "std": 3.284246850080361,
+        "min": 1,
+        "max": 9,
+        "samples": [
+          4,
+          1,
+          9
+        ],
+        "num_unique_values": 9,
+        "description": "'How much do you believe in God?' 1 \u2013 9"
+      }
+    },
+    {
+      "column": "Rel2",
+      "properties": {
+        "dtype": "number",
+        "std": 3.087872913331648,
+        "min": 1.0,
+        "max": 9.0,
+        "samples": [
+          4.0,
+          2.0,
+          6.0
+        ],
+        "num_unique_values": 9,
+        "description": "'I see myself as a religiously oriented person.' 1 \u2013 9"
+      }
+    },
+    {
+      "column": "Rel3",
+      "properties": {
+        "dtype": "number",
+        "std": 3.333610823065186,
+        "min": 1.0,
+        "max": 9.0,
+        "samples": [
+          3.0,
+          1.0,
+          7.0
+        ],
+        "num_unique_values": 9,
+        "description": "'I believe that God or a Higher Power is responsible for my existence.' 1 \u2013 9"
+      }
+    },
+    {
+      "column": "Sure1",
+      "properties": {
+        "dtype": "number",
+        "std": 1.5732501786909676,
+        "min": 1,
+        "max": 9,
+        "samples": [
+          4,
+          7,
+          9
+        ],
+        "num_unique_values": 8,
+        "description": "In reference to `StartDateofLastPeriod`,  'How sure are you about that date?' 1 \u2013 9."
+      }
+    },
+    {
+      "column": "Sure2",
+      "properties": {
+        "dtype": "number",
+        "std": 2.221975065515302,
+        "min": 1,
+        "max": 9,
+        "samples": [
+          6,
+          3,
+          7
+        ],
+        "num_unique_values": 9,
+        "description": "In reference to `StartDateofPeriodBeforeLast`,  'How sure are you about that date?' 1 \u2013 9."
+      }
+    },
+    {
+      "column": "Relationship",
+      "properties": {
+        "dtype": "number",
+        "std": 1.167327837424664,
+        "min": 1,
+        "max": 4,
+        "samples": [
+          1,
+          2,
+          3
+        ],
+        "num_unique_values": 4,
+        "description": "Answer to 'What is your current romantic relationship status?' (1) not dating/romantically involved with anyone, (2) dating or involved with only one partner, (3) engaged or living with my partner, (4) married"
+      }
+    },
+    {
+      "column": "ReportedCycleLength",
+      "properties": {
+        "dtype": "number",
+        "std": 2.6714983210492633,
+        "min": 21.0,
+        "max": 38.0,
+        "samples": [
+          21.0,
+          22.0,
+          26.0
+        ],
+        "num_unique_values": 17,
+        "description": "Answer to 'How many days long are your menstrual cycles? (for most women, the range is between 25-35 days) Keep in mind this is the number of days from the start of one menstrual period to the start of the next menstrual period and NOT the length of your menstrual bleeding.'"
+      }
+    },
+    {
+      "column": "DateTesting",
+      "properties": {
+        "dtype": "date",
+        "min": "03/12/12",
+        "max": "04/27/12",
+        "samples": [
+          "04/06/12",
+          "04/26/12",
+          "03/12/12"
+        ],
+        "num_unique_values": 13,
+        "description": "Date of participant filling in the questionnaire"
+      }
+    },
+    {
+      "column": "StartDateofLastPeriod",
+      "properties": {
+        "dtype": "date",
+        "min": "02/06/12",
+        "max": "04/26/12",
+        "samples": [
+          "02/16/12",
+          "03/01/12",
+          "04/25/12"
+        ],
+        "num_unique_values": 61,
+        "description": "Answer to 'Please give your best estimate of the date on which you started your last period (please be as precise as possible). This date was probably within the last few weeks. Sometimes thinking of where you were when you started your last period helps. For instance, was it on a weekend?, were you at work, was it during a football game?, etc. Please write the date in mm/dd/yyyy format (e.g., 8/18/2012).'"
+      }
+    },
+    {
+      "column": "StartDateofPeriodBeforeLast",
+      "properties": {
+        "dtype": "date",
+        "min": "01/03/12",
+        "max": "03/29/12",
+        "samples": [
+          "01/15/12",
+          "02/04/12",
+          "03/24/12"
+        ],
+        "num_unique_values": 61,
+        "description": "Answer to 'Please give your best estimate of the date on which you started the period before your last period (please be as precise as possible). Please write the date in mm/dd/yyyy format (e.g., 7/18/2012).'"
+      }
+    }
+  ],
+  "num_rows": 275,
+  "field_names": [
+    "WorkerID",
+    "Rel1",
+    "Rel2",
+    "Rel3",
+    "Sure1",
+    "Sure2",
+    "Relationship",
+    "ReportedCycleLength",
+    "DateTesting",
+    "StartDateofLastPeriod",
+    "StartDateofPeriodBeforeLast"
+  ]
+}
+Result: {
+  "cvars": {
+    "ivs": [
+      {
+        "description": "Women's fertility",
+        "columns": [
+          "FertilityGroup"
+        ]
+      }
+    ],
+    "dv": {
+      "description": "Women's religiosity",
+      "columns": [
+        "AvgReligiosity"
+      ]
+    },
+    "controls": [
+      {
+        "description": "Relationship status of the individual",
+        "is_moderator": true,
+        "moderator_on": "Women's fertility",
+        "columns": [
+          "InRelationship"
+        ]
+      }
+    ]
+  },
+  "transform_code": "# drop the rows with missing values in the ReportedCycleLength, Rel1, Rel2, and Rel3 columns\ndf = df.dropna(subset=['ReportedCycleLength'])\ndf = df.dropna(subset=['Rel1', 'Rel2', 'Rel3'])\n\ndf['AvgReligiosity'] = df[['Rel1', 'Rel2', 'Rel3']].mean(axis=1)\n\n\n# Convert date columns to datetime format\ndf['DateTesting'] = pd.to_datetime(df['DateTesting'], format='%m/%d/%y')\ndf['StartDateofLastPeriod'] = pd.to_datetime(df['StartDateofLastPeriod'], format='%m/%d/%y')\ndf['StartDateofPeriodBeforeLast'] = pd.to_datetime(df['StartDateofPeriodBeforeLast'], format='%m/%d/%y')\n\n# Calculate the cycle length based on provided dates\ndf['ReportedCycleLength'] = (df['StartDateofLastPeriod'] - df['StartDateofPeriodBeforeLast']).dt.days\n# Calculate the expected start date of the next menstrual period\n\ndf['ExpectedNextPeriod'] = df['StartDateofLastPeriod'] + pd.to_timedelta(df['ReportedCycleLength'], unit='d')\n\n# Calculate the day of ovulation by subtracting 14 days from the expected start date of the next period\n# since ovulation typically occurs around 14 days before the start of the next period\ndf['OvulationDate'] = df['ExpectedNextPeriod'] - pd.to_timedelta(14, unit='d')\n# Calculate the cycle day on the date of testing\ndf['CycleDay'] = (df['DateTesting'] - df['OvulationDate']).dt.days + 14\n# Define high-fertility (cycle days 6-14) and low-fertility (cycle days 17-27) groups\ndf['FertilityGroup'] = df['CycleDay'].apply(lambda x: 'High-Fertility' if 6 <= x <= 14 else ('Low-Fertility' if 17 <= x <= 27 else 'Other'))\n# Filter out the 'Other' group to focus on the high and low fertility groups\ndf = df[df['FertilityGroup'].isin(['High-Fertility', 'Low-Fertility'])]\n\n\ndf['IsIncommittedRelationship'] = df['Relationship'].apply(lambda x: 0 if x in [1,2] else 1)\ndf['InRelationship'] = df['Relationship'].apply(lambda x: 0 if x == 1 else 1)\ndf['IsInRelationship'] = df['Relationship'].apply(lambda x: 0 if x == 1 else 1)\n",
+  "m_code": "model = smf.ols('AvgReligiosity ~ InRelationship * FertilityGroup', data=df).fit()\n# Display the regression results\nprint(model.summary())\n"
+}
+</Example>
+Research Question: Do modern humans (Homo sapiens) have higher frequencies of antemortem tooth loss (AMTL) compared to non-human primate genera (Pan, Pongo, Papio), after accounting for the effects of age, sex, and tooth class?
+Dataset Schema: {
+  "dataset_description": "Antemortem tooth loss (AMTL), the loss of teeth during an individual's lifetime, is of significant interest in anthropology and evolutionary studies. Some researchers suggest that high frequencies of AMTL in fossil hominins, our ancestors, may indicate the early adoption of certain human-like behaviors such as cooking food or providing care to individuals who could no longer chew effectively. However, it is unclear whether this association between AMTL and human behavior holds when comparing modern humans to non-human primates. To investigate this, Gilmore (2013) collected data on AMTL from skeletal remains of modern human hunter-gatherers and three non-human primate genera: chimpanzees (Pan), orangutans (Pongo), and baboons (Papio). The dataset includes information on the number of missing teeth, observable tooth sockets, estimated age at death, sex, and tooth class (anterior, posterior, or premolar) for each specimen. By analyzing this data using binomial regression modeling, we aim to determine if humans indeed have higher rates of AMTL compared to non-human primates, after accounting for the effects of age, sex, and tooth type.",
+  "fields": [
+    {
+      "column": "genus",
+      "properties": {
+        "dtype": "category",
+        "samples": [
+          "Anterior",
+          "Posterior",
+          "Premolar"
+        ],
+        "num_unique_values": 3,
+        "semantic_type": "",
+        "description": "One of Anterior, Posterior, or Premolar"
+      }
+    },
+    {
+      "column": "specimen",
+      "properties": {
+        "dtype": "category",
+        "samples": [
+          "NMNH350096",
+          "UVS56",
+          "BRK126758"
+        ],
+        "num_unique_values": 484,
+        "semantic_type": "",
+        "description": "Unique identifier for specimen"
+      }
+    },
+    {
+      "column": "stdev_age",
+      "properties": {
+        "dtype": "number",
+        "std": 1.6266311629535932,
+        "min": 0,
+        "max": 12,
+        "samples": [
+          10,
+          9,
+          0
+        ],
+        "num_unique_values": 12,
+        "semantic_type": "",
+        "description": "Number of teeth missing of given class"
+      }
+    },
+    {
+      "column": "prob_male",
+      "properties": {
+        "dtype": "number",
+        "std": 2.798268102170289,
+        "min": 2,
+        "max": 14,
+        "samples": [
+          14,
+          13,
+          12
+        ],
+        "num_unique_values": 13,
+        "semantic_type": "",
+        "description": "number of observable sockets that could be scored for missing teeth"
+      }
+    },
+    {
+      "column": "num_amtl",
+      "properties": {
+        "dtype": "number",
+        "std": 10.93222964111899,
+        "min": 8.59322651,
+        "max": 71.2242553,
+        "samples": [
+          14.0305714,
+          42.2754092,
+          42.5600492
+        ],
+        "num_unique_values": 313,
+        "semantic_type": "",
+        "description": "Estimated age of specimen at death"
+      }
+    },
+    {
+      "column": "sockets",
+      "properties": {
+        "dtype": "number",
+        "std": 3.8776272832369036,
+        "min": 1.26803942,
+        "max": 31.4169538,
+        "samples": [
+          4.50357659,
+          7.9144902,
+          2.86641
+        ],
+        "num_unique_values": 311,
+        "semantic_type": "",
+        "description": "Assigned uncertainty of age at death"
+      }
+    },
+    {
+      "column": "pop",
+      "properties": {
+        "dtype": "number",
+        "std": 0.34975029083398823,
+        "min": 0.0,
+        "max": 1.0,
+        "samples": [
+          0.25,
+          0.0,
+          0.75
+        ],
+        "num_unique_values": 5,
+        "semantic_type": "",
+        "description": "Estimate of sex of specimen"
+      }
+    },
+    {
+      "column": "age",
+      "properties": {
+        "dtype": "category",
+        "samples": [
+          "Pongo",
+          "Pan",
+          "Homo sapiens"
+        ],
+        "num_unique_values": 4,
+        "semantic_type": "",
+        "description": "Specimen genus, one of Homo, Pan, Papio, or Pongo"
+      }
+    },
+    {
+      "column": "tooth_class",
+      "properties": {
+        "dtype": "category",
+        "samples": [
+          "Alaska",
+          "Yaghan",
+          "Ebolwa"
+        ],
+        "num_unique_values": 22,
+        "semantic_type": "",
+        "description": "Region specimen originates from"
+      }
+    }
+  ],
+  "num_rows": 1450,
+  "field_names": [
+    "genus",
+    "specimen",
+    "stdev_age",
+    "prob_male",
+    "num_amtl",
+    "sockets",
+    "pop",
+    "age",
+    "tooth_class"
+  ]
+}
+Result: 
+
+===================[gpt-5-mini RESPONSE (4975)]=====================
+{
+  "cvars": {
+    "ivs": [
+      {
+        "description": "Primary independent variable: whether the specimen is a modern human (Homo sapiens) vs non-human primate. Binary indicator used to test whether modern humans have higher AMTL rates than non-human primates.",
+        "columns": [
+          "IsHuman"
+        ]
+      },
+      {
+        "description": "Alternative/secondary independent variable: specimen genus as a categorical variable (Homo sapiens, Pan, Pongo, Papio, etc.). Used in a genus-level comparison model to estimate differences by genus.",
         "columns": [
           "Genus"
         ]
       }
     ],
     "dv": {
-      "description": "Antemortem tooth loss (AMTL) measured as the count of missing teeth (during life) out of the number of observable sockets for the given tooth class on a specimen. Modeled as a binomial response (Missing successes out of Sockets trials).",
+      "description": "Dependent variable describing antemortem tooth loss (AMTL). We model the count of missing teeth (AMTL) out of the number of observable sockets (n_sockets) using a binomial GLM. AMTL_prop is the proportion AMTL/n_sockets and is modeled with binomial weights.",
       "columns": [
-        "Missing",
-        "Sockets"
+        "AMTL",
+        "n_sockets",
+        "AMTL_prop"
       ]
     },
     "controls": [
       {
-        "description": "Estimated age of the specimen at death (continuous). Older individuals are expected to have higher AMTL.",
+        "description": "Estimated age at death (years). Included as a continuous control because AMTL frequency increases with age.",
         "is_moderator": false,
         "moderator_on": null,
         "columns": [
-          "Age"
+          "Age",
+          "Age_z"
         ]
       },
       {
-        "description": "Estimated probability that the specimen is male (continuous between 0 and 1). Used as a control for sex differences in AMTL.",
+        "description": "Estimated probability of being male (a numeric estimate between 0 and 1). Included to account for sex differences in AMTL. Kept continuous; can be interpreted as probability-male (higher = more male-like).",
         "is_moderator": false,
         "moderator_on": null,
         "columns": [
-          "ProbMale"
+          "SexProb"
         ]
       },
       {
-        "description": "Tooth class (categorical). Controls for anatomical differences in anterior vs. posterior vs. premolar teeth which may have different baseline AMTL rates.",
+        "description": "Tooth class (anterior, premolar, posterior). Included as categorical control because tooth type strongly affects likelihood of loss.",
         "is_moderator": false,
         "moderator_on": null,
         "columns": [
           "ToothClass"
         ]
-      },
+      }
+    ]
+  },
+  "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw dataframe into the analytic dataframe with the exact columns used by the models.\n\n    Assumptions / mapping based on provided schema (columns in raw df):\n    - 'stdev_age' contains the observed number of missing teeth for the relevant tooth class (AMTL count). We round to integer.\n    - 'prob_male' contains the number of observable sockets (n_sockets). We round to integer.\n    - 'num_amtl' contains the estimated age at death (years) for specimen (numeric).\n    - 'pop' contains the sex estimate/probability of male (numeric 0-1).\n    - 'age' contains the specimen genus (e.g., 'Homo sapiens', 'Pan', 'Pongo', 'Papio').\n    - 'genus' contains the tooth class label (e.g., 'Anterior', 'Posterior', 'Premolar').\n\n    The function produces these final columns (exact names used in model):\n      - AMTL: integer count of missing teeth\n      - n_sockets: integer count of observable sockets\n      - AMTL_prop: AMTL / n_sockets (float)\n      - Genus: categorical genus string\n      - IsHuman: binary indicator (1 if Genus contains 'Homo')\n      - Age: numeric age at death (years)\n      - Age_z: standardized age (mean 0, sd 1)\n      - SexProb: probability of being male (0-1)\n      - ToothClass: tooth class categorical\n\n    The function also filters out invalid rows (missing critical values, n_sockets <= 0, or AMTL > n_sockets).\n    \"\"\"\n\n    df = df.copy()\n\n    # Convert/clean counts and measures. Errors -> NaN\n    df['AMTL'] = pd.to_numeric(df.get('stdev_age'), errors='coerce').round()\n    df['n_sockets'] = pd.to_numeric(df.get('prob_male'), errors='coerce').round()\n    df['Age'] = pd.to_numeric(df.get('num_amtl'), errors='coerce')\n    df['SexProb'] = pd.to_numeric(df.get('pop'), errors='coerce')\n\n    # Genus and tooth class as strings\n    df['Genus'] = df.get('age').astype(str)\n    df['ToothClass'] = df.get('genus').astype(str)\n\n    # Drop rows with missing critical variables\n    df = df.dropna(subset=['AMTL', 'n_sockets', 'Age', 'SexProb', 'Genus', 'ToothClass'])\n\n    # Convert AMTL and n_sockets to integer dtype after dropna\n    df['AMTL'] = df['AMTL'].astype(int)\n    df['n_sockets'] = df['n_sockets'].astype(int)\n\n    # Keep only rows with at least one observable socket and sensible counts\n    df = df[df['n_sockets'] > 0]\n    df = df[df['AMTL'] <= df['n_sockets']]\n    df = df[df['AMTL'] >= 0]\n\n    # Compute proportion\n    df['AMTL_prop'] = df['AMTL'] / df['n_sockets']\n\n    # Binary human indicator (Homo sapiens)\n    df['IsHuman'] = df['Genus'].str.contains('Homo', case=False, na=False).astype(int)\n\n    # Standardize Age for easier model interpretation\n    df['Age_z'] = (df['Age'] - df['Age'].mean()) / (df['Age'].std(ddof=0) if df['Age'].std(ddof=0) != 0 else 1)\n\n    # Keep and return only columns needed for modeling (plus specimen id if present)\n    cols_to_keep = []\n    if 'specimen' in df.columns:\n        cols_to_keep.append('specimen')\n    cols_to_keep += ['AMTL', 'n_sockets', 'AMTL_prop', 'Genus', 'IsHuman', 'Age', 'Age_z', 'SexProb', 'ToothClass']\n\n    return df[cols_to_keep]\n",
+  "m_code": "def model(df: pd.DataFrame) -> dict:\n    \"\"\"\n    Fit binomial regression models to test whether modern humans have higher AMTL rates\n    than non-human primates, controlling for age, sex, and tooth class.\n\n    Two complementary models are returned:\n      - model_is_human: GLM binomial with IsHuman as the primary predictor (binary human vs non-human).\n      - model_by_genus: GLM binomial with Genus (categorical) to compare across genera.\n\n    Both models use AMTL_prop as the response and n_sockets as binomial weights.\n\n    Returns a dictionary with fitted statsmodels results objects.\n    \"\"\"\n\n    df = df.copy()\n\n    # Ensure the needed columns exist\n    required = ['AMTL_prop', 'n_sockets', 'IsHuman', 'Age_z', 'SexProb', 'ToothClass', 'Genus']\n    missing = [c for c in required if c not in df.columns]\n    if missing:\n        raise ValueError(f\"Missing required columns for modeling: {missing}\")\n\n    # Create tooth-class dummy variables (drop first to avoid collinearity)\n    tooth_dummies = pd.get_dummies(df['ToothClass'].astype(str), prefix='Tooth', drop_first=True)\n\n    # Model 1: binary human vs non-human\n    exog1 = pd.concat([df[['IsHuman', 'Age_z', 'SexProb']].reset_index(drop=True), tooth_dummies.reset_index(drop=True)], axis=1)\n    exog1 = sm.add_constant(exog1, has_constant='add')\n\n    glm1 = sm.GLM(df['AMTL_prop'], exog1, family=sm.families.Binomial(), var_weights=df['n_sockets'])\n    res1 = glm1.fit()\n\n    # Model 2: genus-level categorical comparison\n    genus_dummies = pd.get_dummies(df['Genus'].astype(str), prefix='Genus', drop_first=True)\n    exog2 = pd.concat([genus_dummies.reset_index(drop=True), df[['Age_z', 'SexProb']].reset_index(drop=True), tooth_dummies.reset_index(drop=True)], axis=1)\n    exog2 = sm.add_constant(exog2, has_constant='add')\n\n    glm2 = sm.GLM(df['AMTL_prop'], exog2, family=sm.families.Binomial(), var_weights=df['n_sockets'])\n    res2 = glm2.fit()\n\n    # Return both fitted results so the caller can inspect coefficients, CIs, p-values, diagnostics\n    return {\n        'model_is_human': res1,\n        'model_by_genus': res2\n    }\n"
+}
+===================[TOKENS]=====================
+Number of prompt tokens: 4935
+Number of total tokens: 9910
+
+===================[PROMPT (API Time: 102.21454071998596, Cache Time: None)]=====================
+=====[SYSTEM]=====:
+You are an AI Data Analysis Assistant who is an expert at writing an end-to-end scientific analysis given a research question and a dataset. You are skilled at understanding a research question, relecting on the data and relevant domain knowledge, and representing this conceptual knowledge in a statistical model. Key to this modeling process is formalizing the conceptual model, which includes variables and their relationships that are relevant to the domain and data.
+=====[USER]=====:
+<Instruction> 
+Given the research question, dataset formulate the conceptual model and write an analysis including all necessary data transformations and a statistical model to answer the research question. 
+</Instruction>
+
+<Format Instructions>
+You will return 3 things:
+1. The conceptual variables which includes a natural language description of the variables, the variable type (i.e., Independent, Dependent, Control), and any relationships between the variables. Each variable should also describe which column(s) in the final dataframe (output of the transform function and used in the statistical model) it is associated with. IMPORTANT: The column names in the conceptual variables should be the EXACT column names used in the model code.     
+2. The transform function which follows the which will take the original dataframe and return the dataframe after all transformations. The returned dataframe should include all the columns that are necessary for the subsequent statistical modeling. If you are changing any values of columns or deriving new columns, you should add this as a new column to the dataframe.     
+3. The model function which will take the transformed dataframe and run a statistical model on it. The model function should return the results of the model.
+
+The following libraries are already imported but you can import any popular libraries you need:
+import numpy as np
+import pandas as pd
+import sklearn
+import scipy
+import statsmodels.api as sm
+import matplotlib.pyplot as plt
+
+You are also allowed to use common machine learning libraries, including but not limited to:
+- xgboost
+- lightgbm
+- catboost
+- tensorflow / keras
+- torch (PyTorch)
+- pytorch-lightning
+- sklearn.experimental modules
+- imbalanced-learn (imblearn)
+
+Here is the code template for the transform function:
+```python
+def transform(df: pd.DataFrame) -> pd.DataFrame:
+    # Your code here
+    return df
+```
+Here is the code template for the model function:
+```python
+def model(df: pd.DataFrame) -> Any:
+    # Your code here
+    return results
+```
+
+Please return the conceptual variables, the transform function, and the model function in the format specified below:
+The output should be formatted as a JSON instance that conforms to the JSON schema below.
+
+As an example, for the schema {"properties": {"foo": {"title": "Foo", "description": "a list of strings", "type": "array", "items": {"type": "string"}}}, "required": ["foo"]}
+the object {"foo": ["bar", "baz"]} is a well-formatted instance of the schema. The object {"properties": {"foo": ["bar", "baz"]}} is not well-formatted.
+
+Here is the output schema:
+```
+{"$defs": {"AgentCVarsWithCol": {"properties": {"ivs": {"items": {"$ref": "#/$defs/IVarWithCol"}, "title": "Independent variables", "type": "array"}, "dv": {"allOf": [{"$ref": "#/$defs/DVarWithCol"}], "title": "Dependent variable"}, "controls": {"items": {"$ref": "#/$defs/ControlVarWithCol"}, "title": "Control variables", "type": "array"}}, "required": ["ivs", "dv", "controls"], "title": "AgentCVarsWithCol", "type": "object"}, "ControlVarWithCol": {"properties": {"description": {"title": "Description of the control variable variable", "type": "string"}, "is_moderator": {"title": "Whether the variable is a moderator.", "type": "boolean"}, "moderator_on": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": "", "title": "The variable that the control variable is moderating. Only applicable for control variables that are moderators."}, "columns": {"items": {"type": "string"}, "title": "The column(s) in the FINAL dataframe used in the STATISTICAL MODEL that corresponds to the control variable", "type": "array"}}, "required": ["description", "is_moderator", "columns"], "title": "ControlVarWithCol", "type": "object"}, "DVarWithCol": {"properties": {"description": {"title": "Description of the dependent variable variable", "type": "string"}, "columns": {"items": {"type": "string"}, "title": "The column(s) in the FINAL dataframe used in the STATISTICAL MODEL that corresponds to the dependent variable", "type": "array"}}, "required": ["description", "columns"], "title": "DVarWithCol", "type": "object"}, "IVarWithCol": {"properties": {"description": {"title": "Description of the independent variable variable", "type": "string"}, "columns": {"items": {"type": "string"}, "title": "The column(s) in the FINAL dataframe used in the STATISTICAL MODEL that corresponds to the independent variable", "type": "array"}}, "required": ["description", "columns"], "title": "IVarWithCol", "type": "object"}}, "properties": {"cvars": {"allOf": [{"$ref": "#/$defs/AgentCVarsWithCol"}], "title": "Conceptual variables"}, "transform_code": {"title": "The code that transforms the data", "type": "string"}, "m_code": {"title": "The code for the statistical modeling", "type": "string"}}, "required": ["cvars", "transform_code", "m_code"]}
+```
+</Format Instructions>
+<Example>
+Research Question: What is the effect of hormonal fluctuations associated with fertility on women's religiosity?
+Dataset Schema: {
+  "dataset_description": "A total of 275 women participated in the study for this dataset. Each participant was asked to answer three religiosity items using a 9-point scale. Further, each participant was asked to indicate the typical length of her menstrual cycle, the start date of her last menstrual period, and the start date of her previous menstrual period. In addition, each woman indicated how sure she was about these two start dates, using a 9-point scale. Finally, each woman was asked to indicate her current romantic relationship status with the following four response options: (1) not dating/romantically involved with anyone, (2) dating or involved with only one partner, (3) engaged or living with my partner, and (4) married.",
+  "fields": [
+    {
+      "column": "WorkerID",
+      "properties": {
+        "dtype": "number",
+        "std": 79.52986860293433,
+        "min": 1,
+        "max": 275,
+        "samples": [
+          31,
+          140,
+          196
+        ],
+        "num_unique_values": 275,
+        "description": "The unique identifier of a participant."
+      }
+    },
+    {
+      "column": "Rel1",
+      "properties": {
+        "dtype": "number",
+        "std": 3.284246850080361,
+        "min": 1,
+        "max": 9,
+        "samples": [
+          4,
+          1,
+          9
+        ],
+        "num_unique_values": 9,
+        "description": "'How much do you believe in God?' 1 \u2013 9"
+      }
+    },
+    {
+      "column": "Rel2",
+      "properties": {
+        "dtype": "number",
+        "std": 3.087872913331648,
+        "min": 1.0,
+        "max": 9.0,
+        "samples": [
+          4.0,
+          2.0,
+          6.0
+        ],
+        "num_unique_values": 9,
+        "description": "'I see myself as a religiously oriented person.' 1 \u2013 9"
+      }
+    },
+    {
+      "column": "Rel3",
+      "properties": {
+        "dtype": "number",
+        "std": 3.333610823065186,
+        "min": 1.0,
+        "max": 9.0,
+        "samples": [
+          3.0,
+          1.0,
+          7.0
+        ],
+        "num_unique_values": 9,
+        "description": "'I believe that God or a Higher Power is responsible for my existence.' 1 \u2013 9"
+      }
+    },
+    {
+      "column": "Sure1",
+      "properties": {
+        "dtype": "number",
+        "std": 1.5732501786909676,
+        "min": 1,
+        "max": 9,
+        "samples": [
+          4,
+          7,
+          9
+        ],
+        "num_unique_values": 8,
+        "description": "In reference to `StartDateofLastPeriod`,  'How sure are you about that date?' 1 \u2013 9."
+      }
+    },
+    {
+      "column": "Sure2",
+      "properties": {
+        "dtype": "number",
+        "std": 2.221975065515302,
+        "min": 1,
+        "max": 9,
+        "samples": [
+          6,
+          3,
+          7
+        ],
+        "num_unique_values": 9,
+        "description": "In reference to `StartDateofPeriodBeforeLast`,  'How sure are you about that date?' 1 \u2013 9."
+      }
+    },
+    {
+      "column": "Relationship",
+      "properties": {
+        "dtype": "number",
+        "std": 1.167327837424664,
+        "min": 1,
+        "max": 4,
+        "samples": [
+          1,
+          2,
+          3
+        ],
+        "num_unique_values": 4,
+        "description": "Answer to 'What is your current romantic relationship status?' (1) not dating/romantically involved with anyone, (2) dating or involved with only one partner, (3) engaged or living with my partner, (4) married"
+      }
+    },
+    {
+      "column": "ReportedCycleLength",
+      "properties": {
+        "dtype": "number",
+        "std": 2.6714983210492633,
+        "min": 21.0,
+        "max": 38.0,
+        "samples": [
+          21.0,
+          22.0,
+          26.0
+        ],
+        "num_unique_values": 17,
+        "description": "Answer to 'How many days long are your menstrual cycles? (for most women, the range is between 25-35 days) Keep in mind this is the number of days from the start of one menstrual period to the start of the next menstrual period and NOT the length of your menstrual bleeding.'"
+      }
+    },
+    {
+      "column": "DateTesting",
+      "properties": {
+        "dtype": "date",
+        "min": "03/12/12",
+        "max": "04/27/12",
+        "samples": [
+          "04/06/12",
+          "04/26/12",
+          "03/12/12"
+        ],
+        "num_unique_values": 13,
+        "description": "Date of participant filling in the questionnaire"
+      }
+    },
+    {
+      "column": "StartDateofLastPeriod",
+      "properties": {
+        "dtype": "date",
+        "min": "02/06/12",
+        "max": "04/26/12",
+        "samples": [
+          "02/16/12",
+          "03/01/12",
+          "04/25/12"
+        ],
+        "num_unique_values": 61,
+        "description": "Answer to 'Please give your best estimate of the date on which you started your last period (please be as precise as possible). This date was probably within the last few weeks. Sometimes thinking of where you were when you started your last period helps. For instance, was it on a weekend?, were you at work, was it during a football game?, etc. Please write the date in mm/dd/yyyy format (e.g., 8/18/2012).'"
+      }
+    },
+    {
+      "column": "StartDateofPeriodBeforeLast",
+      "properties": {
+        "dtype": "date",
+        "min": "01/03/12",
+        "max": "03/29/12",
+        "samples": [
+          "01/15/12",
+          "02/04/12",
+          "03/24/12"
+        ],
+        "num_unique_values": 61,
+        "description": "Answer to 'Please give your best estimate of the date on which you started the period before your last period (please be as precise as possible). Please write the date in mm/dd/yyyy format (e.g., 7/18/2012).'"
+      }
+    }
+  ],
+  "num_rows": 275,
+  "field_names": [
+    "WorkerID",
+    "Rel1",
+    "Rel2",
+    "Rel3",
+    "Sure1",
+    "Sure2",
+    "Relationship",
+    "ReportedCycleLength",
+    "DateTesting",
+    "StartDateofLastPeriod",
+    "StartDateofPeriodBeforeLast"
+  ]
+}
+Result: {
+  "cvars": {
+    "ivs": [
       {
-        "description": "Assigned uncertainty (standard deviation) of age at death (continuous). Included as a control for age-estimate uncertainty; also can capture preservation/record differences.",
-        "is_moderator": false,
-        "moderator_on": null,
+        "description": "Women's fertility",
         "columns": [
-          "Age_sd"
+          "FertilityGroup"
         ]
-      },
+      }
+    ],
+    "dv": {
+      "description": "Women's religiosity",
+      "columns": [
+        "AvgReligiosity"
+      ]
+    },
+    "controls": [
       {
-        "description": "Specimen identifier. Included so that model standard errors can be clustered by specimen to account for non-independence of multiple observations per specimen (e.g., different tooth classes).",
-        "is_moderator": false,
-        "moderator_on": null,
+        "description": "Relationship status of the individual",
+        "is_moderator": true,
+        "moderator_on": "Women's fertility",
         "columns": [
-          "Specimen"
+          "InRelationship"
         ]
       }
     ]
   },
-  "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Clean and rename input columns to consistent, analysis-ready columns.\n\n    Input columns (per provided schema) are messy/mislabelled. Based on column descriptions,\n    we map them to consistent names used in modeling:\n      - Original 'age' contains genus (Homo, Pan, Pongo, Papio) -> Genus\n      - Original 'specimen' -> Specimen\n      - Original 'stdev_age' contains number of teeth missing (per description) -> Missing\n      - Original 'prob_male' contains number of observable sockets (per description) -> Sockets\n      - Original 'num_amtl' contains estimated age at death -> Age\n      - Original 'sockets' contains assigned uncertainty of age at death -> Age_sd\n      - Original 'pop' contains estimate of sex (probability male) -> ProbMale\n      - Original 'genus' contains tooth class (Anterior/Posterior/Premolar) -> ToothClass\n      - Original 'tooth_class' contains region/population label -> Region (kept as auxiliary)\n\n    The function performs type conversion, handles missing/invalid rows, rounds counts to integers,\n    ensures Missing <= Sockets, and computes AMTL rate (Missing / Sockets) for diagnostics.\n    \"\"\"\n    df = df.copy()\n\n    # Rename columns to standardized names\n    rename_map = {\n        'age': 'Genus',            # according to schema 'age' actually stores genus\n        'specimen': 'Specimen',\n        'stdev_age': 'Missing',    # description says number of teeth missing of given class\n        'prob_male': 'Sockets',    # description says number of observable sockets\n        'num_amtl': 'Age',         # description says estimated age at death\n        'sockets': 'Age_sd',       # description says assigned uncertainty of age at death\n        'pop': 'ProbMale',         # description says estimate of sex of specimen\n        'genus': 'ToothClass',     # description says Anterior/Posterior/Premolar\n        'tooth_class': 'Region'    # auxiliary: region/population\n    }\n    # Only rename existing columns to avoid KeyError\n    existing_rename = {k: v for k, v in rename_map.items() if k in df.columns}\n    df = df.rename(columns=existing_rename)\n\n    # Ensure expected columns exist; if not, create with NaNs so downstream code fails gracefully\n    expected_cols = ['Specimen', 'Genus', 'Missing', 'Sockets', 'Age', 'Age_sd', 'ProbMale', 'ToothClass', 'Region']\n    for col in expected_cols:\n        if col not in df.columns:\n            df[col] = np.nan\n\n    # Strip whitespace and coerce categorical/string fields\n    df['Genus'] = df['Genus'].astype(str).str.strip()\n    df['ToothClass'] = df['ToothClass'].astype(str).str.strip()\n    df['Specimen'] = df['Specimen'].astype(str).str.strip()\n    if 'Region' in df.columns:\n        df['Region'] = df['Region'].astype(str).str.strip()\n\n    # Numeric conversions for counts and continuous controls\n    for col in ['Missing', 'Sockets', 'Age', 'Age_sd', 'ProbMale']:\n        # Convert to numeric, coercing errors to NaN\n        df[col] = pd.to_numeric(df[col], errors='coerce')\n\n    # Drop rows with no socket information or missing specimen/genus/toothclass\n    df = df.dropna(subset=['Sockets', 'Specimen', 'Genus', 'ToothClass'])\n\n    # Round Sockets and Missing to integers (they represent counts). Cap Sockets to be at least 1.\n    df['Sockets'] = df['Sockets'].round().fillna(0).astype(int)\n    df = df[df['Sockets'] > 0].copy()\n\n    # Round Missing to nearest integer and ensure non-negative\n    df['Missing'] = df['Missing'].round().fillna(0).astype(int)\n    df.loc[df['Missing'] < 0, 'Missing'] = 0\n\n    # Ensure Missing does not exceed Sockets\n    df.loc[df['Missing'] > df['Sockets'], 'Missing'] = df.loc[df['Missing'] > df['Sockets'], 'Sockets']\n\n    # ProbMale should lie between 0 and 1; if it's given in fractions 0-1 keep, if in 0-100 convert\n    # Heuristic: if median > 1, assume percent and divide by 100\n    if df['ProbMale'].median(skipna=True) > 1.0:\n        df['ProbMale'] = df['ProbMale'] / 100.0\n    # Clip to [0,1]\n    df['ProbMale'] = df['ProbMale'].clip(lower=0.0, upper=1.0)\n\n    # Compute AMTL rate for diagnostics and to use with binomial model (proportion with weights)\n    df['AMTL_rate'] = df['Missing'] / df['Sockets']\n\n    # Optional: center continuous covariates (helps interpretation and stability)\n    # We'll keep original columns but also add centered versions for modeling.\n    df['Age_c'] = df['Age'] - df['Age'].mean() if df['Age'].notna().any() else df['Age']\n    df['ProbMale_c'] = df['ProbMale'] - df['ProbMale'].mean() if df['ProbMale'].notna().any() else df['ProbMale']\n    df['Age_sd_c'] = df['Age_sd'] - df['Age_sd'].mean() if df['Age_sd'].notna().any() else df['Age_sd']\n\n    # Drop rows with missing key covariates (Age or ProbMale can be NA but model will drop them).\n    df = df.dropna(subset=['AMTL_rate', 'Age_c', 'ProbMale_c', 'Age_sd_c'])\n\n    # Final dataframe returned should include all columns referenced in the model code below\n    # Keep original and derived columns\n    keep_cols = ['Specimen', 'Genus', 'Missing', 'Sockets', 'AMTL_rate', 'Age', 'Age_c', 'ProbMale', 'ProbMale_c', 'Age_sd', 'Age_sd_c', 'ToothClass', 'Region']\n    present_keep = [c for c in keep_cols if c in df.columns]\n    return df[present_keep].reset_index(drop=True)\n",
-  "m_code": "def model(df: pd.DataFrame):\n    \"\"\"\n    Fit a binomial generalized linear model (logit link) predicting AMTL (Missing out of Sockets)\n    from Genus (primary predictor) while controlling for Age, ProbMale (sex estimate), ToothClass,\n    and Age_sd (uncertainty). Standard errors are clustered by Specimen to account for multiple\n    observations per specimen.\n\n    Returns the robust (clustered) results object.\n    \"\"\"\n    # Work on a copy\n    data = df.copy()\n\n    # Build design matrix: categorical dummies for Genus and ToothClass (drop first to avoid collinearity)\n    cat_cols = ['Genus', 'ToothClass']\n    for c in cat_cols:\n        data[c] = data[c].astype('category')\n\n    X_cats = pd.get_dummies(data[['Genus', 'ToothClass']], drop_first=True)\n\n    # Continuous covariates: use centered versions computed in transform\n    cont_cols = []\n    if 'Age_c' in data.columns:\n        cont_cols.append('Age_c')\n    else:\n        data['Age_c'] = data['Age'] - data['Age'].mean()\n        cont_cols.append('Age_c')\n    if 'ProbMale_c' in data.columns:\n        cont_cols.append('ProbMale_c')\n    else:\n        data['ProbMale_c'] = data['ProbMale'] - data['ProbMale'].mean()\n        cont_cols.append('ProbMale_c')\n    if 'Age_sd_c' in data.columns:\n        cont_cols.append('Age_sd_c')\n    else:\n        data['Age_sd_c'] = data['Age_sd'] - data['Age_sd'].mean()\n        cont_cols.append('Age_sd_c')\n\n    X_cont = data[cont_cols].copy()\n\n    # Combine predictors and add intercept\n    X = pd.concat([X_cont, X_cats], axis=1)\n    X = sm.add_constant(X, has_constant='add')\n\n    # Response: proportion and use Sockets as frequency weights for binomial\n    y = data['AMTL_rate']\n    weights = data['Sockets']\n\n    # Fit GLM with Binomial family; using proportion as endog and freq_weights = Sockets\n    model_glm = sm.GLM(y, X, family=sm.families.Binomial(), freq_weights=weights)\n    res = model_glm.fit()\n\n    # Obtain clustered robust covariance (clustered by Specimen)\n    # If Specimen is not present, return standard results\n    if 'Specimen' in data.columns:\n        try:\n            clustered_res = res.get_robustcov_results(cov_type='cluster', groups=data['Specimen'])\n        except Exception:\n            # Fallback if clustering fails for any reason\n            clustered_res = res\n    else:\n        clustered_res = res\n\n    # Print a brief summary and return the clustered results object\n    print(clustered_res.summary())\n    return clustered_res\n"
+  "transform_code": "# drop the rows with missing values in the ReportedCycleLength, Rel1, Rel2, and Rel3 columns\ndf = df.dropna(subset=['ReportedCycleLength'])\ndf = df.dropna(subset=['Rel1', 'Rel2', 'Rel3'])\n\ndf['AvgReligiosity'] = df[['Rel1', 'Rel2', 'Rel3']].mean(axis=1)\n\n\n# Convert date columns to datetime format\ndf['DateTesting'] = pd.to_datetime(df['DateTesting'], format='%m/%d/%y')\ndf['StartDateofLastPeriod'] = pd.to_datetime(df['StartDateofLastPeriod'], format='%m/%d/%y')\ndf['StartDateofPeriodBeforeLast'] = pd.to_datetime(df['StartDateofPeriodBeforeLast'], format='%m/%d/%y')\n\n# Calculate the cycle length based on provided dates\ndf['ReportedCycleLength'] = (df['StartDateofLastPeriod'] - df['StartDateofPeriodBeforeLast']).dt.days\n# Calculate the expected start date of the next menstrual period\n\ndf['ExpectedNextPeriod'] = df['StartDateofLastPeriod'] + pd.to_timedelta(df['ReportedCycleLength'], unit='d')\n\n# Calculate the day of ovulation by subtracting 14 days from the expected start date of the next period\n# since ovulation typically occurs around 14 days before the start of the next period\ndf['OvulationDate'] = df['ExpectedNextPeriod'] - pd.to_timedelta(14, unit='d')\n# Calculate the cycle day on the date of testing\ndf['CycleDay'] = (df['DateTesting'] - df['OvulationDate']).dt.days + 14\n# Define high-fertility (cycle days 6-14) and low-fertility (cycle days 17-27) groups\ndf['FertilityGroup'] = df['CycleDay'].apply(lambda x: 'High-Fertility' if 6 <= x <= 14 else ('Low-Fertility' if 17 <= x <= 27 else 'Other'))\n# Filter out the 'Other' group to focus on the high and low fertility groups\ndf = df[df['FertilityGroup'].isin(['High-Fertility', 'Low-Fertility'])]\n\n\ndf['IsIncommittedRelationship'] = df['Relationship'].apply(lambda x: 0 if x in [1,2] else 1)\ndf['InRelationship'] = df['Relationship'].apply(lambda x: 0 if x == 1 else 1)\ndf['IsInRelationship'] = df['Relationship'].apply(lambda x: 0 if x == 1 else 1)\n",
+  "m_code": "model = smf.ols('AvgReligiosity ~ InRelationship * FertilityGroup', data=df).fit()\n# Display the regression results\nprint(model.summary())\n"
+}
+</Example>
+Research Question: Do modern humans (Homo sapiens) have higher frequencies of antemortem tooth loss (AMTL) compared to non-human primate genera (Pan, Pongo, Papio), after accounting for the effects of age, sex, and tooth class?
+Dataset Schema: {
+  "dataset_description": "Antemortem tooth loss (AMTL), the loss of teeth during an individual's lifetime, is of significant interest in anthropology and evolutionary studies. Some researchers suggest that high frequencies of AMTL in fossil hominins, our ancestors, may indicate the early adoption of certain human-like behaviors such as cooking food or providing care to individuals who could no longer chew effectively. However, it is unclear whether this association between AMTL and human behavior holds when comparing modern humans to non-human primates. To investigate this, Gilmore (2013) collected data on AMTL from skeletal remains of modern human hunter-gatherers and three non-human primate genera: chimpanzees (Pan), orangutans (Pongo), and baboons (Papio). The dataset includes information on the number of missing teeth, observable tooth sockets, estimated age at death, sex, and tooth class (anterior, posterior, or premolar) for each specimen. By analyzing this data using binomial regression modeling, we aim to determine if humans indeed have higher rates of AMTL compared to non-human primates, after accounting for the effects of age, sex, and tooth type.",
+  "fields": [
+    {
+      "column": "genus",
+      "properties": {
+        "dtype": "category",
+        "samples": [
+          "Anterior",
+          "Posterior",
+          "Premolar"
+        ],
+        "num_unique_values": 3,
+        "semantic_type": "",
+        "description": "One of Anterior, Posterior, or Premolar"
+      }
+    },
+    {
+      "column": "specimen",
+      "properties": {
+        "dtype": "category",
+        "samples": [
+          "NMNH350096",
+          "UVS56",
+          "BRK126758"
+        ],
+        "num_unique_values": 484,
+        "semantic_type": "",
+        "description": "Unique identifier for specimen"
+      }
+    },
+    {
+      "column": "stdev_age",
+      "properties": {
+        "dtype": "number",
+        "std": 1.6266311629535932,
+        "min": 0,
+        "max": 12,
+        "samples": [
+          10,
+          9,
+          0
+        ],
+        "num_unique_values": 12,
+        "semantic_type": "",
+        "description": "Number of teeth missing of given class"
+      }
+    },
+    {
+      "column": "prob_male",
+      "properties": {
+        "dtype": "number",
+        "std": 2.798268102170289,
+        "min": 2,
+        "max": 14,
+        "samples": [
+          14,
+          13,
+          12
+        ],
+        "num_unique_values": 13,
+        "semantic_type": "",
+        "description": "number of observable sockets that could be scored for missing teeth"
+      }
+    },
+    {
+      "column": "num_amtl",
+      "properties": {
+        "dtype": "number",
+        "std": 10.93222964111899,
+        "min": 8.59322651,
+        "max": 71.2242553,
+        "samples": [
+          14.0305714,
+          42.2754092,
+          42.5600492
+        ],
+        "num_unique_values": 313,
+        "semantic_type": "",
+        "description": "Estimated age of specimen at death"
+      }
+    },
+    {
+      "column": "sockets",
+      "properties": {
+        "dtype": "number",
+        "std": 3.8776272832369036,
+        "min": 1.26803942,
+        "max": 31.4169538,
+        "samples": [
+          4.50357659,
+          7.9144902,
+          2.86641
+        ],
+        "num_unique_values": 311,
+        "semantic_type": "",
+        "description": "Assigned uncertainty of age at death"
+      }
+    },
+    {
+      "column": "pop",
+      "properties": {
+        "dtype": "number",
+        "std": 0.34975029083398823,
+        "min": 0.0,
+        "max": 1.0,
+        "samples": [
+          0.25,
+          0.0,
+          0.75
+        ],
+        "num_unique_values": 5,
+        "semantic_type": "",
+        "description": "Estimate of sex of specimen"
+      }
+    },
+    {
+      "column": "age",
+      "properties": {
+        "dtype": "category",
+        "samples": [
+          "Pongo",
+          "Pan",
+          "Homo sapiens"
+        ],
+        "num_unique_values": 4,
+        "semantic_type": "",
+        "description": "Specimen genus, one of Homo, Pan, Papio, or Pongo"
+      }
+    },
+    {
+      "column": "tooth_class",
+      "properties": {
+        "dtype": "category",
+        "samples": [
+          "Alaska",
+          "Yaghan",
+          "Ebolwa"
+        ],
+        "num_unique_values": 22,
+        "semantic_type": "",
+        "description": "Region specimen originates from"
+      }
+    }
+  ],
+  "num_rows": 1450,
+  "field_names": [
+    "genus",
+    "specimen",
+    "stdev_age",
+    "prob_male",
+    "num_amtl",
+    "sockets",
+    "pop",
+    "age",
+    "tooth_class"
+  ]
+}
+Result: 
+
+===================[gpt-5-mini RESPONSE (6109)]=====================
+{
+  "cvars": {
+    "ivs": [
+      {
+        "description": "Genus: indicator for whether the specimen is a modern human (Homo sapiens). Primary independent variable comparing humans to non-human primates. (Binary indicator used for the primary test; the categorical genus variable is also preserved for secondary analyses.)",
+        "columns": [
+          "is_human",
+          "genus"
+        ]
+      }
+    ],
+    "dv": {
+      "description": "Antemortem tooth loss (AMTL) expressed as a count of missing teeth out of the number of observable sockets (binomial outcome). Used in the model as counts (successes = n_missing, trials = n_sockets) and as a proportion (amtl_prop) with binomial weights.",
+      "columns": [
+        "n_missing",
+        "n_sockets",
+        "amtl_prop"
+      ]
+    },
+    "controls": [
+      {
+        "description": "Estimated age of the specimen at death (years). Controls for age-related increase in AMTL.",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "age_at_death"
+        ]
+      },
+      {
+        "description": "Estimated uncertainty of the age-at-death estimate (standard error or assigned uncertainty). Included as a control because age estimates with large uncertainty could bias age effects.",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "age_se"
+        ]
+      },
+      {
+        "description": "Estimated probability that the specimen is male (continuous 0-1). Controls for sex differences in AMTL.",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "male_prob"
+        ]
+      },
+      {
+        "description": "Tooth class (categorical: Anterior, Posterior, Premolar). Controls for tooth-specific patterns of AMTL.",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "tooth_class"
+        ]
+      },
+      {
+        "description": "Specimen identifier. Kept so that clustered (by-specimen) robust SEs can be estimated to account for non-independence of teeth from the same individual.",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "specimen"
+        ]
+      }
+    ]
+  },
+  "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw input dataframe to the analysis-ready dataframe.\n\n    Assumptions / mappings (based on provided schema descriptions):\n    - The original column 'stdev_age' contains the count of teeth missing for the given tooth class (used as n_missing).\n    - The original column 'prob_male' contains the number of observable sockets that could be scored for missing teeth (used as n_sockets).\n    - The original column 'num_amtl' contains the estimated age at death in years (used as age_at_death).\n    - The original column 'sockets' contains the assigned uncertainty of the age-at-death estimate (used as age_se).\n    - The original column 'pop' contains an estimate of sex (0-1 probability male) (used as male_prob).\n    - The original column 'age' contains the specimen genus (e.g., 'Homo sapiens', 'Pan', 'Pongo', 'Papio'). We'll rename this to 'genus'.\n    - The original column 'genus' contains tooth class labels (e.g., 'Anterior', 'Posterior', 'Premolar'). We'll rename this to 'tooth_class'.\n\n    The function creates the derived columns used in the model: n_missing, n_sockets, amtl_prop, is_human, genus, tooth_class, age_at_death, age_se, male_prob, specimen.\n    It also performs basic cleaning: numeric coercion, rounding counts to integers, ensuring 0 <= n_missing <= n_sockets, and dropping rows with missing critical values.\n    \"\"\"\n    df = df.copy()\n\n    # Map / derive columns (use original column names as present in the dataset)\n    # n_missing: number of antemortem missing teeth for the given class\n    df['n_missing'] = pd.to_numeric(df.get('stdev_age'), errors='coerce')\n    # n_sockets: number of observable sockets (trials)\n    df['n_sockets'] = pd.to_numeric(df.get('prob_male'), errors='coerce')\n    # age at death (years)\n    df['age_at_death'] = pd.to_numeric(df.get('num_amtl'), errors='coerce')\n    # uncertainty of age-at-death\n    df['age_se'] = pd.to_numeric(df.get('sockets'), errors='coerce')\n    # sex estimate (probability male 0-1)\n    df['male_prob'] = pd.to_numeric(df.get('pop'), errors='coerce')\n\n    # genus (specimen taxon): original column named 'age' per schema\n    df['genus'] = df.get('age').astype(str).str.strip()\n    # tooth class: original column named 'genus' per schema (contains Anterior/Posterior/Premolar)\n    df['tooth_class'] = df.get('genus').astype(str).str.strip()\n\n    # specimen identifier (for possible clustering)\n    if 'specimen' in df.columns:\n        df['specimen'] = df['specimen'].astype(str)\n    else:\n        # if specimen id missing, create an index-based id (less preferred)\n        df['specimen'] = df.index.astype(str)\n\n    # Coerce counts to integers sensibly\n    # Round n_missing and n_sockets to nearest integer where appropriate\n    df['n_missing'] = df['n_missing'].round().where(df['n_missing'].notnull())\n    df['n_sockets'] = df['n_sockets'].round().where(df['n_sockets'].notnull())\n\n    # Convert to integer dtype where possible (nullable integers to preserve NaN)\n    df['n_missing'] = df['n_missing'].astype('Int64')\n    df['n_sockets'] = df['n_sockets'].astype('Int64')\n\n    # Drop rows that do not have the essential columns for a binomial model\n    essential = ['n_missing', 'n_sockets', 'genus', 'tooth_class', 'age_at_death', 'male_prob']\n    df = df.dropna(subset=essential)\n\n    # Ensure n_sockets > 0\n    df = df[df['n_sockets'] > 0]\n\n    # Ensure n_missing is non-negative and not greater than n_sockets.\n    # If n_missing > n_sockets, cap it at n_sockets (data-quality fix).\n    def cap_missing(row):\n        try:\n            nm = int(row['n_missing'])\n            ns = int(row['n_sockets'])\n        except Exception:\n            return pd.NA\n        nm = max(nm, 0)\n        if nm > ns:\n            nm = ns\n        return nm\n\n    df['n_missing'] = df.apply(cap_missing, axis=1).astype('Int64')\n\n    # Re-drop any rows where cap_missing produced NA\n    df = df.dropna(subset=['n_missing', 'n_sockets'])\n\n    # Proportion for modelling (used with binomial weights)\n    df['amtl_prop'] = df['n_missing'] / df['n_sockets']\n\n    # Binary indicator: modern human vs non-human primate\n    df['is_human'] = df['genus'].str.lower().str.contains('homo').astype(int)\n\n    # Treat tooth_class as a categorical variable with limited levels\n    df['tooth_class'] = df['tooth_class'].astype('category')\n\n    # Ensure male_prob is numeric and constrained to [0,1]\n    df['male_prob'] = pd.to_numeric(df['male_prob'], errors='coerce')\n    df.loc[df['male_prob'] < 0, 'male_prob'] = 0.0\n    df.loc[df['male_prob'] > 1, 'male_prob'] = 1.0\n\n    # Final: keep only the columns needed for modeling\n    keep_cols = ['specimen', 'genus', 'is_human', 'tooth_class', 'n_missing', 'n_sockets', 'amtl_prop', 'age_at_death', 'age_se', 'male_prob']\n    df_out = df[keep_cols].reset_index(drop=True)\n\n    return df_out\n",
+  "m_code": "def model(df: pd.DataFrame):\n    \"\"\"\n    Fit a binomial (logit) GLM comparing AMTL in Homo sapiens versus non-human primates,\n    controlling for age, sex, and tooth class. Uses the transformed dataframe produced by transform().\n\n    Returns:\n      - res: the fitted GLM results (default covariance)\n      - res_clustered: results with clustered robust standard errors (clustered by specimen)\n\n    Modeling choices:\n      - Dependent variable: amtl_prop (n_missing / n_sockets) with freq_weights = n_sockets to fit a binomial model on counts.\n      - Primary predictor: is_human (1 = Homo sapiens, 0 = other).\n      - Controls: age_at_death (numeric), male_prob (numeric), C(tooth_class) (categorical), age_se (numeric).\n      - Robust clustered SEs by specimen are computed to account for non-independence of multiple tooth-class observations per specimen.\n    \"\"\"\n    # Copy to avoid modifying input\n    data = df.copy()\n\n    # Drop rows with missing essential modeling columns\n    model_cols = ['n_missing', 'n_sockets', 'amtl_prop', 'is_human', 'genus', 'tooth_class', 'age_at_death', 'male_prob', 'age_se', 'specimen']\n    data = data.dropna(subset=model_cols)\n\n    # Ensure integer trials\n    data = data[data['n_sockets'] > 0]\n\n    # Create formula: primary model uses binary is_human indicator\n    formula = 'amtl_prop ~ is_human + age_at_death + male_prob + C(tooth_class) + age_se'\n\n    # Fit GLM with binomial family using n_sockets as frequency weights so that the model reflects counts\n    # (equivalent to modeling successes/trials).\n    model_glm = sm.GLM.from_formula(formula, data=data, family=sm.families.Binomial(), freq_weights=data['n_sockets'])\n    res = model_glm.fit()\n\n    # Obtain clustered robust standard errors by specimen (if specimen is available)\n    try:\n        res_clustered = res.get_robustcov_results(cov_type='cluster', groups=data['specimen'])\n    except Exception:\n        # If clustering fails for any reason (e.g., only one observation per cluster), fall back to default results\n        res_clustered = res\n\n    # Print a concise summary for the user\n    print('Primary model (GLM Binomial with freq_weights = n_sockets)')\n    print(res_clustered.summary())\n\n    # Secondary model: genus as a categorical predictor (to inspect pairwise genus differences)\n    formula2 = 'amtl_prop ~ C(genus) + age_at_death + male_prob + C(tooth_class) + age_se'\n    model_glm2 = sm.GLM.from_formula(formula2, data=data, family=sm.families.Binomial(), freq_weights=data['n_sockets'])\n    res2 = model_glm2.fit()\n    try:\n        res2_clustered = res2.get_robustcov_results(cov_type='cluster', groups=data['specimen'])\n    except Exception:\n        res2_clustered = res2\n\n    print('\\nSecondary model (categorical genus)')\n    print(res2_clustered.summary())\n\n    # Return both fitted objects (primary and secondary) and their clustered-robust counterparts\n    return {\n        'primary_result': res,\n        'primary_result_clustered': res_clustered,\n        'genus_result': res2,\n        'genus_result_clustered': res2_clustered,\n        'model_data': data\n    }\n"
 }
 ===================[TOKENS]=====================
-Number of prompt tokens: 4872
-Number of total tokens: 9925
+Number of prompt tokens: 4935
+Number of total tokens: 11044

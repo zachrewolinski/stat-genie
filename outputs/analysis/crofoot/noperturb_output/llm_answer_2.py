@@ -1,220 +1,189 @@
 def extract_final_answer(model_output):
     """
-    Extracts and summarizes the effects of relative group size (SizeAdv_z),
-    relative contest location (DistDiff_z), and their interaction on the
-    probability that the focal group wins (logistic regression), using
-    cluster-robust covariance supplied in model_output.
+    Extracts coefficients, robust SEs, p-values, confidence intervals, odds-ratios,
+    and simple-slope tests for the effect of relative group size and its interaction
+    with location advantage from a fitted statsmodels GLM results object stored in
+    model_output['results_clustered'].
 
-    Returns a dictionary with:
-      - "object": a dict containing numeric summaries (coefficients, clustered SE,
-                  z, p, odds ratios, 95% CI) for:
-                    * SizeAdv_z effect at DistDiff_z = -1, 0, +1 (approx. other-home, neutral, focal-home)
-                    * DistDiff_z effect at SizeAdv_z = -1, 0, +1
-                    * raw coefficients, clustered SEs, z and p from clustered_summary
-      - "description": a short interpretation of what the numbers mean
+    Returns a dictionary with keys:
+      - "object": dict containing numeric results (coef table, ORs, simple slopes)
+      - "description": human-readable interpretation / conclusion about whether
+                       relative group size and/or location influence contest outcome.
     """
     import numpy as np
-    import scipy.stats
+    import pandas as pd
+    from scipy import stats
 
-    # Unpack
-    glm_res = model_output.get('glm_results')
-    clustered_cov = model_output.get('clustered_cov')
-    clustered_summary = model_output.get('clustered_summary')
+    # Pull results object
+    if not isinstance(model_output, dict):
+        raise ValueError("model_output must be a dictionary (the function's returned object).")
+    if 'results_clustered' not in model_output:
+        raise ValueError("model_output missing 'results_clustered' key.")
+    res = model_output['results_clustered']
 
-    if glm_res is None or clustered_cov is None or clustered_summary is None:
-        raise ValueError("model_output must contain 'glm_results', 'clustered_cov', and 'clustered_summary'")
+    # Extract parameter table (robust results wrapper should expose these)
+    try:
+        params = res.params.copy()
+        bse = res.bse.copy()
+        pvalues = res.pvalues.copy()
+        conf = res.conf_int()  # DataFrame-like with two cols
+        cov = res.cov_params()
+    except Exception as e:
+        raise RuntimeError(f"Could not extract statistics from results object: {e}")
 
-    # Parameter names and values
-    params = glm_res.params.copy()
-    param_names = list(params.index)
+    # Identify parameter names of interest
+    name_size = 'z_RelSize_log'
+    name_loc = 'z_LocationAdv'
+    # interaction may be named as 'z_RelSize_log:z_LocationAdv' (typical for patsy/statsmodels)
+    # try to find the actual interaction name present
+    param_names = list(params.index.astype(str))
+    interaction_name = None
+    for nm in param_names:
+        if (name_size in nm) and (name_loc in nm) and (nm != name_size) and (nm != name_loc):
+            interaction_name = nm
+            break
+    if interaction_name is None:
+        # fallback to explicit candidate
+        candidate = f'{name_size}:{name_loc}'
+        if candidate in param_names:
+            interaction_name = candidate
 
-    # Helper to find parameter index robustly
-    def idx(name):
-        if name in param_names:
-            return param_names.index(name)
-        # try common alternative interaction naming with reversed order
-        alt = ':'.join(name.split(':')[::-1])
-        if alt in param_names:
-            return param_names.index(alt)
-        raise KeyError(f"Parameter '{name}' not found in model parameters: {param_names}")
-
-    # Required parameter names (as in the provided output)
-    name_size = 'SizeAdv_z'
-    name_dist = 'DistDiff_z'
-    name_inter = 'SizeAdv_z:DistDiff_z'  # as in the clustered_summary provided
-
-    # Ensure parameters exist
-    for nm in (name_size, name_dist, name_inter):
-        alt_nm = ':'.join(nm.split(':')[::-1])
-        if nm not in param_names and alt_nm not in param_names:
-            raise KeyError(f"Expected parameter '{nm}' not found. Available: {param_names}")
-
-    i_size = idx(name_size)
-    i_dist = idx(name_dist)
-    i_inter = idx(name_inter)
-
-    # Function to compute linear combination stats using clustered covariance
-    def lincomb_stats(coef_vector):
-        """
-        coef_vector: 1D array of same length as params, containing weights for linear combination.
-        Returns: dict with 'log_odds', 'se', 'z', 'p', 'odds_ratio', 'ci95_or' (tuple)
-        """
-        coef_vector = np.asarray(coef_vector).reshape(-1)
-        est = float(np.dot(coef_vector, params.values))
-        # Ensure covariance is a numpy array for correct matrix multiplication
-        cov = np.asarray(clustered_cov)
-        try:
-            var = float(coef_vector @ cov @ coef_vector)
-        except Exception:
-            # fallback: use dot for compatibility
-            var = float(np.dot(coef_vector, np.dot(cov, coef_vector)))
-        se = np.sqrt(var) if var >= 0 else np.nan
-        z = est / se if (se is not None and se != 0 and not np.isnan(se)) else np.nan
-        p = 2 * (1 - scipy.stats.norm.cdf(abs(z))) if not np.isnan(z) else np.nan
-        or_ = np.exp(est)
-        ci_low = np.exp(est - 1.96 * se) if not np.isnan(se) else np.nan
-        ci_high = np.exp(est + 1.96 * se) if not np.isnan(se) else np.nan
+    # Helper to safely extract a term's stats if present
+    def get_term_stats(term):
+        if term not in params.index:
+            return None
+        coef = float(params.loc[term])
+        se = float(bse.loc[term])
+        p = float(pvalues.loc[term])
+        ci_low, ci_high = float(conf.loc[term, 0]), float(conf.loc[term, 1])
+        or_est = float(np.exp(coef))
+        or_ci = (float(np.exp(ci_low)), float(np.exp(ci_high)))
         return {
-            'log_odds': est,
+            'term': term,
+            'coef': coef,
             'se': se,
-            'z': z,
-            'p': p,
-            'odds_ratio': or_,
-            'ci95_or': (ci_low, ci_high)
+            'p_value': p,
+            'ci_95': (ci_low, ci_high),
+            'odds_ratio': or_est,
+            'odds_ratio_95ci': or_ci
         }
 
-    n_params = len(params)
+    stats_size = get_term_stats(name_size)
+    stats_loc = get_term_stats(name_loc)
+    stats_inter = get_term_stats(interaction_name) if interaction_name is not None else None
 
-    # Helper to build consistent keys (no trailing .0)
-    def key_for(name, val):
-        try:
-            ival = int(val)
-            return f"{name}={ival}"
-        except Exception:
-            # fallback to general formatting
-            return f"{name}={val}"
+    # Prepare coefficient table
+    coef_table = {}
+    if stats_size:
+        coef_table[name_size] = stats_size
+    if stats_loc:
+        coef_table[name_loc] = stats_loc
+    if stats_inter:
+        coef_table[interaction_name] = stats_inter
 
-    # Compute effect of SizeAdv_z (marginal effect) at DistDiff_z = -1, 0, +1
-    size_effects = {}
-    for d in (-1.0, 0.0, 1.0):
-        vec = np.zeros(n_params)
-        vec[i_size] = 1.0
-        vec[i_inter] = d
-        size_effects[key_for('DistDiff', d)] = lincomb_stats(vec)
+    # Simple-slope test: effect of relative size at selected values of location advantage
+    # (location advantage is standardized, so use -1, 0, +1 SD)
+    simple_slopes = {}
+    if stats_size:
+        beta_size = stats_size['coef']
+        var_size = float(cov.loc[name_size, name_size]) if name_size in cov.index else np.nan
 
-    # Compute effect of DistDiff_z at SizeAdv_z = -1, 0, +1
-    dist_effects = {}
-    for s in (-1.0, 0.0, 1.0):
-        vec = np.zeros(n_params)
-        vec[i_dist] = 1.0
-        vec[i_inter] = s
-        dist_effects[key_for('SizeAdv', s)] = lincomb_stats(vec)
+        if stats_inter:
+            beta_inter = stats_inter['coef']
+            # cov between size and interaction
+            cov_si = float(cov.loc[name_size, interaction_name]) if (name_size in cov.index and interaction_name in cov.index) else np.nan
+            var_inter = float(cov.loc[interaction_name, interaction_name]) if interaction_name in cov.index else np.nan
 
-    # Also return raw clustered summary (for reference)
-    # Convert clustered_summary to a plain dict of dicts
-    raw_summary = {}
-    try:
-        _ = clustered_summary.iterrows
-    except Exception:
-        # If clustered_summary is already a dict-like structure
-        for k, v in clustered_summary.items():
-            raw_summary[k] = {
-                'coef': float(v.get('coef', np.nan)),
-                'se_cluster': float(v.get('se_cluster', np.nan)),
-                'z_cluster': float(v.get('z_cluster', np.nan)),
-                'p_cluster': float(v.get('p_cluster', np.nan))
-            }
-    else:
-        for rowname, row in clustered_summary.iterrows():
-            # row may be a Series or dict-like
-            get = getattr(row, 'get', None)
-            if callable(get):
-                coef = row.get('coef', np.nan)
-                se_cl = row.get('se_cluster', np.nan)
-                z_cl = row.get('z_cluster', np.nan)
-                p_cl = row.get('p_cluster', np.nan)
-            else:
-                # for pandas Series, use direct indexing with fallback
-                coef = row['coef'] if 'coef' in row.index else np.nan
-                se_cl = row['se_cluster'] if 'se_cluster' in row.index else np.nan
-                z_cl = row['z_cluster'] if 'z_cluster' in row.index else np.nan
-                p_cl = row['p_cluster'] if 'p_cluster' in row.index else np.nan
-            raw_summary[rowname] = {
-                'coef': float(coef) if not (coef is None) else np.nan,
-                'se_cluster': float(se_cl) if not (se_cl is None) else np.nan,
-                'z_cluster': float(z_cl) if not (z_cl is None) else np.nan,
-                'p_cluster': float(p_cl) if not (p_cl is None) else np.nan
-            }
-
-    # Short interpretation: check significance for key effects (SizeAdv at neutral and DistDiff at neutral, and interaction)
-    size_neutral = size_effects.get(key_for('DistDiff', 0))
-    dist_neutral = dist_effects.get(key_for('SizeAdv', 0))
-
-    # Robustly retrieve interaction coefficient from params
-    interaction_coef = None
-    if name_inter in params.index:
-        interaction_coef = float(params[name_inter])
-    else:
-        alt_inter = ':'.join(name_inter.split(':')[::-1])
-        if alt_inter in params.index:
-            interaction_coef = float(params[alt_inter])
+            for adv in [-1.0, 0.0, 1.0]:
+                # slope = beta_size + adv * beta_inter
+                slope = beta_size + adv * beta_inter
+                # variance (delta method)
+                # Var(slope) = Var(beta_size) + adv^2 Var(beta_inter) + 2*adv*Cov(beta_size,beta_inter)
+                var_slope = var_size + (adv**2) * var_inter + 2.0 * adv * cov_si
+                se_slope = np.sqrt(var_slope) if var_slope >= 0 else np.nan
+                z = slope / se_slope if (se_slope and not np.isnan(se_slope)) else np.nan
+                p = 2.0 * (1.0 - stats.norm.cdf(abs(z))) if not np.isnan(z) else np.nan
+                ci_low = slope - 1.96 * se_slope if not np.isnan(se_slope) else np.nan
+                ci_high = slope + 1.96 * se_slope if not np.isnan(se_slope) else np.nan
+                simple_slopes[f'z_RelSize_at_z_LocationAdv_{adv:+.1f}'] = {
+                    'adv_value': adv,
+                    'slope_logit': slope,
+                    'se': se_slope,
+                    'z': z,
+                    'p_value': p,
+                    'ci_95_logit': (ci_low, ci_high),
+                    'odds_ratio': float(np.exp(slope)) if not np.isnan(slope) else np.nan,
+                    'odds_ratio_95ci': (float(np.exp(ci_low)), float(np.exp(ci_high))) if not np.isnan(ci_low) else (np.nan, np.nan)
+                }
         else:
-            # try .get with possible None
-            val = params.get(name_inter)
-            if val is None:
-                val = params.get(alt_inter)
-            interaction_coef = float(val) if val is not None else np.nan
+            # No interaction: simple slope is just beta_size (same for all adv)
+            slope = beta_size
+            se_slope = np.sqrt(var_size) if not np.isnan(var_size) else np.nan
+            z = slope / se_slope if (se_slope and not np.isnan(se_slope)) else np.nan
+            p = 2.0 * (1.0 - stats.norm.cdf(abs(z))) if not np.isnan(z) else np.nan
+            ci_low = slope - 1.96 * se_slope if not np.isnan(se_slope) else np.nan
+            ci_high = slope + 1.96 * se_slope if not np.isnan(se_slope) else np.nan
+            simple_slopes['z_RelSize_at_z_LocationAdv_any'] = {
+                'adv_value': None,
+                'slope_logit': slope,
+                'se': se_slope,
+                'z': z,
+                'p_value': p,
+                'ci_95_logit': (ci_low, ci_high),
+                'odds_ratio': float(np.exp(slope)) if not np.isnan(slope) else np.nan,
+                'odds_ratio_95ci': (float(np.exp(ci_low)), float(np.exp(ci_high))) if not np.isnan(ci_low) else (np.nan, np.nan)
+            }
 
-    # get se for interaction directly from clustered_summary if present
-    interaction_se = raw_summary.get(name_inter, {}).get('se_cluster', None)
-    if interaction_se is None:
-        # try reversed interaction name
-        alt_inter = ':'.join(name_inter.split(':')[::-1])
-        interaction_se = raw_summary.get(alt_inter, {}).get('se_cluster', None)
+    # Summarize / form conclusion
+    alpha = 0.05
+    messages = []
+    if stats_inter:
+        if stats_inter['p_value'] < alpha:
+            messages.append("There is a statistically significant interaction between relative group size and location advantage (p < 0.05). "
+                            "This means the effect of relative group size on win probability depends on location advantage.")
+        else:
+            messages.append("The interaction between relative group size and location advantage is not statistically significant (p >= 0.05).")
+    # main effects
+    if stats_size:
+        if stats_size['p_value'] < alpha:
+            messages.append("Relative group size has a statistically significant main effect on win probability (p < 0.05): larger focal groups are more likely to win overall.")
+        else:
+            messages.append("Relative group size does not show a statistically significant main effect (p >= 0.05).")
+    if stats_loc:
+        if stats_loc['p_value'] < alpha:
+            messages.append("Location advantage has a statistically significant main effect on win probability (p < 0.05): contests closer to the focal group's center increase their win probability.")
+        else:
+            messages.append("Location advantage does not show a statistically significant main effect (p >= 0.05).")
 
-    # Determine significance (alpha = 0.05)
-    def sig(p):
-        return (p is not None) and (not np.isnan(p)) and (p < 0.05)
+    # Check simple slopes for practical significance (any significant slopes?)
+    sig_slopes = []
+    for k, v in simple_slopes.items():
+        if ('p_value' in v) and (not np.isnan(v['p_value'])) and (v['p_value'] < alpha):
+            sig_slopes.append((k, v))
+    if sig_slopes:
+        messages.append("Simple-slope tests show that the effect of relative group size is statistically significant at some values of location advantage (see simple_slopes results).")
+    else:
+        messages.append("Simple-slope tests do not show statistically significant effects of relative group size at the tested location-advantage values.")
 
-    interaction_significant = False
-    if (interaction_se is not None) and (not np.isnan(interaction_se)) and (interaction_se > 0):
-        z_inter = interaction_coef / interaction_se if not np.isnan(interaction_coef) else np.nan
-        p_inter = 2 * (1 - scipy.stats.norm.cdf(abs(z_inter))) if not np.isnan(z_inter) else np.nan
-        interaction_significant = (p_inter is not None) and (not np.isnan(p_inter)) and (p_inter < 0.05)
-
-    conclusions = {
-        'SizeAdv_at_neutral_significant': sig(size_neutral['p']) if size_neutral is not None else False,
-        'DistDiff_at_neutral_significant': sig(dist_neutral['p']) if dist_neutral is not None else False,
-        'Interaction_significant': interaction_significant
-    }
+    conclusion = " ".join(messages)
 
     result_object = {
-        'raw_clustered_summary': raw_summary,
-        'size_effects_by_location': size_effects,
-        'dist_effects_by_size': dist_effects,
-        'conclusions_flags': conclusions
+        'coef_table': coef_table,
+        'simple_slopes': simple_slopes,
+        'cov_matrix': cov,  # might be large; included for completeness
+        'conclusion': conclusion
     }
 
-    # Human-readable short description
-    # Based on p-values in clustered_summary and the computed marginal effects, provide concise interpretation.
-    if (not conclusions['SizeAdv_at_neutral_significant'] and
-        not conclusions['DistDiff_at_neutral_significant'] and
-        not conclusions['Interaction_significant']):
-        short_desc = (
-            "Model estimates indicate no statistically significant effect (cluster-robust SEs) of relative group size "
-            "(SizeAdv_z), relative contest location (DistDiff_z), or their interaction on the probability that the focal "
-            "group wins. Point estimates (log-odds) and odds ratios are returned in 'object'. Interpret cautiously: "
-            "the sign of the SizeAdv_z coefficient is negative in the fitted model (larger focal group associated with "
-            "lower odds of winning in this sample), but it is not statistically different from zero once clustering by dyad "
-            "is accounted for."
-        )
-    else:
-        short_desc = (
-            "Model suggests some statistically significant effects (cluster-robust SEs) among SizeAdv_z, DistDiff_z, "
-            "or their interaction. See the numeric summaries in 'object' for direction, magnitude (odds ratios), and CIs."
-        )
+    description = (
+        "This output contains coefficient estimates (log-odds scale), robust standard errors, p-values, "
+        "95% confidence intervals and odds-ratios for the main predictors (relative group size, location advantage) "
+        "and their interaction (if present). It also includes simple-slope tests for the effect of relative group "
+        "size at location advantage = -1, 0, +1 standard deviations (when an interaction is present). "
+        "The 'conclusion' string summarizes whether the main effects or their interaction are statistically significant "
+        "at alpha = 0.05 and whether any simple slopes are significant."
+    )
 
     return {
-        "object": result_object,
-        "description": short_desc
+        'object': result_object,
+        'description': description + " " + conclusion
     }

@@ -12,80 +12,104 @@ df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/anal
 
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
-    # Work on a copy
+    """
+    Transform the raw capuchin contest dataframe into a modeling-ready dataframe.
+
+    Produces standardized (z-scored) predictors and a few derived columns:
+    - size_diff_z: standardized n_focal - n_other
+    - dist_diff_z: standardized dist_other - dist_focal (positive -> focal closer -> location advantage)
+    - m_diff_z: standardized m_focal - m_other
+    - FocalCloser: binary indicator dist_focal < dist_other
+
+    Keeps columns: win, size_diff_z, dist_diff_z, m_diff_z, FocalCloser, dyad (and also log_size_ratio_z and f_diff_z for potential supplementary analyses)
+    """
     df = df.copy()
 
-    # Required original columns
-    required_cols = ['win', 'dist_focal', 'dist_other', 'n_focal', 'n_other', 'm_focal', 'm_other', 'dyad']
-    # Drop rows missing any required fields for modeling
-    df = df.dropna(subset=required_cols)
+    # Required columns for the analysis
+    required = ['win', 'n_focal', 'n_other', 'dist_focal', 'dist_other', 'm_focal', 'm_other', 'f_focal', 'f_other', 'dyad']
+    missing = [c for c in required if c not in df.columns]
+    if len(missing) > 0:
+        raise ValueError(f"Missing required columns in input dataframe: {missing}")
 
-    # Ensure types
+    # Drop rows with missing critical values
+    df = df.dropna(subset=required)
+
+    # Ensure proper dtypes
     df['win'] = df['win'].astype(int)
-    for c in ['dist_focal', 'dist_other', 'n_focal', 'n_other', 'm_focal', 'm_other']:
-        df[c] = pd.to_numeric(df[c], errors='coerce')
+    df['dyad'] = df['dyad'].astype(int)
 
     # Derived predictors
-    # Relative group size (difference and ratio)
     df['size_diff'] = df['n_focal'] - df['n_other']
-    df['size_ratio'] = df['n_focal'] / df['n_other'].replace(0, np.nan)
-
-    # Location advantage: positive when contest is closer to focal group's home center
-    # (dist_other - dist_focal). Larger positive => greater focal home advantage.
-    df['location_adv'] = df['dist_other'] - df['dist_focal']
-
-    # Categorical location for descriptive checks (threshold = 50 meters to define "neutral")
-    def _loc_cat(x):
-        if x > 50:
-            return 'FocalSide'
-        elif x < -50:
-            return 'OtherSide'
-        else:
-            return 'Neutral'
-    df['contest_location'] = df['location_adv'].apply(_loc_cat)
-
-    # Male composition difference control
+    # log ratio as alternative relative-size measure (keeps numerical stability)
+    df['log_size_ratio'] = np.log((df['n_focal'] + 1e-6) / (df['n_other'] + 1e-6))
+    # Positive dist_diff means focal is closer to its home-range center than other (advantage)
+    df['dist_diff'] = df['dist_other'] - df['dist_focal']
+    df['FocalCloser'] = (df['dist_focal'] < df['dist_other']).astype(int)
     df['m_diff'] = df['m_focal'] - df['m_other']
+    df['f_diff'] = df['f_focal'] - df['f_other']
 
-    # Standardize continuous predictors for model stability/interpretation (z-scores)
-    # use population std (ddof=0) to avoid small-sample ddof effects; safe for interpretation
-    for col in ['size_diff', 'location_adv', 'm_diff']:
-        mu = df[col].mean()
-        sigma = df[col].std(ddof=0)
-        # If sigma is zero (no variation), create zeros to avoid division by zero
-        if sigma == 0 or np.isnan(sigma):
+    # Z-score (standardize) continuous predictors to aid interpretation and numerical stability
+    for col in ['size_diff', 'log_size_ratio', 'dist_diff', 'm_diff', 'f_diff']:
+        mean = df[col].mean()
+        std = df[col].std(ddof=0)
+        # avoid division by zero
+        if std == 0 or np.isnan(std):
             df[col + '_z'] = 0.0
         else:
-            df[col + '_z'] = (df[col] - mu) / sigma
+            df[col + '_z'] = (df[col] - mean) / std
 
-    # Final dataframe returned contains original columns plus derived columns used in the model
-    # Key columns used by the model: 'win', 'size_diff_z', 'location_adv_z', 'm_diff_z', 'dyad'
-    return df
+    # Final dataframe columns used for modeling
+    keep_cols = [
+        'win',
+        'size_diff_z',
+        'log_size_ratio_z',
+        'dist_diff_z',
+        'FocalCloser',
+        'm_diff_z',
+        'f_diff_z',
+        'dyad'
+    ]
+
+    # If any keep_cols missing (e.g., because std was NaN), create them filled with zeros (safe fallback)
+    for c in keep_cols:
+        if c not in df.columns:
+            df[c] = 0
+
+    return df[keep_cols]
 
 
 # ======== MODEL CODE ========
 def model(df: pd.DataFrame):
-    import statsmodels.formula.api as smf
+    """
+    Fit a logistic regression (GLM with binomial family) predicting probability that the focal group wins.
 
-    # Ensure the transformed columns exist
-    needed = ['win', 'size_diff_z', 'location_adv_z', 'm_diff_z', 'dyad']
-    missing = [c for c in needed if c not in df.columns]
-    if missing:
+    Primary model tests main effects of standardized relative group size (size_diff_z) and standardized
+    location advantage (dist_diff_z), their interaction, and controls for male difference and focal proximity.
+
+    Cluster-robust standard errors are computed at the dyad level to account for non-independence of contests
+    within the same dyad.
+
+    Returns:
+      - the fitted GLM result object (statsmodels GLMResults)
+    """
+    import statsmodels.formula.api as smf
+    import statsmodels.api as sm
+
+    # Check required columns
+    required = ['win', 'size_diff_z', 'dist_diff_z', 'm_diff_z', 'FocalCloser', 'dyad']
+    missing = [c for c in required if c not in df.columns]
+    if len(missing) > 0:
         raise ValueError(f"Missing required columns for modeling: {missing}")
 
-    # Specify a logistic regression (GLM with binomial family). Include interaction between
-    # relative group size and location advantage to test whether location modulates the
-    # effect of relative group size on win probability.
-    formula = 'win ~ size_diff_z * location_adv_z + m_diff_z'
+    # Formula: main effects + interaction between relative size and location advantage
+    formula = 'win ~ size_diff_z * dist_diff_z + m_diff_z + FocalCloser'
 
-    glm = smf.glm(formula=formula, data=df, family=sm.families.Binomial())
+    # Fit GLM (logistic regression)
+    glm_binom = smf.glm(formula=formula, data=df, family=sm.families.Binomial())
+    # Use cluster-robust SEs clustered on dyad
+    results = glm_binom.fit(cov_type='cluster', cov_kwds={'groups': df['dyad']})
 
-    # Fit with cluster-robust standard errors clustered by dyad (accounts for non-independence
-    # of contests between the same pair of groups). If dyad clustering is inappropriate,
-    # this can be changed to another cluster or to default (non-robust) SEs.
-    results = glm.fit(cov_type='cluster', cov_kwds={'groups': df['dyad']})
-
-    # Return the fitted results object (contains coefficients, SEs, summary, predictions, etc.)
+    # Print a compact summary and return full results object for downstream inspection
     print(results.summary())
     return results
 

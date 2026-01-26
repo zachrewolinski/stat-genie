@@ -1,256 +1,154 @@
 def extract_final_answer(model_output):
     """
-    Extract interpretable statistics about age effects (linear and quadratic) and
-    age-by-culture interactions from a fitted statsmodels GLM/Results object.
+    Extracts the effect of age (age_z) on choosing the majority option (category 1 vs reference 0)
+    across all cultural sites, using the fitted statsmodels MNLogit result object.
 
     Returns a dictionary with:
-      - "object": dict with coefficients, standard errors, p-values, 95% CIs for:
-          * age_c (linear)
-          * age_sq (quadratic)
-          * per-culture linear slopes for age (combined age_c + interaction when present),
-            with inference computed by linear combination using the covariance matrix.
-        Also includes which culture was used as the reference (if that can be inferred).
-      - "description": a short plain-language interpretation of the extracted results
-        in the context of the task (how reliance on majority preference develops with age,
-        and whether trajectories differ across cultures).
+      - "object": a pandas.DataFrame summarizing, for each culture (1..K), the estimated
+                  linear effect of age_z on the log-odds of choosing the majority (vs unchosen),
+                  its standard error, z-value, two-sided p-value, and 95% CI.
+      - "description": brief explanation of what the numbers mean.
+
+    The function handles the common statsmodels MNLogit output layout:
+      - model_output.params is expected to be a DataFrame with one row per non-reference outcome
+        (e.g., indices 1 and 2) and columns = exog names.
+      - model_output.cov_params() is expected to be the full covariance matrix for the
+        flattened parameter vector; the function slices out the block for the outcome=majority.
     """
     import numpy as np
-    from scipy import stats
+    import pandas as pd
+    import math
 
-    res = model_output
-
-    # Basic parameter table
+    # Try to import a normal CDF for p-value calculation; fall back to erf-based
     try:
-        params = res.params.copy()
+        from scipy import stats
+        norm_cdf = stats.norm.cdf
     except Exception:
-        raise ValueError("model_output does not expose .params")
+        def norm_cdf(x):
+            # using error function: cdf = 0.5*(1 + erf(x/sqrt(2)))
+            return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
 
-    # Try to get covariance matrix for linear combinations
-    cov = None
-    try:
-        cov = res.cov_params()
-    except Exception:
-        cov = None
+    # 1) Access parameter table
+    params = model_output.params  # likely a DataFrame with index = outcomes (1,2) and cols = exog names
+    exog_names = list(model_output.model.exog_names)  # list of exogenous variable names in order
+    k_exog = len(exog_names)
 
-    # Helper to safely get bse, pvalues, conf_int
-    bse = getattr(res, "bse", None)
-    pvalues = getattr(res, "pvalues", None)
-    try:
-        ci_table = res.conf_int()
-    except Exception:
-        ci_table = None
-
-    param_names = list(params.index.astype(str))
-
-    # Find primary terms
-    def _get_param(name):
-        if name in params.index:
-            coef = float(params[name])
-            se = float(bse[name]) if (bse is not None and name in bse.index) else np.nan
-            p = float(pvalues[name]) if (pvalues is not None and name in pvalues.index) else np.nan
-            if ci_table is not None and name in ci_table.index:
-                ci_low, ci_high = float(ci_table.loc[name, 0]), float(ci_table.loc[name, 1])
-            else:
-                ci_low, ci_high = (coef - 1.96 * se, coef + 1.96 * se) if not np.isnan(se) else (np.nan, np.nan)
-            return {"coef": coef, "se": se, "p": p, "ci95": (ci_low, ci_high)}
-        else:
-            return None
-
-    age_linear = _get_param("age_c")
-    age_quad = _get_param("age_sq")
-
-    # Identify culture-related parameter names for main effects and interactions
-    # Patterns in statsmodels: "C(culture)[T.level]" and "age_c:C(culture)[T.level]"
-    culture_main_params = [n for n in param_names if n.startswith("C(culture)")]
-    age_c_inter_params = [n for n in param_names if ("age_c" in n) and ("C(culture)" in n)]
-
-    # Attempt to infer culture levels and reference
-    culture_levels = []
-    for n in culture_main_params:
-        # extract level between [T.  and ]
-        try:
-            start = n.index("[T.") + 3
-            end = n.index("]", start)
-            lvl = n[start:end]
-        except Exception:
-            # fallback: take after last '[' until ']'
-            try:
-                start = n.rindex("[") + 1
-                end = n.rindex("]")
-                lvl = n[start:end]
-            except Exception:
-                lvl = n
-        culture_levels.append(lvl)
-
-    # For interactions, extract the level similarly
-    inter_levels = []
-    for n in age_c_inter_params:
-        try:
-            start = n.index("[T.") + 3
-            end = n.index("]", start)
-            lvl = n[start:end]
-        except Exception:
-            try:
-                start = n.rindex("[") + 1
-                end = n.rindex("]")
-                lvl = n[start:end]
-            except Exception:
-                lvl = n
-        inter_levels.append((lvl, n))
-
-    # Try to get full list of culture categories from the original data if available,
-    # so we can identify the reference (the one NOT appearing as a param with [T.level]).
-    reference_culture = None
-    try:
-        df = res.model.data.frame
-        if "culture" in df.columns:
-            unique_cult = list(map(str, pd.unique(df["culture"])))
-            # The design matrix encodes all levels except reference with C(culture)[T.level];
-            # find which unique_cult is not among the 'culture_levels' extracted above.
-            missing = [c for c in unique_cult if c not in culture_levels]
-            if len(missing) == 1:
-                reference_culture = missing[0]
-            elif len(missing) > 1:
-                # Heuristic: statsmodels uses the first category (sorted) as reference unless specified;
-                # choose the first of unique_cult as reference if multiple missing.
-                reference_culture = missing[0]
-            else:
-                reference_culture = None
-    except Exception:
-        # If we couldn't access the dataframe, leave reference_culture as None
-        reference_culture = None
-
-    # If we still don't know the reference culture, try to infer from parameter names:
-    if reference_culture is None:
-        # If we found any interaction levels, then reference is "the level not listed" -
-        # we cannot know its name. Indicate unknown.
-        reference_culture = "(reference level not present in params or unavailable from data)"
-
-    # Compute per-culture linear slopes for age:
-    # - For reference culture: slope = age_c
-    # - For each interaction level L: slope_L = age_c + coef(age_c:C(culture)[T.L])
-    culture_slopes = {}
-    if age_linear is None:
-        raise ValueError("Model does not contain an 'age_c' parameter; cannot compute age slopes.")
-    base_coef = age_linear["coef"]
-    # Variance of base
-    if cov is not None and "age_c" in cov.index:
-        var_base = float(cov.loc["age_c", "age_c"])
+    # Ensure params is a DataFrame in expected shape
+    if isinstance(params, pd.DataFrame):
+        outcome_indices = list(params.index)
     else:
-        var_base = age_linear["se"] ** 2 if not np.isnan(age_linear["se"]) else np.nan
+        # if it's an ndarray (J-1, k), create synthetic indices 0..J-2
+        params = pd.DataFrame(params)
+        outcome_indices = list(params.index)
 
-    # add reference culture entry
-    culture_slopes[reference_culture] = {
-        "slope_coef": base_coef,
-        "slope_se": float(np.sqrt(var_base)) if not np.isnan(var_base) else np.nan,
-        "slope_p": float(age_linear["p"]) if age_linear is not None else np.nan,
-        "slope_ci95": (float(base_coef - 1.96 * np.sqrt(var_base)), float(base_coef + 1.96 * np.sqrt(var_base))) if not np.isnan(var_base) else (np.nan, np.nan),
-        "note": "Reference culture (no interaction term in params)."
-    }
+    # We want the majority outcome which is coded as 1 in the task
+    # Find which row corresponds to outcome '1' (could be int or string)
+    target_outcome = None
+    for idx in outcome_indices:
+        try:
+            if int(idx) == 1:
+                target_outcome = idx
+                break
+        except Exception:
+            # idx may be string
+            if str(idx) == '1':
+                target_outcome = idx
+                break
+    if target_outcome is None:
+        # If not found, assume the first non-reference outcome corresponds to majority (best effort)
+        target_outcome = outcome_indices[0]
 
-    # For each interaction level compute combined slope and inference via covariance
-    for lvl, pname in inter_levels:
-        inter = _get_param(pname)
-        if inter is None:
-            continue
-        inter_coef = inter["coef"]
-        # slope = base_coef + inter_coef
-        slope = base_coef + inter_coef
-        # compute variance: Var(age_c) + Var(inter) + 2*Cov(age_c, inter)
-        if cov is not None and ("age_c" in cov.index) and (pname in cov.index):
-            var_inter = float(cov.loc[pname, pname])
-            covar = float(cov.loc["age_c", pname])
-            var_slope = var_base + var_inter + 2.0 * covar
-        else:
-            # fallback: approximate by summing variances (conservative, ignores covariance)
-            var_inter = inter["se"] ** 2 if not np.isnan(inter["se"]) else np.nan
-            if np.isnan(var_inter) or np.isnan(var_base):
-                var_slope = np.nan
-            else:
-                var_slope = var_base + var_inter
-        se_slope = float(np.sqrt(var_slope)) if not np.isnan(var_slope) else np.nan
-        # compute z and p-value if possible
-        if not np.isnan(se_slope) and se_slope > 0:
-            z = slope / se_slope
-            p = 2.0 * (1.0 - stats.norm.cdf(abs(z)))
-            ci_low = slope - 1.96 * se_slope
-            ci_high = slope + 1.96 * se_slope
-        else:
-            p = np.nan
-            ci_low, ci_high = (np.nan, np.nan)
-        culture_slopes[lvl] = {
-            "slope_coef": float(slope),
-            "slope_se": se_slope,
-            "slope_p": float(p) if not np.isnan(p) else np.nan,
-            "slope_ci95": (float(ci_low) if not np.isnan(ci_low) else np.nan,
-                           float(ci_high) if not np.isnan(ci_high) else np.nan),
-            "interaction_param": pname,
-            "interaction_coef": inter_coef,
-            "interaction_se": inter["se"],
-            "interaction_p": inter["p"]
-        }
+    # Extract the coefficient vector (Series) for the majority outcome
+    beta_row = params.loc[target_outcome]
+    # If params had shape (k,) as a Series, make it consistent
+    beta_row = pd.Series(beta_row, index=exog_names)
 
-    # Summarize quadratic term interpretation
-    quad_summary = None
-    if age_quad is not None:
-        quad_summary = {
-            "coef": age_quad["coef"],
-            "se": age_quad["se"],
-            "p": age_quad["p"],
-            "ci95": age_quad["ci95"],
-        }
+    # 2) Extract the covariance block corresponding to the majority outcome parameters
+    cov_full = model_output.cov_params()  # DataFrame or ndarray of shape ((J-1)*k, (J-1)*k)
+    # Determine the block position of target_outcome among outcome_indices
+    pos = outcome_indices.index(target_outcome)
+    # Compute row/col indices for the slice
+    start = pos * k_exog
+    end = start + k_exog
 
-    # Build object to return
-    result_object = {
-        "age_linear": age_linear,
-        "age_quadratic": quad_summary,
-        "culture_reference": reference_culture,
-        "culture_slopes_for_age": culture_slopes,
-        "notes": (
-            "Slopes for each culture represent the linear effect of centered age on log-odds of "
-            "choosing the majority option. A positive slope means increasing reliance on the majority with age. "
-            "Quadratic term (age_sq) is global across cultures in this model and indicates acceleration/deceleration."
-        )
-    }
+    # Convert cov_full to numpy array for safe slicing (it might be DataFrame with non-numeric index)
+    cov_full_arr = np.asarray(cov_full)
+    cov_block = cov_full_arr[start:end, start:end]  # k x k covariance for this outcome
 
-    # Short plain-language description
-    # We'll highlight whether age has a significant global linear effect and whether any culture slopes differ
-    desc_lines = []
-    try:
-        age_p = age_linear["p"]
-        age_coef = age_linear["coef"]
-        if not np.isnan(age_p) and age_p < 0.05:
-            desc_lines.append(f"Overall (reference culture) linear age effect: coef={age_coef:.3f} (p={age_p:.3f}) — significant. This indicates that reliance on the majority changes with age in the reference culture.")
-        else:
-            desc_lines.append(f"Overall (reference culture) linear age effect: coef={age_coef:.3f} (p={age_p:.3f}) — not statistically significant.")
-    except Exception:
-        desc_lines.append("Could not determine significance for the overall linear age effect.")
-
-    if quad_summary is not None:
-        q_p = quad_summary["p"]
-        q_coef = quad_summary["coef"]
-        if not np.isnan(q_p) and q_p < 0.05:
-            desc_lines.append(f"Quadratic age effect (age_sq): coef={q_coef:.3f} (p={q_p:.3f}) — significant, indicating a non-linear developmental trajectory across ages.")
-        else:
-            desc_lines.append(f"Quadratic age effect (age_sq): coef={q_coef:.3f} (p={q_p:.3f}) — not significant.")
-
-    # Check interactions: list cultures whose slopes differ significantly from reference
-    differing = []
-    for lvl, info in culture_slopes.items():
-        # skip reference entry
-        if lvl == reference_culture:
-            continue
-        pval = info.get("slope_p", np.nan)
-        # But slope_p tests whether slope differs from zero for that culture; better to test interaction param p-value:
-        inter_p = info.get("interaction_p", np.nan)
-        if not np.isnan(inter_p) and inter_p < 0.05:
-            differing.append((lvl, float(inter_p)))
-    if len(differing) > 0:
-        desc_lines.append("There is evidence that developmental slopes differ across cultures. Significant interactions (p<0.05) were found for: " +
-                          ", ".join([f"{lvl} (interaction p={p:.3f})" for lvl, p in differing]) + ".")
+    # 3) Identify culture dummy names and interaction names from exog_names
+    # The code that fitted the model used names like 'culture_2', 'age_z_x_culture_2', etc.
+    culture_dummy_names = [n for n in exog_names if n.startswith('culture_')]
+    # Try to infer available culture numeric IDs from dummy names
+    culture_ids = []
+    for name in culture_dummy_names:
+        # name like 'culture_2' -> id 2
+        try:
+            suffix = name.split('_')[-1]
+            culture_ids.append(int(suffix))
+        except Exception:
+            pass
+    # Determine maximum culture id (if culture ids found). We assume cultures are 1..K and culture_1 was dropped.
+    if culture_ids:
+        max_cid = max(culture_ids + [1])  # include 1 for reference
+        K = max_cid
     else:
-        desc_lines.append("No culture showed a significant interaction with age at p<0.05 based on the interaction parameters; developmental slopes do not strongly differ across cultures in this model.")
+        # fallback: assume 1..8 as described in the task
+        K = 8
 
-    description = " ".join(desc_lines)
+    # Precompute index positions of relevant exog columns
+    exog_index_map = {name: idx for idx, name in enumerate(exog_names)}
+    if 'age_z' not in exog_index_map:
+        raise ValueError("age_z not found among model exogenous variable names.")
 
-    return {"object": result_object, "description": description}
+    idx_age = exog_index_map['age_z']
+
+    # Prepare results list
+    rows = []
+    for cid in range(1, K + 1):
+        # construct contrast vector c of length k_exog
+        c = np.zeros(k_exog, dtype=float)
+        c[idx_age] = 1.0
+        if cid != 1:
+            inter_name = f'age_z_x_culture_{cid}'
+            if inter_name in exog_index_map:
+                c[exog_index_map[inter_name]] = 1.0
+            else:
+                # If the exact interaction name not present, try to find any interaction that endswith the culture id
+                matches = [n for n in exog_names if n.endswith(f'_{cid}') and n.startswith('age_z_x_')]
+                if matches:
+                    c[exog_index_map[matches[0]]] = 1.0
+                # else leave as just the main age effect (assumes no interaction for this culture)
+        # Estimate, SE, z, p, CI
+        est = float(np.dot(c, beta_row.values))
+        var = float(np.dot(c, cov_block.dot(c)))
+        se = math.sqrt(var) if var >= 0 else float('nan')
+        z = est / se if se and not math.isnan(se) else float('nan')
+        # two-sided p-value
+        p = 2.0 * (1.0 - norm_cdf(abs(z))) if not math.isnan(z) else float('nan')
+        ci_low = est - 1.96 * se if not math.isnan(se) else float('nan')
+        ci_high = est + 1.96 * se if not math.isnan(se) else float('nan')
+
+        rows.append({
+            'culture_id': cid,
+            'age_effect_log_odds_majority_vs_ref': est,
+            'se': se,
+            'z': z,
+            'p_two_sided': p,
+            'ci95_lower': ci_low,
+            'ci95_upper': ci_high
+        })
+
+    summary_df = pd.DataFrame(rows)
+
+    description = (
+        "For each culture (culture_id), this table reports the estimated effect of a one-standard-deviation "
+        "increase in age (age_z) on the log-odds of choosing the majority option versus the reference "
+        "(unchosen) option. The estimate for culture 1 is the main effect of age_z (reference culture). "
+        "Estimates for culture c>1 are the sum of the main age effect and the age_x_culture_c interaction; "
+        "standard errors, z-values, p-values and 95% CIs are computed using the covariance block for the "
+        "majority outcome parameters. A statistically significant positive estimate indicates that older "
+        "children in that culture are more likely to choose the majority option (compared to the reference), "
+        "whereas a significant negative estimate indicates they are less likely."
+    )
+
+    return {"object": summary_df, "description": description}

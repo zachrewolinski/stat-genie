@@ -1,102 +1,197 @@
 def extract_final_answer(model_output):
     """
-    Extracts relevant statistics from the fitted model objects returned by the modeling function.
-    Expects model_output to be a dict with at least the key 'nb_deaths' pointing to a statsmodels GLMResultsWrapper
-    (negative binomial or Poisson fallback). Also extracts secondary info for 'gender_female' if present.
-    
+    Extracts statistics for the masfem_z coefficient from the provided model_output.
+
     Returns a dictionary with:
-      - "object": dict with numeric results (coef, se, p-value, 95% CI, exponentiated coef (IRR), IRR CI,
-                          and percent change in expected fatalities per 1-unit (1 SD) increase)
-                   for 'masfem_scaled' (primary) and for 'gender_female' (secondary).
-      - "description": brief interpretation of the primary result in context.
+      - "object": a dict with numeric results from the main Negative Binomial GLM
+                  (and the robustness OLS on log damage if available)
+      - "description": a brief textual interpretation of the results in context.
+
+    Expected input format:
+      model_output = {
+        'main_nb_glm': <statsmodels GLMResultsWrapper>,
+        'robustness': {'ols_log_damage': <statsmodels RegressionResultsWrapper> or None}
+      }
     """
     import numpy as np
 
-    # Validate input
-    if not isinstance(model_output, dict):
-        raise TypeError("model_output must be a dict as returned by the modeling function.")
-    if 'nb_deaths' not in model_output:
-        raise KeyError("model_output must contain the key 'nb_deaths' with the fitted GLM results.")
+    out = {"object": {}, "description": ""}
 
-    nb_res = model_output['nb_deaths']
-
-    # Helper to safely extract statistics for a variable name
-    def _get_stats(res, varname):
-        # Ensure variable exists in the result parameters
-        params = getattr(res, 'params', None)
-        if params is None or varname not in params.index:
-            return None
-
-        coef = float(params[varname])
-        # standard error
-        bse = float(res.bse[varname])
-        # p-value (if available)
-        pval = float(res.pvalues[varname]) if (hasattr(res, 'pvalues') and varname in res.pvalues.index) else None
-        # 95% conf interval
+    # Helper to format extracted stats
+    def _extract_from_results(res, param_name, model_label, is_glm=True):
+        stats = {"model": model_label}
         try:
-            ci = res.conf_int().loc[varname].values.astype(float)
-            ci_lower, ci_upper = float(ci[0]), float(ci[1])
-        except Exception:
-            ci_lower, ci_upper = None, None
+            params = res.params
+            if param_name not in params.index:
+                stats["error"] = f"Parameter '{param_name}' not found in model."
+                return stats
+            coef = float(params[param_name])
+        except Exception as e:
+            stats["error"] = f"Could not extract params: {e}"
+            return stats
 
-        # Exponentiated coefficient: incidence rate ratio (IRR) for count models
+        # Standard error, test stat, pvalue
+        try:
+            se = float(res.bse[param_name])
+        except Exception:
+            se = None
+        try:
+            if is_glm:
+                # GLM: z-value
+                test_stat = float(coef / se) if (se is not None and se != 0) else None
+                stat_name = "z"
+            else:
+                # OLS: t-value
+                test_stat = float(res.tvalues[param_name]) if param_name in res.tvalues.index else (float(coef / se) if (se is not None and se != 0) else None)
+                stat_name = "t"
+        except Exception:
+            test_stat = None
+            stat_name = "stat"
+
+        try:
+            pval = float(res.pvalues[param_name])
+        except Exception:
+            pval = None
+
+        # Confidence intervals
+        try:
+            ci = res.conf_int().loc[param_name].astype(float)
+            ci_lower = float(ci[0])
+            ci_upper = float(ci[1])
+        except Exception:
+            ci_lower = None
+            ci_upper = None
+
+        stats.update({
+            "coef": coef,
+            "se": se,
+            stat_name: test_stat,
+            "p_value": pval,
+            "ci_lower": ci_lower,
+            "ci_upper": ci_upper,
+        })
+
+        # If GLM with log link, also provide incidence rate ratio (IRR) and its CI
         try:
             irr = float(np.exp(coef))
             irr_ci_lower = float(np.exp(ci_lower)) if ci_lower is not None else None
             irr_ci_upper = float(np.exp(ci_upper)) if ci_upper is not None else None
+            stats.update({
+                "irr": irr,
+                "irr_ci_lower": irr_ci_lower,
+                "irr_ci_upper": irr_ci_upper,
+                "irr_interpretation": (
+                    "Multiplicative factor for expected fatalities per 1 SD increase in femininity"
+                )
+            })
         except Exception:
-            irr, irr_ci_lower, irr_ci_upper = None, None, None
+            # If exponentiation fails, skip IRR
+            pass
 
-        # Percent change in expected fatalities for a one-unit increase in predictor:
-        # (exp(coef) - 1) * 100
-        pct_change = (irr - 1.0) * 100.0 if irr is not None else None
+        return stats
 
-        return {
-            'variable': varname,
-            'coef': coef,
-            'std_error': bse,
-            'p_value': pval,
-            'ci_95_lower': ci_lower,
-            'ci_95_upper': ci_upper,
-            'irr': irr,
-            'irr_95_ci_lower': irr_ci_lower,
-            'irr_95_ci_upper': irr_ci_upper,
-            'percent_change_expected_deaths_per_unit': pct_change
-        }
+    # Extract from main negative binomial GLM
+    try:
+        main = model_output.get("main_nb_glm", None)
+    except Exception:
+        main = None
 
-    # Extract stats for primary variable (masfem_scaled) and secondary (gender_female)
-    masfem_stats = _get_stats(nb_res, 'masfem_scaled')
-    gender_stats = _get_stats(nb_res, 'gender_female')
-
-    # Prepare object to return
-    result_object = {
-        'model_family': str(getattr(nb_res, 'family', 'Unknown')),
-        'primary': masfem_stats,
-        'secondary': gender_stats
-    }
-
-    # Construct a concise description interpreting the primary result
-    if masfem_stats is None:
-        description = "The fitted model does not contain a parameter named 'masfem_scaled'. Cannot interpret effect."
+    if main is None:
+        out["object"]["main_nb_glm"] = {"error": "main_nb_glm not found in model_output"}
     else:
-        coef = masfem_stats['coef']
-        p = masfem_stats['p_value']
-        pct = masfem_stats['percent_change_expected_deaths_per_unit']
-        direction = "increase" if coef > 0 else "decrease" if coef < 0 else "no change"
-        sig_text = ""
-        if p is None:
-            sig_text = " (p-value not available)"
-        else:
-            sig_text = " (statistically significant at p < 0.05)" if p < 0.05 else " (not statistically significant at p < 0.05)"
-        description = (
-            f"Primary result for 'masfem_scaled': coefficient = {coef:.4f}, which implies an IRR = {masfem_stats['irr']:.4f}. "
-            f"This corresponds to a {pct:.2f}% expected {direction} in fatalities per 1-SD increase in name femininity. "
-            f"p-value = {p:.4g}{sig_text}. "
-            "Positive coefficient means more feminine names are associated with higher fatalities (consistent with the hypothesis that feminine names elicit fewer precautions); "
-            "negative coefficient would imply the opposite."
-        )
+        nb_stats = _extract_from_results(main, "masfem_z", model_label="NegativeBinomial(GLM)", is_glm=True)
+        out["object"]["main_nb_glm"] = nb_stats
 
-    return {
-        "object": result_object,
-        "description": description
-    }
+    # Extract from robustness OLS if present
+    robustness = model_output.get("robustness", {})
+    ols_mod = robustness.get("ols_log_damage", None) if isinstance(robustness, dict) else None
+    if ols_mod is None:
+        out["object"]["ols_log_damage"] = {"note": "No OLS robustness model available"}
+    else:
+        ols_stats = _extract_from_results(ols_mod, "masfem_z", model_label="OLS(log_damage + 1)", is_glm=False)
+        out["object"]["ols_log_damage"] = ols_stats
+
+    # Build a short description/interpretation focusing on the hypothesis:
+    # "More feminine hurricane names lead to fewer fatalities"
+    desc_lines = []
+    nb = out["object"].get("main_nb_glm", {})
+    if "error" in nb:
+        desc_lines.append("Negative binomial model results could not be extracted: " + nb.get("error"))
+    else:
+        if "coef" in nb and nb.get("coef") is not None:
+            coef = nb["coef"]
+            p = nb.get("p_value")
+            irr = nb.get("irr")
+            # Direction
+            if coef < 0:
+                direction = "associated with fewer expected fatalities"
+            elif coef > 0:
+                direction = "associated with more expected fatalities"
+            else:
+                direction = "no apparent association with expected fatalities"
+
+            # Significance statement
+            if p is not None:
+                sig = "statistically significant (p < 0.05)" if p < 0.05 else "not statistically significant (p >= 0.05)"
+            else:
+                sig = "p-value unavailable"
+
+            desc_lines.append(
+                f"In the Negative Binomial GLM, a 1 SD increase in perceived femininity (masfem_z) has "
+                f"a coefficient = {coef:.4g}"
+                + (f", p = {p:.3g}" if p is not None else "")
+                + f". This is {direction}; the estimated incidence rate ratio (exp(coef)) = {irr:.4g}" if irr is not None else ""
+                + f". The effect is {sig}."
+            )
+            # Add CI if present
+            if nb.get("ci_lower") is not None and nb.get("ci_upper") is not None:
+                desc_lines.append(
+                    f"95% CI for coef: [{nb['ci_lower']:.4g}, {nb['ci_upper']:.4g}]; "
+                    f"95% CI for IRR: [{nb.get('irr_ci_lower', float('nan')):.4g}, {nb.get('irr_ci_upper', float('nan')):.4g}]."
+                )
+        else:
+            desc_lines.append("masfem_z coefficient not available in negative binomial model output.")
+
+    # Include a brief note about robustness OLS
+    ols = out["object"].get("ols_log_damage", {})
+    if "note" in ols:
+        desc_lines.append("No OLS(log damage) robustness model was available.")
+    elif "error" in ols:
+        desc_lines.append("OLS robustness model could not be extracted: " + ols.get("error"))
+    else:
+        if "coef" in ols and ols.get("coef") is not None:
+            coef_o = ols["coef"]
+            p_o = ols.get("p_value")
+            if coef_o < 0:
+                dir_o = "negative (fewer logged damages with more feminine names)"
+            elif coef_o > 0:
+                dir_o = "positive (more logged damages with more feminine names)"
+            else:
+                dir_o = "no apparent association"
+            if p_o is not None:
+                sig_o = "statistically significant (p < 0.05)" if p_o < 0.05 else "not statistically significant (p >= 0.05)"
+            else:
+                sig_o = "p-value unavailable"
+            desc_lines.append(
+                f"Robustness OLS on log-damage: coef = {coef_o:.4g}"
+                + (f", p = {p_o:.3g}" if p_o is not None else "")
+                + f"; direction: {dir_o}; {sig_o}."
+            )
+        else:
+            desc_lines.append("masfem_z coefficient not available in OLS robustness model output.")
+
+    # Final concise verdict hint (do not over-claim)
+    # We will indicate whether the main model provides evidence consistent with the hypothesis
+    if "coef" in nb and nb.get("coef") is not None and nb.get("p_value") is not None:
+        if nb["coef"] < 0 and nb["p_value"] < 0.05:
+            conclusion = "The main model's estimate is consistent with the hypothesis (more feminine names → fewer fatalities) and is statistically significant."
+        elif nb["coef"] < 0 and nb["p_value"] >= 0.05:
+            conclusion = "The main model's estimate is in the hypothesized direction (more feminine names → fewer fatalities) but is not statistically significant."
+        elif nb["coef"] > 0 and nb["p_value"] < 0.05:
+            conclusion = "The main model's estimate is in the opposite direction to the hypothesis and is statistically significant."
+        else:
+            conclusion = "The main model does not provide statistically significant evidence supporting the hypothesis."
+        desc_lines.append(conclusion)
+
+    out["description"] = " ".join(desc_lines)
+    return out

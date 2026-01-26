@@ -1,140 +1,176 @@
 def extract_final_answer(model_output):
     """
-    Extract statistics for the 'Female' coefficient from a fitted statsmodels results object
-    (e.g., GLMResultsWrapper or robustcov results).
-    Returns a dict with:
-      - "object": dict of numeric results (coef, se, pvalue, 95% CI, odds ratio and its 95% CI, nobs)
-      - "description": human-readable interpretation of the Female effect on mortgage approval
+    Extracts statistics for the 'is_female' coefficient from a statsmodels
+    robust Logit result (a RobustResult returned by get_robustcov_results).
 
-    Raises informative errors if expected attributes or the 'Female' parameter are missing.
+    Returns a dict with keys:
+      - "object": dict of numeric results (coef, se, p_value, conf_int,
+                  odds_ratio, odds_ratio_ci, significant, direction,
+                  predicted_probability_difference_at_means)
+      - "description": human-readable interpretation of the result in context
     """
-    import math
     import numpy as np
 
-    # Helper to access attributes robustly
-    def _get_attr(obj, name):
-        if hasattr(obj, name):
-            return getattr(obj, name)
-        raise AttributeError(f"Model output has no attribute '{name}'")
+    # Basic attribute checks
+    if not hasattr(model_output, "params"):
+        raise ValueError("model_output does not have .params (not a statsmodels result object).")
 
-    # Extract parameter vector, std errors, p-values, conf int, nobs
-    try:
-        params = _get_attr(model_output, "params")
-        bse = _get_attr(model_output, "bse")
-        pvalues = _get_attr(model_output, "pvalues")
-        conf = _get_attr(model_output, "conf_int")() if callable(getattr(model_output, "conf_int", None)) else _get_attr(model_output, "conf_int")
-    except AttributeError:
-        # conf_int might be a method without parentheses in some wrappers; try calling if callable
+    params = model_output.params  # usually a pandas Series
+
+    # Determine parameter names (try params.index, otherwise try model.exog_names)
+    if hasattr(params, "index"):
+        param_names = list(params.index)
+    else:
+        model = getattr(model_output, "model", None)
+        exog_names = getattr(model, "exog_names", None)
+        if exog_names:
+            param_names = list(exog_names)
+        else:
+            raise ValueError("Cannot determine parameter names from model_output.params or model.exog_names.")
+
+    # Ensure 'is_female' is present
+    if 'is_female' not in param_names:
+        raise ValueError("'is_female' is not a parameter in the provided model output.")
+
+    # Helper to get a parameter-like value by name, handling Series or ndarray
+    def get_by_name(container, name):
+        if container is None:
+            return None
+        if hasattr(container, "index") and name in container.index:
+            return container[name]
+        # fallback: treat as sequence/ndarray and use param_names index
         try:
-            params = model_output.params
-            bse = model_output.bse
-            pvalues = model_output.pvalues
-            conf = model_output.conf_int()
-        except Exception as e:
-            raise ValueError(f"Could not extract standard regression attributes from model_output: {e}")
+            idx = param_names.index(name)
+            arr = np.asarray(container)
+            return arr[idx]
+        except Exception:
+            return None
 
-    # Ensure params is indexable by name
+    # Extract main statistics
+    # coef: prefer named access if params is Series, otherwise use index lookup
+    coef_val = get_by_name(params, 'is_female')
+    if coef_val is None:
+        raise ValueError("Could not extract 'is_female' coefficient from params.")
+    coef = float(coef_val)
+
+    bse = getattr(model_output, "bse", None)
+    pvalues = getattr(model_output, "pvalues", None)
+    # Confidence interval (95%): try to extract from conf_int output
     try:
-        param_index = list(params.index)
+        conf = model_output.conf_int()  # DataFrame/array with CI rows matching params index
     except Exception:
-        raise ValueError("model_output.params does not appear to be a pandas Series with an index of parameter names.")
+        conf = None
 
-    # Find the parameter name for Female (allow case variants)
-    female_key = None
-    for name in param_index:
-        if str(name).lower() == "female":
-            female_key = name
-            break
-    if female_key is None:
-        raise KeyError("Could not find a parameter named 'Female' (case-insensitive) in model_output.params")
+    # standard error
+    se_val = get_by_name(bse, 'is_female')
+    se = float(se_val) if (se_val is not None) else None
 
-    # Extract numeric values (handle conf possibly being array or DataFrame)
-    coef = float(params[female_key])
-    se = float(bse[female_key]) if female_key in bse.index else float(np.nan)
-    pval = float(pvalues[female_key]) if female_key in pvalues.index else float(np.nan)
+    # p-value
+    pval_val = get_by_name(pvalues, 'is_female')
+    pval = float(pval_val) if (pval_val is not None) else None
 
-    # Confidence interval extraction
+    # Confidence interval extraction with support for DataFrame-like or ndarray
+    if conf is not None:
+        try:
+            if hasattr(conf, "loc"):
+                ci_low = float(conf.loc['is_female', 0])
+                ci_high = float(conf.loc['is_female', 1])
+            else:
+                idx = param_names.index('is_female')
+                conf_arr = np.asarray(conf)
+                ci_low = float(conf_arr[idx, 0])
+                ci_high = float(conf_arr[idx, 1])
+        except Exception:
+            ci_low, ci_high = None, None
+    else:
+        ci_low, ci_high = None, None
+
+    # Odds ratio and its CI (if CI available)
+    odds_ratio = float(np.exp(coef))
+    odds_ratio_ci = (float(np.exp(ci_low)), float(np.exp(ci_high))) if (ci_low is not None and ci_high is not None) else (None, None)
+
+    # Significance and direction
+    alpha = 0.05
+    significant = (pval is not None) and (pval < alpha)
+    if coef > 0:
+        direction = "women have higher odds of approval than men (positive coefficient)"
+    elif coef < 0:
+        direction = "women have lower odds of approval than men (negative coefficient)"
+    else:
+        direction = "no difference in odds (coefficient is zero)"
+
+    # Optional: compute predicted probability difference at sample means of covariates
+    prob_diff = None
+    p_male_at_means = None
+    p_female_at_means = None
     try:
-        # conf may be DataFrame-like with same index as params
-        if hasattr(conf, "loc"):
-            ci_lower = float(conf.loc[female_key, 0])
-            ci_upper = float(conf.loc[female_key, 1])
-        else:
-            # conf may be numpy array with same row order as params
-            idx = param_index.index(female_key)
-            ci_lower = float(conf[idx, 0])
-            ci_upper = float(conf[idx, 1])
+        model = getattr(model_output, "model", None)
+        if model is not None and hasattr(model, "exog") and hasattr(model, "exog_names"):
+            exog = np.asarray(model.exog)
+            exog_names = list(model.exog_names)
+            # mean of each column
+            mean_exog = np.mean(exog, axis=0)
+            # locate index of 'is_female' in exog_names
+            idx = exog_names.index('is_female')
+            # create two feature vectors: female=1 and female=0
+            x_male = mean_exog.copy()
+            x_female = mean_exog.copy()
+            x_male[idx] = 0.0
+            x_female[idx] = 1.0
+            # Ensure ordering of params matches exog_names: build param_vals in that order if possible
+            try:
+                # if params supports named access
+                param_vals = np.asarray([get_by_name(params, name) for name in exog_names], dtype=float)
+            except Exception:
+                # fallback: use params as array (assumed to be in same order)
+                param_vals = np.asarray(params, dtype=float)
+            lin_male = float(np.dot(x_male, param_vals))
+            lin_female = float(np.dot(x_female, param_vals))
+            invlogit = lambda z: 1.0 / (1.0 + np.exp(-z))
+            p_male_at_means = invlogit(lin_male)
+            p_female_at_means = invlogit(lin_female)
+            prob_diff = float(p_female_at_means - p_male_at_means)
     except Exception:
-        # As a fallback, compute Wald CI from coef +/- 1.96*se if se is available
-        if not math.isnan(se):
-            ci_lower = coef - 1.96 * se
-            ci_upper = coef + 1.96 * se
-        else:
-            ci_lower = float("nan")
-            ci_upper = float("nan")
+        prob_diff = None
 
-    # Odds ratio and its CI
-    try:
-        or_point = float(math.exp(coef))
-        or_ci_lower = float(math.exp(ci_lower)) if not math.isnan(ci_lower) else float("nan")
-        or_ci_upper = float(math.exp(ci_upper)) if not math.isnan(ci_upper) else float("nan")
-    except Exception:
-        or_point = float("nan")
-        or_ci_lower = float("nan")
-        or_ci_upper = float("nan")
-
-    # Number of observations if available
-    nobs = getattr(model_output, "nobs", None)
-    try:
-        if nobs is not None:
-            nobs = int(nobs)
-    except Exception:
-        nobs = None
-
-    # Determine statistical significance at conventional levels
-    significance = None
-    if not math.isnan(pval):
-        if pval < 0.01:
-            significance = "p < 0.01"
-        elif pval < 0.05:
-            significance = "p < 0.05"
-        elif pval < 0.1:
-            significance = "p < 0.1"
-        else:
-            significance = f"p = {pval:.3f}"
-
-    # Build the descriptive interpretation
-    sign_text = "higher" if coef > 0 else "lower" if coef < 0 else "no difference in"
-    pct_change = (or_point - 1.0) * 100 if not math.isnan(or_point) else float("nan")
-    description_lines = []
-    description_lines.append(f"Coefficient estimate for Female (female = 1 vs male = 0): {coef:.4f}")
-    description_lines.append(f"Standard error: {se:.4f}, p-value: {pval:.4g} ({significance})")
-    description_lines.append(f"95% CI for log-odds: [{ci_lower:.4f}, {ci_upper:.4f}]")
-    description_lines.append(f"Odds ratio (exp(coef)): {or_point:.4f}")
-    description_lines.append(f"95% CI for odds ratio: [{or_ci_lower:.4f}, {or_ci_upper:.4f}]")
-    description_lines.append(f"Interpretation: Holding included controls constant, being female is associated with {sign_text} odds of mortgage approval.")
-    if not math.isnan(pct_change):
-        description_lines.append(f"Specifically, the odds change by approximately {pct_change:.1f}% (OR = {or_point:.3f}).")
-    if significance is not None:
-        if pval < 0.05:
-            description_lines.append("This effect is statistically significant at the 5% level.")
-        else:
-            description_lines.append("This effect is not statistically significant at the 5% level.")
-    if nobs is not None:
-        description_lines.append(f"Number of observations used in the model: {nobs}")
-
-    description = " ".join(description_lines)
-
+    # Prepare object to return
     result_object = {
         "coef": coef,
-        "std_err": se,
+        "se": se,
         "p_value": pval,
-        "ci_lower": ci_lower,
-        "ci_upper": ci_upper,
-        "odds_ratio": or_point,
-        "odds_ratio_ci_lower": or_ci_lower,
-        "odds_ratio_ci_upper": or_ci_upper,
-        "nobs": nobs,
+        "conf_int": (ci_low, ci_high),
+        "odds_ratio": odds_ratio,
+        "odds_ratio_ci": odds_ratio_ci,
+        "significant_at_0.05": significant,
+        "direction_interpretation": direction,
+        "predicted_probability_difference_at_means": prob_diff,
+        "predicted_prob_male_at_means": p_male_at_means,
+        "predicted_prob_female_at_means": p_female_at_means
     }
+
+    # Human-readable description
+    descr_parts = []
+    try:
+        descr_parts.append(f"'is_female' coefficient (log-odds): {coef:.6f}")
+    except Exception:
+        descr_parts.append(f"'is_female' coefficient (log-odds): {coef}")
+    if se is not None:
+        descr_parts.append(f"SE = {se:.6f}")
+    if pval is not None:
+        descr_parts.append(f"p-value = {pval:.4g} ({'significant' if significant else 'not significant'} at α={alpha})")
+    if (ci_low is not None) and (ci_high is not None):
+        descr_parts.append(f"95% CI (log-odds) = ({ci_low:.6f}, {ci_high:.6f})")
+        descr_parts.append(f"Odds ratio = {odds_ratio:.3f}, 95% CI = ({odds_ratio_ci[0]:.3f}, {odds_ratio_ci[1]:.3f})")
+    else:
+        descr_parts.append(f"Odds ratio = {odds_ratio:.3f} (CI not available)")
+
+    descr_parts.append(direction)
+    if prob_diff is not None:
+        descr_parts.append(
+            f"Holding other covariates at their sample means, predicted approval probability is "
+            f"{p_female_at_means:.3f} for women vs {p_male_at_means:.3f} for men (difference = {prob_diff:.3f})."
+        )
+
+    description = " ".join(descr_parts)
 
     return {"object": result_object, "description": description}

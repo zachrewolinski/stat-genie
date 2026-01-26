@@ -12,105 +12,152 @@ df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/anal
 
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
-    # Work on a copy
+    """
+    Transform the raw Fair (1978) affairs dataset into a modeling dataframe.
+
+    Steps performed:
+    - Work on a copy of df to avoid side effects.
+    - Map children and gender to binary indicators: Children (1/0) and Female (1/0).
+    - Create interaction term Children_Female for testing moderation.
+    - Standardize continuous covariates (z-scores) used in the model for stability and interpretability.
+    - Drop rows with missing values in any variables used by the model.
+
+    Returns dataframe containing the columns used in the statistical model (and keeps original affairs column).
+    """
     df = df.copy()
 
-    # Keep only columns we need and drop rows with missing values in those
-    required_cols = ['affairs', 'children', 'gender', 'age', 'yearsmarried',
-                     'religiousness', 'education', 'occupation', 'rating']
-    # If some of these columns are missing from input, raise informative error
-    missing = [c for c in required_cols if c not in df.columns]
+    # Ensure expected columns exist
+    expected = ['affairs', 'children', 'gender', 'age', 'yearsmarried', 'religiousness', 'education', 'occupation', 'rating']
+    missing = [c for c in expected if c not in df.columns]
     if missing:
-        raise ValueError(f"Missing required columns in input dataframe: {missing}")
+        raise KeyError(f"Missing expected columns in input dataframe: {missing}")
 
-    df = df.dropna(subset=required_cols)
+    # Map children to binary indicator (handle 'yes'/'no' or numeric factor)
+    def map_children(x):
+        if pd.isna(x):
+            return np.nan
+        if isinstance(x, str):
+            xl = x.strip().lower()
+            if xl in ['yes', 'y', '1', 'true', 't']:
+                return 1
+            if xl in ['no', 'n', '0', 'false', 'f']:
+                return 0
+        # otherwise try numeric coercion
+        try:
+            xv = float(x)
+            # If dataset uses factor coding like 1/2, attempt to map: assume 1=yes or use >0
+            # Here we assume values >0 indicate yes; but preserve 1/0 mapping if present
+            if xv == 1:
+                return 1
+            if xv == 0:
+                return 0
+        except Exception:
+            pass
+        return np.nan
 
-    # Create binary indicator for presence of children
-    # Accept 'yes'/'no' (case-insensitive) or other encodings; anything starting with 'y' -> 1
-    df['ChildrenYes'] = df['children'].apply(lambda x: 1 if str(x).strip().lower().startswith('y') else 0).astype(int)
+    df['Children'] = df['children'].apply(map_children)
 
-    # Binary indicator for any affair in the past year
-    df['AffairAny'] = (df['affairs'].astype(float) > 0).astype(int)
+    # Map gender to Female indicator (1 = female, 0 = male). Robust to various text cases.
+    def map_female(x):
+        if pd.isna(x):
+            return np.nan
+        if isinstance(x, str):
+            xl = x.strip().lower()
+            if xl.startswith('f') or 'female' in xl:
+                return 1
+            if xl.startswith('m') or 'male' in xl:
+                return 0
+        # if numeric, try heuristic: assume 0/1 where 1 is female? But safer to coerce to NaN
+        try:
+            xv = float(x)
+            # if only two numeric codes present, user should inspect; here treat nan for numeric unexpected values
+            return np.nan
+        except Exception:
+            return np.nan
 
-    # Recode gender to numeric: male = 1, female = 0. If other values present, treat 'male' substring as male.
-    df['gender_male'] = df['gender'].apply(lambda x: 1 if str(x).strip().lower().startswith('m') else 0).astype(int)
+    df['Female'] = df['gender'].apply(map_female)
 
-    # Interaction term for moderation test (Children * Gender)
-    df['Children_gender_interaction'] = df['ChildrenYes'] * df['gender_male']
+    # Create interaction term for moderation test
+    df['Children_Female'] = df['Children'] * df['Female']
 
-    # Standardize continuous controls (zero mean, unit sd) to aid interpretation and numerical stability
-    def z(col: pd.Series) -> pd.Series:
-        col = pd.to_numeric(col, errors='coerce')
-        m = col.mean()
-        s = col.std(ddof=0)
-        if s == 0 or np.isnan(s):
-            # If no variation, return zeros
-            return (col - m).fillna(0.0)
-        return ((col - m) / s).fillna(0.0)
+    # Standardize continuous controls (z-scores). Use ddof=0 to compute population std for consistent scaling.
+    cont_vars = ['age', 'yearsmarried', 'education', 'religiousness', 'occupation', 'rating']
+    for v in cont_vars:
+        # coerce to numeric
+        df[v] = pd.to_numeric(df[v], errors='coerce')
+        mean = df[v].mean()
+        std = df[v].std(ddof=0)
+        if std == 0 or pd.isna(std):
+            # avoid division by zero; set to 0
+            df[v + '_z'] = (df[v] - mean)
+        else:
+            df[v + '_z'] = (df[v] - mean) / std
 
-    df['age_z'] = z(df['age'])
-    df['yearsmarried_z'] = z(df['yearsmarried'])
-    df['religiousness_z'] = z(df['religiousness'])
-    df['education_z'] = z(df['education'])
-    df['occupation_z'] = z(df['occupation'])
-    df['rating_z'] = z(df['rating'])
-
-    # Ensure affairs is numeric (it encodes frequency categories). Keep raw coding for count model.
+    # Ensure affairs is numeric
     df['affairs'] = pd.to_numeric(df['affairs'], errors='coerce')
 
-    # Final drop of any rows that ended up with NA in model columns
-    model_cols = ['affairs', 'AffairAny', 'ChildrenYes', 'gender_male', 'Children_gender_interaction',
-                  'age_z', 'yearsmarried_z', 'religiousness_z', 'education_z', 'occupation_z', 'rating_z']
-    df = df.dropna(subset=model_cols)
+    # Select final columns required by the model and drop rows with missing values in these columns
+    final_cols = [
+        'affairs',
+        'Children',
+        'Female',
+        'Children_Female',
+        'age_z',
+        'yearsmarried_z',
+        'education_z',
+        'religiousness_z',
+        'occupation_z',
+        'rating_z'
+    ]
 
-    # Return transformed dataframe with all variables needed for modeling
-    return df
+    df_final = df[final_cols].dropna()
+
+    # (Optional) cast integer-like indicators to int for readability
+    df_final['Children'] = df_final['Children'].astype(int)
+    df_final['Female'] = df_final['Female'].astype(int)
+    df_final['Children_Female'] = (df_final['Children'] * df_final['Female']).astype(int)
+
+    return df_final
 
 
 # ======== MODEL CODE ========
-def model(df: pd.DataFrame) -> dict:
-    # Assumes df has been transformed with transform(df)
-    # Prepare design matrix
-    model_cols = ['ChildrenYes', 'gender_male', 'Children_gender_interaction',
-                  'age_z', 'yearsmarried_z', 'religiousness_z', 'education_z', 'occupation_z', 'rating_z']
+def model(df: pd.DataFrame):
+    """
+    Fit count-regression models testing whether having children decreases engagement in extramarital affairs.
 
-    X = df[model_cols].astype(float)
-    X = sm.add_constant(X, has_constant='add')
+    Modeling strategy:
+    - Use Negative Binomial (NB) GLM to handle overdispersion relative to Poisson.
+    - Fit a main-effects model with Children and controls.
+    - Fit a second model adding the Children x Female interaction to test whether the effect of children differs by gender.
 
-    results = {}
+    Returns a dictionary with both fitted statsmodels results objects.
+    """
+    # Ensure the required columns are present
+    required = ['affairs', 'Children', 'Female', 'Children_Female', 'age_z', 'yearsmarried_z', 'education_z', 'religiousness_z', 'occupation_z', 'rating_z']
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise KeyError(f"Missing required columns for modeling: {missing}")
 
-    # 1) Logistic regression for probability of any affair (binary outcome)
-    y_logit = df['AffairAny'].astype(float)
-    try:
-        logit_mod = sm.Logit(y_logit, X)
-        logit_res = logit_mod.fit(disp=False)
-        results['logit'] = logit_res
-    except Exception as e:
-        # If Logit fails (e.g., perfect separation), attempt GLM with binomial family as a fallback
-        try:
-            glm_binom = sm.GLM(y_logit, X, family=sm.families.Binomial())
-            glm_binom_res = glm_binom.fit()
-            results['logit_glm_binomial'] = glm_binom_res
-        except Exception as e2:
-            results['logit_error'] = str(e)
+    # Response
+    y = df['affairs']
 
-    # 2) Count model for frequency of affairs. Use Negative Binomial GLM to allow overdispersion.
-    y_count = df['affairs'].astype(float)
-    try:
-        nb_mod = sm.GLM(y_count, X, family=sm.families.NegativeBinomial())
-        nb_res = nb_mod.fit()
-        results['neg_binomial'] = nb_res
-    except Exception as e:
-        # If negative binomial fails, fall back to Poisson and record the error
-        try:
-            pois_mod = sm.GLM(y_count, X, family=sm.families.Poisson())
-            pois_res = pois_mod.fit()
-            results['poisson'] = pois_res
-            results['neg_binomial_error'] = str(e)
-        except Exception as e2:
-            results['neg_binomial_error'] = str(e)
+    # Main-effects predictors
+    X_main = df[['Children', 'Female', 'age_z', 'yearsmarried_z', 'education_z', 'religiousness_z', 'occupation_z', 'rating_z']]
+    X_main = sm.add_constant(X_main)
 
-    # Return a dictionary of model fit results objects (or error messages). Callers can inspect summaries via .summary().
-    return results
+    # Fit Negative Binomial GLM (handles overdispersion)
+    # Note: statsmodels' GLM with NegativeBinomial family estimates an extra parameter for overdispersion.
+    model_nb_main = sm.GLM(y, X_main, family=sm.families.NegativeBinomial()).fit()
+
+    # Interaction model: add Children_Female
+    X_int = df[['Children', 'Female', 'Children_Female', 'age_z', 'yearsmarried_z', 'education_z', 'religiousness_z', 'occupation_z', 'rating_z']]
+    X_int = sm.add_constant(X_int)
+    model_nb_int = sm.GLM(y, X_int, family=sm.families.NegativeBinomial()).fit()
+
+    # Return both fitted model results for inspection
+    return {
+        'nb_main': model_nb_main,
+        'nb_with_interaction': model_nb_int
+    }
 
 

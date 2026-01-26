@@ -1,184 +1,190 @@
 def extract_final_answer(model_output):
     """
-    Extracts per-culture age effects (coefficients, SE, z, p, 95% CI, odds-ratio and OR CI)
-    from a statsmodels GLMResultsWrapper fitted with the formula:
-        MajorityChoice ~ age_c * C(culture) + is_male + majority_first
+    Extracts statistics relevant to how reliance on the majority changes with age
+    (and across cultures to the extent estimated) from the provided model_output.
 
-    Returns:
-      {
-        "object": list_of_dicts_per_culture,
-        "description": brief_explanation_string
-      }
+    Expects model_output to be the dict returned by the modeling function in the prompt,
+    containing keys 'social_choice_model', 'majority_choice_model', and 'mnlogit_model'.
 
-    Each dict in list_of_dicts_per_culture contains:
-      - culture: culture level name (string)
-      - age_coef: estimated log-odds coefficient for age in that culture
-      - se: standard error (delta-method when interaction applies)
-      - z: z-statistic (coef / se)
-      - p: two-sided p-value for the age effect in that culture
-      - ci_lower, ci_upper: 95% Wald confidence interval for the age coefficient
-      - odds_ratio: exp(age_coef)
-      - or_ci_lower, or_ci_upper: 95% CI for the odds ratio
+    Returns a dict with keys:
+      - "object": dict of extracted numeric results (coefficients, SEs, p-values, ORs, CIs)
+      - "description": human-readable interpretation of those results in this study context
     """
-    import re
     import numpy as np
     import pandas as pd
-    from scipy.stats import norm
 
-    # Basic checks
-    if model_output is None:
-        return {
-            "object": None,
-            "description": "No model_output provided."
-        }
+    out = {"object": None, "description": None}
 
-    # Extract coefficients, covariance matrix, etc.
-    params = model_output.params
-    cov = model_output.cov_params()
-    param_names = list(params.index)
+    # Check for multinomial model presence
+    mn = model_output.get('mnlogit_model', None)
+    if mn is None:
+        out["object"] = {"error": "mnlogit_model not present in model_output"}
+        out["description"] = "No multinomial model available to extract age/culture effects."
+        return out
 
-    # Ensure 'age_c' is present
-    if 'age_c' not in param_names:
-        return {
-            "object": None,
-            "description": "The model does not contain a main effect parameter named 'age_c'."
-        }
+    # If mn is an error dict, return that
+    if isinstance(mn, dict) and 'error' in mn:
+        out["object"] = {"error": mn['error']}
+        out["description"] = "Multinomial model failed; cannot extract statistics."
+        return out
 
-    # Try to obtain full list of culture values from the original data if available
-    cultures_in_data = None
+    # At this point mn should be a statsmodels MNLogit results wrapper
     try:
-        df = model_output.model.data.frame
-        if 'culture' in df.columns:
-            # preserve the observed unique values in the data (order as observed)
-            cultures_in_data = list(pd.unique(df['culture']))
-    except Exception:
-        cultures_in_data = None
+        params = mn.params  # DataFrame: rows = non-baseline categories, cols = exog names
+        pvalues = mn.pvalues
+        bse = mn.bse
+    except Exception as e:
+        out["object"] = {"error": f"Could not read params/pvalues/bse from mnlogit_model: {e}"}
+        out["description"] = "Model object does not have expected attributes."
+        return out
 
-    # Find interaction parameter names that involve age_c and culture
-    # Typical names: 'age_c:C(culture)[T.X]' or 'age_c:C(culture)[T.X]'
-    interaction_params = [n for n in param_names if (n != 'age_c') and ('age_c' in n)]
-
-    # Extract culture levels from interaction parameter names using regex
-    extracted_levels = []
-    interaction_map = {}  # map culture_level -> interaction_param_name
-    prog = re.compile(r'\[T\.(.*)\]')  # captures level inside [T.level]
-    for name in interaction_params:
-        m = prog.search(name)
-        if m:
-            level = m.group(1)
+    # Determine which row corresponds to the 'majority' category.
+    # With the original coding y_mn = y - min(y), if min(y)=1 then mapping is:
+    # 0 = unchosen (baseline), 1 = majority, 2 = minority.
+    # MNLogit reports rows in increasing order of endogenous categories (excluding baseline),
+    # so the first row should correspond to majority.
+    try:
+        # Prefer index value 1 if present, else take first row
+        if 1 in params.index:
+            maj_row = 1
         else:
-            # fallback: try splitting by ':' and taking last token
-            parts = name.split(':')[-1]
-            # try to extract after '[' and ']' if present
-            m2 = re.search(r'\[(.*)\]', parts)
-            if m2:
-                level = m2.group(1).replace('T.', '')
+            maj_row = params.index[0]
+        # minority row if present
+        if len(params.index) >= 2:
+            if 2 in params.index:
+                min_row = 2
             else:
-                # As a last resort, use the whole param name
-                level = parts
-        extracted_levels.append(level)
-        interaction_map[level] = name
-
-    extracted_levels = list(dict.fromkeys(extracted_levels))  # unique, preserve order
-
-    # Determine baseline culture: the one not present among extracted_levels (treatment coding baseline)
-    baseline = None
-    if cultures_in_data is not None:
-        # choose the first culture in observed unique list that is NOT in extracted_levels
-        for c in cultures_in_data:
-            if c not in extracted_levels:
-                baseline = c
-                break
-        if baseline is None and len(cultures_in_data) > 0:
-            # fallback to first observed
-            baseline = cultures_in_data[0]
-    else:
-        # if we don't have original data, infer baseline as 'baseline' (unknown)
-        # but we can still report effects for extracted levels and a 'baseline' entry
-        baseline = 'baseline (unnamed)'
-
-    # Build list of cultures to report: baseline + all extracted_levels (avoid duplicates)
-    cultures_to_report = [baseline] + [c for c in extracted_levels if c != baseline]
-
-    results_list = []
-    for cult in cultures_to_report:
-        if cult == baseline:
-            # age effect is the main age_c coefficient
-            coef = params['age_c']
-            var = cov.loc['age_c', 'age_c']
-            interaction_name = None
+                # if first is majority, second is minority
+                min_row = params.index[1]
         else:
-            # age effect = age_c + age_c:C(culture)[T.cult]
-            if cult not in interaction_map:
-                # If interaction param not found, skip or report NA
-                results_list.append({
-                    'culture': cult,
-                    'age_coef': np.nan,
-                    'se': np.nan,
-                    'z': np.nan,
-                    'p': np.nan,
-                    'ci_lower': np.nan,
-                    'ci_upper': np.nan,
-                    'odds_ratio': np.nan,
-                    'or_ci_lower': np.nan,
-                    'or_ci_upper': np.nan,
-                    'note': 'interaction parameter not found for this culture'
-                })
-                continue
-            interaction_name = interaction_map[cult]
-            coef = params['age_c'] + params[interaction_name]
-            # delta-method variance: var(age_c) + var(interaction) + 2*cov(age_c, interaction)
-            var_age = cov.loc['age_c', 'age_c']
-            var_inter = cov.loc[interaction_name, interaction_name]
-            cov_term = cov.loc['age_c', interaction_name]
-            var = var_age + var_inter + 2 * cov_term
+            min_row = None
+    except Exception:
+        maj_row = params.index[0]
+        min_row = params.index[1] if len(params.index) >= 2 else None
 
-        se = np.sqrt(var) if var >= 0 else np.nan
-        if not np.isfinite(se) or se == 0:
-            z = np.nan
-            p = np.nan
-            ci_lower = np.nan
-            ci_upper = np.nan
-        else:
-            z = coef / se
-            p = 2 * (1 - norm.cdf(abs(z)))
-            ci_lower = coef - 1.96 * se
-            ci_upper = coef + 1.96 * se
+    results = {}
 
-        # Odds ratio and CI
+    # Helper to safely extract a coefficient, se, pval for a given row and variable name
+    def _get_stat(row, var):
         try:
-            odds_ratio = float(np.exp(coef))
-            or_ci_lower = float(np.exp(ci_lower))
-            or_ci_upper = float(np.exp(ci_upper))
+            coef = float(params.loc[row, var])
+            se_val = float(bse.loc[row, var])
+            pval = float(pvalues.loc[row, var])
+            z = coef / se_val if se_val != 0 else np.nan
+            # 95% Wald CI on log-odds scale
+            ci_lower = coef - 1.96 * se_val
+            ci_upper = coef + 1.96 * se_val
+            # exponentiate to get odds ratio scale for interpretation (approx. multiplicative change in odds)
+            or_est = float(np.exp(coef))
+            or_ci = (float(np.exp(ci_lower)), float(np.exp(ci_upper)))
+            return {
+                "coef": coef,
+                "se": se_val,
+                "z": z,
+                "p": pval,
+                "ci_95": (ci_lower, ci_upper),
+                "OR": or_est,
+                "OR_95": or_ci
+            }
         except Exception:
-            odds_ratio = np.nan
-            or_ci_lower = np.nan
-            or_ci_upper = np.nan
+            return None
 
-        results_list.append({
-            'culture': cult,
-            'age_coef': float(coef) if np.isfinite(coef) else np.nan,
-            'se': float(se) if np.isfinite(se) else np.nan,
-            'z': float(z) if np.isfinite(z) else np.nan,
-            'p': float(p) if np.isfinite(p) else np.nan,
-            'ci_lower': float(ci_lower) if np.isfinite(ci_lower) else np.nan,
-            'ci_upper': float(ci_upper) if np.isfinite(ci_upper) else np.nan,
-            'odds_ratio': odds_ratio,
-            'or_ci_lower': or_ci_lower,
-            'or_ci_upper': or_ci_upper,
-            'interaction_param': interaction_name
-        })
+    # Extract age coefficient for majority vs unchosen
+    age_var = 'age_centered'
+    maj_age_stats = _get_stat(maj_row, age_var)
+    results['majority_vs_unchosen_age'] = maj_age_stats
 
-    description = (
-        "This output reports, for each cultural site, the estimated effect of age (age_c) on the log-odds "
-        "of choosing the majority option, along with SE, z, two-sided p-value, 95% Wald confidence interval, "
-        "and the corresponding odds ratio (with 95% CI). The baseline culture is the reference level used by "
-        "the model (no 'C(culture)[T.X]' term). For non-baseline cultures, the age effect is the sum of the "
-        "main 'age_c' coefficient and the culture-specific age-by-culture interaction parameter (delta-method "
-        "is used to compute SE and CI)."
+    # Extract age coefficient for minority vs unchosen, if available
+    if min_row is not None:
+        min_age_stats = _get_stat(min_row, age_var)
+    else:
+        min_age_stats = None
+    results['minority_vs_unchosen_age'] = min_age_stats
+
+    # Robustly identify culture main effect columns for majority vs unchosen.
+    # Column labels may not all be plain strings (could be ints, tuples, etc.), so
+    # normalize to strings for detection but keep original label for indexing.
+    def _col_str(c):
+        # Return a readable string for a column label
+        if isinstance(c, str):
+            return c
+        if isinstance(c, (list, tuple)):
+            # try to find a string element that looks like a column name
+            for part in c:
+                if isinstance(part, str):
+                    return part
+            # fallback to stringifying the first element
+            return str(c[0]) if len(c) > 0 else str(c)
+        return str(c)
+
+    try:
+        culture_cols = [c for c in params.columns if _col_str(c).startswith('culture_')]
+    except Exception:
+        # If params.columns isn't iterable as expected, set empty
+        culture_cols = []
+
+    culture_effects = {}
+    for c in culture_cols:
+        stat = _get_stat(maj_row, c)
+        culture_effects[_col_str(c)] = stat
+    results['majority_vs_unchosen_culture_effects'] = culture_effects
+
+    # Note about interactions: the original logistic models included age x culture interactions,
+    # but the MNLogit here was fit without interactions (to aid convergence). So we cannot
+    # directly assess culture-specific age slopes from this MNLogit.
+    # We include a short summary interpretation below.
+
+    out["object"] = results
+
+    # Build description:
+    desc_lines = []
+    desc_lines.append(
+        "Extracted statistics are from the multinomial logistic model predicting choice (unchosen=baseline, "
+        "majority, minority). Coefficients are log-odds differences vs the baseline (unchosen)."
     )
+    if maj_age_stats is not None:
+        desc_lines.append(
+            f"Age effect (majority vs unchosen): coef = {maj_age_stats['coef']:.3f}, SE = {maj_age_stats['se']:.3f}, "
+            f"z = {maj_age_stats['z']:.3f}, p = {maj_age_stats['p']:.3g}. "
+            f"Odds ratio per year (exp(coef)) = {maj_age_stats['OR']:.3f} "
+            f"(95% CI on OR = [{maj_age_stats['OR_95'][0]:.3f}, {maj_age_stats['OR_95'][1]:.3f}])."
+        )
+        if maj_age_stats['p'] < 0.05:
+            desc_lines.append("Interpretation: Older children have significantly higher (or lower if OR<1) odds of choosing the majority option vs an unchosen option per year of age (age was mean-centered).")
+        else:
+            desc_lines.append("Interpretation: The effect of age on choosing the majority option vs an unchosen option is not statistically significant at alpha=0.05.")
+    else:
+        desc_lines.append("Could not extract the age coefficient for majority vs unchosen.")
 
-    return {
-        "object": results_list,
-        "description": description
-    }
+    if min_age_stats is not None:
+        desc_lines.append(
+            f"Age effect (minority vs unchosen): coef = {min_age_stats['coef']:.3f}, SE = {min_age_stats['se']:.3f}, p = {min_age_stats['p']:.3g}."
+        )
+    else:
+        desc_lines.append("Minority vs unchosen equation not available or age coefficient not extractable.")
+
+    # Culture main effects summary (majority vs unchosen)
+    if culture_effects:
+        non_null = {k: v for k, v in culture_effects.items() if v is not None}
+        if non_null:
+            desc_lines.append("Culture main effects on majority vs unchosen (coefficients are log-odds relative to reference site):")
+            for k, v in non_null.items():
+                desc_lines.append(f"  {k}: coef={v['coef']:.3f}, p={v['p']:.3g}, OR={v['OR']:.3f}")
+            desc_lines.append(
+                "Note: Interactions age x culture were not included in this MNLogit model, so these are baseline cross-cultural differences in majority choice, not culture-specific developmental slopes."
+            )
+        else:
+            desc_lines.append("Culture dummy coefficients were not extractable.")
+    else:
+        desc_lines.append("No culture dummy columns found in model output.")
+
+    # Mention that original logistic models with interactions failed to return robust results
+    sc_err = model_output.get('social_choice_model')
+    maj_err = model_output.get('majority_choice_model')
+    if isinstance(sc_err, dict) and 'error' in sc_err:
+        desc_lines.append("Note: The separate logistic models that included age x culture interactions failed (see social_choice_model error). We therefore rely on the MNLogit main-effects model; direct tests of age-by-culture moderation are not available from that model.")
+    if isinstance(maj_err, dict) and 'error' in maj_err:
+        desc_lines.append("Note: The majority_choice_model also failed; cannot extract interaction estimates from that model.")
+
+    out["description"] = "\n".join(desc_lines)
+    return out

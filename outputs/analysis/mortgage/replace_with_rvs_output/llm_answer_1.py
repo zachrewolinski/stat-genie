@@ -1,144 +1,133 @@
 def extract_final_answer(model_output):
     """
-    Extracts statistics for the 'female' coefficient from a fitted binary/logit model output.
-
-    Accepts either:
-      - a statsmodels result object (BinaryResultsWrapper or GLMResults), or
-      - a dict containing 'model_result' (as produced by the modeling function) or
-        precomputed 'odds_ratios' / 'odds_CI_lower' / 'odds_CI_upper'.
-
-    Returns a dictionary with:
-      - "object": dict with numeric results: coefficient (log-odds), p-value,
-                  odds_ratio, CI_lower, CI_upper, and a boolean 'significant' (at alpha=0.05)
-      - "description": short human-readable interpretation of the effect of being female
-                       on mortgage acceptance.
+    Extracts statistics about the effect of 'female' on mortgage approval from the provided
+    model output (either a dict with keys 'model_result' and/or 'odds_ratios', or a raw
+    statsmodels result object). Returns a dict with keys:
+      - "object": dict with numeric results (coef, odds_ratio, 95% CI, p_value, significant)
+      - "description": short plain-language interpretation in context
     """
     import numpy as np
+    import pandas as pd
 
-    # Helper to format numeric safely
-    def _fmt(x, dig=4):
-        try:
-            return float(np.round(x, dig))
-        except Exception:
-            return x
+    # Initialize outputs
+    coef = None
+    odds_ratio = None
+    ci_lower = None
+    ci_upper = None
+    p_value = None
 
-    # Try to obtain a statsmodels result object
-    result = None
-    if hasattr(model_output, 'params') and hasattr(model_output, 'pvalues'):
-        # model_output looks like a statsmodels result object
-        result = model_output
-    elif isinstance(model_output, dict) and 'model_result' in model_output:
-        result = model_output['model_result']
+    # Unpack possible containers
+    res = None
+    or_df = None
+    if isinstance(model_output, dict):
+        res = model_output.get('model_result', None)
+        or_df = model_output.get('odds_ratios', None)
     else:
-        # May still contain precomputed odds ratios and CIs
-        result = None
+        # user may have passed the raw result object directly
+        res = model_output
 
-    # Initialize return fields
-    output = {
-        'coefficient': None,
-        'p_value': None,
-        'odds_ratio': None,
-        'CI_lower': None,
-        'CI_upper': None,
-        'significant': None
+    # Try to extract from the statsmodels result object (best source for p-value)
+    if res is not None:
+        try:
+            # coefficients
+            coef = float(res.params['female'])
+        except Exception:
+            try:
+                # sometimes params might be a numpy array; try positional lookup
+                coef = float(res.params.loc['female'])
+            except Exception:
+                coef = None
+
+        try:
+            p_value = float(res.pvalues['female'])
+        except Exception:
+            try:
+                p_value = float(res.pvalues.loc['female'])
+            except Exception:
+                p_value = None
+
+        try:
+            ci = res.conf_int().loc['female']
+            # conf_int returns two columns (lower, upper)
+            ci_lower = float(ci[0])
+            ci_upper = float(ci[1])
+        except Exception:
+            ci_lower = ci_upper = None
+
+    # If odds ratios DataFrame is available, prefer those for OR and CI (they are already exp'd)
+    if or_df is not None:
+        try:
+            # or_df may have an index including 'female'
+            if 'female' in or_df.index:
+                odds_ratio = float(or_df.loc['female', 'odds_ratio'])
+                # or_df stores ci in exp form as ci_lower/ci_upper
+                if pd.notna(or_df.loc['female', 'ci_lower']):
+                    ci_lower = float(or_df.loc['female', 'ci_lower'])
+                if pd.notna(or_df.loc['female', 'ci_upper']):
+                    ci_upper = float(or_df.loc['female', 'ci_upper'])
+            else:
+                # attempt to access by position where column name equals 'female'
+                # fall back to using coef to compute OR
+                pass
+        except Exception:
+            odds_ratio = None
+
+    # If odds_ratio still not set but coef is available, compute it
+    if odds_ratio is None and coef is not None:
+        odds_ratio = float(np.exp(coef))
+
+    # If CI on log-odds available but not on OR, exponentiate
+    if (ci_lower is None or ci_upper is None) and res is not None:
+        try:
+            ci_log = res.conf_int().loc['female'].astype(float).values
+            ci_lower = float(np.exp(ci_log[0]))
+            ci_upper = float(np.exp(ci_log[1]))
+        except Exception:
+            pass
+
+    # Determine statistical significance at alpha = 0.05
+    significant = None
+    alpha = 0.05
+    if p_value is not None:
+        significant = (p_value < alpha)
+    elif (ci_lower is not None and ci_upper is not None):
+        # If 95% CI for odds ratio does not include 1, it's significant
+        significant = not (ci_lower <= 1.0 <= ci_upper)
+
+    # Build the object to return
+    result_object = {
+        'female_coef_log_odds': None if coef is None else float(coef),
+        'female_odds_ratio': None if odds_ratio is None else float(odds_ratio),
+        'ci_95_odds_ratio': None if (ci_lower is None or ci_upper is None) else [float(ci_lower), float(ci_upper)],
+        'p_value': None if p_value is None else float(p_value),
+        'significant_at_0.05': significant
     }
 
-    try:
-        if result is not None:
-            # Extract from statsmodels result object
-            # Use .params, .pvalues, .conf_int()
-            params = result.params
-            pvalues = result.pvalues
-            conf = result.conf_int()
+    # Create a plain-language description
+    # Give a concise interpretation based on available numbers
+    parts = []
+    if result_object['female_odds_ratio'] is not None:
+        parts.append(f"Estimated odds ratio for female vs male = {result_object['female_odds_ratio']:.3f}")
+    elif result_object['female_coef_log_odds'] is not None:
+        parts.append(f"Estimated log-odds coefficient for female = {result_object['female_coef_log_odds']:.3f}")
 
-            if 'female' not in params.index:
-                raise KeyError("The model result does not contain a 'female' coefficient")
+    if result_object['ci_95_odds_ratio'] is not None:
+        lo, hi = result_object['ci_95_odds_ratio']
+        parts.append(f"95% CI for odds ratio = [{lo:.3f}, {hi:.3f}]")
 
-            coef = float(params['female'])
-            pval = float(pvalues['female']) if 'female' in pvalues.index else None
-            ci_lower_log, ci_upper_log = float(conf.loc['female', 0]), float(conf.loc['female', 1])
+    if result_object['p_value'] is not None:
+        parts.append(f"p-value = {result_object['p_value']:.3g}")
 
-            odds = float(np.exp(coef))
-            ci_lower = float(np.exp(ci_lower_log))
-            ci_upper = float(np.exp(ci_upper_log))
-
-            output.update({
-                'coefficient': _fmt(coef, 6),
-                'p_value': _fmt(pval, 6) if pval is not None else None,
-                'odds_ratio': _fmt(odds, 6),
-                'CI_lower': _fmt(ci_lower, 6),
-                'CI_upper': _fmt(ci_upper, 6),
-                'significant': (pval is not None) and (pval < 0.05)
-            })
-        else:
-            # Fall back to reading precomputed odds ratios and CIs from the dict
-            if not isinstance(model_output, dict):
-                raise ValueError("model_output must be a statsmodels result or a dict with precomputed values")
-
-            or_dict = model_output.get('odds_ratios', {})
-            ci_low_dict = model_output.get('odds_CI_lower', {})
-            ci_up_dict = model_output.get('odds_CI_upper', {})
-
-            if 'female' not in or_dict:
-                raise KeyError("No 'female' entry found in provided odds ratios")
-
-            odds = float(or_dict['female'])
-            ci_lower = float(ci_low_dict['female']) if 'female' in ci_low_dict else None
-            ci_upper = float(ci_up_dict['female']) if 'female' in ci_up_dict else None
-
-            # Coefficient and p-value not available in this branch
-            output.update({
-                'coefficient': None,
-                'p_value': None,
-                'odds_ratio': _fmt(odds, 6),
-                'CI_lower': _fmt(ci_lower, 6) if ci_lower is not None else None,
-                'CI_upper': _fmt(ci_upper, 6) if ci_upper is not None else None,
-                'significant': None
-            })
-    except Exception as e:
-        # Return a clear message if extraction failed
-        return {
-            "object": None,
-            "description": f"Failed to extract 'female' statistics from model_output: {e}"
-        }
-
-    # Build interpretation string
-    if output['odds_ratio'] is None:
-        description = "Could not extract odds ratio for 'female' from the provided model output."
+    if result_object['significant_at_0.05'] is True:
+        parts.append("Conclusion: Statistically significant at α=0.05 — evidence that gender is associated with approval odds after controls.")
+    elif result_object['significant_at_0.05'] is False:
+        parts.append("Conclusion: Not statistically significant at α=0.05 — no evidence that gender affects approval odds after controls.")
     else:
-        or_val = output['odds_ratio']
-        ci_l = output['CI_lower']
-        ci_u = output['CI_upper']
-        coef = output['coefficient']
-        pval = output['p_value']
-        sig = output['significant']
+        parts.append("Conclusion: Unable to determine statistical significance from the available output.")
 
-        # Percent change in odds
-        try:
-            pct_change = (float(or_val) - 1.0) * 100.0
-            pct_str = f"{_fmt(pct_change,3)}%"
-        except Exception:
-            pct_str = "N/A"
-
-        # Significance wording
-        if sig is True:
-            sig_text = "statistically significant (p < 0.05)"
-        elif sig is False:
-            sig_text = "not statistically significant (p >= 0.05)"
-        else:
-            sig_text = "statistical significance could not be determined (p-value not available)"
-
-        # Compose description
-        description = (
-            f"Female coefficient (log-odds) = {coef}. "
-            f"Odds ratio = {or_val} (95% CI: {ci_l} to {ci_u}). "
-            f"This implies female applicants have about {pct_str} change in the odds of mortgage acceptance "
-            f"compared to male applicants. The effect is {sig_text}."
-        )
-        if pval is not None:
-            description += f" (p = {_fmt(pval,6)})"
+    description = " ".join(parts)
 
     return {
-        "object": output,
+        "object": result_object,
         "description": description
     }

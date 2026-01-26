@@ -1,212 +1,129 @@
-from typing import Any
+from typing import Dict, FrozenSet, List, Literal, Optional, Set, Tuple, Any
 import numpy as np
 import pandas as pd
+import sklearn
+import scipy
 import statsmodels.api as sm
-
-# Load raw data (path retained from original file; can be overwritten by caller)
+import statsmodels.formula.api as smf
+import matplotlib.pyplot as plt
+import pickle
+  
 df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/analysis/hurricane/shuffle_names_output/hurricane.csv')
-
 
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Transform the raw hurricane dataframe into the analytic dataframe.
-
-    Produces a dataframe with the exact required final columns:
-      - 'deaths', 'femininity_z', 'female_name', 'wind', 'min_pressure',
-        'saffir', 'year', 'log_property_damage'
-
-    This function is robust to missing control columns by imputing reasonable
-    defaults (medians or zeros) so that downstream modeling does not fail due
-    to complete-case filtering on many controls. It requires that the input
-    dataframe contain usable values for deaths and the femininity rating; if
-    those are missing for all rows the returned dataframe will be empty.
-    """
     df = df.copy()
 
-    # Map possible source columns to the canonical final columns.
-    # Dependent variable: deaths (try common alternatives)
+    # Required raw columns we expect in this dataset
+    # 'name' = coder-rated masculinity<->femininity index (higher => more feminine)
+    # 'ndam15' = total deaths caused by the hurricane
+    # 'ind' = normalized property damage (raw dollar amounts adjusted)
+    # 'wind' = maximum wind speed at landfall
+    # 'min' = minimum central pressure at landfall
+    # 'masfem' = Saffir-Simpson category / numeric intensity code
+    # 'alldeaths' = year of storm (dataset naming is idiosyncratic)
+    # 'elapsedyrs' = binary gender indicator for the name (0 male, 1 female)
+
+    # Drop rows missing the minimal set needed for the main analysis
+    required = [c for c in ['name', 'ndam15', 'wind', 'min', 'masfem', 'alldeaths'] if c in df.columns]
+    if len(required) > 0:
+        df = df.dropna(subset=required)
+
+    # Winsorize deaths and damage at 1st and 99th percentiles to reduce extreme influence
     if 'ndam15' in df.columns:
-        df['deaths'] = pd.to_numeric(df['ndam15'], errors='coerce')
-    elif 'ndam' in df.columns:
-        df['deaths'] = pd.to_numeric(df['ndam'], errors='coerce')
-    else:
-        # fallback: try any existing 'deaths' column
-        df['deaths'] = pd.to_numeric(df.get('deaths'), errors='coerce')
+        low = df['ndam15'].quantile(0.01)
+        high = df['ndam15'].quantile(0.99)
+        df['ndam15_winsor'] = df['ndam15'].clip(lower=low, upper=high)
+        # log transform (log1p to handle zeros)
+        df['log_deaths'] = np.log1p(df['ndam15_winsor'])
 
-    # Feminine/masculinity continuous rating: expect 'name' per schema, but allow 'femininity'
-    femininity_candidates = ['name', 'femininity', 'femininity_score', 'masfem']
-    femininity_col = None
-    for col in femininity_candidates:
-        if col in df.columns:
-            # coerce to numeric; if strings are present this will yield NaN
-            series = pd.to_numeric(df[col], errors='coerce')
-            # accept if at least one non-NaN value
-            if series.notna().any():
-                df['femininity'] = series
-                femininity_col = col
-                break
-    if femininity_col is None:
-        # as a last resort, attempt to coerce an existing 'name' even if it's string;
-        # this will likely be NaN, but keep consistent column name
-        df['femininity'] = pd.to_numeric(df.get('name'), errors='coerce')
+    if 'ind' in df.columns:
+        low = df['ind'].quantile(0.01)
+        high = df['ind'].quantile(0.99)
+        df['ind_winsor'] = df['ind'].clip(lower=low, upper=high)
+        df['log_damage'] = np.log1p(df['ind_winsor'])
 
-    # Binary female name indicator (0 = male, 1 = female) expected 'elapsedyrs' per schema,
-    # but allow a few alternatives and coerce to 0/1
-    female_candidates = ['elapsedyrs', 'female', 'is_female', 'female_name']
-    female_col = None
-    for col in female_candidates:
-        if col in df.columns:
-            series = pd.to_numeric(df[col], errors='coerce')
-            if series.notna().any():
-                df['female_name'] = series
-                female_col = col
-                break
-    if female_col is None:
-        # create column if missing (will be filled/imputed later)
-        df['female_name'] = pd.NA
+    # Standardize (z-score) the continuous predictors/controls used in the regression
+    # Note: use population sd (ddof=0) to be explicit and stable for small samples
+    if 'name' in df.columns:
+        df['femininity_z'] = (df['name'] - df['name'].mean()) / (df['name'].std(ddof=0) if df['name'].std(ddof=0) != 0 else 1.0)
 
-    # Controls: wind, min_pressure (from 'min'), saffir (from 'masfem'), year (from 'alldeaths' or 'year'),
-    # property_damage (from 'ind')
-    df['wind'] = pd.to_numeric(df.get('wind'), errors='coerce')
-    df['min_pressure'] = pd.to_numeric(df.get('min'), errors='coerce')
-    df['saffir'] = pd.to_numeric(df.get('masfem'), errors='coerce')
+    if 'wind' in df.columns:
+        df['wind_z'] = (df['wind'] - df['wind'].mean()) / (df['wind'].std(ddof=0) if df['wind'].std(ddof=0) != 0 else 1.0)
 
+    if 'min' in df.columns:
+        df['min_z'] = (df['min'] - df['min'].mean()) / (df['min'].std(ddof=0) if df['min'].std(ddof=0) != 0 else 1.0)
+
+    if 'masfem' in df.columns:
+        df['masfem_z'] = (df['masfem'] - df['masfem'].mean()) / (df['masfem'].std(ddof=0) if df['masfem'].std(ddof=0) != 0 else 1.0)
+
+    # 'alldeaths' in this dataset actually encodes the year of the storm
     if 'alldeaths' in df.columns:
-        df['year'] = pd.to_numeric(df['alldeaths'], errors='coerce')
-    else:
-        df['year'] = pd.to_numeric(df.get('year'), errors='coerce')
+        df['year_z'] = (df['alldeaths'] - df['alldeaths'].mean()) / (df['alldeaths'].std(ddof=0) if df['alldeaths'].std(ddof=0) != 0 else 1.0)
 
-    df['property_damage'] = pd.to_numeric(df.get('ind'), errors='coerce')
+    # Binary indicator if present
+    if 'elapsedyrs' in df.columns:
+        # ensure it's 0/1 integer
+        df['is_female_name'] = df['elapsedyrs'].astype(int)
 
-    # Require at minimum that deaths and femininity be present (non-missing).
-    # These are the essential variables for the analysis. If these are missing,
-    # resulting dataframe will be empty.
-    df = df[df['deaths'].notna() & df['femininity'].notna()].copy()
+    # Drop any rows missing our primary IV or DV
+    required_for_model = [c for c in ['femininity_z', 'log_deaths'] if c in df.columns]
+    if len(required_for_model) > 0:
+        df = df.dropna(subset=required_for_model)
 
-    # Ensure non-negative death counts and numeric type
-    df['deaths'] = pd.to_numeric(df['deaths'], errors='coerce')
-    df = df[df['deaths'].ge(0)]
-
-    # Impute remaining controls so that rows are not dropped later due to missingness.
-    # Use medians for continuous controls where available; fall back to sensible defaults.
-    # wind
-    if df['wind'].notna().any():
-        wind_median = float(df['wind'].median(skipna=True))
-    else:
-        wind_median = 0.0
-    df['wind'] = df['wind'].fillna(wind_median).astype(float)
-
-    # min_pressure
-    if df['min_pressure'].notna().any():
-        min_median = float(df['min_pressure'].median(skipna=True))
-    else:
-        min_median = 0.0
-    df['min_pressure'] = df['min_pressure'].fillna(min_median).astype(float)
-
-    # saffir (ordinal)
-    if df['saffir'].notna().any():
-        saffir_median = float(df['saffir'].median(skipna=True))
-    else:
-        saffir_median = 1.0
-    # round saffir to nearest integer within 1-5
-    df['saffir'] = df['saffir'].fillna(saffir_median).round().clip(lower=1, upper=5).astype(int)
-
-    # year
-    if df['year'].notna().any():
-        year_median = int(df['year'].median(skipna=True))
-    else:
-        year_median = 0
-    df['year'] = df['year'].fillna(year_median).astype(int)
-
-    # property damage -> log transform
-    df['property_damage'] = df['property_damage'].fillna(0.0).astype(float)
-    df['log_property_damage'] = np.log1p(df['property_damage'])
-
-    # female_name: coerce to binary 0/1. If values are not present, default to 0.
-    df['female_name'] = pd.to_numeric(df['female_name'], errors='coerce').fillna(0)
-    # Map anything equal to 1 to 1, everything else to 0
-    df['female_name'] = df['female_name'].apply(lambda x: 1 if float(x) == 1.0 else 0).astype(int)
-
-    # Standardize femininity for interpretability (z-score)
-    femininity_mean = float(df['femininity'].mean())
-    femininity_std = float(df['femininity'].std(ddof=0))
-    if (femininity_std == 0) or np.isnan(femininity_std):
-        df['femininity_z'] = 0.0
-    else:
-        df['femininity_z'] = (df['femininity'] - femininity_mean) / femininity_std
-
-    # Final dataframe: keep only the required final columns in the specified names
-    final_cols = [
-        'deaths', 'femininity_z', 'female_name', 'wind', 'min_pressure',
-        'saffir', 'year', 'log_property_damage'
+    # Keep only columns relevant for modeling (plus raw columns for reference)
+    keep_cols = [
+        'femininity_z', 'log_deaths', 'log_damage',
+        'wind_z', 'min_z', 'masfem_z', 'year_z', 'is_female_name',
+        # keep raw originals for traceability if present
+        'name', 'ndam15', 'ind', 'wind', 'min', 'masfem', 'alldeaths', 'elapsedyrs'
     ]
-    # Ensure all final columns exist (they should, given the steps above)
-    for col in final_cols:
-        if col not in df.columns:
-            # create placeholder if somehow missing
-            df[col] = 0.0
-
-    df = df[final_cols].reset_index(drop=True)
+    # Filter to columns that exist in df
+    keep_cols = [c for c in keep_cols if c in df.columns]
+    df = df[keep_cols].copy()
 
     return df
 
 
 # ======== MODEL CODE ========
-def model(df: pd.DataFrame) -> Any:
-    """
-    Fit a Negative Binomial regression predicting hurricane fatalities from name femininity
-    controlling for storm intensity and year-specific factors.
+def model(df: pd.DataFrame):
+    df = df.copy()
 
-    Model specification (main):
-      deaths ~ femininity_z + female_name + wind + min_pressure + saffir + year + log_property_damage
+    # Build main model predicting log fatalities
+    # Select controls that exist in the transformed dataframe
+    base_controls = [c for c in ['wind_z', 'min_z', 'masfem_z', 'year_z', 'is_female_name'] if c in df.columns]
 
-    Returns the fitted model results object (statsmodels). Also prints summary.
-    """
-    # Copy to avoid modifying the caller's dataframe
-    data = df.copy()
+    # Prepare design matrix for main model
+    X_cols = ['femininity_z'] + base_controls
+    X = df[X_cols].astype(float)
+    X = sm.add_constant(X)
+    y = df['log_deaths'].astype(float)
 
-    # Ensure required columns exist
-    predictors = [
-        'femininity_z', 'female_name', 'wind', 'min_pressure', 'saffir', 'year', 'log_property_damage'
-    ]
-    missing = [c for c in predictors + ['deaths'] if c not in data.columns]
-    if missing:
-        raise ValueError(f"Transformed dataframe is missing required columns: {missing}")
+    # Fit OLS with robust (HC3) standard errors
+    model_main = sm.OLS(y, X).fit(cov_type='HC3')
 
-    # Drop any rows with missing outcome
-    data = data[data['deaths'].notna()].copy()
+    # Interaction model: femininity * wind (tests whether effect of perceived femininity differs by intensity)
+    interaction_results = None
+    if 'wind_z' in df.columns:
+        df['fem_x_wind'] = df['femininity_z'] * df['wind_z']
+        X_int_cols = X_cols + ['fem_x_wind']
+        X_int = df[X_int_cols].astype(float)
+        X_int = sm.add_constant(X_int)
+        interaction_results = sm.OLS(y, X_int).fit(cov_type='HC3')
 
-    # Prepare design matrix
-    X = data[predictors].copy()
+    # Robustness model: predict log property damage (alternative outcome)
+    damage_results = None
+    if 'log_damage' in df.columns:
+        y2 = df['log_damage'].astype(float)
+        X2 = df[X_cols].astype(float)
+        X2 = sm.add_constant(X2)
+        damage_results = sm.OLS(y2, X2).fit(cov_type='HC3')
 
-    # Ensure numeric and no NA in X: impute with column medians if necessary
-    for col in X.columns:
-        if X[col].isna().any():
-            if X[col].dtype.kind in 'biufc':
-                median = X[col].median(skipna=True)
-                if np.isnan(median):
-                    median = 0.0
-                X[col] = X[col].fillna(median)
-            else:
-                X[col] = pd.to_numeric(X[col], errors='coerce').fillna(0.0)
-        # cast to float for statsmodels
-        X[col] = X[col].astype(float)
+    # Return fitted model objects (statsmodels RegressionResults). Caller can print .summary() or extract coefficients.
+    return {
+        'deaths_model': model_main,
+        'interaction_model': interaction_results,
+        'damage_model': damage_results
+    }
 
-    # Add constant
-    X = sm.add_constant(X, has_constant='add')
 
-    y = pd.to_numeric(data['deaths'], errors='coerce').astype(float)
-
-    # After imputation, ensure there is at least one observation
-    if X.shape[0] == 0 or y.shape[0] == 0:
-        raise ValueError("No observations available after preprocessing for model fitting.")
-
-    # Fit Negative Binomial GLM
-    model_glm = sm.GLM(y, X, family=sm.families.NegativeBinomial())
-    results = model_glm.fit(maxiter=100, disp=False)
-
-    # Print summary for immediate inspection
-    print(results.summary())
-
-    return results

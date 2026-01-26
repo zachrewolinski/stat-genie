@@ -1,87 +1,79 @@
 def extract_final_answer(model_output):
     """
-    Extracts key statistics for the 'StudentTeacherRatio' coefficient from a fitted
-    statsmodels RegressionResultsWrapper and returns a concise interpretation.
+    Extracts statistics for the 'StudentTeacherRatio' coefficient from a fitted statsmodels
+    regression results object and provides a concise interpretation answering whether
+    a lower student-teacher ratio is associated with higher academic performance.
 
-    Returns a dict with:
-      - "object": dict with numeric results (coef, se, t, p, 95% CI, effect per 10 students, conclusion_bool)
-      - "description": human-readable explanation of what these numbers mean for the question
-                       "Is a lower student-teacher ratio associated with higher academic performance?"
+    Returns a dictionary with keys:
+      - "object": a dict of extracted numeric results and the inferred conclusion
+      - "description": a short human-readable explanation of the numbers and conclusion
     """
-    # Basic validation
-    if model_output is None:
-        raise ValueError("model_output is None")
-    # Ensure it's a statsmodels results object with necessary attributes
-    for attr in ("params", "bse", "tvalues", "pvalues", "conf_int"):
-        if not hasattr(model_output, attr):
-            raise ValueError(f"model_output missing required attribute: {attr}")
-
-    param_name = 'StudentTeacherRatio'
-    params = model_output.params
-    if param_name not in params.index:
-        raise ValueError(f"Parameter '{param_name}' not found in model parameters: {list(params.index)}")
-
-    coef = float(model_output.params[param_name])
-    se = float(model_output.bse[param_name]) if param_name in model_output.bse.index else None
-    t_stat = float(model_output.tvalues[param_name]) if param_name in model_output.tvalues.index else None
-    p_value = float(model_output.pvalues[param_name]) if param_name in model_output.pvalues.index else None
-
-    # 95% CI
+    # Ensure model_output looks like a statsmodels RegressionResultsWrapper
+    # and contains the coefficient for StudentTeacherRatio
+    var = 'StudentTeacherRatio'
     try:
-        ci_df = model_output.conf_int(alpha=0.05)
-        ci_lower, ci_upper = (float(ci_df.loc[param_name, 0]), float(ci_df.loc[param_name, 1]))
+        params = model_output.params
+    except Exception as e:
+        raise ValueError("Provided model_output does not appear to be a statsmodels results object.") from e
+
+    if var not in params.index:
+        raise ValueError(f"Variable '{var}' not found in the model results. Available variables: {list(params.index)}")
+
+    # Extract statistics
+    coef = float(params[var])
+    # robust standard errors are available via bse
+    se = float(model_output.bse[var]) if hasattr(model_output, 'bse') else None
+    tstat = float(model_output.tvalues[var]) if hasattr(model_output, 'tvalues') else None
+    pval = float(model_output.pvalues[var]) if hasattr(model_output, 'pvalues') else None
+
+    # 95% confidence interval
+    try:
+        ci = model_output.conf_int(alpha=0.05).loc[var].tolist()
+        ci_lower, ci_upper = float(ci[0]), float(ci[1])
     except Exception:
-        ci_lower, ci_upper = (None, None)
+        ci_lower, ci_upper = None, None
 
-    # Practical interpretation: effect per 10-student change
-    effect_per_10 = coef * 10.0
-
-    # Conclusion about whether lower ratio (fewer students per teacher) is associated with higher performance.
-    # Note: StudentTeacherRatio is "students per teacher"; a negative coef implies that increasing ratio (more students)
-    # decreases scores, so lower ratio is associated with higher scores.
-    if p_value is None:
-        conclusion_bool = None
-        conclusion_text = "Could not determine statistical significance (p-value not available)."
+    # Determine statistical significance (two-sided alpha=0.05) and direction
+    significant = (pval is not None) and (pval < 0.05)
+    # Interpretation: StudentTeacherRatio = students per teacher; lower values = fewer students per teacher.
+    if coef < 0:
+        direction = "Lower student-teacher ratio (fewer students per teacher) is associated with HIGHER AvgScore"
+    elif coef > 0:
+        direction = "Lower student-teacher ratio (fewer students per teacher) is associated with LOWER AvgScore (i.e., higher ratio -> higher AvgScore)"
     else:
-        statistically_significant = (p_value < 0.05)
-        if coef < 0:
-            direction = "lower student-teacher ratio is associated with higher AvgScore"
-        elif coef > 0:
-            direction = "lower student-teacher ratio is associated with lower AvgScore"
-        else:
-            direction = "no association (coefficient is zero)"
+        direction = "No directional association (coefficient is zero)"
 
-        if statistically_significant:
-            conclusion_bool = (coef < 0)  # True if lower ratio -> higher score (coef negative) and significant
-            concl_sign = "statistically significant (p < 0.05)"
-        else:
-            conclusion_bool = False
-            concl_sign = "not statistically significant (p >= 0.05)"
+    if significant:
+        conclusion = "Yes, there is statistically significant evidence supporting the association described by the sign of the coefficient."
+    else:
+        conclusion = "No, there is not statistically significant evidence at the 5% level to conclude an association."
 
-        conclusion_text = (
-            f"The estimated coefficient on StudentTeacherRatio is {coef:.4f} (SE={se:.4f}, t={t_stat:.2f}, p={p_value:.3g}). "
-            f"95% CI = [{ci_lower:.4f}, {ci_upper:.4f}].\n"
-            f"Interpretation: a one-unit increase in StudentTeacherRatio (one more student per teacher) is associated "
-            f"with a change of {coef:.4f} points in AvgScore. Equivalently, reducing the ratio by 10 students is "
-            f"associated with a change of {effect_per_10:.4f} points.\n"
-            f"Direction: {direction}. Statistical significance: {concl_sign}.\n"
-            f"Answer to the question 'Is a lower student-teacher ratio associated with higher academic performance?': "
-            f"{'Yes' if conclusion_bool else 'No (not supported)'}."
-        )
-
-    result_object = {
+    # Build returned object
+    result_obj = {
+        "variable": var,
         "coef": coef,
-        "se": se,
-        "t_stat": t_stat,
-        "p_value": p_value,
-        "ci_lower": ci_lower,
-        "ci_upper": ci_upper,
-        "effect_per_10_students": effect_per_10,
-        # conclusion_bool is True only when coef < 0 and statistically significant at 5%
-        "conclusion_bool": conclusion_bool,
+        "std_error": se,
+        "t_stat": tstat,
+        "p_value": pval,
+        "ci_95_lower": ci_lower,
+        "ci_95_upper": ci_upper,
+        "significant_at_0.05": significant,
+        "direction_interpretation": direction,
+        "conclusion": conclusion,
+        # Practical interpretation: change in AvgScore per one-unit increase in StudentTeacherRatio
+        "practical_interpretation": (
+            f"A one-unit increase in StudentTeacherRatio is associated with a {coef:.3f} point change in AvgScore."
+            if coef is not None else None
+        )
     }
 
-    return {
-        "object": result_object,
-        "description": conclusion_text
-    }
+    # Short human-readable description
+    description = (
+        f"Coefficient for {var} = {coef:.4f} (SE = {se:.4f}, t = {tstat:.3f}, p = {pval:.4g}). "
+        f"95% CI = [{ci_lower if ci_lower is not None else 'NA'}, {ci_upper if ci_upper is not None else 'NA'}]. "
+        f"{'Statistically significant at 5%.' if significant else 'Not statistically significant at 5%.'} "
+        f"Interpretation: {direction}. "
+        f"Practical effect: one-unit increase in StudentTeacherRatio -> AvgScore change of {coef:.3f} points."
+    )
+
+    return {"object": result_obj, "description": description}

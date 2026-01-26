@@ -1,169 +1,176 @@
 def extract_final_answer(model_output):
     """
-    Extract statistics about the effect of HasChildren from model_output.
-    Expects model_output to be a dict with keys 'logit' and/or 'ols' whose
-    values are fitted statsmodels result objects (or None).
+    Extract statistics about the effect of 'HasChildren' on 'NumAffairs' from the
+    model_output produced by the provided modeling function.
+
     Returns a dict with:
-      - "object": dict with extracted stats for 'logit' and 'ols' (or None)
-      - "description": brief interpretation in context ("does having children decrease affairs?")
+      - "object": a dict containing extracted numeric results (coefficients, SEs,
+                  p-values, CIs, IRR for negbin, group means)
+      - "description": a short plain-language interpretation of those numbers
+                       in the context of whether having children decreases
+                       engagement in extramarital affairs.
     """
-    import math
+    import numpy as np
 
-    def _extract_from_result(res, target_substr='HasChildren'):
-        """
-        Extract coef, se, pvalue, conf_int for parameter whose name contains target_substr.
-        Returns None if res is None or parameter not found.
-        """
-        if res is None:
-            return None
+    out = {
+        "negbin": None,
+        "ols": None,
+        "group_summary": None,
+        "errors": {}
+    }
 
-        # Ensure params-like attributes exist
+    # Helper to safely pull parameter stats for a given results object
+    def _pull_params(res, varname):
         try:
-            params = getattr(res, 'params', None)
-            pvalues = getattr(res, 'pvalues', None)
-            bse = getattr(res, 'bse', None)
-            # conf_int may be a method
-            try:
-                conf = res.conf_int()
-            except Exception:
-                conf = None
-            if params is None:
-                return {'error': 'Result object has no params attribute'}
+            params = res.params
+            pvals = res.pvalues
+            bse = res.bse
+            ci = res.conf_int()
         except Exception as e:
-            return {'error': f'Error accessing result attributes: {e}'}
+            raise RuntimeError(f"Could not extract stats from results object: {e}")
 
-        # params may be a Series with index; coerce to dict-like
+        if varname not in params.index:
+            raise KeyError(f"Variable '{varname}' not found in model parameters. "
+                           f"Available params: {list(params.index)}")
+
+        coef = float(params[varname])
+        se = float(bse[varname]) if varname in bse.index else None
+        pval = float(pvals[varname]) if varname in pvals.index else None
+        ci_low = float(ci.loc[varname, 0]) if varname in ci.index else None
+        ci_high = float(ci.loc[varname, 1]) if varname in ci.index else None
+
+        return {"coef": coef, "se": se, "pvalue": pval, "ci_low": ci_low, "ci_high": ci_high}
+
+    # 1) Negative binomial results
+    if "negbin" in model_output and model_output.get("negbin") is not None:
         try:
-            param_index = list(params.index)
-        except Exception:
-            # if params has no index, can't find parameter by name
-            return {'error': 'params exists but has no index (cannot find parameter name)'}
+            nb_res = model_output["negbin"]
+            nb_stats = _pull_params(nb_res, "HasChildren")
+            # For count models, exponentiate to get incidence rate ratio (IRR)
+            irr = float(np.exp(nb_stats["coef"]))
+            irr_ci_low = float(np.exp(nb_stats["ci_low"])) if nb_stats["ci_low"] is not None else None
+            irr_ci_high = float(np.exp(nb_stats["ci_high"])) if nb_stats["ci_high"] is not None else None
+            pct_change = (irr - 1.0) * 100.0  # percent change in expected count
+            out["negbin"] = {
+                "coef_log": nb_stats["coef"],
+                "se": nb_stats["se"],
+                "pvalue": nb_stats["pvalue"],
+                "ci_log": [nb_stats["ci_low"], nb_stats["ci_high"]],
+                "irr": irr,
+                "irr_ci": [irr_ci_low, irr_ci_high],
+                "irr_pct_change": pct_change
+            }
+        except Exception as e:
+            out["errors"]["negbin"] = str(e)
+    elif "negbin_error" in model_output:
+        out["errors"]["negbin"] = model_output.get("negbin_error")
 
-        # find a parameter name that contains target_substr
-        matches = [name for name in param_index if target_substr in str(name)]
-        if not matches:
-            return {'error': f"No parameter containing '{target_substr}' found",
-                    'available_params': param_index}
-
-        name = matches[0]
-
-        # extract numeric values, guard against missing pvalues/bse/conf
+    # 2) OLS results
+    if "ols" in model_output and model_output.get("ols") is not None:
         try:
-            coef = float(params[name])
+            ols_res = model_output["ols"]
+            ols_stats = _pull_params(ols_res, "HasChildren")
+            ci_low = ols_stats["ci_low"]
+            ci_high = ols_stats["ci_high"]
+            out["ols"] = {
+                "coef": ols_stats["coef"],
+                "se": ols_stats["se"],
+                "pvalue": ols_stats["pvalue"],
+                "ci": [ci_low, ci_high],
+                "interpretation": ("An OLS coefficient is the expected absolute change in "
+                                   "the NumAffairs score associated with HasChildren=1 vs 0, "
+                                   "holding controls constant.")
+            }
+        except Exception as e:
+            out["errors"]["ols"] = str(e)
+    elif "ols_error" in model_output:
+        out["errors"]["ols"] = model_output.get("ols_error")
+
+    # 3) Group summary (unadjusted means)
+    if "group_summary_NumAffairs_by_HasChildren" in model_output:
+        try:
+            gs = model_output["group_summary_NumAffairs_by_HasChildren"]
+            # expected MultiIndex columns like ('NumAffairs','mean'), etc.
+            # We'll try to pick count, mean, std, median for groups 0 and 1 if present.
+            group_info = {}
+            for hasch in gs.index:
+                try:
+                    count = int(gs.loc[hasch, ("NumAffairs", "count")])
+                    mean = float(gs.loc[hasch, ("NumAffairs", "mean")])
+                    std = float(gs.loc[hasch, ("NumAffairs", "std")]) if ("std") in gs.columns.get_level_values(1) else None
+                    median = float(gs.loc[hasch, ("NumAffairs", "median")]) if ("median") in gs.columns.get_level_values(1) else None
+                except Exception:
+                    # fallback if columns are single-level
+                    try:
+                        count = int(gs.loc[hasch, "count"])
+                        mean = float(gs.loc[hasch, "mean"])
+                        std = float(gs.loc[hasch, "std"]) if "std" in gs.columns else None
+                        median = float(gs.loc[hasch, "median"]) if "median" in gs.columns else None
+                    except Exception:
+                        raise
+                group_info[int(hasch)] = {"n": count, "mean_NumAffairs": mean, "std": std, "median": median}
+            out["group_summary"] = group_info
+        except Exception as e:
+            out["errors"]["group_summary"] = str(e)
+
+    # 4) Short, actionable conclusion based on present stats
+    concl_parts = []
+    # Prefer negbin for inference, fallback to OLS if negbin missing
+    if out["negbin"]:
+        try:
+            irr = out["negbin"]["irr"]
+            p = out["negbin"]["pvalue"]
+            pct = out["negbin"]["irr_pct_change"]
+            sig = (p is not None and p < 0.05)
+            direction = "decrease" if irr < 1 else "increase" if irr > 1 else "no change"
+            concl_parts.append(
+                f"Negative-binomial: HasChildren is associated with a {pct:.1f}% "
+                f"{direction} in the expected number of reported extramarital acts "
+                f"(IRR={irr:.3f}, 95% CI={out['negbin']['irr_ci']}, p={p:.3g}). "
+                f"{'Statistically significant.' if sig else 'Not statistically significant.'}"
+            )
         except Exception:
-            return {'error': f'Could not convert coefficient for {name} to float'}
+            pass
 
-        pval = None
-        if pvalues is not None and name in pvalues.index:
-            try:
-                pval = float(pvalues[name])
-            except Exception:
-                pval = None
+    if out["ols"]:
+        try:
+            coef = out["ols"]["coef"]
+            p = out["ols"]["pvalue"]
+            sig = (p is not None and p < 0.05)
+            direction = "fewer" if coef < 0 else "more" if coef > 0 else "no change"
+            concl_parts.append(
+                f"OLS: HasChildren coefficient = {coef:.3f} (95% CI={out['ols']['ci']}, p={p:.3g}); "
+                f"this suggests {direction} reported affairs associated with children. "
+                f"{'Statistically significant.' if sig else 'Not statistically significant.'}"
+            )
+        except Exception:
+            pass
 
-        se = None
-        if bse is not None and name in bse.index:
-            try:
-                se = float(bse[name])
-            except Exception:
-                se = None
+    if out["group_summary"]:
+        try:
+            g0 = out["group_summary"].get(0)
+            g1 = out["group_summary"].get(1)
+            if g0 is not None and g1 is not None:
+                concl_parts.append(
+                    f"Unadjusted means: mean NumAffairs without children = {g0['mean_NumAffairs']:.3f} "
+                    f"(n={g0['n']}); with children = {g1['mean_NumAffairs']:.3f} (n={g1['n']})."
+                )
+        except Exception:
+            pass
 
-        ci = None
-        if conf is not None:
-            try:
-                # conf may be DataFrame-like with rows indexed by param names and two columns
-                if name in conf.index:
-                    lower = float(conf.loc[name].iloc[0])
-                    upper = float(conf.loc[name].iloc[1])
-                    ci = (lower, upper)
-            except Exception:
-                ci = None
-
-        return {
-            'param_name': name,
-            'coef': coef,
-            'se': se,
-            'pvalue': pval,
-            'conf_int': ci
-        }
-
-    result_summary = {'logit': None, 'ols': None}
-
-    # Extract for logit
-    logit_res = model_output.get('logit') if isinstance(model_output, dict) else None
-    logit_stats = _extract_from_result(logit_res, 'HasChildren')
-    if logit_stats and 'error' not in (logit_stats or {}):
-        # add odds ratio and OR CI if possible
-        coef = logit_stats['coef']
-        logit_stats['odds_ratio'] = math.exp(coef)
-        if logit_stats.get('conf_int') is not None:
-            ci = logit_stats['conf_int']
-            logit_stats['odds_ratio_conf_int'] = (math.exp(ci[0]), math.exp(ci[1]))
-    result_summary['logit'] = logit_stats
-
-    # Extract for ols
-    ols_res = model_output.get('ols') if isinstance(model_output, dict) else None
-    ols_stats = _extract_from_result(ols_res, 'HasChildren')
-    result_summary['ols'] = ols_stats
-
-    # Build human-readable description
-    def interpret_logit(s):
-        if s is None:
-            return "No logistic model available."
-        if 'error' in s:
-            return "Logistic extraction error: " + s['error']
-        coef = s['coef']
-        p = s['pvalue']
-        orr = s['odds_ratio']
-        orc = s.get('odds_ratio_conf_int')
-        # significance threshold: 0.05 (conventional)
-        if p is None:
-            sig_text = "p-value not available"
-        else:
-            sig_text = ("statistically significant (p = {:.3g})".format(p)
-                        if p < 0.05 else "not statistically significant (p = {:.3g})".format(p))
-        # direction
-        if coef < 0:
-            direction = "Having children is associated with LOWER odds of reporting an affair."
-            pct = (1 - orr) * 100
-            change_text = "Odds ratio = {:.3f} ({:+.1f}% change in odds)".format(orr, -pct)
-        else:
-            direction = "Having children is associated with HIGHER odds of reporting an affair."
-            pct = (orr - 1) * 100
-            change_text = "Odds ratio = {:.3f} ({:+.1f}% change in odds)".format(orr, pct)
-        ci_text = ("; OR 95% CI = [{:.3f}, {:.3f}]".format(orc[0], orc[1]) if orc is not None else "")
-        return "Logistic: {} {}. {}{}".format(direction, sig_text, change_text, ci_text)
-
-    def interpret_ols(s):
-        if s is None:
-            return "No OLS robustness model available."
-        if 'error' in s:
-            return "OLS extraction error: " + s['error']
-        coef = s['coef']
-        p = s['pvalue']
-        if p is None:
-            sig_text = "p-value not available"
-        else:
-            sig_text = ("statistically significant (p = {:.3g})".format(p)
-                        if p < 0.05 else "not statistically significant (p = {:.3g})".format(p))
-        if coef < 0:
-            direction = "Having children is associated with a decrease in the coded affair frequency."
-        else:
-            direction = "Having children is associated with an increase in the coded affair frequency."
-        # coef units: coded frequency (0,1,2,3,7,12)
-        return "OLS (robust SE): {} {}. Coefficient = {:.3g}.".format(direction, sig_text, coef)
-
-    # Compose final description combining available information
-    if (result_summary['logit'] is None or ('error' in result_summary['logit'] and result_summary['logit']['error'].startswith("No parameter"))) \
-       and (result_summary['ols'] is None or ('error' in result_summary['ols'] and result_summary['ols']['error'].startswith("No parameter"))):
-        description = ("No fitted model parameters for 'HasChildren' were found in the provided model_output. "
-                       "This usually means the model did not fit or the HasChildren variable was not included/was dropped.")
+    if not concl_parts:
+        concl = "No usable model statistics were found in model_output to form a conclusion."
     else:
-        parts = []
-        parts.append(interpret_logit(result_summary['logit']))
-        parts.append(interpret_ols(result_summary['ols']))
-        description = " ".join(parts)
+        concl = " ".join(concl_parts)
 
     return {
-        "object": result_summary,
-        "description": description
+        "object": out,
+        "description": (
+            "Extracted statistics for the effect of HasChildren on NumAffairs. "
+            "The 'object' field contains: negbin results (log-coef, SE, p-value, 95% CI, IRR and IRR CI), "
+            "OLS results (coef, SE, p-value, 95% CI), unadjusted group means by HasChildren, and any extraction errors. "
+            "The 'conclusion' is a brief plain-language summary appended inside the 'object' under the 'errors'/summary info "
+            "and also returned here as text. Interpret IRR < 1 as a lower expected count of affairs when HasChildren=1; "
+            "for OLS the coefficient gives the absolute change in NumAffairs associated with HasChildren=1 vs 0."
+        ) + " Conclusion summary: " + concl
     }

@@ -12,66 +12,86 @@ df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/anal
 
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
-    # Make a copy to avoid modifying original
+    """
+    Transform the raw dataset into a dataframe ready for modeling.
+
+    Produces the following new/renamed columns used in the analyses:
+    - OutcomeY: integer copy of original y (1=unchosen, 2=majority, 3=minority)
+    - Age: copy of age as float
+    - Age_c: age centered around sample mean
+    - Age2: squared centered age (to capture quadratic effects)
+    - gender_boy: 1 if original gender==2 (boy), 0 if gender==1 (girl)
+    - majority_first: integer copy of original majority_first (0/1)
+    - culture: integer copy of original culture (will be used as categorical in models)
+    - SocialCopy: binary 1 if child copied any demonstrator (majority or minority), 0 if chose undemonstrated
+    - MajorityChoice: binary 1 if child chose majority (y==2), 0 otherwise
+    """
     df = df.copy()
 
-    # Keep only rows with required variables
-    required_cols = ['y', 'age', 'culture', 'gender', 'majority_first']
-    df = df.dropna(subset=required_cols)
+    # Drop rows with missing critical fields
+    df = df.dropna(subset=['y', 'age', 'culture', 'gender', 'majority_first'])
 
-    # Dependent variable: majority chosen (y == 2)
-    # y: 1 = unchosen option, 2 = majority option, 3 = minority option
-    df['MajorityChosen'] = (df['y'] == 2).astype(int)
+    # Standardize / cast columns
+    df['OutcomeY'] = df['y'].astype(int)
+    df['Age'] = df['age'].astype(float)
+    df['culture'] = df['culture'].astype(int)
+    # majority_first in data is 0/1; ensure integer type
+    df['majority_first'] = df['majority_first'].astype(int)
 
-    # Age: center and add quadratic term for potential nonlinearity
-    df['age'] = pd.to_numeric(df['age'], errors='coerce')
-    df['age_c'] = df['age'] - df['age'].mean()
-    df['age_sq'] = df['age_c'] ** 2
+    # Center age and add quadratic term (centered squared)
+    df['Age_c'] = df['Age'] - df['Age'].mean()
+    df['Age2'] = df['Age_c'] ** 2
 
-    # Culture/site as categorical (keep original numeric IDs but cast to category dtype)
-    df['culture'] = df['culture'].astype('category')
+    # Gender binary: create gender_boy (1=boy when gender==2, 0=girl when gender==1)
+    df['gender_boy'] = df['gender'].apply(lambda x: 1 if int(x) == 2 else 0).astype(int)
 
-    # Gender: original coding 1 = girl, 2 = boy. Create binary is_boy (1 = boy, 0 = girl)
-    df['gender'] = pd.to_numeric(df['gender'], errors='coerce')
-    df['is_boy'] = (df['gender'] == 2).astype(int)
+    # Behavioral derived binaries
+    df['SocialCopy'] = df['OutcomeY'].apply(lambda x: 1 if int(x) in (2, 3) else 0).astype(int)
+    df['MajorityChoice'] = df['OutcomeY'].apply(lambda x: 1 if int(x) == 2 else 0).astype(int)
 
-    # majority_first should be numeric 0/1; coerce to int
-    df['majority_first'] = pd.to_numeric(df['majority_first'], errors='coerce').fillna(0).astype(int)
-
-    # Final subset to ensure no NA in key model columns
-    model_cols = ['MajorityChosen', 'age_c', 'age_sq', 'culture', 'is_boy', 'majority_first']
-    df = df.dropna(subset=model_cols)
-
-    # Return dataframe with the new columns available for modeling
+    # Keep only columns necessary for downstream analyses (retain originals for traceability)
+    # We'll return the full dataframe but ensure the necessary columns exist
     return df
 
 
 # ======== MODEL CODE ========
-def model(df: pd.DataFrame):
+def model(df: pd.DataFrame) -> dict:
     """
-    Fit a logistic regression predicting choice of the majority option.
-    We model a main effect of age (linear + quadratic), culture (categorical), and their interaction
-    (age_c * culture) to test whether developmental trajectories differ across cultural contexts.
-    Controls: is_boy, majority_first.
+    Fit two complementary models to answer the research question:
+      1) SocialCopy model (binary logistic): Do children copy demonstrators (majority or minority) vs. pick the undemonstrated option? Predictors: age (linear + quadratic), culture (categorical), gender_boy, majority_first, and Age x Culture interactions.
+      2) MajorityChoice model (binary logistic, fit only among children who copied someone): Among copiers, do children preferentially choose the majority (vs. minority)? Same predictors.
 
-    Returns the fitted GLMResults object (Binomial family).
+    Returns a dict with keys 'socialcopy_model' and 'majority_model' containing fitted statsmodels results objects. If there are too few copiers to fit the majority model, returns None for that entry.
     """
     import statsmodels.formula.api as smf
-    import statsmodels.api as sm
 
-    # Ensure culture is categorical (patsy will treat C(culture) as categorical)
+    # Work on a copy
     df = df.copy()
-    df['culture'] = df['culture'].astype('category')
 
-    # Build formula: include linear and quadratic age terms and interactions of linear age with culture.
-    # We include interactions for the linear age term with culture to test different slopes across cultures.
-    # Quadratic term is included without culture interactions by default (can be extended if desired).
-    formula = 'MajorityChosen ~ age_c + age_sq + C(culture) + age_c:C(culture) + is_boy + majority_first'
+    # Ensure required columns exist
+    required = ['SocialCopy', 'MajorityChoice', 'Age_c', 'Age2', 'culture', 'gender_boy', 'majority_first']
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns for modeling: {missing}")
 
-    # Fit GLM with binomial family (logistic regression)
-    model = smf.glm(formula=formula, data=df, family=sm.families.Binomial()).fit()
+    # Model 1: SocialCopy ~ Age_c + Age2 + C(culture) + gender_boy + majority_first + Age_c:C(culture)
+    # Use categorical coding for culture via C(culture). This fits a separate intercept for each culture and allows interaction terms.
+    formula_sc = 'SocialCopy ~ Age_c + Age2 + C(culture) + gender_boy + majority_first + Age_c:C(culture)'
+    socialcopy_model = smf.logit(formula=formula_sc, data=df).fit(disp=False)
 
-    # Return the fitted model results so the caller can inspect summary, params, pvalues, etc.
-    return model
+    # Model 2: MajorityChoice among those who copied (SocialCopy==1)
+    df_copiers = df[df['SocialCopy'] == 1].copy()
+    if df_copiers.shape[0] < 30:
+        # If sample is too small, we still attempt but warn the user; here we return None to indicate limited data for reliable inference
+        majority_model = None
+    else:
+        formula_mc = 'MajorityChoice ~ Age_c + Age2 + C(culture) + gender_boy + majority_first + Age_c:C(culture)'
+        majority_model = smf.logit(formula=formula_mc, data=df_copiers).fit(disp=False)
+
+    # Return fitted result objects for downstream inspection (coefficients, p-values, CIs, predicted probabilities, etc.)
+    return {
+        'socialcopy_model': socialcopy_model,
+        'majority_model': majority_model
+    }
 
 

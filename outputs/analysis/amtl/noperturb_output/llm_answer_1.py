@@ -1,133 +1,130 @@
 def extract_final_answer(model_output):
     """
-    Extracts genus comparison statistics from a fitted GLM (cluster-robust results allowed).
-    Assumes the model used Treatment coding with "Homo sapiens" as the reference level,
-    so coefficients for the non-human genera represent log-odds differences (genus vs Homo sapiens).
+    Extracts the effect of the 'Human' indicator from a fitted statsmodels GEE results object.
 
-    Returns a dictionary:
-      - "object": a dict with per-genus statistics (coef, se, p-value, 95% CI on log-odds,
-                  odds-ratio and its 95% CI), plus summary booleans
-      - "description": brief interpretation in plain language
-
-    Example keys in returned object:
-      {
-        "per_genus": {
-          "Pan": {"coef": ..., "se": ..., "p": ..., "ci": [low, high], "or": ..., "or_ci": [low, high]},
-          "Pongo": {...},
-          "Papio": {...}
-        },
-        "humans_higher_all": True/False,    # True if all non-human genera have significantly LOWER AMTL (coef<0 & p<0.05)
-        "humans_higher_some": [list of genera where humans have significantly higher AMTL],
-        "notes": "coefficients are log-odds for genus vs Homo sapiens (reference)"
-      }
+    Returns a dictionary with:
+      - "object": dict with numeric results for the Human effect (coefficient, SE, z, p, 95% CI,
+                  odds ratio and its CI, parameter name)
+      - "description": brief interpretation answering whether modern humans have higher AMTL
+                       than non-human primates after accounting for covariates.
     """
+    import re
     import numpy as np
 
-    # Defensive: accept either a results wrapper or plain results
     res = model_output
 
-    # Attempt to access parameter objects; raise informative error if missing
-    try:
-        params = res.params
-        bse = res.bse
-        pvalues = res.pvalues
-        try:
-            ci = res.conf_int()
-        except Exception:
-            # If conf_int method isn't available, compute approximate 95% CI from bse
-            ci_lower = params - 1.96 * bse
-            ci_upper = params + 1.96 * bse
-            ci = np.column_stack([ci_lower, ci_upper])
-    except Exception as e:
-        raise ValueError("Provided model_output does not appear to be a fitted results object with params/bse/pvalues.") from e
+    # Ensure required attributes exist
+    if not hasattr(res, "params"):
+        raise ValueError("model_output does not appear to be a fitted statsmodels results object (missing .params).")
 
-    # Target non-human genera to extract (these were the levels in the original model)
-    target_genera = ["Pan", "Pongo", "Papio"]
+    params = res.params
+    param_names = list(params.index)
 
-    per_genus = {}
-    humans_higher_significant = []
+    # Find the parameter name that corresponds to the Human indicator.
+    # This will match names like 'Human' or 'Human[T.True]' etc.
+    human_params = [name for name in param_names if "Human" in name]
+    if len(human_params) == 0:
+        raise ValueError("No parameter matching 'Human' found in model_output params: found %r" % param_names)
 
-    # params and pvalues may be a pandas Series with index names like
-    # 'C(genus, Treatment(reference="Homo sapiens"))[T.Pan]' or similar.
-    # We'll search for any parameter name containing the genus string.
-    param_index = list(params.index) if hasattr(params, 'index') else None
+    # If multiple matches, choose the first (common case is a single match).
+    human_param = human_params[0]
 
-    for g in target_genera:
-        # Find parameter name containing the genus label
-        matched_names = [name for name in (param_index or []) if g in str(name)]
-        if not matched_names:
-            # If no parameter found, skip but record None
-            per_genus[g] = {
-                "coef": None, "se": None, "p": None, "ci": [None, None],
-                "or": None, "or_ci": [None, None],
-                "note": f"No parameter matching genus '{g}' found in model parameters."
-            }
-            continue
-
-        # If multiple matches (unlikely), take the first
-        pname = matched_names[0]
-        coef = float(params[pname])
-        se = float(bse[pname]) if bse is not None else None
-        pval = float(pvalues[pname]) if pvalues is not None else None
-
-        # Confidence interval: res.conf_int() returns DataFrame or ndarray indexed same as params
-        try:
-            ci_vals = ci.loc[pname].tolist() if hasattr(ci, 'loc') else list(ci[param_index.index(pname)])
-        except Exception:
-            # Fallback: compute from coef +/- 1.96*se
-            if se is not None:
-                ci_vals = [coef - 1.96 * se, coef + 1.96 * se]
-            else:
-                ci_vals = [None, None]
-
-        # Odds ratio and its CI
-        try:
-            or_val = float(np.exp(coef))
-            or_ci = [float(np.exp(ci_vals[0])) if ci_vals[0] is not None else None,
-                     float(np.exp(ci_vals[1])) if ci_vals[1] is not None else None]
-        except Exception:
-            or_val = None
-            or_ci = [None, None]
-
-        per_genus[g] = {
-            "param_name": str(pname),
-            "coef": coef,
-            "se": se,
-            "p": pval,
-            "ci": ci_vals,
-            "or": or_val,
-            "or_ci": or_ci
-        }
-
-        # Interpretation: because Homo sapiens is the reference, a negative coef means that
-        # the given non-human genus has LOWER log-odds (and thus lower probability) of AMTL
-        # compared to humans. We flag genera where coef < 0 and p < 0.05.
-        if (coef is not None) and (pval is not None) and (coef < 0) and (pval < 0.05):
-            humans_higher_significant.append(g)
-
-    humans_higher_all = (len(humans_higher_significant) == len([g for g in target_genera if per_genus[g].get("coef") is not None]))
-
-    # Build description text
-    if len(humans_higher_significant) == 0:
-        conclusion = ("No clear evidence that modern humans (Homo sapiens) have higher AMTL than the "
-                      "non-human genera included (Pan, Pongo, Papio): none of the genus coefficients "
-                      "showed a statistically significant negative difference (p < 0.05).")
-    elif humans_higher_all:
-        conclusion = ("Yes — modern humans have higher AMTL than all three non-human genera (Pan, Pongo, Papio). "
-                      "Each non-human genus shows a statistically significant lower AMTL compared to Homo sapiens "
-                      "(coefficients < 0, p < 0.05).")
+    # Extract statistics (robust to availability of attributes)
+    coef = float(params[human_param])
+    # standard error
+    if hasattr(res, "bse"):
+        se = float(res.bse[human_param])
+    elif hasattr(res, "standard_errors"):
+        se = float(res.standard_errors[human_param])
     else:
-        conclusion = ("Partially: modern humans have significantly higher AMTL than some but not all non-human genera. "
-                      f"Significant comparisons (humans higher): {humans_higher_significant}. "
-                      "See per-genus statistics for details (coefficients are log-odds: negative means that genus has lower AMTL than humans).")
+        raise ValueError("Could not find standard errors on model output (expected .bse).")
+
+    # z-value (compute if not provided)
+    z_value = float(coef / se) if se != 0 else float("nan")
+
+    # p-value
+    if hasattr(res, "pvalues"):
+        p_value = float(res.pvalues[human_param])
+    else:
+        # fallback: try to compute two-sided p from z
+        from math import erf, sqrt
+        # p = 2*(1 - Phi(|z|)); Phi via erf
+        phi = 0.5 * (1.0 + erf(abs(z_value) / sqrt(2.0)))
+        p_value = 2.0 * (1.0 - phi)
+
+    # 95% confidence interval (on link/logit scale)
+    if hasattr(res, "conf_int"):
+        ci_df = res.conf_int()
+        # conf_int returns a DataFrame; index should contain human_param
+        if human_param in ci_df.index:
+            ci_lower = float(ci_df.loc[human_param, 0])
+            ci_upper = float(ci_df.loc[human_param, 1])
+        else:
+            # try columns by name if different ordering
+            try:
+                row = ci_df.loc[human_param]
+                ci_lower = float(row.iloc[0])
+                ci_upper = float(row.iloc[1])
+            except Exception:
+                raise ValueError("Could not extract confidence interval for parameter %r." % human_param)
+    else:
+        # approximate 95% CI from coef +/- 1.96*se
+        ci_lower = coef - 1.96 * se
+        ci_upper = coef + 1.96 * se
+
+    # Transform to odds ratio scale (exp of coefficient) and CI
+    or_est = float(np.exp(coef))
+    or_ci_lower = float(np.exp(ci_lower))
+    or_ci_upper = float(np.exp(ci_upper))
+
+    # Conclusion logic at alpha = 0.05
+    alpha = 0.05
+    if p_value < alpha:
+        if coef > 0:
+            conclusion = (
+                "Yes — the coefficient for %r is positive and statistically significant "
+                "(coef = %.4f, p = %.4g). After adjusting for age, sex, and tooth class, "
+                "modern humans have a higher probability of AMTL compared to non-human primates. "
+                "Estimated odds ratio = %.3f (95%% CI: %.3f–%.3f)."
+                % (human_param, coef, p_value, or_est, or_ci_lower, or_ci_upper)
+            )
+        else:
+            conclusion = (
+                "No — the coefficient for %r is negative and statistically significant "
+                "(coef = %.4f, p = %.4g). After adjusting for age, sex, and tooth class, "
+                "modern humans have a lower probability of AMTL compared to non-human primates. "
+                "Estimated odds ratio = %.3f (95%% CI: %.3f–%.3f)."
+                % (human_param, coef, p_value, or_est, or_ci_lower, or_ci_upper)
+            )
+    else:
+        conclusion = (
+            "No statistically significant difference detected — the coefficient for %r is %.4f "
+            "(p = %.4g), which does not provide strong evidence that modern humans differ from "
+            "non-human primates in AMTL frequency after adjusting for age, sex, and tooth class. "
+            "Estimated odds ratio = %.3f (95%% CI: %.3f–%.3f)."
+            % (human_param, coef, p_value, or_est, or_ci_lower, or_ci_upper)
+        )
 
     result_object = {
-        "per_genus": per_genus,
-        "humans_higher_all": bool(humans_higher_all),
-        "humans_higher_some": humans_higher_significant,
-        "notes": ("Model coefficients are log-odds for (genus) minus (Homo sapiens). "
-                  "Negative coefficient => genus has LOWER AMTL than Homo sapiens. "
-                  "Odds ratios (OR = exp(coef)) and 95% CIs are also provided."),
+        "param_name": human_param,
+        "coef": coef,
+        "std_error": se,
+        "z_value": z_value,
+        "p_value": p_value,
+        "ci_lower": ci_lower,
+        "ci_upper": ci_upper,
+        "odds_ratio": or_est,
+        "or_ci_lower": or_ci_lower,
+        "or_ci_upper": or_ci_upper,
+        "conclusion": conclusion
     }
 
-    return {"object": result_object, "description": conclusion}
+    description = (
+        "Extracted the coefficient and inference for the 'Human' indicator from the provided "
+        "GEE model. The returned 'object' contains numeric results (coef, SE, z, p, 95% CI) on the "
+        "logit scale and the exponentiated effect (odds ratio and its 95% CI). The 'conclusion' key "
+        "summarizes whether modern humans show higher AMTL than non-human primates after adjusting "
+        "for age_z, prob_male_z, and tooth_class, based on a 0.05 significance threshold."
+    )
+
+    return {"object": result_object, "description": description}

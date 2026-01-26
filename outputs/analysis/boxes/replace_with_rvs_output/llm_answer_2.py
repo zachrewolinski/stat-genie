@@ -1,177 +1,200 @@
 def extract_final_answer(model_output):
     """
-    Extracts coefficients, standard errors, z-scores, p-values, and 95% CIs for:
-      - age_c (linear age effect)
-      - age_sq (quadratic age effect)
-      - each age_c:culture interaction term (if present)
-    Also computes per-culture age slopes (reference culture = age_c; other cultures =
-    age_c + corresponding interaction), their SEs, z-scores, p-values, and 95% CIs.
-    Finally performs a joint Wald test of whether all age_c:culture interaction
-    coefficients are simultaneously zero (i.e., whether developmental slopes differ
-    across cultures).
+    Extract key statistics from the fitted models returned by the provided modeling function.
 
-    Returns a dictionary:
-      {
-        "object": { ... detailed numeric results ... },
-        "description": "Brief interpretation of results in context."
-      }
+    Returns a dictionary with keys:
+      - "object": a serializable dict containing numeric results (coefficients, SEs, p-values,
+                  CIs) for each parameter, a summary of Age-related terms and Age x Culture
+                  interaction tests, and predicted probability change across the observed
+                  age range for each culture (holding other covariates at sample means).
+      - "description": a short plain-language explanation of how to interpret the returned
+                       numbers in relation to the research question:
+                       "How do children's reliance on majority preference develop with age
+                        across different cultural contexts?"
     """
-    import re
     import numpy as np
-    from scipy.stats import norm
+    import pandas as pd
 
-    res = model_output  # statsmodels GLMResultsWrapper
+    out = {"object": {}, "description": None}
 
-    params = res.params.copy()
-    pvalues = res.pvalues.copy()
-    try:
-        conf = res.conf_int().copy()
-    except Exception:
-        # conf_int sometimes returns ndarray; convert to DataFrame-like for indexing
-        ci_arr = res.conf_int()
-        conf = {}
-        for i, name in enumerate(params.index):
-            conf[name] = (float(ci_arr[i, 0]), float(ci_arr[i, 1]))
-
-    cov = res.cov_params()
-
-    out = {}
-    # Helper to format single-parameter summaries
-    def summarize_param(name):
-        coef = float(params[name])
-        se = float(np.sqrt(cov.loc[name, name]))
-        z = coef / se if se > 0 else np.nan
-        p = float(2 * (1 - norm.cdf(abs(z)))) if not np.isnan(z) else np.nan
-        if isinstance(conf, dict):
-            ci_low, ci_high = conf[name]
-        else:
-            ci_low, ci_high = float(conf.loc[name, 0]), float(conf.loc[name, 1])
-        return {"coef": coef, "se": se, "z": z, "p": p, "95% CI": [ci_low, ci_high]}
-
-    # Ensure age_c and age_sq exist
-    summary = {}
-    if 'age_c' in params.index:
-        summary['age_c'] = summarize_param('age_c')
-    else:
-        raise KeyError("Model does not contain 'age_c' parameter")
-
-    if 'age_sq' in params.index:
-        summary['age_sq'] = summarize_param('age_sq')
-    else:
-        # not fatal, but note absent
-        summary['age_sq'] = None
-
-    # Find interaction parameters for age_c by culture.
-    # Robust matching: any param name that contains 'age_c' AND ('C(culture)' or 'culture')
-    interaction_names = [name for name in params.index
-                         if ('age_c' in name) and ('culture' in name) and (name != 'age_c')]
-
-    # Summarize each interaction parameter individually
-    interactions_summary = {}
-    for name in interaction_names:
-        interactions_summary[name] = summarize_param(name)
-
-    # Compute per-culture age slopes:
-    # Reference culture (the baseline) slope is the 'age_c' coefficient.
-    # For each interaction term, slope = age_c + interaction_coef
-    culture_slopes = {}
-    # reference
-    ref_slope = float(params['age_c'])
-    ref_se = float(np.sqrt(cov.loc['age_c', 'age_c']))
-    ref_z = ref_slope / ref_se if ref_se > 0 else np.nan
-    ref_p = float(2 * (1 - norm.cdf(abs(ref_z)))) if not np.isnan(ref_z) else np.nan
-    ref_ci = [float(conf.loc['age_c', 0]) if not isinstance(conf, dict) else conf['age_c'][0],
-              float(conf.loc['age_c', 1]) if not isinstance(conf, dict) else conf['age_c'][1]]
-    culture_slopes["reference"] = {
-        "slope_coef": ref_slope, "se": ref_se, "z": ref_z, "p": ref_p, "95% CI": ref_ci,
-        "note": "Reference (omitted) culture slope for age"
-    }
-
-    for name in interaction_names:
-        inter_coef = float(params[name])
-        # slope = age_c + interaction
-        slope = ref_slope + inter_coef
-        # SE(slope) = sqrt(Var(age_c) + Var(inter) + 2*Cov(age_c, inter))
-        var_age = float(cov.loc['age_c', 'age_c'])
-        var_inter = float(cov.loc[name, name])
-        cov_ai = float(cov.loc['age_c', name])
-        se_slope = float(np.sqrt(var_age + var_inter + 2 * cov_ai))
-        z_slope = slope / se_slope if se_slope > 0 else np.nan
-        p_slope = float(2 * (1 - norm.cdf(abs(z_slope)))) if not np.isnan(z_slope) else np.nan
-        # 95% CI
-        ci_low = slope - 1.96 * se_slope
-        ci_high = slope + 1.96 * se_slope
-
-        # try to extract culture label from parameter name like 'age_c:C(culture)[T.2]'
-        m = re.search(r'\[T\.?([^\]]+)\]', name)
-        label = m.group(1) if m else name
-
-        culture_slopes[label] = {
-            "slope_coef": slope,
-            "se": se_slope,
-            "z": z_slope,
-            "p": p_slope,
-            "95% CI": [ci_low, ci_high],
-            "param_name_for_interaction": name
-        }
-
-    # Joint test: are all age_c:culture interactions = 0?
-    joint_test = None
-    if len(interaction_names) > 0:
-        # Build constraint string like "age_c:C(culture)[T.2] = 0, age_c:C(culture)[T.3] = 0"
-        constraint = ", ".join([f"{name} = 0" for name in interaction_names])
+    # Helper to summarize a statsmodels binary results object
+    def summarize_result(res):
+        summary = {}
+        # Parameter table
+        params = res.params
+        bse = res.bse
+        pvals = res.pvalues
         try:
-            wt = res.wald_test(constraint)
-            # wt may have attributes statistic and pvalue
-            stat = float(wt.statistic) if hasattr(wt, 'statistic') else float(wt.statistic[0])
-            pval = float(wt.pvalue) if hasattr(wt, 'pvalue') else float(wt.p_value if hasattr(wt, 'p_value') else np.nan)
-            df = int(wt.df_denom) if hasattr(wt, 'df_denom') else (int(wt.df) if hasattr(wt, 'df') else len(interaction_names))
-            joint_test = {"constraint": constraint, "statistic": stat, "pvalue": pval, "df": df}
-        except Exception as e:
-            joint_test = {"error": f"Failed to run Wald test: {e}", "constraint": constraint}
-    else:
-        joint_test = {"note": "No age_c:culture interaction parameters found; joint test not applicable."}
+            ci = res.conf_int()
+            ci.columns = ['ci_lower', 'ci_upper']
+        except Exception:
+            # If conf_int fails for some reason, fill with NaNs
+            ci = pd.DataFrame(index=params.index, data={'ci_lower': np.nan, 'ci_upper': np.nan})
 
-    out["params_summary"] = summary
-    out["interactions"] = interactions_summary
-    out["culture_slopes"] = culture_slopes
-    out["interaction_joint_test"] = joint_test
-
-    # Short human-readable interpretation
-    # Basic guidance: positive slope => increasing reliance on majority with age; negative => decreasing.
-    interpretation_lines = []
-    interpretation_lines.append(
-        "age_c (linear): coef = {coef:.3f}, p = {p:.3g}. Positive implies increasing reliance on the majority with age "
-        "in the reference culture.".format(**{
-            "coef": summary['age_c']['coef'],
-            "p": summary['age_c']['p']
+        df_params = pd.DataFrame({
+            'coef': params,
+            'se': bse,
+            'pval': pvals,
+            'ci_lower': ci['ci_lower'],
+            'ci_upper': ci['ci_upper']
         })
-    )
-    if summary.get('age_sq') is not None:
-        interpretation_lines.append(
-            "age_sq (quadratic): coef = {coef:.3f}, p = {p:.3g}. This captures curvature in the age trajectory.".format(
-                **{"coef": summary['age_sq']['coef'] if summary['age_sq'] else np.nan,
-                   "p": summary['age_sq']['p'] if summary['age_sq'] else np.nan}
-            )
-        )
-    if len(interaction_names) > 0:
-        if isinstance(joint_test, dict) and 'pvalue' in joint_test:
-            if joint_test['pvalue'] < 0.05:
-                interpretation_lines.append(
-                    f"The set of age-by-culture interaction terms is significant (Wald p = {joint_test['pvalue']:.3g}), "
-                    "indicating that age-related slopes differ across cultural contexts."
-                )
+
+        # Convert param table to nested dict for serialization
+        params_dict = df_params.to_dict(orient='index')
+        summary['params'] = params_dict
+
+        # Identify Age terms and Age x Culture interaction terms
+        age_terms = {name: params_dict[name] for name in params_dict.keys() if name in ('Age_c', 'Age2')}
+        interaction_terms = {name: params_dict[name] for name in params_dict.keys() if 'Age_c:C(culture)' in name}
+
+        summary['age_terms'] = age_terms
+        summary['interaction_terms'] = interaction_terms
+
+        # Flag whether any interaction term is individually statistically significant (p < .05)
+        any_interaction_sig = any((term_info['pval'] < 0.05) for term_info in interaction_terms.values()) if interaction_terms else False
+        summary['any_interaction_term_significant'] = bool(any_interaction_sig)
+
+        # Joint Wald test for all Age_c:C(culture) coefficients = 0 (if there are any such terms)
+        joint_pval = None
+        if interaction_terms:
+            try:
+                param_names = list(params.index)
+                # indices of interaction parameters
+                idxs = [param_names.index(name) for name in interaction_terms.keys()]
+                # Build R matrix: one row per tested parameter selecting that parameter
+                R = np.zeros((len(idxs), len(param_names)))
+                for i, idx in enumerate(idxs):
+                    R[i, idx] = 1.0
+                wres = res.wald_test(R)
+                # wres may expose pvalue or pvalue attribute in different statmodels versions
+                joint_pval = getattr(wres, 'pvalue', None) or getattr(wres, 'pvals', None) or getattr(wres, 'pvalues', None)
+                # If pvalue is an array (one per df), take the last element or scalar
+                if isinstance(joint_pval, (list, tuple, np.ndarray)):
+                    joint_pval = float(np.array(joint_pval).ravel()[-1])
+                else:
+                    joint_pval = float(joint_pval) if joint_pval is not None else None
+            except Exception:
+                joint_pval = None
+        summary['joint_interaction_pvalue'] = joint_pval
+
+        # Predicted probability change across observed age range for each culture:
+        # We will construct new data at observed min and max Age_c in the data used to fit the model,
+        # set Age2 = Age_c**2, and set other covariates to their sample means.
+        try:
+            df_used = res.model.data.frame.copy()
+            # Ensure Age_c and Age2 present
+            if 'Age_c' in df_used.columns and 'Age2' in df_used.columns:
+                age_min = float(df_used['Age_c'].min())
+                age_max = float(df_used['Age_c'].max())
+                # covariates means/modes
+                covars = {}
+                for col in df_used.columns:
+                    if col in ('Age_c', 'Age2', res.model.endog_names):
+                        continue
+                    # For categorical culture, we'll vary it below
+                    if col == 'culture':
+                        continue
+                    # use mean for numeric/binary covariates
+                    if pd.api.types.is_numeric_dtype(df_used[col]):
+                        covars[col] = float(df_used[col].mean())
+                    else:
+                        # If non-numeric, take the first observed value
+                        covars[col] = df_used[col].iloc[0]
+                cultures = sorted(pd.unique(df_used['culture']).tolist())
+                prob_changes = {}
+                for cult in cultures:
+                    row_min = {'Age_c': age_min, 'Age2': age_min ** 2, 'culture': cult}
+                    row_max = {'Age_c': age_max, 'Age2': age_max ** 2, 'culture': cult}
+                    # add covariates
+                    for k, v in covars.items():
+                        row_min[k] = v
+                        row_max[k] = v
+                    # Build dataframes; keep column order consistent with model
+                    newdf = pd.DataFrame([row_min, row_max])
+                    # Ensure all columns expected by the model exist in newdf; if not, attempt to add NaNs
+                    for col in res.model.exog_names:
+                        # exog_names include the intercept 'Intercept' or 'const' sometimes; statsmodels will handle that
+                        if col not in newdf.columns:
+                            # If exog is interaction-coded (e.g., dummy columns) we rely on Patsy to build these from formula.
+                            # However res.predict accepts a dataframe with original variable names and Patsy will rebuild design matrix.
+                            # So do nothing here; missing columns may be handled by Patsy.
+                            pass
+                    # Predict using model's predict (it will go through Patsy to construct design matrix)
+                    try:
+                        preds = res.predict(newdf)
+                        prob_min = float(preds.iloc[0])
+                        prob_max = float(preds.iloc[1])
+                        prob_changes[str(cult)] = {
+                            'age_c_min': age_min,
+                            'age_c_max': age_max,
+                            'prob_min': prob_min,
+                            'prob_max': prob_max,
+                            'delta_prob': prob_max - prob_min
+                        }
+                    except Exception:
+                        # If prediction fails (e.g., mismatched columns), record None
+                        prob_changes[str(cult)] = {
+                            'age_c_min': age_min,
+                            'age_c_max': age_max,
+                            'prob_min': None,
+                            'prob_max': None,
+                            'delta_prob': None
+                        }
+                summary['predicted_probability_change_across_age_per_culture'] = prob_changes
             else:
-                interpretation_lines.append(
-                    f"The set of age-by-culture interaction terms is NOT significant (Wald p = {joint_test['pvalue']:.3g}), "
-                    "indicating no strong evidence that age-related slopes differ across cultures."
-                )
-        else:
-            interpretation_lines.append("Could not compute a joint test for the interactions; inspect individual interaction terms below.")
+                summary['predicted_probability_change_across_age_per_culture'] = None
+        except Exception:
+            summary['predicted_probability_change_across_age_per_culture'] = None
 
-        interpretation_lines.append("Per-culture slopes (reference and differences): see 'object' -> 'culture_slopes' for numeric estimates.")
+        return summary
+
+    # Validate input
+    if not isinstance(model_output, dict):
+        raise ValueError("model_output must be the dictionary returned by the modeling function.")
+
+    # Extract and summarize socialcopy_model
+    if 'socialcopy_model' in model_output and model_output['socialcopy_model'] is not None:
+        try:
+            res_sc = model_output['socialcopy_model']
+            out['object']['socialcopy_model'] = summarize_result(res_sc)
+        except Exception as e:
+            out['object']['socialcopy_model'] = {'error': f'Failed to summarize socialcopy_model: {str(e)}'}
     else:
-        interpretation_lines.append("No age-by-culture interactions were present in the model: comparable slopes across cultures were assumed in the model.")
-    description = " ".join(interpretation_lines)
+        out['object']['socialcopy_model'] = None
 
-    return {"object": out, "description": description}
+    # Extract and summarize majority_model (might be None if too few copiers)
+    if 'majority_model' in model_output and model_output['majority_model'] is not None:
+        try:
+            res_mc = model_output['majority_model']
+            out['object']['majority_model'] = summarize_result(res_mc)
+        except Exception as e:
+            out['object']['majority_model'] = {'error': f'Failed to summarize majority_model: {str(e)}'}
+    else:
+        out['object']['majority_model'] = None
+
+    # Short interpretive description to help the user read the numeric output
+    out['description'] = (
+        "Returned objects contain: (1) a parameter table for each fitted model "
+        "(coefficients, standard errors, p-values, and 95% CIs), (2) a focused "
+        "listing of Age-related terms (Age_c, Age2) and any Age_c x Culture interaction terms, "
+        "(3) whether any interaction terms are individually significant (p < .05), "
+        "and (4) a joint Wald-test p-value (if computable) testing whether all Age_c:C(culture) "
+        "coefficients are zero. Also included are predicted probability changes across the observed "
+        "Age_c range for each culture (holding other covariates at their sample means) so you can "
+        "see how the model implies developmental change differs by culture.\n\n"
+        "How to read the numbers in relation to the research question:\n"
+        "- If the Age_c coefficient (or a combination of Age_c and Age2) in the socialcopy_model "
+        "is statistically significant, this indicates an overall developmental change in the tendency "
+        "to copy demonstrators vs. choose an undemonstrated option. A positive coefficient for Age_c "
+        "means copying increases with age (over the centered age range); a negative one means it decreases.\n"
+        "- If any Age_c:C(culture) terms are significant or the joint interaction p-value is < 0.05, "
+        "this indicates the developmental trajectory of copying differs across cultural sites.\n"
+        "- The predicted_probability_change_across_age_per_culture entries show the model-predicted "
+        "probability of the outcome at the observed minimum and maximum Age_c for each culture and the "
+        "difference between them (delta_prob). Positive delta_prob means an increase in probability with age "
+        "for that culture; negative means a decrease.\n\n"
+        "Use the numeric outputs in out['object'] to make formal statements (e.g., 'Age effect is significant, "
+        "p = X; Age x Culture joint test p = Y; in culture A predicted probability increases by Z between min and max ages')."
+    )
+
+    return out

@@ -13,92 +13,97 @@ df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/anal
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Transform raw contest data into variables required for the binomial model.
+    Transform the raw capuchin contest dataframe into an analysis-ready dataframe.
 
-    Produces the following model columns (exact names used in the modeling function):
-      - win: binary outcome (kept from input)
-      - SizeDiff: raw difference n_focal - n_other
-      - LocAdv: raw location advantage dist_other - dist_focal
-      - MaleDiff: m_focal - m_other
-      - FemaleDiff: f_focal - f_other
-      - SizeDiff_c, LocAdv_c, MaleDiff_c, FemaleDiff_c: mean-centered versions
-      - dyad: dyad identifier (kept as-is for fixed effects and clustering)
+    Produces the following columns used in the model:
+      - win: dependent binary outcome (keeps original)
+      - size_diff_z: standardized (n_focal - n_other)
+      - loc_adv_z: standardized (dist_other - dist_focal) ; positive => focal closer to its center
+      - homefield: binary indicator (1 if dist_focal < dist_other else 0)
+      - male_diff_z: standardized (m_focal - m_other)
+      - female_diff_z: standardized (f_focal - f_other)
+      - dyad: categorical dyad id (kept for fixed effects / clustering)
+
+    The function drops rows with missing values in required columns.
     """
 
-    # Work on a copy
     df = df.copy()
 
-    # Required columns
-    required_cols = ['win', 'n_focal', 'n_other', 'dist_focal', 'dist_other', 'm_focal', 'm_other', 'f_focal', 'f_other', 'dyad']
-    missing = [c for c in required_cols if c not in df.columns]
-    if len(missing) > 0:
-        raise ValueError(f"Input dataframe is missing required columns: {missing}")
+    # Columns required for analysis
+    required_cols = [
+        'win', 'dist_focal', 'dist_other',
+        'n_focal', 'n_other', 'm_focal', 'm_other', 'f_focal', 'f_other',
+        'dyad'
+    ]
 
-    # Drop rows with missing values in any of the required columns
+    # Drop rows missing any of the required columns
     df = df.dropna(subset=required_cols)
 
-    # Create raw difference variables
-    df['SizeDiff'] = df['n_focal'] - df['n_other']
-    # Alternative scale (ratio) could be used; here we use difference because group sizes are small integers
-    df['LocAdv'] = df['dist_other'] - df['dist_focal']
-    df['MaleDiff'] = df['m_focal'] - df['m_other']
-    df['FemaleDiff'] = df['f_focal'] - df['f_other']
+    # Compute difference variables (raw)
+    df['size_diff'] = df['n_focal'] - df['n_other']
+    df['male_diff'] = df['m_focal'] - df['m_other']
+    df['female_diff'] = df['f_focal'] - df['f_other']
 
-    # Mean-center continuous predictors for interpretability and to reduce collinearity in interactions
-    for col in ['SizeDiff', 'LocAdv', 'MaleDiff', 'FemaleDiff']:
-        mean_val = df[col].mean()
-        df[col + '_c'] = df[col] - mean_val
+    # Location advantage: positive when focal is relatively closer to its home center
+    df['loc_adv'] = df['dist_other'] - df['dist_focal']
 
-    # Ensure dyad is present and keep it for fixed effects and clustering
-    # Make dyad a categorical-like column but keep original values for clustering
-    df['dyad'] = df['dyad'].astype(int)
+    # Homefield indicator: 1 if focal is closer to its home center than the other group
+    df['homefield'] = (df['dist_focal'] < df['dist_other']).astype(int)
 
-    # Keep only the columns necessary for modeling (but return full df to be safe)
-    # Explicitly ensure the columns named in the conceptual variables exist
-    expected_model_cols = ['win', 'SizeDiff_c', 'LocAdv_c', 'MaleDiff_c', 'FemaleDiff_c', 'dyad',
-                           'SizeDiff', 'LocAdv', 'MaleDiff', 'FemaleDiff']
-    for c in expected_model_cols:
-        if c not in df.columns:
-            raise RuntimeError(f"Expected column '{c}' not found after transformation")
+    # Standardize continuous predictors (z-score). Use population std (ddof=0) for stable estimates.
+    for col in ['size_diff', 'male_diff', 'female_diff', 'loc_adv']:
+        mean = df[col].mean()
+        std = df[col].std(ddof=0)
+        if std == 0 or np.isclose(std, 0):
+            # If zero variance (unlikely), create zero column to avoid division by zero
+            df[col + '_z'] = 0.0
+        else:
+            df[col + '_z'] = (df[col] - mean) / std
 
-    return df
+    # Ensure dyad is a categorical variable (keeps it for fixed effects)
+    df['dyad'] = df['dyad'].astype('category')
+
+    # Keep only the columns needed for modeling and return a copy
+    final_cols = [
+        'win',
+        'size_diff_z',
+        'loc_adv_z',
+        'homefield',
+        'male_diff_z',
+        'female_diff_z',
+        'dyad'
+    ]
+
+    return df[final_cols].copy()
 
 
 # ======== MODEL CODE ========
-def model(df: pd.DataFrame) -> Any:
+def model(df: pd.DataFrame):
     """
-    Fit a logistic (binomial) regression testing the effects of relative group size (SizeDiff_c),
-    location advantage (LocAdv_c), and their interaction on the probability that the focal group wins.
+    Fit a logistic regression (binomial GLM) predicting the probability that the focal group wins.
 
-    The model includes MaleDiff_c and FemaleDiff_c as controls and dyad fixed effects.
-    We also compute cluster-robust standard errors clustered by dyad.
+    Model specification:
+      win ~ size_diff_z * homefield + loc_adv_z + male_diff_z + female_diff_z + C(dyad)
 
-    Returns a dictionary with the fitted GLM object and cluster-robust results.
+    - Tests main effects of relative group size (size_diff_z) and location advantage (loc_adv_z),
+      and whether the effect of relative size varies when the focal group is 'homefield' (interaction).
+    - Includes dyad fixed effects via C(dyad) to account for pair-level idiosyncrasies.
+
+    Returns the fitted statsmodels GLMResults object.
     """
 
     import statsmodels.formula.api as smf
 
-    # Ensure required columns exist
-    required = ['win', 'SizeDiff_c', 'LocAdv_c', 'MaleDiff_c', 'FemaleDiff_c', 'dyad']
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        raise ValueError(f"Transformed dataframe missing required columns for modeling: {missing}")
+    # Ensure dyad is categorical inside the modeling environment
+    df = df.copy()
+    df['dyad'] = df['dyad'].astype('category')
 
-    # Fit binomial GLM with dyad fixed effects; use interaction operator * to include main effects and interaction
-    formula = 'win ~ SizeDiff_c * LocAdv_c + MaleDiff_c + FemaleDiff_c + C(dyad)'
-    glm_res = smf.glm(formula=formula, data=df, family=sm.families.Binomial()).fit()
+    formula = 'win ~ size_diff_z * homefield + loc_adv_z + male_diff_z + female_diff_z + C(dyad)'
 
-    # Compute cluster-robust covariance by dyad
-    try:
-        robust_res = glm_res.get_robustcov_results(cov_type='cluster', groups=df['dyad'])
-    except Exception:
-        # If cluster robust fails for any reason, return the original glm result and note that robust fit failed
-        robust_res = None
+    # Fit binomial GLM (logistic regression)
+    model_res = smf.glm(formula=formula, data=df, family=sm.families.Binomial()).fit()
 
-    # Return both the original and robust results (robust_res may be None if computation failed)
-    return {
-        'glm_result': glm_res,
-        'cluster_robust_result': robust_res
-    }
+    # Return the fitted model object (caller can inspect .summary(), .params, etc.)
+    return model_res
 
 

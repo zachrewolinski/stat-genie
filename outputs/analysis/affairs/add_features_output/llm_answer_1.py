@@ -1,136 +1,170 @@
 def extract_final_answer(model_output):
     """
-    Extracts and summarizes the effect of 'HasChildren' from fitted statsmodels results
-    provided in model_output (expected keys: 'logit' and 'neg_bin').
+    Extracts coefficient, p-value, confidence interval, and exponentiated effect
+    (IRR or OR) for the treatment variable 'Children' from model_output.
 
     Returns a dict with:
-      - "object": a dict summarizing coefficients, p-values, 95% CIs, and exp(coef)
-                  (odds ratio / incidence rate ratio) for each model and an overall
-                  plain-language conclusion.
-      - "description": a short explanation of what the returned numbers mean.
+      - "object": dict keyed by model name with numeric summaries
+      - "description": short textual interpretation about whether having children
+                       is associated with fewer extramarital affairs.
     """
     import numpy as np
     import pandas as pd
 
-    summary = {}
-    def summarize_model(res_obj, model_name):
-        if res_obj is None:
-            return {"error": f"{model_name} result is None"}
-        # If the caller passed an error string instead of a model object, propagate it
-        if isinstance(res_obj, str):
-            return {"error": res_obj}
+    def find_param_name(params_index, base_name='Children'):
+        # Try exact match first, then case-insensitive contains
+        if base_name in params_index:
+            return base_name
+        for n in params_index:
+            if isinstance(n, str) and base_name.lower() in n.lower():
+                return n
+        return None
 
-        try:
-            params = res_obj.params            # pandas Series
-            pvals = res_obj.pvalues
-            ci_array = res_obj.conf_int().values  # ndarray shape (k,2)
-            param_names = list(params.index)
-            if 'HasChildren' not in param_names:
-                return {"error": "'HasChildren' not found in model parameters"}
-            idx = param_names.index('HasChildren')
-
-            coef = float(params['HasChildren'])
-            pval = float(pvals['HasChildren'])
-            ci_low = float(ci_array[idx, 0])
-            ci_high = float(ci_array[idx, 1])
-            exp_coef = float(np.exp(coef))
-            exp_ci_low = float(np.exp(ci_low))
-            exp_ci_high = float(np.exp(ci_high))
-
-            return {
-                "coef": coef,
-                "pvalue": pval,
-                "ci_95": (ci_low, ci_high),
-                "exp_coef": exp_coef,
-                "exp_ci_95": (exp_ci_low, exp_ci_high)
-            }
-        except Exception as e:
-            return {"error": f"exception while summarizing {model_name}: {str(e)}"}
-
-    # Summarize logistic model (probability of any affair)
-    logit_res = model_output.get('logit')
-    summary['logit'] = summarize_model(logit_res, 'logit')
-
-    # Summarize negative binomial model (count of affairs)
-    negbin_res = model_output.get('neg_bin')
-    summary['neg_bin'] = summarize_model(negbin_res, 'neg_bin')
-
-    # Build a concise conclusion about whether having children decreases engagement in affairs
-    conclusions = []
-    def interpret(summ, label, kind):
-        if summ is None:
-            return f"{label}: no result."
-        if 'error' in summ:
-            return f"{label}: {summ['error']}"
-        coef = summ['coef']
-        p = summ['pvalue']
-        expc = summ['exp_coef']
-        ci = summ['ci_95']
-        expci = summ['exp_ci_95']
-        direction = "decrease" if coef < 0 else ("increase" if coef > 0 else "no change")
-        signif = "statistically significant" if p < 0.05 else "not statistically significant"
-        if kind == 'logit':
-            return (f"{label}: HasChildren coef={coef:.3f}, p={p:.3g} ({signif}); "
-                    f"odds ratio={expc:.3f}, 95% CI={expci[0]:.3f}–{expci[1]:.3f}. "
-                    f"Interpretation: having children is associated with a {direction} in the odds of any affair.")
-        else:
-            return (f"{label}: HasChildren coef={coef:.3f}, p={p:.3g} ({signif}); "
-                    f"incidence rate ratio={expc:.3f}, 95% CI={expci[0]:.3f}–{expci[1]:.3f}. "
-                    f"Interpretation: having children is associated with a {direction} in the expected count of affairs.")
-    conclusions.append(interpret(summary['logit'], "Logistic (AnyAffair)", 'logit'))
-    conclusions.append(interpret(summary['neg_bin'], "NegativeBinomial (AffairCount)", 'negbin'))
-
-    # Combine into final short conclusion:
-    # If both models show negative coef and at least one is significant, say evidence for decrease.
-    def final_statement(summary):
-        ok = []
-        neg_signif = 0
-        neg_any = 0
-        pos_signif = 0
-        pos_any = 0
-        for k in ('logit', 'neg_bin'):
-            s = summary.get(k)
-            if not s or 'error' in s:
+    summaries = {}
+    available_models = []
+    for key in ['neg_binom', 'logit_any_affair', 'zinb']:
+        if key in model_output and not (isinstance(model_output[key], str) and key.endswith('_error') is False):
+            res = model_output[key]
+            # Some entries might be error strings; skip those
+            if res is None:
                 continue
-            coef = s['coef']
-            p = s['pvalue']
-            if coef < 0:
-                neg_any += 1
-                if p < 0.05:
-                    neg_signif += 1
-            elif coef > 0:
-                pos_any += 1
-                if p < 0.05:
-                    pos_signif += 1
-        if neg_signif >= 1 and pos_signif == 0:
-            return ("Overall: Evidence that having children is associated with LOWER engagement in extramarital affairs "
-                    "(at least one model shows a statistically significant negative association).")
-        if neg_any >= 1 and pos_any == 0 and neg_signif == 0:
-            return ("Overall: Both (or at least one) models estimate negative associations (fewer affairs for parents) "
-                    "but these estimates are not statistically significant; evidence is weak.")
-        if pos_signif >= 1 and neg_signif == 0:
-            return ("Overall: Evidence that having children is associated with HIGHER engagement in extramarital affairs "
-                    "(unexpectedly), as shown by a statistically significant positive association in at least one model.")
-        if pos_any >= 1 and neg_any == 0 and pos_signif == 0:
-            return ("Overall: Estimated positive associations (more affairs for parents) but not statistically significant; evidence is weak.")
-        # Mixed directions or no clear signal
-        return ("Overall: Mixed or inconclusive evidence across models about whether having children changes engagement in affairs; "
-                "no consistent statistically significant effect.")
+            # Ensure the object looks like a fitted results with .params
+            if not hasattr(res, 'params'):
+                continue
+            params_index = res.params.index if hasattr(res.params, 'index') else list(res.params.keys())
+            pname = find_param_name(params_index, 'Children')
+            if pname is None:
+                summaries[key] = {'error': "Could not locate parameter name for 'Children' in model params."}
+                continue
 
-    final_concl = final_statement(summary)
+            # Extract coefficient
+            try:
+                coef = float(res.params[pname])
+            except Exception:
+                coef = float(pd.Series(res.params)[pname])
 
-    result_object = {
-        "models": summary,
-        "final_conclusion": final_concl,
-        "model_level_descriptions": conclusions
+            # p-value (may not exist on some result types)
+            pval = None
+            try:
+                if hasattr(res, 'pvalues'):
+                    pval = float(res.pvalues[pname])
+            except Exception:
+                pval = None
+
+            # Confidence intervals
+            ci_lower = ci_upper = None
+            try:
+                ci = res.conf_int()
+                # conf_int may be DataFrame or ndarray; use label if possible
+                if isinstance(ci, (pd.DataFrame, pd.Series)):
+                    ci_lower = float(ci.loc[pname][0])
+                    ci_upper = float(ci.loc[pname][1])
+                else:
+                    # fallback: try to index by position
+                    idx = list(params_index).index(pname)
+                    ci_lower = float(ci[idx, 0])
+                    ci_upper = float(ci[idx, 1])
+            except Exception:
+                ci_lower = ci_upper = None
+
+            # Exponentiated coefficient (IRR for count model with log link, OR for logit)
+            exp_coef = None
+            exp_ci = (None, None)
+            try:
+                exp_coef = float(np.exp(coef))
+                if (ci_lower is not None) and (ci_upper is not None):
+                    exp_ci = (float(np.exp(ci_lower)), float(np.exp(ci_upper)))
+            except Exception:
+                exp_coef = None
+
+            significance = None
+            if pval is not None:
+                significance = bool(pval < 0.05)
+
+            summaries[key] = {
+                'param_name': pname,
+                'coef': coef,
+                'pvalue': pval,
+                'conf_int': (ci_lower, ci_upper),
+                'exp_coef': exp_coef,
+                'exp_conf_int': exp_ci,
+                'significant_at_0.05': significance
+            }
+            available_models.append(key)
+
+    # Formulate a concise overall conclusion based on available models
+    conclusion_notes = []
+    sig_negative = []
+    sig_positive = []
+    nonsig = []
+    for k, s in summaries.items():
+        if 'error' in s:
+            conclusion_notes.append(f"{k}: {s['error']}")
+            continue
+        if s['pvalue'] is None:
+            nonsig.append(k)
+            continue
+        if s['significant_at_0.05']:
+            if s['coef'] < 0:
+                sig_negative.append(k)
+            elif s['coef'] > 0:
+                sig_positive.append(k)
+            else:
+                nonsig.append(k)
+        else:
+            nonsig.append(k)
+
+    if len(sig_negative) > 0 and len(sig_positive) == 0:
+        overall = ("Evidence that having children is associated with LOWER engagement in "
+                   "extramarital affairs in the models: " + ", ".join(sig_negative) + ".")
+    elif len(sig_positive) > 0 and len(sig_negative) == 0:
+        overall = ("Evidence that having children is associated with HIGHER engagement in "
+                   "extramarital affairs in the models: " + ", ".join(sig_positive) + ".")
+    elif len(sig_negative) > 0 and len(sig_positive) > 0:
+        overall = ("Mixed evidence: some models show a statistically significant negative "
+                   f"association ({', '.join(sig_negative)}) while others show a significant "
+                   f"positive association ({', '.join(sig_positive)}).")
+    else:
+        overall = ("No robust evidence that having children decreases extramarital affairs; "
+                   "no model shows a statistically significant negative association at p<0.05." if len(nonsig) > 0
+                   else "No models available to draw a conclusion.")
+
+    # Build human-readable summary lines for each available model
+    model_lines = []
+    for k in ['neg_binom', 'logit_any_affair', 'zinb']:
+        if k not in summaries:
+            continue
+        s = summaries[k]
+        if 'error' in s:
+            model_lines.append(f"{k}: {s['error']}")
+            continue
+        line = f"{k}: coef({s['param_name']})={s['coef']:.4f}"
+        if s['pvalue'] is not None:
+            line += f", p={s['pvalue']:.3g}"
+        if s['exp_coef'] is not None:
+            if k == 'neg_binom':
+                label = "IRR"
+            elif k == 'logit_any_affair':
+                label = "OR"
+            else:
+                label = "exp(coef)"
+            line += f", {label}={s['exp_coef']:.3f}"
+            if s['exp_conf_int'][0] is not None:
+                line += f" (95% CI {s['exp_conf_int'][0]:.3f}–{s['exp_conf_int'][1]:.3f})"
+        model_lines.append(line)
+
+    description = {
+        'per_model_text': " ; ".join(model_lines) if model_lines else "No model summaries available.",
+        'overall_conclusion': overall,
+        'notes': ("Interpretation: For the negative binomial (count) model, exp(coef) is an incidence-rate ratio (IRR): values <1"
+                  " indicate fewer expected affairs for those with children. For the logit model, exp(coef) is an odds ratio (OR).")
     }
 
-    description = (
-        "Returned are coefficient, p-value, 95% confidence interval, and exp(coef) for 'HasChildren' "
-        "from both the logistic model (odds ratio for any affair) and the negative-binomial model "
-        "(incidence rate ratio for count of affairs). The 'final_conclusion' gives a plain-language "
-        "summary about whether having children appears to decrease engagement in extramarital affairs "
-        "based on direction and statistical significance of the estimates."
-    )
-
-    return {"object": result_object, "description": description}
+    return {
+        "object": {
+            "per_model": summaries,
+            "available_models": available_models,
+            "final_judgment": overall
+        },
+        "description": description
+    }

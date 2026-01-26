@@ -1,118 +1,140 @@
-from typing import Dict, FrozenSet, List, Literal, Optional, Set, Tuple, Any
+from typing import Any, Dict, List, Optional, Set, Tuple, FrozenSet, Literal
 import numpy as np
 import pandas as pd
-import sklearn
-import scipy
+import sklearn  # noqa: F401
+import scipy  # noqa: F401
 import statsmodels.api as sm
-import statsmodels.formula.api as smf
-import matplotlib.pyplot as plt
-import pickle
-  
-df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/analysis/boxes/noperturb_output/boxes.csv')
+import statsmodels.formula.api as smf  # noqa: F401
+import matplotlib.pyplot as plt  # noqa: F401
+import pickle  # noqa: F401
+
 
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Transform the raw dataset into a dataframe ready for modeling.
-
-    Steps:
-    - Drop rows with missing values in variables needed for the model.
-    - Create binary outcome y_majority (1 if y==2, else 0).
-    - Center age (age_c) and create quadratic term age2 to capture nonlinearity.
-    - Create is_boy indicator from gender (1=girl, 2=boy in raw data).
-    - Ensure majority_first is binary (0/1).
-    - Create culture dummy variables (culture_2 ... culture_8) with culture_1 as reference.
-    - Create interaction terms between centered age and each culture dummy.
-    - Add an Intercept column for explicit design matrix use.
-
-    The returned dataframe will contain at minimum the columns referenced in the conceptual variables and model code.
-    """
-    # Required columns for modeling
-    required_cols = ['y', 'age', 'culture', 'gender', 'majority_first']
+    # Make a copy to avoid modifying input in-place
     df = df.copy()
 
-    # Drop rows with missing values in any required column
-    df = df.dropna(subset=required_cols)
+    # Required raw columns: 'y', 'gender', 'age', 'majority_first', 'culture'
+    # Drop rows with missing values in core variables
+    df = df.dropna(subset=['y', 'age', 'culture'])
 
-    # Create binary dependent variable: 1 if majority option selected (y == 2), else 0
-    df['y_majority'] = (df['y'] == 2).astype(int)
+    # 1) Basic recodes and derived variables
+    # gender: 1 = girl, 2 = boy in dataset. Create is_female indicator (1 = girl, 0 = boy)
+    df['is_female'] = (df['gender'] == 1).astype(int)
 
-    # Center age and create quadratic term
+    # 2) Center age and create coarse age groups (developmental stages)
     df['age_c'] = df['age'] - df['age'].mean()
-    df['age2'] = df['age_c'] ** 2
+    # Age groups: 4-6, 7-9, 10-12, 13-14
+    bins = [3.5, 6.5, 9.5, 12.5, 14.5]
+    labels = ['4-6', '7-9', '10-12', '13-14']
+    df['age_group'] = pd.cut(df['age'], bins=bins, labels=labels)
 
-    # Convert gender to is_boy indicator: gender==2 -> 1, else 0
-    df['is_boy'] = (df['gender'] == 2).astype(int)
+    # 3) Derived dependent variables
+    # social_follow: 1 if child chose a demonstrated option (majority or minority: y==2 or y==3), 0 if chose undemonstrated (y==1)
+    df['social_follow'] = df['y'].apply(lambda v: 1 if v in [2, 3] else 0)
 
-    # Ensure majority_first is 0/1 integer
-    df['majority_first'] = df['majority_first'].astype(int)
+    # majority_pref: among those who followed demonstrators, 1 if chose majority (y==2), 0 if chose minority (y==3)
+    df['majority_pref'] = pd.NA
+    mask_demonstrated = df['y'].isin([2, 3])
+    df.loc[mask_demonstrated, 'majority_pref'] = df.loc[mask_demonstrated, 'y'].apply(lambda v: 1 if v == 2 else 0)
+    # Convert majority_pref to numeric (0/1) where available; use to_numeric to safely coerce pd.NA to NaN
+    df['majority_pref'] = pd.to_numeric(df['majority_pref'], errors='coerce')
 
-    # Create culture dummies; drop_first=True uses culture_1 as reference
-    # Cast culture to string to get deterministic column names like 'culture_2'
-    culture_dummies = pd.get_dummies(df['culture'].astype(int).astype(str), prefix='culture', drop_first=True)
-    # Ensure consistent ordering of dummy columns (culture_2 ... culture_8 if present)
-    culture_dummies = culture_dummies.reindex(sorted(culture_dummies.columns, key=lambda x: int(x.split('_')[1])), axis=1).fillna(0).astype(int)
-
-    # Attach culture dummies to df
+    # 4) Culture: keep a categorical version and create one-hot dummies for modeling (drop first to avoid collinearity)
+    df['culture_cat'] = df['culture'].astype('category')
+    culture_dummies = pd.get_dummies(df['culture_cat'], prefix='culture', drop_first=True)
+    # Append dummy columns to df (these will be used as fixed effects and for interactions)
     for col in culture_dummies.columns:
-        df[col] = culture_dummies[col].values
+        df[col] = culture_dummies[col]
 
-    # Create interactions between centered age and each culture dummy
-    interaction_cols = []
-    for col in culture_dummies.columns:
-        inter_name = 'age_c_x_' + col
-        df[inter_name] = df['age_c'] * df[col]
-        interaction_cols.append(inter_name)
+    # 5) Interaction terms: age_c x each culture dummy to test culture-specific developmental slopes
+    # Only use the one-hot dummy columns (e.g., culture_2, culture_3, ...) and exclude 'culture_cat' which is categorical
+    culture_dummy_cols = [c for c in df.columns if c.startswith('culture_') and c != 'culture_cat']
+    for ccol in culture_dummy_cols:
+        inter_name = f'age_c:{ccol}'
+        df[inter_name] = df['age_c'] * df[ccol]
 
-    # Add explicit intercept column for modeling
-    df['Intercept'] = 1.0
+    # 6) Ensure majority_first is numeric 0/1 if possible
+    df['majority_first'] = pd.to_numeric(df['majority_first'], errors='coerce')
+    # If there are no missing values, cast to int to ensure 0/1 integer coding; otherwise leave as numeric with NaN
+    if not df['majority_first'].isnull().any():
+        df['majority_first'] = df['majority_first'].astype(int)
 
-    # Optionally, build a list of model columns to keep for downstream modeling
-    model_cols = ['Intercept', 'age_c', 'age2', 'is_boy', 'majority_first'] + list(culture_dummies.columns) + interaction_cols
-    # We keep these columns (plus the outcome) in the returned dataframe to make subsequent modeling explicit
-    cols_to_return = ['y_majority'] + model_cols + ['y', 'age', 'culture', 'gender', 'majority_first']
+    # Final check: drop rows with NA in binary derived outcomes when needed for their specific analyses
+    # (we keep them here — model function will subset appropriately)
 
-    # Return df with at least the columns we need (keeping other columns as well is fine)
-    return df[cols_to_return].copy()
+    return df
 
 
 # ======== MODEL CODE ========
 def model(df: pd.DataFrame) -> Any:
+    """Run three complementary models to answer the research question:
+    1) Multinomial logistic regression predicting the full 3-category choice (y = 1 undemonstrated, 2 majority, 3 minority) from age, culture, their interaction, and controls.
+    2) Logistic regression for social_follow (binary: followed demonstrators vs chose undemonstrated) with the same predictors.
+    3) Logistic regression for majority_pref among children who followed demonstrators (1 = majority, 0 = minority) with the same predictors.
+
+    Returns a dict with fitted results objects for each model.
     """
-    Fit a binomial (logistic) regression predicting the probability of choosing the majority option.
+    results: Dict[str, Any] = {}
 
-    Model specification (GLM, binomial logit link):
-      y_majority ~ age_c + age2 + is_boy + majority_first + culture dummies + (age_c x culture dummies)
+    # Make a copy
+    df = df.copy()
 
-    Interpretation focus: the age_c x culture interaction terms test whether the developmental slope for majority preference differs across cultural sites.
+    # Identify culture dummy columns created in transform: 'culture_2', 'culture_3', ... depending on site ids
+    # Exclude 'culture_cat' which is a categorical column not a dummy
+    culture_dummy_cols = [c for c in df.columns if c.startswith('culture_') and c != 'culture_cat']
+    interaction_cols = [f'age_c:{c}' for c in culture_dummy_cols]
 
-    Returns the fitted statsmodels GLM results object.
-    """
-    # Ensure necessary model columns exist
-    # Base columns
-    base_cols = ['Intercept', 'age_c', 'age2', 'is_boy', 'majority_first']
-    # Culture dummy columns expected (culture_2 ... culture_8). Keep only those present in df.
-    culture_cols = [c for c in df.columns if c.startswith('culture_')]
-    # Interaction columns: age_c_x_culture_*
-    interaction_cols = [c for c in df.columns if c.startswith('age_c_x_culture_')]
+    # Base predictor set: controls + main effects + culture dummies + interactions
+    predictor_cols = ['is_female', 'majority_first', 'age_c'] + culture_dummy_cols + interaction_cols
 
-    model_cols = base_cols + sorted(culture_cols) + sorted(interaction_cols)
+    # 1) Multinomial logistic regression (full 3-category outcome)
+    # Prepare endog as category codes (0..K-1)
+    endog_cat = df['y'].astype('category')
+    endog = endog_cat.cat.codes
 
-    # Subset to rows without missing values in model columns or the outcome
-    model_df = df.dropna(subset=['y_majority'] + model_cols)
+    # Prepare exog and add constant
+    exog = df[predictor_cols].astype(float)
+    exog = sm.add_constant(exog, has_constant='add')
 
-    # Design matrix X and outcome y
-    X = model_df[model_cols].astype(float)
-    y = model_df['y_majority'].astype(int)
+    # Fit MNLogit. If convergence problems occur, try a different method.
+    mnlogit_mod = sm.MNLogit(endog, exog)
+    try:
+        mnlogit_res = mnlogit_mod.fit(method='newton', maxiter=200, disp=False)
+    except Exception:
+        mnlogit_res = mnlogit_mod.fit(method='bfgs', maxiter=200, disp=False)
 
-    # Fit GLM with binomial family (logit link)
-    model = sm.GLM(y, X, family=sm.families.Binomial())
-    results = model.fit()
+    results['multinomial'] = mnlogit_res
 
-    # Optionally compute clustered robust SEs by culture (uncomment if desired):
-    # results_robust = results.get_robustcov_results(cov_type='cluster', groups=model_df['culture'])
-    # return results_robust
+    # 2) Logistic regression for social_follow
+    # Drop rows with missing social_follow
+    df_sf = df.dropna(subset=['social_follow'])
+    endog_sf = df_sf['social_follow'].astype(float)
+    exog_sf = df_sf[predictor_cols].astype(float)
+    exog_sf = sm.add_constant(exog_sf, has_constant='add')
+    logit_sf = sm.Logit(endog_sf, exog_sf)
+    try:
+        logit_sf_res = logit_sf.fit(disp=False)
+    except Exception:
+        logit_sf_res = logit_sf.fit(method='bfgs', disp=False)
+    results['social_follow_logit'] = logit_sf_res
 
+    # 3) Logistic regression for majority_pref among those who followed demonstrators
+    df_mp = df[df['social_follow'] == 1].copy()
+    # Drop missing majority_pref if any
+    df_mp = df_mp.dropna(subset=['majority_pref'])
+    if df_mp.shape[0] >= 20:
+        endog_mp = df_mp['majority_pref'].astype(float)
+        exog_mp = df_mp[predictor_cols].astype(float)
+        exog_mp = sm.add_constant(exog_mp, has_constant='add')
+        logit_mp = sm.Logit(endog_mp, exog_mp)
+        try:
+            logit_mp_res = logit_mp.fit(disp=False)
+        except Exception:
+            logit_mp_res = logit_mp.fit(method='bfgs', disp=False)
+        results['majority_pref_logit'] = logit_mp_res
+    else:
+        results['majority_pref_logit'] = None
+
+    # Return results dict. Each value is a fitted statsmodels results object (inspect using .summary() externally).
     return results
-
-

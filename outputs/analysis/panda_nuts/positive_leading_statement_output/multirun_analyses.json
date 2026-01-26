@@ -1,0 +1,252 @@
+{
+  "dataset_name": "panda_nuts",
+  "n": 5,
+  "analyses": {
+    "0": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Age in years at time of observation (continuous). Hypothesized to increase motor control / experience and therefore increase nut-cracking efficiency.",
+            "columns": [
+              "age"
+            ]
+          },
+          {
+            "description": "Sex of the individual, coded as a binary predictor (Sex_Male = 1 for males, 0 for females). May influence strength, opportunity, or learning and thus efficiency.",
+            "columns": [
+              "Sex_Male"
+            ]
+          },
+          {
+            "description": "Whether the focal individual received help from another chimpanzee during the session (Help_Received = 1 if yes, 0 if no). Social help may improve immediate efficiency (assistance, scaffolding) or reflect social learning contexts.",
+            "columns": [
+              "Help_Received"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Nut-cracking efficiency, operationalized as the log(1 + nuts opened per second) to stabilize variance. This is used as the outcome variable.",
+          "columns": [
+            "LogEfficiency",
+            "Efficiency"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Hammer type used in the session (categorical). Different hammer types could affect cracking efficiency and are included as a control (entered as categorical in the model via C(hammer)).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "hammer"
+            ]
+          },
+          {
+            "description": "Individual chimpanzee identifier. Included as a grouping variable for a random intercept (mixed-effects model) to account for repeated measures within individuals.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "chimpanzee"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw dataset into a dataframe suitable for modeling nut-cracking efficiency.\n    Produces:\n      - Efficiency: nuts opened per second (float)\n      - LogEfficiency: log1p(Efficiency) to stabilize skew and handle zeros\n      - Sex_Male: binary 1 if sex is male, 0 if female\n      - Help_Received: binary 1 if help indicates yes, 0 otherwise\n      - Ensures chimpanzee is a categorical/grouping column and hammer stays as categorical\n    Drops rows with missing critical values or invalid session durations (seconds <= 0).\n    \"\"\"\n    # copy to avoid modifying original\n    df = df.copy()\n\n    # Standardize column names if necessary (expecting given schema names)\n    required_cols = ['chimpanzee', 'age', 'sex', 'hammer', 'nuts_opened', 'seconds', 'help']\n    missing = [c for c in required_cols if c not in df.columns]\n    if missing:\n        raise ValueError(f\"Input dataframe is missing required columns: {missing}\")\n\n    # Convert numeric-looking fields to numeric, coerce errors to NaN\n    df['nuts_opened'] = pd.to_numeric(df['nuts_opened'], errors='coerce')\n    df['seconds'] = pd.to_numeric(df['seconds'], errors='coerce')\n    df['age'] = pd.to_numeric(df['age'], errors='coerce')\n\n    # Drop rows with missing critical fields\n    df = df.dropna(subset=['nuts_opened', 'seconds', 'age', 'sex', 'help', 'chimpanzee', 'hammer'])\n\n    # Ensure seconds > 0 to compute rates\n    df = df[df['seconds'] > 0].copy()\n\n    # Compute efficiency: nuts opened per second\n    df['Efficiency'] = df['nuts_opened'].astype(float) / df['seconds'].astype(float)\n\n    # Handle infinite or NaN values (e.g., division issues)\n    df.loc[~np.isfinite(df['Efficiency']), 'Efficiency'] = np.nan\n    df = df.dropna(subset=['Efficiency'])\n\n    # Stabilize skew with log(1 + Efficiency) (keeps zeros valid)\n    df['LogEfficiency'] = np.log1p(df['Efficiency'].astype(float))\n\n    # Create binary sex variable: Sex_Male = 1 if male, 0 if female\n    # be robust to case variations and missing labels\n    df['sex_str'] = df['sex'].astype(str).str.strip().str.lower()\n    df['Sex_Male'] = df['sex_str'].map(lambda x: 1 if x.startswith('m') else (0 if x.startswith('f') else np.nan))\n\n    # Map help to binary: Help_Received = 1 for yes-like answers, 0 otherwise\n    df['help_str'] = df['help'].astype(str).str.strip().str.lower()\n    df['Help_Received'] = df['help_str'].map(lambda x: 1 if x.startswith('y') else (0 if x.startswith('n') else np.nan))\n\n    # Drop rows where mapping was ambiguous\n    df = df.dropna(subset=['Sex_Male', 'Help_Received'])\n\n    # Cast binary columns to integer dtype\n    df['Sex_Male'] = df['Sex_Male'].astype(int)\n    df['Help_Received'] = df['Help_Received'].astype(int)\n\n    # Ensure chimpanzee is categorical (grouping variable for mixed model)\n    df['chimpanzee'] = df['chimpanzee'].astype('category')\n\n    # Ensure hammer is categorical\n    df['hammer'] = df['hammer'].astype('category')\n\n    # Keep only columns needed for modeling plus some diagnostics\n    keep_cols = ['chimpanzee', 'age', 'Sex_Male', 'Help_Received', 'hammer', 'nuts_opened', 'seconds', 'Efficiency', 'LogEfficiency']\n    df = df[keep_cols].reset_index(drop=True)\n\n    return df",
+      "m_code": "def model(df: pd.DataFrame) -> Any:\n    \"\"\"\n    Fit a mixed-effects model predicting LogEfficiency from age, sex, and help,\n    controlling for hammer type and including a random intercept for each chimpanzee.\n\n    Returns the fitted model object(s). Prints a brief summary.\n    \"\"\"\n    import statsmodels.formula.api as smf\n    import statsmodels.api as sm\n\n    # Check required columns exist\n    required = ['LogEfficiency', 'age', 'Sex_Male', 'Help_Received', 'hammer', 'chimpanzee']\n    missing = [c for c in required if c not in df.columns]\n    if missing:\n        raise ValueError(f\"Transformed dataframe missing columns required for modeling: {missing}\")\n\n    # Build formula: include hammer as categorical control via C(hammer)\n    formula = 'LogEfficiency ~ age + Sex_Male + Help_Received + C(hammer)'\n\n    # Fit mixed effects model with random intercepts for chimpanzee\n    # Attempt several fitting strategies to avoid singular matrix / convergence failures\n    md = smf.mixedlm(formula, data=df, groups=df['chimpanzee'])\n\n    mdf = None\n    fit_errors = []\n    # Sequence of fit attempts with different options\n    fit_attempts = [\n        {'method': 'lbfgs', 'reml': False, 'options': {'maxiter': 1000}},\n        {'method': 'lbfgs', 'reml': True, 'options': {'maxiter': 1000}},\n        {'method': 'powell', 'reml': False, 'options': {'maxiter': 1000}},\n        {'method': 'cg', 'reml': False, 'options': {'maxiter': 1000}},\n        {'method': 'bfgs', 'reml': False, 'options': {'maxiter': 1000}},\n        # final naive attempt: allow default settings\n        {'method': None, 'reml': False, 'options': {}},\n    ]\n\n    for attempt in fit_attempts:\n        try:\n            if attempt['method'] is None:\n                mdf = md.fit(reml=attempt['reml'])\n            else:\n                mdf = md.fit(method=attempt['method'], reml=attempt['reml'], **({'options': attempt['options']} if attempt.get('options') else {}))\n            # If fit succeeded, break\n            break\n        except Exception as e:\n            # Record error and try next strategy\n            fit_errors.append((attempt, str(e)))\n            mdf = None\n            continue\n\n    # Print concise summary if mixed model fitted successfully\n    if mdf is not None:\n        try:\n            print(mdf.summary())\n        except Exception:\n            # If summary fails, just print that fit succeeded\n            print(\"MixedLM fit succeeded; summary not available.\")\n\n    else:\n        # If all mixed model attempts failed, report and proceed to OLS fallback\n        print(\"MixedLM failed to converge or produced a singular matrix with attempted optimizers. Falling back to cluster-robust OLS.\")\n        for a, err in fit_errors:\n            print(f\"Attempt: {a} -> Error: {err}\")\n\n    # Also compute and print robust (clustered) standard errors by chimpanzee using OLS as a check\n    ols_mod = None\n    try:\n        with warnings.catch_warnings():\n            warnings.simplefilter(\"ignore\")\n            ols_mod = smf.ols(formula, data=df).fit(cov_type='cluster', cov_kwds={'groups': df['chimpanzee']})\n        print('\\nCluster-robust OLS (clustered by chimpanzee) summary:')\n        if ols_mod is not None:\n            print(ols_mod.summary())\n    except Exception as e:\n        print(f\"Cluster-robust OLS failed: {e}\")\n        ols_mod = None\n\n    # Return both fitted mixed model (or None if failed) and cluster-robust OLS as a tuple for further inspection\n    return {\n        'mixedlm_result': mdf,\n        'cluster_robust_ols': ols_mod\n    }"
+    },
+    "1": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Age of the chimpanzee in years at time of observation (continuous). Used to test whether older/younger individuals crack nuts at different rates.",
+            "columns": [
+              "age"
+            ]
+          },
+          {
+            "description": "Sex of the chimpanzee, coded as a binary indicator for male. (sex_male = 1 for male, 0 for female). Tests whether males and females differ in nut-cracking efficiency.",
+            "columns": [
+              "sex_male"
+            ]
+          },
+          {
+            "description": "Whether the focal chimpanzee received help from another chimpanzee in that session (help_binary: 1 = yes, 0 = no). Tests whether receiving help influences nut-cracking efficiency.",
+            "columns": [
+              "help_binary"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Number of nuts opened in a session (count). The statistical model treats this as a count outcome and models nut-cracking rate by using session duration as exposure (log(seconds) as offset).",
+          "columns": [
+            "nuts_opened"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Session duration in seconds (positive numeric). Used as exposure for the count model (logged and used as an offset). Also included as a raw column for descriptive checks.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "seconds",
+              "log_seconds"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the original dataframe for modeling nut-cracking efficiency.\n\n    Produces the following new/clean columns used in the model:\n      - age: (ensures numeric)\n      - sex_male: binary 1 = male, 0 = female\n      - help_binary: binary 1 = received help, 0 = not\n      - nuts_opened: ensured numeric (count)\n      - seconds: ensured numeric (positive exposure)\n      - nuts_per_sec: descriptive rate = nuts_opened / seconds\n      - log_seconds: natural log of seconds (used as offset in count model)\n\n    Drops rows with missing or invalid essential values.\n    \"\"\"\n    df = df.copy()\n\n    # Ensure essential columns exist\n    required_cols = ['nuts_opened', 'seconds', 'age', 'sex', 'help']\n    for c in required_cols:\n        if c not in df.columns:\n            raise ValueError(f\"Required column missing from input dataframe: {c}\")\n\n    # Coerce numeric columns and drop NA\n    df['nuts_opened'] = pd.to_numeric(df['nuts_opened'], errors='coerce')\n    df['seconds'] = pd.to_numeric(df['seconds'], errors='coerce')\n    df['age'] = pd.to_numeric(df['age'], errors='coerce')\n\n    df = df.dropna(subset=['nuts_opened', 'seconds', 'age', 'sex', 'help'])\n\n    # Remove impossible/degenerate sessions (non-positive time)\n    df = df[df['seconds'] > 0]\n\n    # Create binary indicator for help: treat 'y'/'Y'/'yes' as yes, everything else as no\n    df['help_binary'] = (\n        df['help'].astype(str)\n        .str.strip()\n        .str.lower()\n        .map(lambda x: 1 if x in ['y', 'yes', 'true', 't', '1'] else 0)\n    )\n\n    # Create binary indicator for male sex\n    df['sex_male'] = (\n        df['sex'].astype(str)\n        .str.strip()\n        .str.lower()\n        .map(lambda x: 1 if x in ['m', 'male'] else 0)\n    )\n\n    # Derived rate for descriptive purposes\n    df['nuts_per_sec'] = df['nuts_opened'] / df['seconds']\n\n    # Log seconds for use as an offset in count models\n    # offset must be finite -> seconds > 0 ensured above\n    df['log_seconds'] = np.log(df['seconds'])\n\n    # Keep only columns we will use (plus a few for diagnostics)\n    keep_cols = ['chimpanzee', 'age', 'sex', 'sex_male', 'help', 'help_binary',\n                 'nuts_opened', 'seconds', 'log_seconds', 'nuts_per_sec', 'hammer']\n    present_keep = [c for c in keep_cols if c in df.columns]\n    df = df[present_keep]\n\n    # Reset index for cleanliness\n    df = df.reset_index(drop=True)\n\n    return df",
+      "m_code": "def model(df: pd.DataFrame) -> dict:\n    \"\"\"\n    Fit a count model for nuts_opened with session duration as exposure.\n\n    Primary specification: Negative Binomial GLM for counts with log(seconds) as an offset.\n    Predictors: age (continuous), sex_male (0/1), help_binary (0/1).\n\n    Returns a dictionary containing the fitted model object and derived summaries (rate ratios).\n    \"\"\"\n    df = df.copy()\n\n    # Ensure transformed columns are present\n    for c in ['nuts_opened', 'log_seconds', 'age', 'sex_male', 'help_binary']:\n        if c not in df.columns:\n            raise ValueError(f\"Required column for modeling missing: {c}\")\n\n    # Prepare design matrix\n    X = df[['age', 'sex_male', 'help_binary']].astype(float)\n    X = sm.add_constant(X)\n    y = df['nuts_opened'].astype(float)\n    offset = df['log_seconds'].astype(float)\n\n    # Fit Negative Binomial GLM with offset (models counts with exposure = seconds)\n    # If the data are not overdispersed, this will still fit; NB is robust to overdispersion.\n    nb_model = sm.GLM(y, X, family=sm.families.NegativeBinomial(), offset=offset).fit()\n\n    # Exponentiate coefficients to get multiplicative effects on the rate (rate ratios)\n    params = nb_model.params\n    conf_int = nb_model.conf_int()\n    rate_ratios = np.exp(params)\n    rr_conf_int = np.exp(conf_int)\n\n    # Prepare a summary table (DataFrame) with coefficient, RR and CI\n    summary_df = pd.DataFrame({\n        'coef': params,\n        'rr': rate_ratios,\n        'ci_lower': rr_conf_int[0],\n        'ci_upper': rr_conf_int[1],\n        'pvalue': nb_model.pvalues\n    })\n\n    results = {\n        'model_object': nb_model,\n        'summary_table': summary_df,\n        'aic': nb_model.aic,\n        'deviance': nb_model.deviance\n    }\n\n    return results"
+    },
+    "2": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Age of the chimpanzee in years (continuous). Hypothesized to increase nut-cracking efficiency as older individuals have more experience and motor control.",
+            "columns": [
+              "age"
+            ]
+          },
+          {
+            "description": "Sex of the chimpanzee encoded as a binary indicator (male = 1, female = 0). Tests whether males and females differ in efficiency.",
+            "columns": [
+              "sex_male"
+            ]
+          },
+          {
+            "description": "Whether the focal chimpanzee received help from another chimpanzee during the session (yes = 1, no = 0). Tests whether receiving help is associated with higher efficiency.",
+            "columns": [
+              "help_yes"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Nut-cracking efficiency measured as the log(1 + nuts_opened / seconds). Log transform improves normality and reduces influence of skew/outliers.",
+          "columns": [
+            "LogEfficiency"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Hammer type used in the session (categorical). Different hammer types can affect cracking success and are included as a fixed-effect control.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "hammer"
+            ]
+          },
+          {
+            "description": "Chimpanzee ID used as the grouping variable for a random intercept (accounts for repeated measures on individuals). Not a fixed-effect control but used as the random effect.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "chimpanzee"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw dataset into a dataframe ready for modeling.\n\n    Produces the following new/cleaned columns used in the model:\n    - Efficiency: nuts_opened / seconds\n    - LogEfficiency: log1p(Efficiency)\n    - sex_male: binary indicator (1 if sex == 'm', 0 if sex == 'f')\n    - help_yes: binary indicator (1 if help == 'y'/'yes', 0 otherwise)\n    - hammer: categorical (kept as category)\n    - chimpanzee: string category for grouping\n\n    Rows with missing critical values or non-positive session durations are dropped.\n    \"\"\"\n    df = df.copy()\n\n    # Drop rows missing essential columns\n    required = ['nuts_opened', 'seconds', 'age', 'sex', 'help', 'chimpanzee']\n    df = df.dropna(subset=required)\n\n    # Remove sessions with non-positive duration (cannot compute rate)\n    df = df[df['seconds'] > 0].copy()\n\n    # Compute efficiency (nuts opened per second) and log-transform\n    df['Efficiency'] = df['nuts_opened'] / df['seconds']\n    # Use log1p to handle zeros robustly\n    df['LogEfficiency'] = np.log1p(df['Efficiency'])\n\n    # Encode sex: male = 1, female = 0. If unknown values appear, map to NaN then fill with 0.\n    df['sex_male'] = df['sex'].astype(str).str.lower().map({'m': 1, 'f': 0})\n    df['sex_male'] = df['sex_male'].fillna(0).astype(int)\n\n    # Encode help: 'y' or 'yes' -> 1, otherwise 0. Normalize strings first.\n    df['help_yes'] = df['help'].astype(str).str.lower().isin(['y', 'yes']).astype(int)\n\n    # Hammer as categorical control (keep original values but ensure dtype)\n    df['hammer'] = df['hammer'].astype('category')\n\n    # Ensure chimpanzee is a string/categorical group identifier\n    df['chimpanzee'] = df['chimpanzee'].astype(str)\n\n    # (Optional) Keep only columns needed for modeling plus relevant originals\n    keep_cols = [\n        'chimpanzee', 'age', 'sex', 'sex_male', 'help', 'help_yes', 'hammer',\n        'nuts_opened', 'seconds', 'Efficiency', 'LogEfficiency'\n    ]\n    # Some datasets may not contain all original columns in keep_cols; intersect\n    keep_cols = [c for c in keep_cols if c in df.columns]\n    df = df[keep_cols].reset_index(drop=True)\n\n    return df",
+      "m_code": "def model(df: pd.DataFrame) -> dict:\n    \"\"\"\n    Fit a mixed-effects model to test whether age, sex, and receiving help predict nut-cracking efficiency.\n\n    Model specification (primary):\n      LogEfficiency ~ age + sex_male + help_yes + C(hammer)\n    with a random intercept for chimpanzee to account for repeated measures.\n\n    Returns a dictionary with the fitted mixed-effects model and an OLS robustness fit.\n    \"\"\"\n    import statsmodels.formula.api as smf\n\n    df = df.copy()\n\n    # Ensure the transformed columns exist\n    required = ['LogEfficiency', 'age', 'sex_male', 'help_yes', 'hammer', 'chimpanzee']\n    missing = [c for c in required if c not in df.columns]\n    if missing:\n        raise ValueError(f\"Missing required columns for modeling: {missing}\")\n\n    # Primary model: linear mixed effects with random intercept for chimpanzee\n    formula = 'LogEfficiency ~ age + sex_male + help_yes + C(hammer)'\n    md = smf.mixedlm(formula, df, groups=df['chimpanzee'])\n    try:\n        mdf = md.fit(reml=False)\n    except Exception:\n        # If convergence issues occur, try a simpler optimizer\n        mdf = md.fit(reml=False, method='nm', maxiter=2000)\n\n    # Robustness: ordinary least squares (ignores within-individual correlation)\n    ols = smf.ols(formula, data=df).fit()\n\n    # Return fitted model objects (users can print .summary() or inspect params)\n    return {\n        'mixedlm_result': mdf,\n        'ols_result': ols\n    }"
+    },
+    "3": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Age (centered). Numerical age of the chimpanzee in years, centered to improve model interpretability and numerical stability.",
+            "columns": [
+              "z_age"
+            ]
+          },
+          {
+            "description": "Sex (male indicator). Binary indicator coded 1 if sex is male ('m') and 0 if female ('f').",
+            "columns": [
+              "sex_male"
+            ]
+          },
+          {
+            "description": "Received help (yes indicator). Binary indicator coded 1 if the focal individual received help from another chimpanzee during the session ('y'/yes) and 0 if not.",
+            "columns": [
+              "help_yes"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Nut-cracking efficiency (log-transformed). Primary outcome is the session-level nuts cracked per minute; log(1 + nuts_per_minute) is modeled to reduce skew and stabilize variance.",
+          "columns": [
+            "log_efficiency"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Hammer type dummies. Controls for the type of hammer used (Q, G, wood). These are included as fixed-effect covariates to account for effect of hammer type on efficiency.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "hammer_Q",
+              "hammer_G",
+              "hammer_wood"
+            ]
+          },
+          {
+            "description": "Chimpanzee ID (random intercept). Session-level repeated measures are clustered within individual chimpanzees; this column is used as the grouping variable for a mixed-effects model (random intercept per chimpanzee).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "chimpanzee"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    # Copy to avoid modifying original\n    df = df.copy()\n\n    # Drop rows with missing / invalid key session measures\n    df = df.dropna(subset=['nuts_opened', 'seconds'])\n\n    # Remove sessions with non-positive duration\n    df = df[df['seconds'] > 0]\n\n    # Standardize textual columns and create binary indicators\n    # sex_male: 1 if sex == 'm' (case insensitive), else 0\n    df['sex_male'] = df['sex'].astype(str).str.lower().apply(lambda x: 1 if x == 'm' else 0)\n\n    # help_yes: 1 if help indicates yes ('y' or 'Y' or 'yes'), else 0\n    df['help_clean'] = df['help'].astype(str).str.lower()\n    df['help_yes'] = df['help_clean'].apply(lambda x: 1 if x in ['y', 'yes', 'true', '1'] else 0)\n    df.drop(columns=['help_clean'], inplace=True)\n\n    # Compute raw efficiency: nuts per minute\n    df['Efficiency_npm'] = df['nuts_opened'] / df['seconds'] * 60.0\n\n    # Log-transform efficiency to stabilize variance and downweight outliers\n    # Use log1p to handle zero efficiency\n    df['log_efficiency'] = np.log1p(df['Efficiency_npm'])\n\n    # Center age (z_age)\n    # If missing ages are present, they will remain NA; higher-level code can drop them or model will drop rows\n    if 'age' in df.columns:\n        df['z_age'] = df['age'] - df['age'].mean()\n    else:\n        # create a placeholder if age missing (all NaN)\n        df['z_age'] = np.nan\n\n    # Create explicit hammer-type dummy columns so column names are deterministic in the model\n    # If particular hammer types are not present in the data, these columns will be all zeros.\n    df['hammer_str'] = df['hammer'].astype(str).str.lower()\n    df['hammer_Q'] = df['hammer_str'].apply(lambda x: 1 if x == 'q' else 0)\n    df['hammer_G'] = df['hammer_str'].apply(lambda x: 1 if x == 'g' else 0)\n    df['hammer_wood'] = df['hammer_str'].apply(lambda x: 1 if x == 'wood' else 0)\n    df.drop(columns=['hammer_str'], inplace=True)\n\n    # Ensure chimpanzee column exists and is suitable as group id (keep original IDs)\n    # If chimpanzee IDs are not numeric, leave as-is (mixedlm accepts categorical grouping)\n    df['chimpanzee'] = df['chimpanzee']\n\n    # Final: drop rows with missing values in dependent or primary independent vars\n    df = df.dropna(subset=['log_efficiency', 'z_age', 'sex_male', 'help_yes'])\n\n    # Return dataframe containing all columns used in modeling\n    # (we keep other columns for future checks if needed)\n    return df",
+      "m_code": "def model(df: pd.DataFrame):\n    \"\"\"\n    Fit a linear mixed-effects model predicting log-transformed efficiency from age, sex, and help,\n    controlling for hammer type and with a random intercept for each chimpanzee.\n\n    Returns:\n      - If MixedLM fits successfully: the fitted MixedLMResults object\n      - If MixedLM fails: fallback OLS with cluster-robust standard errors by chimpanzee (RegressionResultsWrapper)\n    \"\"\"\n    import statsmodels.formula.api as smf\n    import statsmodels.api as sm\n\n    # Build formula (explicit hammer dummies are included)\n    formula = 'log_efficiency ~ z_age + sex_male + help_yes + hammer_Q + hammer_G + hammer_wood'\n\n    # Try mixed-effects model with random intercept for chimpanzee\n    try:\n        md = smf.mixedlm(formula, df, groups=df['chimpanzee'])\n        mdf = md.fit(reml=False)  # use ML for likelihood-based comparison if needed\n        # Return the fitted mixed model object; users can call mdf.summary()\n        return mdf\n    except Exception as e:\n        # Fallback: OLS with cluster-robust (by chimpanzee) SEs\n        # Prepare design matrix\n        y = df['log_efficiency']\n        X = sm.add_constant(df[['z_age', 'sex_male', 'help_yes', 'hammer_Q', 'hammer_G', 'hammer_wood']])\n        ols_mod = sm.OLS(y, X).fit()\n        try:\n            ols_cl = ols_mod.get_robustcov_results(cov_type='cluster', groups=df['chimpanzee'])\n            return ols_cl\n        except Exception:\n            # If clustering fails, return plain OLS\n            return ols_mod"
+    },
+    "4": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Age of the individual in years (numeric). Hypothesized to affect nut-cracking efficiency as older individuals may be more skilled/strong.",
+            "columns": [
+              "age"
+            ]
+          },
+          {
+            "description": "Sex of the individual encoded as a binary indicator (male = 1, female = 0). Tests whether males differ from females in nut-cracking efficiency.",
+            "columns": [
+              "sex_male"
+            ]
+          },
+          {
+            "description": "Whether the focal individual received help from another chimpanzee during the session (yes = 1, no = 0). Tests the effect of social assistance on efficiency.",
+            "columns": [
+              "help_yes"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Log-transformed nut-cracking efficiency measured as number of nuts opened per minute (log(nuts_per_min + small_constant)). Log transform reduces skew and yields an approximately Gaussian outcome for linear modeling.",
+          "columns": [
+            "LogEfficiency"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Type of hammer used in the session (categorical). Included as a categorical control (fixed effect) because tool type may influence efficiency.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "hammer"
+            ]
+          },
+          {
+            "description": "Chimpanzee ID (grouping variable). Used as a random effect to account for repeated measures per individual (random intercept).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "chimpanzee"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform raw dataset into analysis-ready dataframe.\n\n    Produces the following columns (minimum) used in modeling:\n      - age: numeric, unchanged\n      - sex_male: binary (1 = male, 0 = female)\n      - help_yes: binary (1 = received help, 0 = no help)\n      - Efficiency_per_min: nuts opened per minute (nuts_opened * 60 / seconds)\n      - LogEfficiency: log(Efficiency_per_min + small_constant)\n      - hammer: categorical (tool type), NA filled with 'unknown'\n      - chimpanzee: numeric ID\n\n    Rows with missing critical values (nuts_opened, seconds, age, sex, help, chimpanzee)\n    or non-positive session durations are removed.\n    \"\"\"\n    df = df.copy()\n\n    # Drop rows missing the primary measurement fields or with invalid session duration\n    df = df.dropna(subset=['nuts_opened', 'seconds', 'age', 'sex', 'help', 'chimpanzee'])\n    # Ensure seconds positive\n    df = df[df['seconds'] > 0]\n\n    # Normalize and encode sex -> sex_male (1 if male, 0 if female)\n    df['sex'] = df['sex'].astype(str).str.lower().str.strip()\n    df['sex_male'] = df['sex'].map({'m': 1, 'male': 1, 'f': 0, 'female': 0})\n    # If any remaining NaNs in sex_male (unexpected labels), drop those rows to avoid ambiguity\n    df = df.dropna(subset=['sex_male'])\n    df['sex_male'] = df['sex_male'].astype(int)\n\n    # Normalize and encode help -> help_yes (1 if helped, 0 otherwise)\n    df['help'] = df['help'].astype(str).str.lower().str.strip()\n    df['help_yes'] = df['help'].map(lambda x: 1 if x in ['y', 'yes', 'true', '1'] else 0)\n    df['help_yes'] = df['help_yes'].astype(int)\n\n    # Ensure chimpanzee id numeric\n    df['chimpanzee'] = pd.to_numeric(df['chimpanzee'], errors='coerce')\n    df = df.dropna(subset=['chimpanzee'])\n    df['chimpanzee'] = df['chimpanzee'].astype(int)\n\n    # Hammer: keep as categorical control; fill missing with 'unknown'\n    df['hammer'] = df['hammer'].astype(str).fillna('unknown').str.strip()\n\n    # Compute efficiency as nuts per minute and log-transform (small constant to avoid log(0))\n    df['Efficiency_per_min'] = df['nuts_opened'] * 60.0 / df['seconds']\n    # Add a very small constant (1e-6) to avoid log(0); this keeps scale interpretable\n    df['LogEfficiency'] = np.log(df['Efficiency_per_min'] + 1e-6)\n\n    # Final defensive drop: remove rows with non-finite LogEfficiency\n    df = df[np.isfinite(df['LogEfficiency'])]\n\n    # Reset index for cleanliness\n    df = df.reset_index(drop=True)\n    return df",
+      "m_code": "def model(df: pd.DataFrame):\n    \"\"\"\n    Fit a mixed-effects linear model predicting log-transformed nut-cracking efficiency.\n\n    Primary model (preferred): linear mixed-effects model with random intercept for chimpanzee\n    to account for repeated measures per individual. Fixed effects: age, sex_male, help_yes,\n    and hammer (categorical control).\n\n    Returns the fitted model object (MixedLMResults) and prints a summary.\n    Falls back to OLS with cluster-robust standard errors by chimpanzee if MixedLM fails to converge.\n    \"\"\"\n    # Make a local copy\n    df = df.copy()\n\n    import statsmodels.formula.api as smf\n    import statsmodels.api as sm\n\n    formula = 'LogEfficiency ~ age + sex_male + help_yes + C(hammer)'\n\n    try:\n        # Mixed effects model with random intercept for each chimpanzee\n        md = smf.mixedlm(formula, data=df, groups=df['chimpanzee'])\n        mdf = md.fit(reml=False)\n        print('MixedLM fit successful. Summary:')\n        print(mdf.summary())\n        return mdf\n    except Exception as e:\n        # Fallback: OLS on the same fixed effects with cluster-robust SEs by chimpanzee\n        print('MixedLM failed with error:', e)\n        print('Falling back to OLS with cluster-robust SEs by chimpanzee.')\n\n        # Build design matrix using patsy via formula API for consistency\n        ols_model = smf.ols(formula, data=df).fit()\n        # Get cluster-robust covariance (clusters = chimpanzee)\n        robust = ols_model.get_robustcov_results(cov_type='cluster', groups=df['chimpanzee'])\n        print(robust.summary())\n        return robust"
+    }
+  }
+}

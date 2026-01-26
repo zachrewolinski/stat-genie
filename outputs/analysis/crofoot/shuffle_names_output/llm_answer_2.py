@@ -1,198 +1,180 @@
 def extract_final_answer(model_output):
     """
-    Extracts and interprets statistics from a fitted statsmodels GLMResults-like object
-    (ideally the cluster-robust result returned by get_robustcov_results).
-    Returns a dictionary with:
-      - "object": dict of extracted effects (estimates, SE, z, p, 95% CI, odds ratio and OR CI)
-      - "description": brief explanation of what the results mean
-    
-    Expected coefficient names in the model:
-      'log_rel_size', 'log_size_x_Focal', 'log_size_x_Other',
-      'ContestLoc_Focal', 'ContestLoc_Other'
+    Extracts and interprets the effect of relative group size (size_ratio) on the probability
+    that the focal group wins, and how that effect is modified by contest location
+    (interaction terms size_ratio_x_contest_location_*).
+
+    Returns:
+      {
+        "object": dict with numeric summaries (coefficients, SE, z, p, 95% CI, odds ratio and CI)
+                  for:
+                    - the baseline effect of size_ratio (reference location: FocalHome)
+                    - the marginal effect of size_ratio in each contest location (combination of main + interaction)
+                    - the raw interaction coefficients (for completeness)
+        "description": short interpretation of what those numbers mean in context
+      }
     """
     import numpy as np
-    from scipy.stats import norm
-    from collections import OrderedDict
-
-    res = model_output
-
-    # Helper: get params series and covariance matrix as DataFrame-like (indexable by names)
     try:
-        params = res.params.copy()
-    except Exception as e:
-        raise ValueError(f"Could not obtain params from model_output: {e}")
-
-    try:
-        cov = res.cov_params()
+        from scipy import stats
     except Exception:
-        # fallback to using outer product of bse if cov not available (less preferred)
+        # Fallback to normal cdf via math.erf if scipy not available
+        import math
+        class _Norm:
+            @staticmethod
+            def cdf(x):
+                return 0.5 * (1 + math.erf(x / math.sqrt(2)))
+        stats = _Norm()
+
+    res = model_output  # statsmodels GLMResultsWrapper expected
+
+    # Extract params, covariance, and basic summaries
+    params = res.params
+    cov = res.cov_params()
+    # conf_int may depend on method; we'll compute CIs ourselves using normal approx
+    bse = np.sqrt(np.diag(cov))
+
+    # Helper to compute p-value from z
+    def two_sided_p(z):
         try:
-            bse = res.bse
-            idx = params.index
-            cov = np.diag(bse**2)
-            # convert to DataFrame-like with index for easier access
-            import pandas as _pd
-            cov = _pd.DataFrame(cov, index=idx, columns=idx)
-        except Exception as e:
-            raise ValueError(f"Could not obtain covariance matrix (or bse) from model_output: {e}")
+            return float(2 * (1 - stats.norm.cdf(abs(z))))
+        except Exception:
+            # stats may be fallback object with cdf method
+            return float(2 * (1 - stats.cdf(abs(z))))
 
-    # If cov is numpy array, convert to DataFrame using params.index
-    try:
-        import pandas as pd
-        if isinstance(cov, np.ndarray):
-            cov = pd.DataFrame(cov, index=params.index, columns=params.index)
-    except Exception:
-        pass
+    # Prepare output structure
+    summary = {}
+    # Main size_ratio coefficient (baseline = reference contest location, presumably FocalHome)
+    if 'size_ratio' not in params.index:
+        raise KeyError("Model output does not contain a 'size_ratio' coefficient. Check model specification.")
 
-    # Names we'll extract / combine
-    coeff_names = [
-        'log_rel_size',
-        'log_size_x_Focal',
-        'log_size_x_Other',
-        'ContestLoc_Focal',
-        'ContestLoc_Other'
-    ]
+    coef_size = float(params['size_ratio'])
+    se_size = float(bse[params.index.get_loc('size_ratio')])
+    z_size = coef_size / se_size if se_size != 0 else np.nan
+    p_size = two_sided_p(z_size)
+    ci_low_size = coef_size - 1.96 * se_size
+    ci_high_size = coef_size + 1.96 * se_size
+    or_size = float(np.exp(coef_size))
+    or_ci_low = float(np.exp(ci_low_size))
+    or_ci_high = float(np.exp(ci_high_size))
 
-    # Validate presence of required coefficient names
-    missing = [n for n in coeff_names if n not in params.index]
-    if missing:
-        # If interaction terms absent, still proceed with what exists
-        # but inform the user
-        missing_msg = f"Warning: the following expected coefficients are missing from the model: {missing}"
-    else:
-        missing_msg = None
+    summary['size_ratio_baseline'] = {
+        'location': 'FocalHome (reference)',
+        'coef_log_odds_per_unit_size_ratio': coef_size,
+        'se': se_size,
+        'z': z_size,
+        'p_value': p_size,
+        '95ci_log_odds': [ci_low_size, ci_high_size],
+        'odds_ratio': or_size,
+        '95ci_odds_ratio': [or_ci_low, or_ci_high],
+        'interpretation_brief': (
+            "Baseline effect of focal:other size ratio on log-odds of focal winning "
+            "(applicable when contest_location == FocalHome). Positive coef -> higher "
+            "size_ratio increases probability focal wins."
+        )
+    }
 
-    # Function to compute linear combination stats given a dict of {name: weight}
-    def lincomb_stats(weights):
-        # weights: dict mapping coef name -> multiplier
-        # compute estimate
-        est = 0.0
-        for name, w in weights.items():
-            if name not in params.index:
-                raise KeyError(f"Coefficient '{name}' not present in model params.")
-            est += w * params[name]
-        # variance
-        var = 0.0
-        for i, (n1, w1) in enumerate(weights.items()):
-            for j, (n2, w2) in enumerate(weights.items()):
-                var += w1 * w2 * cov.loc[n1, n2]
-        se = np.sqrt(var) if var >= 0 else np.nan
-        z = est / se if se and not np.isnan(se) else np.nan
-        p = 2 * (1 - norm.cdf(abs(z))) if not np.isnan(z) else np.nan
-        ci_low = est - norm.ppf(0.975) * se if not np.isnan(se) else np.nan
-        ci_high = est + norm.ppf(0.975) * se if not np.isnan(se) else np.nan
-        # odds ratio and CI
-        or_est = np.exp(est) if not np.isnan(est) else np.nan
-        or_ci = (np.exp(ci_low), np.exp(ci_high)) if not np.isnan(ci_low) else (np.nan, np.nan)
-        return {
-            'estimate_log_odds': float(est),
-            'se': float(se),
-            'z': float(z),
-            'p_value': float(p),
-            'ci_95_log_odds': (float(ci_low), float(ci_high)),
-            'odds_ratio': float(or_est),
-            'ci_95_odds_ratio': (float(or_ci[0]), float(or_ci[1])),
-            'weights': dict(weights)
+    # Find interaction terms of the form 'size_ratio_x_contest_location_<LocationName>'
+    interaction_prefix = 'size_ratio_x_contest_location_'
+    interaction_terms = [name for name in params.index if name.startswith(interaction_prefix)]
+
+    # Compute marginal effects (combined coefficient) for each location:
+    marginal_effects = {}
+    # Baseline location entry
+    marginal_effects['FocalHome'] = {
+        'combined_coef_log_odds': coef_size,
+        'se': se_size,
+        'z': z_size,
+        'p_value': p_size,
+        '95ci_log_odds': [ci_low_size, ci_high_size],
+        'odds_ratio': or_size,
+        '95ci_odds_ratio': [or_ci_low, or_ci_high]
+    }
+
+    # For each interaction, compute combined coefficient = size_ratio + interaction_coef
+    for inter in interaction_terms:
+        # infer location name
+        location = inter.replace(interaction_prefix, '')
+        inter_coef = float(params[inter])
+        # Build contrast vector: 1 for size_ratio, 1 for this interaction, 0 elsewhere
+        p_index = list(params.index)
+        contrast = np.zeros(len(p_index))
+        contrast[p_index.index('size_ratio')] = 1.0
+        contrast[p_index.index(inter)] = 1.0
+        # variance of contrast
+        var = float(contrast @ cov.values @ contrast)
+        se_comb = float(np.sqrt(var)) if var >= 0 else float(np.nan)
+        coef_comb = float(coef_size + inter_coef)
+        z_comb = coef_comb / se_comb if se_comb != 0 else np.nan
+        p_comb = two_sided_p(z_comb)
+        ci_low = coef_comb - 1.96 * se_comb
+        ci_high = coef_comb + 1.96 * se_comb
+        or_comb = float(np.exp(coef_comb))
+        or_ci_low = float(np.exp(ci_low))
+        or_ci_high = float(np.exp(ci_high))
+
+        marginal_effects[location] = {
+            'combined_coef_log_odds': coef_comb,
+            'se': se_comb,
+            'z': z_comb,
+            'p_value': p_comb,
+            '95ci_log_odds': [ci_low, ci_high],
+            'odds_ratio': or_comb,
+            '95ci_odds_ratio': [or_ci_low, or_ci_high],
+            'interpretation_brief': (
+                f"Effect of size_ratio on log-odds of focal winning when contest_location == {location}."
+            )
         }
 
-    results = OrderedDict()
+    # Also include raw interaction coefficients (to see whether the interaction itself is significant)
+    raw_interactions = {}
+    for inter in interaction_terms:
+        coef_i = float(params[inter])
+        se_i = float(bse[params.index.get_loc(inter)])
+        z_i = coef_i / se_i if se_i != 0 else np.nan
+        p_i = two_sided_p(z_i)
+        ci_low_i = coef_i - 1.96 * se_i
+        ci_high_i = coef_i + 1.96 * se_i
+        raw_interactions[inter] = {
+            'coef': coef_i,
+            'se': se_i,
+            'z': z_i,
+            'p_value': p_i,
+            '95ci': [ci_low_i, ci_high_i],
+            'interpretation_brief': (
+                "Interaction term: how much the slope of size_ratio (log-odds per unit) differs "
+                "in this location compared to the reference (FocalHome)."
+            )
+        }
 
-    # 1) Main effect of log_rel_size (this is the effect when both location dummies = 0,
-    # i.e., Neutral contests)
-    if 'log_rel_size' in params.index:
-        try:
-            results['log_rel_size_neutral'] = lincomb_stats({'log_rel_size': 1.0})
-        except Exception as e:
-            results['log_rel_size_neutral'] = {'error': str(e)}
-    else:
-        results['log_rel_size_neutral'] = {'error': "log_rel_size coefficient not present"}
+    # Package final object
+    output_obj = {
+        'baseline_size_ratio': summary['size_ratio_baseline'],
+        'marginal_effects_by_location': marginal_effects,
+        'raw_interaction_coefficients': raw_interactions,
+        # also include full params & pvalues for completeness (converted to native types)
+        'all_coefficients': {name: float(val) for name, val in params.items()},
+        'all_pvalues': {name: float(val) for name, val in res.pvalues.items()}
+    }
 
-    # 2) Effect of log_rel_size when contest is at Focal location:
-    #    log_rel_size + log_size_x_Focal
-    if 'log_rel_size' in params.index and 'log_size_x_Focal' in params.index:
-        try:
-            results['log_rel_size_at_Focal'] = lincomb_stats({'log_rel_size': 1.0, 'log_size_x_Focal': 1.0})
-        except Exception as e:
-            results['log_rel_size_at_Focal'] = {'error': str(e)}
-    else:
-        results['log_rel_size_at_Focal'] = {'error': "Required coefficients for Focal interaction not present"}
-
-    # 3) Effect of log_rel_size when contest is at Other location:
-    #    log_rel_size + log_size_x_Other
-    if 'log_rel_size' in params.index and 'log_size_x_Other' in params.index:
-        try:
-            results['log_rel_size_at_Other'] = lincomb_stats({'log_rel_size': 1.0, 'log_size_x_Other': 1.0})
-        except Exception as e:
-            results['log_rel_size_at_Other'] = {'error': str(e)}
-    else:
-        results['log_rel_size_at_Other'] = {'error': "Required coefficients for Other interaction not present"}
-
-    # 4) Main effects of Contest location dummies (these are differences in intercept by location,
-    #    holding other covariates at reference). Extract raw coef stats if present.
-    for loc in ['ContestLoc_Focal', 'ContestLoc_Other']:
-        if loc in params.index:
-            est = float(params[loc])
-            se = float(cov.loc[loc, loc]**0.5) if loc in cov.index else float(np.nan)
-            z = est / se if se and not np.isnan(se) else float(np.nan)
-            p = float(2 * (1 - norm.cdf(abs(z)))) if not np.isnan(z) else float(np.nan)
-            ci_low = est - norm.ppf(0.975) * se if not np.isnan(se) else float(np.nan)
-            ci_high = est + norm.ppf(0.975) * se if not np.isnan(se) else float(np.nan)
-            results[loc] = {
-                'estimate_log_odds': est,
-                'se': se,
-                'z': z,
-                'p_value': p,
-                'ci_95_log_odds': (ci_low, ci_high),
-                'odds_ratio': float(np.exp(est)),
-                'ci_95_odds_ratio': (float(np.exp(ci_low)), float(np.exp(ci_high)))
-            }
-        else:
-            results[loc] = {'error': f"{loc} not present in model parameters"}
-
-    # 5) Also include the raw parameter table (est, se, p, 95% CI) for transparency if available
-    try:
-        # Some result objects include .pvalues and .bse and .conf_int()
-        param_table = {}
-        for name in params.index:
-            try:
-                est = float(params[name])
-                se = float(res.bse[name]) if hasattr(res, 'bse') else float(np.sqrt(cov.loc[name, name]))
-                z = est / se if se and not np.isnan(se) else float(np.nan)
-                p = float(res.pvalues[name]) if hasattr(res, 'pvalues') else float(2 * (1 - norm.cdf(abs(z))))
-                ci_low, ci_high = (None, None)
-                try:
-                    ci = res.conf_int().loc[name]
-                    ci_low, ci_high = float(ci[0]), float(ci[1])
-                except Exception:
-                    ci_low = est - norm.ppf(0.975) * se
-                    ci_high = est + norm.ppf(0.975) * se
-                param_table[name] = {
-                    'estimate_log_odds': est,
-                    'se': se,
-                    'z': z,
-                    'p_value': p,
-                    'ci_95_log_odds': (ci_low, ci_high),
-                    'odds_ratio': float(np.exp(est)),
-                    'ci_95_odds_ratio': (float(np.exp(ci_low)), float(np.exp(ci_high)))
-                }
-            except Exception:
-                param_table[name] = {'error': 'could not extract'}
-        results['parameter_table'] = param_table
-    except Exception:
-        results['parameter_table'] = {'error': 'could not build parameter table'}
-
-    # Build a short description of what the returned object contains and how to interpret
-    description_lines = [
-        "Returned entries give estimated effects on the log-odds (and transformed odds ratios) that the focal group wins.",
-        "- 'log_rel_size_neutral': effect of log(total_focal/total_other) when contest location is Neutral (both location dummies = 0).",
-        "- 'log_rel_size_at_Focal': combined effect (main + interaction) when contest occurs nearer the focal group's home-range center.",
-        "- 'log_rel_size_at_Other': combined effect (main + interaction) when contest occurs nearer the other group's home-range center.",
-        "- 'ContestLoc_Focal' and 'ContestLoc_Other': estimated shift in intercept (log-odds) for contests at those locations relative to the baseline (Neutral).",
-        "- Each effect contains: estimate (log-odds), SE, z-stat, two-sided p-value, 95% CI on log-odds, odds ratio and 95% CI on odds ratio.",
+    # Short text description
+    # We'll highlight how to read the results:
+    desc_lines = [
+        "This object gives (1) the baseline effect of size_ratio on the log-odds of focal winning",
+        "   (reference contest location: FocalHome), (2) the marginal effect of size_ratio in each",
+        "   contest location (computed as baseline + interaction), and (3) the raw interaction coefficients.",
+        "",
+        "Interpretation guidance:",
+        "- A positive combined coef means that increasing the focal:other size ratio increases the",
+        "  log-odds (and hence probability) that the focal group wins. The odds_ratio > 1 corresponds",
+        "  to multiplicative change in odds per unit increase in size_ratio.",
+        "- Interaction coefficients indicate whether the slope (effect of size_ratio) is stronger",
+        "  or weaker in that contest location compared to FocalHome. A positive interaction means the",
+        "  effect of size_ratio is larger in that location.",
+        "",
+        "Review the 'p_value' fields to assess statistical evidence for each effect; note that p-values",
+        "are computed using a normal approximation (z-test) from the model covariance supplied by the fitted model."
     ]
-    if missing_msg:
-        description_lines.append(missing_msg)
+    description = "\n".join(desc_lines)
 
-    description = " ".join(description_lines)
-
-    return {"object": results, "description": description}
+    return {"object": output_obj, "description": description}

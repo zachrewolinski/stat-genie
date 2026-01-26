@@ -1,264 +1,181 @@
 def extract_final_answer(model_output):
     """
-    Extract statistics from a fitted statsmodels GLMResults-like object (possibly
-    with clustered robust covariance) to answer whether modern humans (Homo)
-    have higher AMTL than Pan, Pongo, and Papio, after controlling for covariates.
-    
-    Returns:
-      {
-        "object": {
-            "decision": True/False/None,
-            "reason": short reason string,
-            "predicted_probabilities": { genus_label: { "lp":..., "prob":..., "prob_95ci": (low,high) }, ... },
-            "pairwise_comparisons": {
-                "Homo_vs_Pan": {
-                    "diff_logit": ...,
-                    "se_diff": ...,
-                    "z": ...,
-                    "p_value": ...,
-                    "Homo_prob": ...,
-                    "Other_prob": ...,
-                    "interpretation": ...
-                }, ...
-            }
-        },
-        "description": "Brief explanation..."
-      }
-    Notes:
-      - This function assumes the model used column names like 'const' (or 'Intercept')
-        and genus dummy names with prefix 'Genus_' (e.g., 'Genus_Pan', 'Genus_Homo sapiens').
-      - If the exact label used for Homo in the data cannot be identified unambiguously,
-        the function will return the computed probabilities for all observed genus levels
-        and set decision to None.
+    Extract statistics for the primary comparison (Homo sapiens vs non-human primates)
+    from the model output returned by the provided `model()` function.
+
+    Returns a dict with keys:
+      - "object": dict with numeric results (coef, se, z, p, 95% CI, odds ratio + CI, conclusion, model_used)
+      - "description": a brief human-readable interpretation of the results
+
+    The function will:
+      - Prefer clustered-robust results if available (primary_result_clustered).
+      - Fall back to primary_result if necessary.
+      - Attempt to find the 'is_human' parameter; if not found, try to locate a parameter
+        that references Homo (e.g., a genus categorical parameter).
     """
     import numpy as np
-    from math import sqrt
-    from scipy.special import expit
-    from scipy.stats import norm
 
-    res = model_output
+    # Helper to safely get attributes from results
+    def safe_attr(res, name):
+        return getattr(res, name, None)
 
-    # Extract params and covariance matrix
+    # Choose the result object: prefer clustered if present
+    res = None
+    if isinstance(model_output, dict):
+        # try clustered first
+        res = model_output.get('primary_result_clustered') or model_output.get('primary_result')
+        # fallback to any object that looks like a result
+        if res is None:
+            # try other keys
+            for k in ('primary_result', 'genus_result_clustered', 'genus_result'):
+                if k in model_output and model_output[k] is not None:
+                    res = model_output[k]
+                    break
+    else:
+        res = model_output
+
+    if res is None:
+        return {
+            "object": None,
+            "description": "No model result object found in model_output."
+        }
+
+    # Get parameter names and values
+    params = safe_attr(res, 'params')
+    pvalues = safe_attr(res, 'pvalues')
+    bse = safe_attr(res, 'bse')
+    conf_int = None
     try:
-        params = res.params.copy()
-        cov = res.cov_params().copy()
-    except Exception as e:
-        raise ValueError(f"Cannot extract params/covariance from model_output: {e}")
+        conf_int = res.conf_int()
+    except Exception:
+        # some objects might not implement conf_int; leave as None
+        conf_int = None
 
-    param_names = list(params.index)
+    # Ensure params is a pandas Series or similar mapping; otherwise try to get names from model
+    param_name = None
+    if params is None:
+        return {
+            "object": None,
+            "description": "The result object has no 'params' attribute."
+        }
 
-    # Find intercept name
-    intercept_candidates = ['const', 'Const', 'INTERCEPT', 'Intercept', 'intercept']
-    intercept_name = None
-    for cand in intercept_candidates:
-        if cand in param_names:
-            intercept_name = cand
-            break
-    if intercept_name is None:
-        # fallback: use first parameter as intercept if its name contains no '=' and is not a predictor pattern
-        # but we try a safer approach: if 'const' not found, raise a helpful error
-        raise ValueError("Intercept ('const' or 'Intercept') not found among model parameters. "
-                         f"Found parameters: {param_names}")
+    # Find the parameter corresponding to is_human.
+    # Common name in the primary model: 'is_human'
+    possible_names = []
+    try:
+        # try index if pandas Series
+        idx = list(params.index)
+        possible_names = idx
+    except Exception:
+        # if params is numpy array, get names from model.exog_names
+        exog_names = safe_attr(getattr(res, 'model', None), 'exog_names')
+        if exog_names:
+            possible_names = list(exog_names)
 
-    # Identify genus dummy columns
-    genus_dummy_names = [n for n in param_names if n.startswith('Genus_')]
-    genus_levels = [n.split('Genus_', 1)[1] for n in genus_dummy_names]
-
-    # Build weight vector helper to compute linear predictor and its variance for any genus label
-    def make_weight_for_genus(dummy_name):
-        """
-        Returns weight vector (length = len(params)) that when dotted with params yields
-        the linear predictor for a specimen with:
-          - intercept = 1
-          - genus = dummy_name (if dummy_name is None => reference genus with no dummy)
-          - all continuous covariates set to their means (they were centered => 0)
-          - all toothclass dummies = reference (all zero)
-        """
-        w = np.zeros(len(param_names), dtype=float)
-        # intercept weight
-        w[param_names.index(intercept_name)] = 1.0
-        # genus effect if present
-        if dummy_name is not None:
-            if dummy_name in param_names:
-                w[param_names.index(dummy_name)] = 1.0
-            else:
-                # dummy not in params -> treat as reference (weight remains zero)
-                pass
-        return w
-
-    # Compute lp, se, prob, and 95% CI for a given weight vector
-    def compute_stats_for_weight(w):
-        vals = params.values
-        lp = float(w.dot(vals))
-        var_lp = float(w @ cov.values @ w)
-        se_lp = sqrt(max(var_lp, 0.0))
-        lp_low = lp - 1.96 * se_lp
-        lp_high = lp + 1.96 * se_lp
-        prob = float(expit(lp))
-        prob_low = float(expit(lp_low))
-        prob_high = float(expit(lp_high))
-        return {"lp": lp, "se_lp": se_lp, "prob": prob, "prob_95ci": (prob_low, prob_high)}
-
-    # Prepare mapping of observed genus labels -> dummy column names and stats
-    observed_genus_map = {}  # display_label -> dummy_column_name or None for reference
-    for lvl, dummy in zip(genus_levels, genus_dummy_names):
-        observed_genus_map[lvl] = dummy
-
-    # Try to detect the dropped/reference genus by comparing to expected genera
-    expected_core = ['Homo', 'Pan', 'Pongo', 'Papio']
-    # For matching we do case-insensitive substring checks
-    present_expected = {g: any(g.lower() in lvl.lower() for lvl in observed_genus_map.keys()) for g in expected_core}
-    # If a genus from expected_core is not present among the dummies, it is likely the reference (dropped)
-    missing_expected = [g for g, present in present_expected.items() if not present]
-
-    reference_label = None
-    if len(missing_expected) == 1:
-        # identify the likely reference genus
-        reference_label = missing_expected[0]
+    # Preferred exact match
+    if 'is_human' in possible_names:
+        param_name = 'is_human'
     else:
-        # If we cannot uniquely identify reference among expected set, we will set reference_label to None
-        reference_label = None
+        # fallback: look for parameter name that contains 'Homo' or 'homo' or 'human'
+        for nm in possible_names:
+            if isinstance(nm, str) and ('Homo' in nm or 'homo' in nm or 'human' in nm):
+                param_name = nm
+                break
+        # final fallback: try any name that looks like a binary indicator (exact match of common alternatives)
+        if param_name is None:
+            for alt in ['C(genus)[T.Homo sapiens]', 'C(genus)[T.Homo sapiens]']:
+                if alt in possible_names:
+                    param_name = alt
+                    break
 
-    # If we determined a reference label and it's not in observed_genus_map, include it mapped to None
-    if reference_label is not None and reference_label not in observed_genus_map:
-        observed_genus_map[reference_label] = None
+    if param_name is None:
+        return {
+            "object": None,
+            "description": "Could not find a parameter corresponding to the human indicator ('is_human' or similar) in the model parameters."
+        }
 
-    # Compute stats for each observed genus label (including the reference one if identified)
-    predicted = {}
-    for label, dummy in observed_genus_map.items():
-        w = make_weight_for_genus(dummy)
-        predicted[label] = compute_stats_for_weight(w)
+    # Extract numeric values
+    coef = float(params[param_name])
+    se = float(bse[param_name]) if (bse is not None and param_name in bse.index) else (float(params[param_name]) * np.nan)
+    pval = float(pvalues[param_name]) if (pvalues is not None and param_name in pvalues.index) else None
 
-    # If we didn't detect reference_label but there are exactly 3 dummy columns, try infer the dropped label
-    if reference_label is None and len(genus_levels) == 3:
-        # try to infer by checking which of expected_core is not matched (even if multiple substrings)
-        unmatched = []
-        for g in expected_core:
-            if not any(g.lower() in lvl.lower() for lvl in observed_genus_map.keys()):
-                unmatched.append(g)
-        if len(unmatched) == 1:
-            reference_label = unmatched[0]
-            if reference_label not in observed_genus_map:
-                observed_genus_map[reference_label] = None
-                predicted[reference_label] = compute_stats_for_weight(make_weight_for_genus(None))
+    # z / t value
+    z_val = coef / se if (se is not None and not np.isnan(se) and se != 0.0) else None
 
-    # Now attempt pairwise comparisons between Homo and each non-human genus (Pan, Pongo, Papio)
-    comparisons = {}
-    decision = None
-    reason = ""
-    # Only proceed if we can identify which label corresponds to Homo
-    homo_label = None
-    # find an observed key that looks like Homo if present
-    for label in list(observed_genus_map.keys()):
-        if 'homo' in label.lower() or 'human' in label.lower():
-            homo_label = label
-            break
-    # If Homo label not found among keys but reference_label is 'Homo', set homo_label to that
-    if homo_label is None and reference_label is not None and reference_label.lower().startswith('homo'):
-        homo_label = reference_label
+    # Confidence interval on log-odds scale
+    ci_low, ci_high = (None, None)
+    if conf_int is not None:
+        try:
+            # conf_int may be a DataFrame or ndarray; handle both
+            if hasattr(conf_int, 'loc') and param_name in conf_int.index:
+                ci_low = float(conf_int.loc[param_name, 0])
+                ci_high = float(conf_int.loc[param_name, 1])
+            else:
+                # try to locate by position
+                # assume same ordering as params
+                pos = possible_names.index(param_name) if param_name in possible_names else None
+                if pos is not None:
+                    ci_low = float(conf_int[pos, 0])
+                    ci_high = float(conf_int[pos, 1])
+        except Exception:
+            ci_low, ci_high = (None, None)
 
-    # We'll collect results for the three target non-human genera when possible
-    target_nonhuman = ['Pan', 'Pongo', 'Papio']
-    all_successful = True
-    homo_vs_results = {}
-    if homo_label is None:
-        decision = None
-        reason = ("Could not unambiguously identify which model genus label corresponds to modern humans "
-                  "(Homo). Returning predicted probabilities for observed genus levels instead.")
+    # Convert to odds ratio and CI
+    try:
+        odds_ratio = float(np.exp(coef))
+        or_ci_low = float(np.exp(ci_low)) if ci_low is not None else None
+        or_ci_high = float(np.exp(ci_high)) if ci_high is not None else None
+    except Exception:
+        odds_ratio = None
+        or_ci_low = None
+        or_ci_high = None
+
+    # Conclusion: do humans have higher AMTL?
+    # A positive coef => higher log-odds (hence higher probability) in humans vs baseline.
+    significance = None
+    if pval is not None:
+        significance = (pval < 0.05)
     else:
-        # compute weight vectors for Homo and each target genus
-        # We need the full params vector and cov matrix
-        param_vals = params.values
-        cov_vals = cov.values
-        # helper to build weight vector for given label name (which maps to dummy or None)
-        def w_for_label(label):
-            if label not in observed_genus_map:
-                return None
-            return make_weight_for_genus(observed_genus_map[label])
+        significance = None
 
-        w_homo = w_for_label(homo_label)
-        stats_homo = compute_stats_for_weight(w_homo)
+    if coef > 0:
+        direction = "higher"
+    elif coef < 0:
+        direction = "lower"
+    else:
+        direction = "no difference (coef = 0)"
 
-        # Iterate comparisons
-        comparisons_summary = {}
-        for other in target_nonhuman:
-            if other not in observed_genus_map:
-                # The other genus label not observed -> cannot compute
-                all_successful = False
-                comparisons_summary[other] = {
-                    "available": False,
-                    "reason": f"Genus '{other}' not present among model genus dummies/labels; cannot compare."
-                }
-                continue
-            w_other = w_for_label(other)
-            # difference weight vector
-            w_diff = w_homo - w_other
-            diff = float(w_diff.dot(param_vals))
-            var_diff = float(w_diff @ cov_vals @ w_diff)
-            se_diff = sqrt(max(var_diff, 0.0))
-            if se_diff == 0:
-                z = np.nan
-                pval = np.nan
-            else:
-                z = diff / se_diff
-                pval = float(2.0 * (1.0 - norm.cdf(abs(z))))
-            # compute probs
-            stats_other = compute_stats_for_weight(w_other)
-            # Interpretation: positive diff means Homo log-odds > other (higher AMTL in Homo)
-            interpretation = ""
-            if np.isnan(pval):
-                interpretation = "Comparison not available (zero variance)."
-            else:
-                if pval < 0.05:
-                    if diff > 0:
-                        interpretation = "Homo has significantly higher AMTL than " + other
-                    else:
-                        interpretation = other + " has significantly higher AMTL than Homo"
-                else:
-                    interpretation = "No statistically significant difference between Homo and " + other
-            comparisons_summary[other] = {
-                "available": True,
-                "diff_logit": diff,
-                "se_diff": se_diff,
-                "z": z,
-                "p_value": pval,
-                "Homo_prob": stats_homo["prob"],
-                "Other_prob": stats_other["prob"],
-                "Homo_prob_95ci": stats_homo["prob_95ci"],
-                "Other_prob_95ci": stats_other["prob_95ci"],
-                "interpretation": interpretation
-            }
+    if significance is True:
+        conclusion_text = f"Statistically significant ({pval:.3g}) evidence that modern humans have {direction} AMTL compared to non-human primates, controlling for age, sex, tooth class, and age uncertainty."
+    elif significance is False:
+        conclusion_text = f"No statistically significant evidence (p = {pval:.3g}) that modern humans differ from non-human primates in AMTL after controlling for covariates; the point estimate indicates {direction} AMTL in humans but it is not statistically significant."
+    else:
+        conclusion_text = f"Unable to determine statistical significance (p-value unavailable). Point estimate indicates {direction} AMTL in humans."
 
-        # Decide final answer: require that for all three non-human genera comparisons are available
-        # and that Homo has higher AMTL (diff>0) AND p<0.05 for each.
-        if all(comparisons_summary.get(g, {}).get("available", False) for g in target_nonhuman):
-            homo_higher_all = all((comparisons_summary[g]["diff_logit"] > 0 and comparisons_summary[g]["p_value"] < 0.05)
-                                  for g in target_nonhuman)
-            if homo_higher_all:
-                decision = True
-                reason = "Homo has higher AMTL than Pan, Pongo, and Papio (all differences positive and p<0.05)."
-            else:
-                decision = False
-                reason = "Homo does not have consistently higher AMTL than all three non-human genera (one or more comparisons non-significant or reversed)."
-        else:
-            decision = None
-            reason = "Could not compute all three pairwise comparisons between Homo and Pan/Pongo/Papio (some genera labels missing in model dummies)."
-
-        comparisons = comparisons_summary
-
-    # Prepare output object
-    out_object = {
-        "decision": decision,
-        "reason": reason,
-        "predicted_probabilities": predicted,
-        "pairwise_comparisons": comparisons
+    # Build output object
+    stats = {
+        "parameter_name": param_name,
+        "coef_log_odds": coef,
+        "se": se,
+        "z_or_t": z_val,
+        "p_value": pval,
+        "conf_int_log_odds": (ci_low, ci_high),
+        "odds_ratio": odds_ratio,
+        "odds_ratio_conf_int": (or_ci_low, or_ci_high),
+        "humans_higher": True if (coef > 0 and significance is True) else (False if (coef <= 0 and significance is True) else None),
+        "significant": significance,
+        "model_used": "primary_result_clustered" if ('primary_result_clustered' in model_output and model_output.get('primary_result_clustered') is not None) else "primary_result"
     }
 
-    desc_lines = [
-        "Extracted predicted AMTL probabilities (with 95% CI) for each genus-level linear predictor (covariates at mean/reference).",
-        "Also performed pairwise logit-scale comparisons (Homo vs each of Pan, Pongo, Papio) when genus labels could be matched.",
-        "Decision is True if Homo shows higher AMTL than each non-human genus with p<0.05; False if not; None if comparison not possible/ambiguous."
-    ]
-    description = " ".join(desc_lines)
+    # Create a short description
+    description = (
+        f"Parameter '{param_name}' from the primary binomial GLM: coef (log-odds) = {coef:.4f}, SE = {se:.4f}, "
+        f"z = {z_val:.3f} , p = {pval:.3g}. 95% CI (log-odds) = [{ci_low:.4f}, {ci_high:.4f}]. "
+        f"Odds ratio = {odds_ratio:.3f} (95% CI = [{or_ci_low:.3f}, {or_ci_high:.3f}]). "
+        + conclusion_text
+    )
 
-    return {"object": out_object, "description": description}
+    return {
+        "object": stats,
+        "description": description
+    }

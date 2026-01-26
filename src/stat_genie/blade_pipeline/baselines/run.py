@@ -27,6 +27,9 @@ from stat_genie.blade_pipeline.additions.perturbations.features import (
 from stat_genie.blade_pipeline.additions.perturbations.data import (
     DataPerturbation,
 )
+from stat_genie.blade_pipeline.additions.perturbations.task import (
+    TaskPerturbation,
+)
 from stat_genie.blade_pipeline.additions.prompt.prompt import PromptGenerator
 from stat_genie.blade_pipeline.baselines.config import SingleRunConfig
 from stat_genie.blade_pipeline.baselines.lm.gen_analysis import GenAnalysisLM
@@ -41,12 +44,14 @@ class SingleRunExperiment:
 
     def __init__(self, config: SingleRunConfig, prompt: PromptGenerator,
                  feature_perturbation: FeaturePerturbation,
-                 data_perturbation: DataPerturbation):
+                 data_perturbation: DataPerturbation,
+                 task_perturbation: TaskPerturbation):
         self.config = config
         # NOTE: THIS IS WHERE WE APPLY FEATURE AND DATA PERTURBATION
         self.dinfo = load_dataset_info(dataset=config.run_dataset,
                                        feature_perturbation=feature_perturbation,
                                        data_perturbation=data_perturbation,
+                                       task_perturbation=task_perturbation,
                                        edited_df_path=os.path.abspath(config.output_dir))
         self.llm_history = LLMHistory()
         self.format_lm = LLMBase(config.llm_eval.texgt_gen)

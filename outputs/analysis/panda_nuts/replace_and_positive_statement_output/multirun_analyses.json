@@ -1,0 +1,261 @@
+{
+  "dataset_name": "panda_nuts",
+  "n": 5,
+  "analyses": {
+    "0": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Age of the chimpanzee in years (centered). Continuous predictor expected to influence motor skill and efficiency.",
+            "columns": [
+              "age_c"
+            ]
+          },
+          {
+            "description": "Sex of the chimpanzee coded as male indicator (1 = male, 0 = female). Categorical predictor; captures sex differences in strength/learning.",
+            "columns": [
+              "sex_M"
+            ]
+          },
+          {
+            "description": "Whether the focal session included help from another chimpanzee (1 = yes, 0 = no). Social help may directly influence efficiency.",
+            "columns": [
+              "help_Y"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Nut-cracking output modeled as count of nuts opened with session duration as exposure (seconds). Also derive a descriptive efficiency rate (nuts per minute) for diagnostics and plotting.",
+          "columns": [
+            "nuts_opened",
+            "seconds",
+            "rate_per_min"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Type of hammer used during the session (categorical). Included as a control because tool type may affect cracking efficiency.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "hammer"
+            ]
+          },
+          {
+            "description": "Chimpanzee identifier. Used as a clustering variable for robust (clustered) standard errors to account for repeated sessions per individual.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "chimpanzee"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Clean and prepare the chimpanzee nut-cracking dataset for modeling.\n\n    Output columns required by the model:\n      - nuts_opened (int)        : dependent count\n      - seconds (float)          : exposure (duration of session in seconds)\n      - rate_per_min (float)     : nuts opened per minute (derived descriptive DV)\n      - log_seconds (float)      : natural log of seconds (offset for count models)\n      - age (float)              : original age (kept)\n      - age_c (float)            : age centered (predictor)\n      - sex_M (int)              : sex indicator (1 = male, 0 = female)\n      - help_Y (int)             : help indicator (1 = yes, 0 = no)\n      - hammer (category)        : hammer type (control, kept as categorical)\n      - chimpanzee (int)         : individual id (for clustering)\n\n    Rows with missing key fields or nonpositive seconds are dropped.\n    \"\"\"\n\n    df = df.copy()\n\n    # Keep only relevant columns if dataset contains extras\n    needed = ['chimpanzee', 'age', 'sex', 'hammer', 'nuts_opened', 'seconds', 'help']\n    for col in needed:\n        if col not in df.columns:\n            raise KeyError(f\"Required column missing from input dataframe: {col}\")\n\n    # Drop rows with missing values in key columns\n    df = df.dropna(subset=['chimpanzee', 'age', 'sex', 'nuts_opened', 'seconds', 'help'])\n\n    # Ensure numeric types\n    df['nuts_opened'] = pd.to_numeric(df['nuts_opened'], errors='coerce')\n    df['seconds'] = pd.to_numeric(df['seconds'], errors='coerce')\n    df['age'] = pd.to_numeric(df['age'], errors='coerce')\n\n    # Drop rows with invalid numeric values\n    df = df.dropna(subset=['nuts_opened', 'seconds', 'age'])\n    # Remove sessions with non-positive seconds (can't be used as exposure)\n    df = df[df['seconds'] > 0]\n\n    # Standardize / encode predictors\n    # sex: create male indicator (sex_M = 1 if male)\n    # Accept common male labels starting with 'm' (case-insensitive)\n    df['sex_M'] = df['sex'].astype(str).str.strip().str.lower().map(lambda x: 1 if x.startswith('m') else 0)\n\n    # help: create indicator (help_Y = 1 if helped)\n    df['help_Y'] = df['help'].astype(str).str.strip().str.lower().map(lambda x: 1 if x in ['y', 'yes', '1', 'true', 't'] else 0)\n\n    # Derived descriptive rate: nuts per minute (useful for plotting and diagnostics)\n    df['rate_per_min'] = df['nuts_opened'] / (df['seconds'] / 60.0)\n\n    # Exposure for count models: seconds and its log\n    df['log_seconds'] = np.log(df['seconds'].astype(float))\n\n    # Keep hammer as categorical (modeling will use C(hammer) in formula)\n    df['hammer'] = df['hammer'].astype('category')\n\n    # Ensure chimpanzee id is integer (or category) for clustering\n    try:\n        df['chimpanzee'] = df['chimpanzee'].astype(int)\n    except Exception:\n        # fallback to categorical codes if not integer-parseable\n        df['chimpanzee'] = pd.Categorical(df['chimpanzee']).codes\n\n    # Center age for numerical stability and interpretability\n    df['age_c'] = df['age'] - df['age'].mean()\n\n    # Final check — ensure required columns exist and have no missing\n    final_cols = ['nuts_opened', 'seconds', 'rate_per_min', 'log_seconds', 'age', 'age_c', 'sex_M', 'help_Y', 'hammer', 'chimpanzee']\n    missing_final = [c for c in final_cols if c not in df.columns]\n    if missing_final:\n        raise RuntimeError(f\"Transform failed to produce required columns: {missing_final}\")\n\n    # Ensure no missing values in final required columns\n    df = df.dropna(subset=final_cols)\n\n    return df",
+      "m_code": "def model(df: pd.DataFrame) -> Any:\n    \"\"\"\n    Fit a count model for nuts opened using session duration as exposure.\n\n    Strategy:\n      1. Fit a Poisson GLM with offset = log(seconds).\n      2. Compute dispersion (Pearson chi2 / df_resid). If dispersion > 1.5, refit with Negative Binomial family.\n      3. Return the final fitted model object and a small summary table with incidence-rate ratios (IRRs) and clustered SEs by chimpanzee.\n\n    Model formula:\n      nuts_opened ~ age_c + sex_M + help_Y + C(hammer)\n\n    The returned object is a simple wrapper providing clustered results info. The function also prints summary and IRRs.\n    \"\"\"\n\n    # Ensure the dataframe has the columns we expect\n    required = ['nuts_opened', 'seconds', 'log_seconds', 'age_c', 'sex_M', 'help_Y', 'hammer', 'chimpanzee']\n    for c in required:\n        if c not in df.columns:\n            raise KeyError(f\"Required column for modeling missing: {c}\")\n\n    # Define formula\n    formula = 'nuts_opened ~ age_c + sex_M + help_Y + C(hammer)'\n\n    # Fit Poisson GLM with offset = log_seconds\n    poisson_model = smf.glm(formula=formula, data=df, family=sm.families.Poisson(), offset=df['log_seconds'])\n    poisson_res = poisson_model.fit()\n\n    # Compute dispersion: Pearson chi2 / df_resid\n    try:\n        pearson_chi2 = np.sum(poisson_res.resid_pearson ** 2)\n    except Exception:\n        mu = poisson_res.fittedvalues\n        y = poisson_res.model.endog\n        pearson_chi2 = np.sum((y - mu) ** 2 / np.where(mu == 0, 1e-8, mu))\n\n    dispersion = pearson_chi2 / poisson_res.df_resid if poisson_res.df_resid > 0 else np.nan\n\n    # Choose family based on dispersion\n    if not np.isnan(dispersion) and dispersion > 1.5:\n        chosen_family = sm.families.NegativeBinomial()\n        fam_name = 'NegativeBinomial'\n    else:\n        chosen_family = sm.families.Poisson()\n        fam_name = 'Poisson'\n\n    # Fit final model with chosen family\n    final_model = smf.glm(formula=formula, data=df, family=chosen_family, offset=df['log_seconds'])\n    final_res = final_model.fit()\n\n    # Compute clustered (by chimpanzee) robust covariance matrix\n    # Use statsmodels' cov_cluster to get clustered covariance, then build a small wrapper\n    group = df['chimpanzee'].values\n    clustered_cov = cov_cluster(final_res, group)\n\n    params = final_res.params.copy()\n    # Ensure params is a pandas Series with proper index\n    if not isinstance(params, pd.Series):\n        params = pd.Series(params, index=final_res.params.index)\n\n    # standard errors from clustered covariance\n    bse_cluster = np.sqrt(np.diag(clustered_cov))\n    bse_cluster = pd.Series(bse_cluster, index=params.index)\n\n    # z-statistics and p-values\n    z_stats = params / bse_cluster\n    pvalues = 2 * (1 - _stats.norm.cdf(np.abs(z_stats)))\n    pvalues = pd.Series(pvalues, index=params.index)\n\n    # 95% CI based on normal approximation\n    crit = _stats.norm.ppf(0.975)\n    conf_lower = params - crit * bse_cluster\n    conf_upper = params + crit * bse_cluster\n    conf_df = pd.DataFrame({0: conf_lower, 1: conf_upper})\n\n    # Simple wrapper object to mimic minimal interface expected by downstream code\n    class ClusteredResults:\n        def __init__(self, params, bse, pvalues, conf_df, final_res, clustered_cov):\n            self.params = params\n            self.bse = bse\n            self.pvalues = pvalues\n            self._conf = conf_df\n            self._final = final_res\n            self.cov = clustered_cov\n\n        def conf_int(self):\n            return self._conf\n\n        def summary(self):\n            # Provide the original (model-based) summary plus a note about clustered SEs\n            base = \"\"\n            try:\n                base = self._final.summary().as_text()\n            except Exception:\n                base = str(self._final.summary())\n            note = \"\\nNote: standard errors, p-values, and CIs below are computed with clustering by 'chimpanzee'.\"\n            return base + note\n\n        def __repr__(self):\n            return self.summary()\n\n    clustered_res = ClusteredResults(params=params, bse=bse_cluster, pvalues=pvalues, conf_df=conf_df, final_res=final_res, clustered_cov=clustered_cov)\n\n    # Prepare IRR table (exp(coef)) with clustered CIs\n    irr = np.exp(clustered_res.params)\n    irr_conf = np.exp(clustered_res.conf_int())\n    irr_table = pd.DataFrame({\n        'coef': clustered_res.params,\n        'IRR': irr,\n        'IRR_CI_lower': irr_conf[0],\n        'IRR_CI_upper': irr_conf[1],\n        'pvalue': clustered_res.pvalues\n    })\n\n    # Print model selection diagnostics and summary\n    print(\"Model family chosen:\", fam_name)\n    print(f\"Dispersion (Pearson chi2 / df_resid) from initial Poisson: {dispersion:.3f}\")\n    print('\\nClustered robust summary:')\n    print(clustered_res.summary())\n    print('\\nIncidence-rate ratios (IRR) with clustered CIs:')\n    print(irr_table)\n\n    # Return a dict with useful objects\n    return {\n        'final_results_clustered': clustered_res,\n        'irr_table': irr_table,\n        'dispersion': dispersion,\n        'family': fam_name,\n        'poisson_initial_results': poisson_res\n    }"
+    },
+    "1": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Age of the individual chimpanzee in years (continuous). Hypothesized to increase nut-cracking efficiency as skill and strength develop with age.",
+            "columns": [
+              "age"
+            ]
+          },
+          {
+            "description": "Sex of the individual encoded as a binary indicator (1 = male, 0 = female). Hypothesized to affect efficiency via sex differences in strength, opportunity, or social learning.",
+            "columns": [
+              "Sex_m"
+            ]
+          },
+          {
+            "description": "Whether the focal chimpanzee received help from another chimpanzee in the session. Encoded as a binary indicator (1 = received help, 0 = no help). Hypothesized to increase nut-cracking efficiency by social facilitation or direct assistance.",
+            "columns": [
+              "Help_y"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Log-transformed nut-cracking efficiency measured as number of nuts opened per second (natural log). Log transform stabilizes variance and reduces influence of outliers; this is the dependent variable in the mixed-effects model.",
+          "columns": [
+            "LogNutsPerSec"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Type of hammer used in the session (categorical). Different hammer types may change efficiency; included as a fixed-effect control (factor).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "hammer"
+            ]
+          },
+          {
+            "description": "Chimpanzee ID. Used as the grouping variable (random intercept) to account for repeated measures of the same individual across sessions.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "chimpanzee"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw dataset into the analysis dataframe. Creates efficiency measures, encodes categorical predictors,\n    and drops rows with missing/invalid values required for the model.\n\n    Required output columns (used in the model):\n      - NutsPerSec: nuts_opened / seconds\n      - LogNutsPerSec: natural log of NutsPerSec (with small epsilon added)\n      - age: original age column (kept)\n      - Sex_m: indicator (1=male, 0=female)\n      - Help_y: indicator (1=help received 'y', 0=otherwise)\n      - hammer: hammer type (string/categorical)\n      - chimpanzee: ID for random effects grouping\n    \"\"\"\n    df = df.copy()\n\n    # Standardize string columns and handle common variants\n    if 'sex' in df.columns:\n        df['sex'] = df['sex'].astype(str).str.strip().str.lower()\n    if 'help' in df.columns:\n        df['help'] = df['help'].astype(str).str.strip().str.lower()\n    if 'hammer' in df.columns:\n        df['hammer'] = df['hammer'].astype(str).str.strip()\n\n    # Drop rows missing the primary fields required to compute efficiency or predictors\n    df = df.dropna(subset=['nuts_opened', 'seconds', 'age', 'sex', 'help', 'hammer', 'chimpanzee'])\n\n    # Remove zero or negative session durations to avoid division by zero\n    df = df[df['seconds'] > 0]\n\n    # Compute nuts opened per second as primary efficiency measure\n    df['NutsPerSec'] = df['nuts_opened'] / df['seconds']\n\n    # Log-transform the rate to stabilize variance; add small epsilon to avoid log(0)\n    eps = 1e-6\n    df['LogNutsPerSec'] = np.log(df['NutsPerSec'] + eps)\n\n    # Encode binary predictors as numeric indicators for modeling\n    # Sex: 'm' -> 1, others (including 'f') -> 0\n    df['Sex_m'] = df['sex'].map({'m': 1, 'f': 0})\n    # If mapping produced NaN (unexpected values), coerce these to 0 and keep a warning\n    df['Sex_m'] = df['Sex_m'].fillna(0).astype(int)\n\n    # Help: 'y' -> 1, anything else -> 0 (handles uppercase/lowercase earlier)\n    df['Help_y'] = df['help'].map({'y': 1})\n    df['Help_y'] = df['Help_y'].fillna(0).astype(int)\n\n    # Ensure hammer is a string categorical column for model formula use\n    df['hammer'] = df['hammer'].astype(str)\n\n    # Ensure chimpanzee ID is present and of appropriate dtype\n    # (Mixed models accept numeric or string group labels)\n    df['chimpanzee'] = df['chimpanzee']\n\n    # Final drop of any rows that still contain NA in model columns\n    model_cols = ['LogNutsPerSec', 'age', 'Sex_m', 'Help_y', 'hammer', 'chimpanzee']\n    df = df.dropna(subset=model_cols)\n\n    # Reset index for cleanliness\n    df = df.reset_index(drop=True)\n    return df",
+      "m_code": "def model(df: pd.DataFrame) -> any:\n    \"\"\"\n    Fit a mixed-effects model to test whether age, sex, and receiving help predict nut-cracking efficiency.\n\n    Model specification:\n      - Dependent variable: LogNutsPerSec (log of nuts per second)\n      - Fixed effects: age (continuous), Sex_m (0/1), Help_y (0/1), C(hammer) (categorical control)\n      - Random effects: random intercept for chimpanzee to account for repeated measures\n\n    Returns the fitted mixed model results object (statsmodels MixedLMResults).\n    \"\"\"\n    import statsmodels.formula.api as smf\n\n    # Copy to avoid side effects\n    df = df.copy()\n\n    # Ensure required columns exist\n    required = ['LogNutsPerSec', 'age', 'Sex_m', 'Help_y', 'hammer', 'chimpanzee']\n    missing = [c for c in required if c not in df.columns]\n    if missing:\n        raise ValueError(f\"Missing required columns for modeling: {missing}\")\n\n    # Specify formula: include hammer as a categorical control\n    formula = 'LogNutsPerSec ~ age + Sex_m + Help_y + C(hammer)'\n\n    # Fit mixed-effects model with random intercept for chimpanzee\n    # Use reml=False for likelihood-based comparisons if desired\n    md = smf.mixedlm(formula, df, groups=df['chimpanzee'])\n    mdf = md.fit(reml=False)\n\n    # Print brief summary to console and return the fitted object for programmatic inspection\n    try:\n        print(mdf.summary())\n    except Exception:\n        # summary printing can sometimes fail in limited environments; ignore\n        pass\n\n    return mdf"
+    },
+    "2": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Age in years at time of observation, centered (independent variable). Centering helps with interpretation of the intercept and reduces collinearity.",
+            "columns": [
+              "age_c"
+            ]
+          },
+          {
+            "description": "Sex of the individual (independent categorical variable). Values in the transformed dataframe are string categories (e.g., 'f', 'm') and will be modeled with dummy coding.",
+            "columns": [
+              "sex"
+            ]
+          },
+          {
+            "description": "Receiving help from another chimpanzee (independent binary variable). Derived binary column: 1 = received help, 0 = no help.",
+            "columns": [
+              "help_bin"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Nut-cracking efficiency operationalized as nuts opened per minute (continuous). Because rates are typically skewed, a log transform is included for modeling: log_nuts_per_min = log(nuts_per_min + 1e-6). The model will predict log_nuts_per_min.",
+          "columns": [
+            "nuts_per_min",
+            "log_nuts_per_min"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Type of hammer used in the session (categorical control). Different hammer types may affect cracking efficiency and are included as fixed-effect categorical controls (dummy-coded in the model).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "hammer"
+            ]
+          },
+          {
+            "description": "Chimpanzee individual ID used as the grouping variable for a random intercept to account for repeated measures within individuals (random effect / control).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "chimpanzee"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw dataset into the analysis-ready dataframe.\n    Produces:\n      - nuts_per_min: nuts opened per minute (continuous rate)\n      - log_nuts_per_min: log-transformed rate for modeling\n      - help_bin: binary indicator for receiving help (1 = yes, 0 = no)\n      - age_c: centered age\n      - sex, hammer, chimpanzee preserved/converted to categorical strings\n    Drops rows with missing essential values (nuts_opened, seconds, age, sex, help).\n    \"\"\"\n    df = df.copy()\n\n    # Drop rows missing essential vars\n    df = df.dropna(subset=['nuts_opened', 'seconds', 'age', 'sex', 'help'])\n\n    # Ensure numeric for calculations\n    df['nuts_opened'] = pd.to_numeric(df['nuts_opened'], errors='coerce')\n    df['seconds'] = pd.to_numeric(df['seconds'], errors='coerce')\n    df = df.dropna(subset=['nuts_opened', 'seconds'])\n\n    # Compute rate: nuts per minute\n    # avoid division by zero if any 'seconds' == 0 (shouldn't happen given schema, but guard anyway)\n    df = df[df['seconds'] > 0]\n    df['nuts_per_min'] = df['nuts_opened'] / df['seconds'] * 60.0\n\n    # Log-transform the rate for modeling (small epsilon to avoid log(0))\n    eps = 1e-6\n    df['log_nuts_per_min'] = np.log(df['nuts_per_min'] + eps)\n\n    # Create binary help indicator\n    # Map common variants to 1/0; default to 0 for unknown/missing after mapping\n    df['help_bin'] = df['help'].astype(str).str.strip().str.lower().map({\n        'y': 1, 'yes': 1, 'yep': 1, 'true': 1, 't': 1, '1': 1,\n        'n': 0, 'no': 0, 'false': 0, 'f': 0, '0': 0\n    })\n    df['help_bin'] = df['help_bin'].fillna(0).astype(int)\n\n    # Standardize categorical columns: keep as strings for formula handling\n    df['sex'] = df['sex'].astype(str).str.strip()\n    df['hammer'] = df['hammer'].astype(str).str.strip()\n    df['chimpanzee'] = df['chimpanzee'].astype(str)\n\n    # Center age for interpretability\n    df['age_c'] = df['age'] - df['age'].mean()\n\n    # Final: drop any rows with NaN in new columns (defensive)\n    df = df.dropna(subset=['nuts_per_min', 'log_nuts_per_min', 'age_c', 'sex', 'hammer', 'chimpanzee'])\n\n    return df",
+      "m_code": "def model(df: pd.DataFrame):\n    \"\"\"\n    Fit a linear mixed-effects model predicting log(nuts_per_min) from age, sex, and help,\n    controlling for hammer type and with a random intercept for chimpanzee.\n\n    Model formula:\n      log_nuts_per_min ~ age_c + C(sex) + help_bin + C(hammer)\n    Random effects:\n      random intercept for chimpanzee (groups=chimpanzee)\n\n    Returns the fitted model results object (statsmodels MixedLMResults).\n    Prints the model summary.\n    \"\"\"\n    import statsmodels.formula.api as smf\n\n    # Fit mixed-effects linear model (random intercept by chimpanzee)\n    # Use ML (reml=False) for easier comparison across fixed-effects specifications\n    md = smf.mixedlm(\"log_nuts_per_min ~ age_c + C(sex) + help_bin + C(hammer)\", data=df, groups=df[\"chimpanzee\"])\n\n    try:\n        mdf = md.fit(reml=False)\n    except Exception as e:\n        # If convergence issues occur, try a more robust optimizer\n        mdf = md.fit(reml=False, method='nm', maxiter=2000)\n\n    # Print summary for inspection\n    print(mdf.summary())\n\n    # For asserting effects of interest, we return the full results object\n    return mdf"
+    },
+    "3": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Age of the chimpanzee in years (numeric). Hypothesized to increase nut-cracking efficiency as experience/strength accumulate.",
+            "columns": [
+              "age"
+            ]
+          },
+          {
+            "description": "Sex of the chimpanzee encoded as a binary indicator (1 = male, 0 = female). Tests whether males and females differ in nut-cracking efficiency.",
+            "columns": [
+              "sex_male"
+            ]
+          },
+          {
+            "description": "Whether the focal individual received help from another chimpanzee during the session (1 = yes, 0 = no). Hypothesized to improve efficiency (more nuts opened per unit time).",
+            "columns": [
+              "help_yes"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Nut-cracking efficiency. Primary model treats nuts_opened (count) with session duration seconds as exposure (offset). A secondary continuous outcome is nuts_per_second = nuts_opened / seconds for OLS robustness checks.",
+          "columns": [
+            "nuts_opened",
+            "seconds",
+            "nuts_per_second"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Hammer type used in the session (categorical). Included as a control because tool type can affect cracking success and speed.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "hammer"
+            ]
+          },
+          {
+            "description": "Chimpanzee ID (integer). Used to cluster standard errors to account for non-independence / repeated measures of individuals (control for individual-level heterogeneity).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "chimpanzee"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw dataset into the analysis-ready dataframe.\n\n    Produces columns used in the models (exact names):\n      - chimpanzee (unchanged)\n      - age (numeric)\n      - sex_male (0/1)\n      - help_yes (0/1)\n      - hammer (categorical, unchanged)\n      - nuts_opened (count, unchanged)\n      - seconds (positive numeric, unchanged)\n      - nuts_per_second (numeric = nuts_opened / seconds)\n\n    Drops rows with missing or invalid values in critical columns.\n    \"\"\"\n    import numpy as np\n    import pandas as pd\n\n    df = df.copy()\n\n    # Keep only the columns we need (this also tolerates extra columns)\n    expected_cols = ['chimpanzee', 'age', 'sex', 'hammer', 'nuts_opened', 'seconds', 'help']\n    # If any expected columns are missing, raise an informative error\n    missing = [c for c in expected_cols if c not in df.columns]\n    if missing:\n        raise ValueError(f\"Missing expected columns in input dataframe: {missing}\")\n\n    # Drop rows with missing critical values\n    df = df.dropna(subset=['nuts_opened', 'seconds', 'age', 'sex', 'help', 'hammer', 'chimpanzee'])\n\n    # Ensure numeric types where expected\n    df['nuts_opened'] = pd.to_numeric(df['nuts_opened'], errors='coerce')\n    df['seconds'] = pd.to_numeric(df['seconds'], errors='coerce')\n    df['age'] = pd.to_numeric(df['age'], errors='coerce')\n    df = df.dropna(subset=['nuts_opened', 'seconds', 'age'])\n\n    # Remove rows with non-positive session duration (cannot be used as exposure)\n    df = df[df['seconds'] > 0]\n\n    # Standardize and encode sex into a male indicator column\n    # Accept common encodings like 'm', 'M', 'male', 'f', 'F', 'female'\n    df['sex_str'] = df['sex'].astype(str).str.strip().str.lower()\n    df['sex_male'] = df['sex_str'].isin(['m', 'male']).astype(int)\n    df.drop(columns=['sex_str'], inplace=True)\n\n    # Encode help variable into binary indicator help_yes (accept 'y','Y','yes','n','no','N')\n    df['help_str'] = df['help'].astype(str).str.strip().str.lower()\n    df['help_yes'] = df['help_str'].isin(['y', 'yes', 'true', '1']).astype(int)\n    df.drop(columns=['help_str'], inplace=True)\n\n    # Ensure hammer is treated as categorical (preserve original labels)\n    df['hammer'] = df['hammer'].astype(str).str.strip()\n\n    # Compute continuous efficiency for robustness checks: nuts opened per second\n    # small epsilon to avoid division issues is unnecessary because seconds > 0\n    df['nuts_per_second'] = df['nuts_opened'] / df['seconds']\n\n    # Ensure chimpanzee ID is integer (used for clustering)\n    try:\n        df['chimpanzee'] = pd.to_numeric(df['chimpanzee'], errors='coerce').astype(int)\n    except Exception:\n        # If conversion fails, keep original but still usable as group label\n        df['chimpanzee'] = df['chimpanzee']\n\n    # Final sanity drop if any remaining NAs\n    df = df.dropna(subset=['nuts_opened', 'seconds', 'age', 'sex_male', 'help_yes', 'hammer', 'nuts_per_second', 'chimpanzee'])\n\n    # Reset index for cleanliness\n    df = df.reset_index(drop=True)\n\n    return df",
+      "m_code": "def model(df: pd.DataFrame) -> dict:\n    \"\"\"\n    Fit models to test whether age, sex, and receiving help influence nut-cracking efficiency.\n\n    Primary approach: Count model (Poisson with session-duration offset). Check for overdispersion\n    (Pearson chi2 / df). If substantial overdispersion is present, refit with a Negative Binomial family.\n\n    Controls: hammer as a categorical predictor. Cluster robust standard errors by chimpanzee ID.\n\n    Secondary (robustness): OLS on nuts_per_second with clustered robust SEs.\n\n    Returns a dictionary with the fitted model results objects and diagnostics:\n      - 'final_glm_result': fitted GLMResults object (Poisson or NegBin)\n      - 'glm_family': name of family used ('Poisson' or 'NegativeBinomial')\n      - 'dispersion': computed Pearson chi2 / df_resid from initial Poisson\n      - 'poisson_result': initial Poisson fit (results object)\n      - 'ols_result': OLS results on nuts_per_second (with clustered SEs)\n\n    Note: statsmodels result objects are returned so the caller can print .summary() as needed.\n    \"\"\"\n    import numpy as np\n    import statsmodels.api as sm\n    import statsmodels.formula.api as smf\n\n    results = {}\n\n    # Build formula for GLM: nuts_opened ~ age + sex_male + help_yes + C(hammer)\n    formula = 'nuts_opened ~ age + sex_male + help_yes + C(hammer)'\n\n    # Fit initial Poisson with log(seconds) as offset (exposure)\n    # Use statsmodels formula API for convenience with categorical hammer\n    df = df.copy()\n    df['log_seconds'] = np.log(df['seconds'])\n\n    poisson_model = smf.glm(formula=formula, data=df, family=sm.families.Poisson(), offset=df['log_seconds'])\n    poisson_result = poisson_model.fit()\n\n    # Overdispersion diagnostic: Pearson chi2 / df_resid\n    pearson_chi2 = sum(poisson_result.resid_pearson**2)\n    df_resid = float(poisson_result.df_resid) if poisson_result.df_resid is not None else np.nan\n    dispersion = (pearson_chi2 / df_resid) if df_resid and df_resid > 0 else np.nan\n\n    results['poisson_result'] = poisson_result\n    results['dispersion'] = dispersion\n\n    # Threshold for deciding overdispersion: commonly > 1.5 indicates extra-Poisson variation\n    if (not np.isnan(dispersion)) and (dispersion > 1.5):\n        # Refit with a Negative Binomial family\n        nb_model = smf.glm(formula=formula, data=df, family=sm.families.NegativeBinomial(alpha=1.0), offset=df['log_seconds'])\n        # Note: statsmodels will estimate the dispersion (alpha) if possible, but formula API's NegativeBinomial uses a parameterization; this provides a robust alternative.\n        try:\n            nb_result = nb_model.fit()\n            final_result = nb_result\n            family_used = 'NegativeBinomial'\n        except Exception:\n            # If NB fails, fall back to Poisson but use sandwich (clustered) SEs\n            final_result = poisson_result\n            family_used = 'Poisson'\n    else:\n        final_result = poisson_result\n        family_used = 'Poisson'\n\n    # For inference robust to within-individual correlation, compute cluster-robust covariance (by chimpanzee)\n    try:\n        # Get clustered covariance matrix and create a results wrapper with robust cov\n        clustered = final_result.get_robustcov_results(cov_type='cluster', groups=df['chimpanzee'])\n        results['final_glm_result'] = clustered\n    except Exception:\n        # If clustering fails for NB model or other reason, return the plain result\n        results['final_glm_result'] = final_result\n\n    results['glm_family'] = family_used\n\n    # Robustness: OLS on nuts_per_second (continuous), with clustered SEs by chimpanzee\n    ols_formula = 'nuts_per_second ~ age + sex_male + help_yes + C(hammer)'\n    ols_model = smf.ols(formula=ols_formula, data=df)\n    ols_result = ols_model.fit()\n\n    try:\n        ols_clustered = ols_result.get_robustcov_results(cov_type='cluster', groups=df['chimpanzee'])\n        results['ols_result'] = ols_clustered\n    except Exception:\n        results['ols_result'] = ols_result\n\n    # Add model summaries as strings for quick inspection\n    try:\n        results['poisson_summary'] = poisson_result.summary().as_text()\n    except Exception:\n        results['poisson_summary'] = None\n    try:\n        results['final_glm_summary'] = results['final_glm_result'].summary().as_text()\n    except Exception:\n        results['final_glm_summary'] = None\n    try:\n        results['ols_summary'] = results['ols_result'].summary().as_text()\n    except Exception:\n        results['ols_summary'] = None\n\n    return results"
+    },
+    "4": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Age of the chimpanzee in years, mean-centered to aid interpretation and reduce collinearity.",
+            "columns": [
+              "age_c"
+            ]
+          },
+          {
+            "description": "Sex of the chimpanzee coded as a binary indicator (1 = male, 0 = female).",
+            "columns": [
+              "sex_male"
+            ]
+          },
+          {
+            "description": "Whether the focal chimpanzee received help from another chimpanzee during the session (1 = yes, 0 = no).",
+            "columns": [
+              "help_yes"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Nut-cracking efficiency expressed as number of nuts opened per minute, log-transformed to reduce skew and make model residuals more Gaussian-like.",
+          "columns": [
+            "log_eff_nuts_per_min"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Type of hammer used in the session (categorical). Hammer type can affect efficiency (tool quality/weight) so we include it as a categorical control (dummy-coded in the model via C(hammer)).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "hammer"
+            ]
+          },
+          {
+            "description": "Chimpanzee ID. Included as a grouping variable / random intercept to account for repeated measures and unobserved individual differences.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "chimpanzee"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw dataset to produce the columns required for modeling.\n\n    Output columns used in the model:\n      - eff_nuts_per_min: nuts opened per minute (raw efficiency, kept for inspection)\n      - log_eff_nuts_per_min: log-transformed efficiency (dependent variable)\n      - age_c: mean-centered age (independent)\n      - sex_male: binary indicator (1 = male, 0 = female) (independent)\n      - help_yes: binary indicator for receiving help (1 = yes, 0 = no) (independent)\n      - hammer: hammer type (categorical control)\n      - chimpanzee: chimpanzee ID (grouping variable / control)\n    \"\"\"\n    df = df.copy()\n\n    # Drop rows missing core variables needed to compute efficiency and predictors\n    df = df.dropna(subset=['nuts_opened', 'seconds', 'age', 'sex', 'help', 'chimpanzee'])\n\n    # Remove sessions with non-positive duration to avoid division by zero\n    df = df[df['seconds'] > 0]\n\n    # Standardize and create binary variables for 'help' and 'sex'\n    # 'help' values in dataset appear as 'y' and 'N' (case inconsistent). Map 'y'/'Y' to 1, else 0.\n    df['help_yes'] = df['help'].astype(str).str.strip().str.lower().map({'y': 1, 'yes': 1}).fillna(0).astype(int)\n\n    # Sex: map 'm' or 'male' (case-insensitive) to 1, everything else -> 0 (female)\n    df['sex_male'] = df['sex'].astype(str).str.strip().str.lower().map({'m': 1, 'male': 1}).fillna(0).astype(int)\n\n    # Efficiency: nuts opened per minute\n    df['eff_nuts_per_min'] = df['nuts_opened'] / df['seconds'] * 60.0\n\n    # Address possible zeros / skew by log-transforming efficiency. Add tiny constant to avoid log(0).\n    df['log_eff_nuts_per_min'] = np.log(df['eff_nuts_per_min'] + 1e-6)\n\n    # Center age for interpretability\n    df['age_c'] = df['age'] - df['age'].mean()\n\n    # Ensure hammer is a string categorical column (Patsy/statsmodels will handle C(hammer))\n    df['hammer'] = df['hammer'].astype(str)\n\n    # Ensure chimpanzee ID is an integer (grouping variable)\n    df['chimpanzee'] = df['chimpanzee'].astype(int)\n\n    # Optional: keep only sensible values for efficiency (filter out extreme negative/NaN log values)\n    df = df.replace([np.inf, -np.inf], np.nan).dropna(subset=['log_eff_nuts_per_min'])\n\n    return df",
+      "m_code": "def model(df: pd.DataFrame):\n    \"\"\"\n    Fit a mixed-effects linear model predicting log-transformed nut-cracking efficiency.\n\n    Primary predictors (fixed effects): age_c, sex_male, help_yes\n    Controls (fixed effects): hammer (categorical)\n    Grouping (random effect): random intercept for chimpanzee\n\n    Returns the fitted model object (MixedLMResults if successful). If MixedLM fails,\n    falls back to OLS with clustered standard errors by chimpanzee and returns the OLS result.\n    \"\"\"\n    import statsmodels.formula.api as smf\n    import statsmodels.api as sm\n\n    # Formula: include hammer as categorical control. Interaction terms are not requested by the\n    # research question; we're testing main effects of age, sex, and help.\n    formula = 'log_eff_nuts_per_min ~ age_c + sex_male + help_yes + C(hammer)'\n\n    # Try a mixed-effects model with a random intercept per chimpanzee to account for repeated measures\n    try:\n        md = smf.mixedlm(formula, df, groups=df['chimpanzee'])\n        mdf = md.fit(reml=False)\n        print('MixedLM fit successful')\n        print(mdf.summary())\n        return mdf\n    except Exception as e:\n        # Fallback: OLS with cluster-robust SEs by chimpanzee\n        print('MixedLM failed with error:', str(e))\n        print('Falling back to OLS with cluster-robust standard errors by chimpanzee')\n        ols = smf.ols(formula, data=df).fit()\n        # Compute clustered cov_type summary if desired\n        try:\n            clustered = ols.get_robustcov_results(cov_type='cluster', groups=df['chimpanzee'])\n            print(clustered.summary())\n            return clustered\n        except Exception:\n            print('Clustered SE computation failed; returning plain OLS fit')\n            print(ols.summary())\n            return ols"
+    }
+  }
+}

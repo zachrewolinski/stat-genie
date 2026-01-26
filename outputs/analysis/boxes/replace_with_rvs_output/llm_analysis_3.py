@@ -13,99 +13,120 @@ df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/anal
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Transform the raw dataset into a dataframe ready for modeling.
+    Transform raw dataset into analysis-ready dataframe.
 
-    Produces the following final columns used in the model:
-      - MajorityChoice: binary DV (1 if y==2 [majority], else 0)
-      - Age_c: centered age (age - mean(age))
-      - Culture: categorical site identifier (from original 'culture')
-      - Gender_Boy: binary (1 if gender==2 (boy), 0 if gender==1 (girl))
-      - MajorityFirst: binary copy of the 'majority_first' column
+    Produces the following new columns used in modeling:
+    - Choice: integer copy of original y (1=unchosen, 2=majority, 3=minority)
+    - demonstrated_choice: binary (1 if Choice in {2,3} i.e. child chose a demonstrated option; 0 if unchosen)
+    - majority_choice: binary among demonstrated choices (1 if majority (2), 0 if minority (3); NaN if Choice==1)
+    - age_z: standardized age (z-score)
+    - culture_cat: categorical culture label as string (e.g., 'C1', 'C2', ...)
+    - is_male: binary (1=boy, 0=girl)
 
-    The function drops rows with missing values in the variables required for modeling.
+    Drops rows missing any of the key variables used in these transforms (y, age, culture, gender, majority_first).
     """
+    # Work on a copy to avoid modifying original
     df = df.copy()
 
-    # Ensure necessary columns exist
-    required = ['y', 'age', 'culture', 'gender', 'majority_first']
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        raise ValueError(f"Missing required columns: {missing}")
-
-    # Drop rows with missing outcome or key predictors/controls
+    # Drop rows with missing critical fields
     df = df.dropna(subset=['y', 'age', 'culture', 'gender', 'majority_first'])
 
-    # Create binary outcome: 1 if majority option (y == 2), else 0
-    df['MajorityChoice'] = (df['y'] == 2).astype(int)
+    # Keep original choice coding but standardize the name for modeling
+    df['Choice'] = df['y'].astype(int)
 
-    # Center age for interpretability in interaction terms
-    df['Age_c'] = df['age'] - df['age'].mean()
+    # Binary: did the child pick one of the demonstrated options (majority or minority)?
+    df['demonstrated_choice'] = df['Choice'].isin([2, 3]).astype(int)
 
-    # Convert culture to a categorical variable for modeling (keeps original codes but marks as category)
-    df['Culture'] = df['culture'].astype('category')
+    # For those who picked a demonstrated option, was it the majority (1) or minority (0)?
+    # For nondemonstrated choices this will be NaN
+    df['majority_choice'] = np.where(df['Choice'] == 2, 1,
+                                     np.where(df['Choice'] == 3, 0, np.nan))
 
-    # Create gender binary: original coding 1=girl, 2=boy. Create Boy=1 indicator
-    df['Gender_Boy'] = df['gender'].map({1: 0, 2: 1})
-    # If any unexpected gender codes appear, coerce to 0 and warn
-    if df['Gender_Boy'].isna().any():
-        df['Gender_Boy'] = df['Gender_Boy'].fillna(0).astype(int)
-    else:
-        df['Gender_Boy'] = df['Gender_Boy'].astype(int)
+    # Standardize age (z-score) for interpretability and to stabilize interactions
+    df['age_z'] = (df['age'] - df['age'].mean()) / df['age'].std()
 
-    # Ensure majority_first is binary integer (0/1)
-    df['MajorityFirst'] = df['majority_first'].astype(int)
+    # Create a categorical label for culture (string) so formula interface treats it as a factor
+    # Prepend 'C' to preserve categorical ordering as strings (e.g., 'C1')
+    df['culture_cat'] = 'C' + df['culture'].astype(int).astype(str)
 
-    # Keep only columns needed for modeling (plus optionally original columns if desired)
-    cols_to_keep = ['MajorityChoice', 'Age_c', 'Culture', 'Gender_Boy', 'MajorityFirst', 'y', 'age', 'culture', 'gender', 'majority_first']
-    existing_cols = [c for c in cols_to_keep if c in df.columns]
-    df = df[existing_cols].reset_index(drop=True)
+    # Gender: convert to is_male flag (1 = boy (originally coded 2), 0 = girl (1))
+    df['is_male'] = (df['gender'] == 2).astype(int)
+
+    # Ensure majority_first is integer 0/1
+    df['majority_first'] = df['majority_first'].astype(int)
+
+    # Final check: keep only rows with valid Choice codes (1,2,3)
+    df = df[df['Choice'].isin([1, 2, 3])]
+
+    # Reset index for cleanliness
+    df = df.reset_index(drop=True)
 
     return df
 
 
 # ======== MODEL CODE ========
-def model(df: pd.DataFrame) -> any:
+def model(df: pd.DataFrame):
     """
-    Fit a logistic regression predicting the probability of choosing the majority option.
+    Runs statistical models to address (a) children's reliance on social information
+    (demonstrated vs undemonstrated choices) and (b) children's preference for
+    the majority when they use social information (majority vs minority).
 
-    Model specification:
-      MajorityChoice ~ Age_c * C(Culture) + Gender_Boy + MajorityFirst
+    Two logistic regression models are fit using statsmodels' formula API:
+    1) demonstrated_choice ~ age_z + C(culture_cat) + is_male + majority_first + age_z:C(culture_cat)
+       (binary logistic regression predicting whether a child chose a demonstrated option)
+    2) majority_choice ~ age_z + C(culture_cat) + is_male + majority_first + age_z:C(culture_cat)
+       (binary logistic regression among subset who chose a demonstrated option)
 
-    - Age_c * C(Culture) tests whether the age slope differs across cultural sites (i.e., whether developmental trajectories of majority reliance vary by culture).
-    - Gender_Boy and MajorityFirst are included as controls.
+    Both models include an age-by-culture interaction to test whether developmental
+    trajectories differ across cultures.
 
-    Returns the fitted statsmodels logit result object. Also computes average marginal effects of Age by Culture for interpretability.
+    Returns a dict with fitted model results (statsmodels objects):
+      {'demonstrated_model': <BinaryResults>, 'majority_model': <BinaryResults>, 'n_demo': int}
     """
     import statsmodels.formula.api as smf
-    import statsmodels.api as sm
+    import warnings
 
-    # Make a copy to avoid modifying the input
-    df = df.copy()
+    results = {}
 
-    # Basic sanity checks
-    required = ['MajorityChoice', 'Age_c', 'Culture', 'Gender_Boy', 'MajorityFirst']
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        raise ValueError(f"Missing required columns for modeling: {missing}")
-
-    # Fit logistic regression with culture fixed effects and Age x Culture interactions
-    formula = 'MajorityChoice ~ Age_c * C(Culture) + Gender_Boy + MajorityFirst'
-    logit_model = smf.logit(formula=formula, data=df)
-    results = logit_model.fit(disp=False)
-
-    # Compute average marginal effect of Age overall and (optionally) by culture.
-    # Overall marginal effect for Age_c
+    # Model 1: reliance on social information (demonstrated vs undemonstrated)
+    formula1 = 'demonstrated_choice ~ age_z + C(culture_cat) + is_male + majority_first + age_z:C(culture_cat)'
     try:
-        margeff_overall = results.get_margeff(at='overall', method='dydx', atexog=None).summary_frame()
-    except Exception:
-        margeff_overall = None
+        m1 = smf.logit(formula=formula1, data=df).fit(disp=False)
+    except Exception as e:
+        # If convergence or perfect separation occurs, raise informative error
+        raise RuntimeError(f"Model 1 failed to fit: {e}")
 
-    # Package results into a dictionary for convenient downstream use
-    out = {
-        'model_result': results,
-        'marginal_effects_overall': margeff_overall
-    }
+    results['demonstrated_model'] = m1
 
-    return out
+    # Model 2: preference for majority vs minority among those who used social information
+    df_demo = df[df['demonstrated_choice'] == 1].copy()
+    n_demo = df_demo.shape[0]
+    results['n_demo'] = int(n_demo)
+
+    if n_demo < 30:
+        warnings.warn(
+            f"Small sample for majority-vs-minority model (n={n_demo}). Coefficients may be unstable.")
+
+    # Drop rows where majority_choice is missing (should only be missing when Choice==1)
+    df_demo = df_demo.dropna(subset=['majority_choice'])
+
+    if df_demo['majority_choice'].nunique() < 2:
+        warnings.warn('No variation in majority_choice in the demonstrated subset; model cannot be fit.')
+        results['majority_model'] = None
+        return results
+
+    formula2 = 'majority_choice ~ age_z + C(culture_cat) + is_male + majority_first + age_z:C(culture_cat)'
+    try:
+        m2 = smf.logit(formula=formula2, data=df_demo).fit(disp=False)
+    except Exception as e:
+        raise RuntimeError(f"Model 2 failed to fit: {e}")
+
+    results['majority_model'] = m2
+
+    # Optionally: print summaries for immediate inspection (commented out by default)
+    # print(m1.summary())
+    # print(m2.summary())
+
+    return results
 
 

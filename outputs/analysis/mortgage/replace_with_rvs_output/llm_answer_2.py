@@ -1,204 +1,130 @@
 def extract_final_answer(model_output):
     """
-    Extract statistics about the 'female' coefficient from a fitted statsmodels
-    binary regression results object (Logit/GLM or their wrapper).
+    Extract statistics about the effect of gender ('female') on mortgage acceptance
+    from the provided model_output and produce a concise interpretation.
 
-    Returns a dict with:
-      - "object": a dict of numeric results for 'female' (coef, se, z, p, conf_int,
-                  odds_ratio, odds_ratio_conf_int, (if available) average marginal effect)
-      - "description": short interpretation in plain language.
-
-    The function is defensive: it converts numpy types to native Python floats and
-    falls back gracefully if some summaries (e.g., marginal effects) are not available.
+    Returns:
+      {
+        "object": {  # numeric results
+            "coef": float,         # logistic coefficient for 'female'
+            "odds_ratio": float,   # exp(coef)
+            "ci_lower": float,     # lower bound of 95% CI for OR
+            "ci_upper": float,     # upper bound of 95% CI for OR
+            "pvalue": float,       # p-value for 'female'
+            "nobs": int,           # sample size used in the model
+            "significant": bool    # True if pvalue < 0.05
+        },
+        "description": str  # short interpretation in context
+      }
     """
-    import numpy as np
+    # Normalize input: expect either (result_obj, summary_dict) or summary_dict or result_obj
+    summary = None
+    # Case: tuple with summary dict as second element
+    if isinstance(model_output, tuple) and len(model_output) >= 2:
+        candidate = model_output[1]
+        if isinstance(candidate, dict):
+            summary = candidate
+        else:
+            # maybe the first element is the dict
+            if isinstance(model_output[0], dict):
+                summary = model_output[0]
+    # Case: provided directly a dict
+    if summary is None and isinstance(model_output, dict):
+        summary = model_output
 
-    res = model_output
-
-    # Helper to safely access attributes
-    def safe_attr(obj, name, default=None):
-        return getattr(obj, name, default)
-
-    # Try to get parameter series / dict-like
-    try:
-        params = safe_attr(res, "params", None)
-        if params is None:
-            # For some wrapper objects params might be accessed slightly differently
-            params = res.params
-    except Exception:
-        raise ValueError("Could not extract params from model_output")
-
-    if "female" not in params.index:
-        raise ValueError("Model output does not contain a 'female' coefficient")
-
-    # Extract coefficient and standard error
-    coef = float(params["female"])
-
-    # standard error
-    try:
-        bse = float(safe_attr(res, "bse")[ "female" ])
-    except Exception:
-        # try alternative attribute names
+    # If still None, try to compute from a statsmodels result object
+    if summary is None:
+        result_obj = None
+        if isinstance(model_output, tuple) and len(model_output) >= 1:
+            result_obj = model_output[0]
+        else:
+            result_obj = model_output
         try:
-            bse = float(res.bse["female"])
-        except Exception:
-            bse = None
+            params = result_obj.params
+            pvalues = result_obj.pvalues
+            conf = result_obj.conf_int()
+            import numpy as _np
+            or_vals = _np.exp(params)
+            or_lower = _np.exp(conf[0])
+            or_upper = _np.exp(conf[1])
+            summary = {
+                'params': params,
+                'odds_ratios': or_vals,
+                'or_ci_lower': or_lower,
+                'or_ci_upper': or_upper,
+                'pvalues': pvalues,
+                'nobs': int(result_obj.nobs)
+            }
+        except Exception as e:
+            raise ValueError("Unsupported model_output format; unable to extract summary.") from e
 
-    # p-value
+    # Helper to safely get values from pandas Series or dict
+    def _get(series_like, key):
+        try:
+            return series_like.get(key)
+        except Exception:
+            try:
+                return series_like[key]
+            except Exception:
+                return None
+
+    coef = _get(summary.get('params', {}), 'female')
+    odds_ratio = _get(summary.get('odds_ratios', {}), 'female')
+    ci_lower = _get(summary.get('or_ci_lower', {}), 'female')
+    ci_upper = _get(summary.get('or_ci_upper', {}), 'female')
+    pvalue = _get(summary.get('pvalues', {}), 'female')
+    nobs = summary.get('nobs', None)
+
+    # Cast to native Python types where possible
     try:
-        pval = float(safe_attr(res, "pvalues")["female"])
+        coef = float(coef)
     except Exception:
-        try:
-            pval = float(res.pvalues["female"])
-        except Exception:
-            pval = None
-
-    # z/t statistic: compute as coef / se if possible
-    z_stat = None
-    if bse is not None and bse != 0:
-        z_stat = float(coef / bse)
-
-    # confidence interval
-    ci_low = ci_high = None
+        coef = None
     try:
-        ci = safe_attr(res, "conf_int")()
-        # conf_int() returns array like [[low1, high1], ...] indexed in same order as params
-        # but sometimes conf_int is an attribute (DataFrame) instead of callable
-    except Exception:
-        try:
-            ci = safe_attr(res, "conf_int")
-        except Exception:
-            ci = None
-
-    if ci is not None:
-        try:
-            # If ci is a DataFrame or ndarray with index matching params
-            if hasattr(ci, "loc"):
-                ci_low = float(ci.loc["female"].iloc[0])
-                ci_high = float(ci.loc["female"].iloc[1])
-            else:
-                # ci might be ndarray; find the position of 'female'
-                idx = list(params.index).index("female")
-                ci_low = float(ci[idx, 0])
-                ci_high = float(ci[idx, 1])
-        except Exception:
-            ci_low = ci_high = None
-
-    # Odds ratio and its CI (exp of coef/conf_int)
-    try:
-        odds_ratio = float(np.exp(coef))
+        odds_ratio = float(odds_ratio)
     except Exception:
         odds_ratio = None
-
-    or_ci_low = or_ci_high = None
-    if ci_low is not None and ci_high is not None:
-        try:
-            or_ci_low = float(np.exp(ci_low))
-            or_ci_high = float(np.exp(ci_high))
-        except Exception:
-            or_ci_low = or_ci_high = None
-
-    # Try to compute average marginal effect for 'female' (if supported)
-    me_value = me_se = me_p = me_ci_low = me_ci_high = None
     try:
-        # get_margeff() exists for discrete models in statsmodels
-        margeff = res.get_margeff()
-        # summary_frame() returns a DataFrame with index matching variables
-        try:
-            me_df = margeff.summary_frame()
-            if "female" in me_df.index:
-                me_value = float(me_df.loc["female"]["dy/dx"])
-                # Standard error column name varies; try common ones
-                se_col = None
-                for c in ["Std. Err.", "std err", "std_err", "Std Err"]:
-                    if c in me_df.columns:
-                        se_col = c
-                        break
-                if se_col is not None:
-                    me_se = float(me_df.loc["female"][se_col])
-                # p-value column:
-                for c in ["P>|z|", "p-value", "pvalue", "P>|z| "]:
-                    if c in me_df.columns:
-                        me_p = float(me_df.loc["female"][c])
-                        break
-                # CI columns:
-                # common columns are ['[0.025', '0.975]'] or 'CI_lower','CI_upper'
-                if "[0.025" in me_df.columns and "0.975]" in me_df.columns:
-                    me_ci_low = float(me_df.loc["female"]["[0.025"])
-                    me_ci_high = float(me_df.loc["female"]["0.975]"])
-                else:
-                    for lowc, highc in [("CI_lower", "CI_upper"), ("0.025", "0.975")]:
-                        if lowc in me_df.columns and highc in me_df.columns:
-                            me_ci_low = float(me_df.loc["female"][lowc])
-                            me_ci_high = float(me_df.loc["female"][highc])
-                            break
-        except Exception:
-            # If summary_frame fails, try to index margins directly
-            try:
-                me_res = margeff.summary()
-                # parsing text summary is brittle; skip if not straightforward
-            except Exception:
-                pass
+        ci_lower = float(ci_lower)
     except Exception:
-        # marginal effects not available for this result object
-        pass
+        ci_lower = None
+    try:
+        ci_upper = float(ci_upper)
+    except Exception:
+        ci_upper = None
+    try:
+        pvalue = float(pvalue)
+    except Exception:
+        pvalue = None
+    try:
+        nobs = int(nobs) if nobs is not None else None
+    except Exception:
+        nobs = None
 
-    # Build the returned object (numeric values)
-    numeric_result = {
-        "coef_log_odds": coef,
-        "std_err": bse,
-        "z_stat": z_stat,
-        "p_value": pval,
-        "conf_int_95": [ci_low, ci_high],
+    significant = (pvalue is not None) and (pvalue < 0.05)
+
+    # Build concise description
+    if odds_ratio is not None and ci_lower is not None and ci_upper is not None and pvalue is not None:
+        sign_text = "statistically significant (p = {:.3g})".format(pvalue) if significant else "not statistically significant (p = {:.3g})".format(pvalue)
+        description = (
+            "Controlling for the listed covariates, the estimated effect of being female is "
+            "coef = {:.4f} (odds ratio = {:.3f}, 95% CI [{:.3f}, {:.3f}]). This effect is {}, "
+            "based on n = {} observations. In context: female applicants have about a {:.1f}% "
+            "higher odds of mortgage approval than male applicants (association, not proof of causation)."
+            .format(coef, odds_ratio, ci_lower, ci_upper, sign_text, nobs if nobs is not None else "unknown",
+                    (odds_ratio - 1) * 100 if odds_ratio is not None else float('nan'))
+        )
+    else:
+        description = "Could not extract complete statistics for 'female' from model_output."
+
+    result_object = {
+        "coef": coef,
         "odds_ratio": odds_ratio,
-        "odds_ratio_conf_int_95": [or_ci_low, or_ci_high],
-        "avg_marginal_effect": me_value,
-        "avg_marginal_effect_se": me_se,
-        "avg_marginal_effect_pvalue": me_p,
-        "avg_marginal_effect_conf_int_95": [me_ci_low, me_ci_high],
+        "ci_lower": ci_lower,
+        "ci_upper": ci_upper,
+        "pvalue": pvalue,
+        "nobs": nobs,
+        "significant": significant
     }
 
-    # Interpretation: succinct plain-language description
-    # Determine direction and significance if p-value known
-    if pval is not None:
-        sig = pval < 0.05
-    else:
-        sig = None
-
-    if coef > 0:
-        direction = "higher"
-    elif coef < 0:
-        direction = "lower"
-    else:
-        direction = "no difference"
-
-    desc_parts = []
-    desc_parts.append(
-        "The model coefficient for 'female' is {:.4g} (log-odds).".format(coef)
-    )
-    if odds_ratio is not None:
-        desc_parts.append(
-            "This corresponds to an odds ratio of {:.4g}.".format(odds_ratio)
-        )
-        if or_ci_low is not None and or_ci_high is not None:
-            desc_parts.append(
-                "95% CI for the odds ratio: [{:.4g}, {:.4g}].".format(or_ci_low, or_ci_high)
-            )
-    if pval is not None:
-        desc_parts.append(
-            "p-value = {:.4g}.".format(pval) + (" (statistically significant at alpha=0.05)" if sig else " (not statistically significant at alpha=0.05)")
-        )
-    else:
-        desc_parts.append("p-value not available from the model output.")
-
-    # Short plain conclusion about gender effect
-    if sig is True:
-        desc_parts.append("Conclusion: Female applicants have {} odds of mortgage acceptance compared to male applicants, conditional on controls (statistically significant).".format(direction))
-    elif sig is False:
-        desc_parts.append("Conclusion: There is {} odds of acceptance for female applicants compared to male applicants, but this difference is not statistically significant given the model and data.".format(direction))
-    else:
-        desc_parts.append("Conclusion: Could not determine statistical significance from the available output.")
-
-    description = " ".join(desc_parts)
-
-    return {"object": numeric_result, "description": description}
+    return {"object": result_object, "description": description}

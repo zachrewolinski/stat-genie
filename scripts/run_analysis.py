@@ -13,6 +13,7 @@ from stat_genie.blade_pipeline.baselines.config import MultiRunConfig
 from stat_genie.blade_pipeline.baselines.multirun import multirun_llm
 from stat_genie.blade_pipeline.additions.perturbations.features import FeaturePerturbation
 from stat_genie.blade_pipeline.additions.perturbations.data import DataPerturbation
+from stat_genie.blade_pipeline.additions.perturbations.task import TaskPerturbation
 
 
 def run_analysis():
@@ -20,7 +21,7 @@ def run_analysis():
     parser.add_argument("--dataset", required=True, help="Dataset name")
     parser.add_argument("--analysis-num", type=int, required=True, help="Analysis number (1, 2, 3, etc.)")
     parser.add_argument("--perturbation-type", required=True, 
-                       choices=["noperturb", "anonymize", "shuffle_names", "add_features", "replace_with_rvs"],
+                       choices=["noperturb", "anonymize", "shuffle_names", "add_features", "replace_with_rvs", "positive_leading_statement", "negative_leading_statement", "replace_and_positive_statement"],
                        help="Type of feature perturbation")
     parser.add_argument("--llm-provider", default="openai", help="LLM provider")
     parser.add_argument("--llm-model", default="gpt-5-mini", help="LLM model")
@@ -55,7 +56,7 @@ def run_analysis():
     }
     llm_eval_config = llm_config.copy()
     
-    output_dir = project_root / "corrected_outputs" / "analysis" / dataset_name / f"{perturbation_type}_output"
+    output_dir = project_root / "outputs" / "analysis" / dataset_name / f"{perturbation_type}_output"
     output_dir.mkdir(parents=True, exist_ok=True)
     
     llm_config["log_file"] = str(output_dir / "llm.log")
@@ -80,21 +81,38 @@ def run_analysis():
     if perturbation_type == "noperturb":
         feature_perturbation = FeaturePerturbation()
         data_perturbation = DataPerturbation()
+        task_perturbation = TaskPerturbation()
     elif perturbation_type == "anonymize":
         feature_perturbation = FeaturePerturbation(anonymize=True)
         data_perturbation = DataPerturbation()
+        task_perturbation = TaskPerturbation()
     elif perturbation_type == "shuffle_names":
         feature_perturbation = FeaturePerturbation(
             shuffle_names=True,
             shuffle_names_seed=args.shuffle_names_seed
         )
         data_perturbation = DataPerturbation()
+        task_perturbation = TaskPerturbation()
     elif perturbation_type == "add_features":
         feature_perturbation = FeaturePerturbation(add_random_features=10)
         data_perturbation = DataPerturbation()
+        task_perturbation = TaskPerturbation()
     elif perturbation_type == "replace_with_rvs":
         feature_perturbation = FeaturePerturbation()
         data_perturbation = DataPerturbation(replace_features=True)
+        task_perturbation = TaskPerturbation()
+    elif perturbation_type == "positive_leading_statement":
+        feature_perturbation = FeaturePerturbation()
+        data_perturbation = DataPerturbation()
+        task_perturbation = TaskPerturbation(positive_leading_statement=True)
+    elif perturbation_type == "negative_leading_statement":
+        feature_perturbation = FeaturePerturbation()
+        data_perturbation = DataPerturbation()
+        task_perturbation = TaskPerturbation(negative_leading_statement=True)
+    elif perturbation_type == "replace_and_positive_statement":
+        feature_perturbation = FeaturePerturbation()
+        data_perturbation = DataPerturbation(replace_features=True)
+        task_perturbation = TaskPerturbation(positive_leading_statement=True)
     
     slurm_job_id = os.environ.get("SLURM_JOB_ID", None)
     
@@ -126,7 +144,7 @@ def run_analysis():
     print(f"Output: {output_dir}")
     print(f"Running analysis {analysis_num}: {dataset_name}, {perturbation_type}, {llm_provider}/{llm_model}")
     
-    multirun_llm(single_run_config, feature_perturbation=feature_perturbation, data_perturbation=data_perturbation)
+    multirun_llm(single_run_config, feature_perturbation=feature_perturbation, data_perturbation=data_perturbation, task_perturbation=task_perturbation)
     
     print(f"Analysis {analysis_num} completed")
     

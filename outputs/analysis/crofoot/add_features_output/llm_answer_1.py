@@ -1,253 +1,224 @@
 def extract_final_answer(model_output):
     """
-    Extract key statistics from a fitted statsmodels GLM model (with optional
-    cluster-robust results) and produce an interpretable summary focused on:
-      - z_RelativeSize (main effect)
-      - z_LocAdv (main effect)
-      - interaction z_RelativeSize:z_LocAdv
+    Extract key statistics from a fitted statsmodels logistic regression (BinaryResultsWrapper).
+    Expects the model to include the regressors:
+      - 'rel_size_ratio_z'
+      - 'focal_home'
+      - 'rel_by_home'   (interaction = rel_size_ratio_z * focal_home)
 
-    Returns a dict with:
-      - "object": a dictionary containing tables of coefficients (coef, se, p,
-                  95% CI) and odds-ratios, plus marginal effects of a one-SD
-                  increase in relative size at LocAdv = -1, 0, +1.
-      - "description": a short plain-language interpretation of what the
-                       extracted statistics mean for the task.
-
-    model_output is expected to be the dict returned by the supplied model()
-    function, typically containing at least the key 'fit' and possibly a
-    cluster-robust results object under 'cluster_robust'.
+    Returns a dictionary with:
+      - "object": dict containing coefficients, SEs, z-stats, p-values, 95% CIs, odds-ratios and CIs
+                  for the main terms and for the combined effect of relative size when focal_home=1.
+      - "description": short interpretation guidance about what the numbers mean for the research question.
     """
     import numpy as np
-    import pandas as pd
-    from math import sqrt
+    from math import exp, sqrt
     from scipy import stats
 
-    def safe_exp(x):
-        """
-        Compute exponential in a way that avoids raising OverflowError.
-        Uses numpy.exp and maps extreme values to inf/0 as appropriate.
-        """
+    # Helper to safe-get parameter or raise informative error
+    def _get_param(name, params):
+        if name not in params.index:
+            raise KeyError(f"Model result does not contain parameter '{name}'. Available params: {list(params.index)}")
+        return params[name]
+
+    # Extract fundamental results objects
+    try:
+        params = model_output.params        # pandas Series
+        cov = model_output.cov_params()     # DataFrame or ndarray-like
+        # Many statsmodels results also expose bse, pvalues, conf_int
+        bse = getattr(model_output, "bse", None)
+        pvalues = getattr(model_output, "pvalues", None)
+        conf_int = None
         try:
-            val = np.exp(x)
-            # numpy.exp returns numpy types; convert to Python float if finite
-            if np.isscalar(val):
-                if np.isfinite(val):
-                    return float(val)
-                # val is inf or nan
-                if np.isnan(val):
-                    # treat nan conservatively as inf for positive x, 0 for negative x
-                    return float('inf') if x >= 0 else 0.0
-                return float('inf') if val > 0 else 0.0
-            else:
-                # fallback: convert elementwise if needed
-                val = np.array(val, dtype=float)
-                if np.all(np.isfinite(val)):
-                    return float(val)
-                return float('inf') if x >= 0 else 0.0
+            conf_int = model_output.conf_int()
         except Exception:
-            # If anything unexpected happens, fall back to safe heuristic
-            try:
-                xv = float(x)
-            except Exception:
-                return float('inf')
-            return float('inf') if xv >= 0 else 0.0
+            conf_int = None
+    except Exception as e:
+        raise RuntimeError(f"Failed to access parameters/covariance from model_output: {e}")
 
-    # Validate and select results
-    if not isinstance(model_output, dict):
-        raise ValueError("model_output must be a dict as returned by the model() function.")
-    results = model_output.get('cluster_robust', model_output.get('fit'))
-    if results is None:
-        raise ValueError("model_output does not contain 'fit' or 'cluster_robust' results.")
+    terms = ['rel_size_ratio_z', 'focal_home', 'rel_by_home']
 
-    # Extract parameter info
-    params = getattr(results, 'params', None)
-    bse = getattr(results, 'bse', None)
-    pvalues = getattr(results, 'pvalues', None)
-
-    # Confidence intervals (try standard method, else approximate)
-    try:
-        ci_df = results.conf_int()
-    except Exception:
-        if bse is None or params is None:
-            raise
-        ci_df = pd.DataFrame({
-            0: params - 1.96 * bse,
-            1: params + 1.96 * bse
-        }, index=params.index)
-
-    # Covariance matrix if available
-    cov = None
-    try:
-        cov = results.cov_params()
-    except Exception:
-        cov = None
-
-    # Terms of interest
-    terms = ['z_RelativeSize', 'z_LocAdv', 'z_RelativeSize:z_LocAdv']
-    term_table = {}
+    results = {}
     for t in terms:
-        if params is not None and t in params.index:
-            coef = float(params.loc[t])
-            se = float(bse.loc[t]) if bse is not None and t in getattr(bse, 'index', []) else None
-            p = float(pvalues.loc[t]) if pvalues is not None and t in getattr(pvalues, 'index', []) else None
-            # CI might have different column labels; try common ones
-            try:
-                ci_low = float(ci_df.loc[t, 0])
-                ci_high = float(ci_df.loc[t, 1])
-            except Exception:
-                # attempt named columns
-                try:
-                    ci_low = float(ci_df.loc[t, ci_df.columns[0]])
-                    ci_high = float(ci_df.loc[t, ci_df.columns[1]])
-                except Exception:
-                    ci_low = None
-                    ci_high = None
+        try:
+            coef = float(_get_param(t, params))
+        except KeyError:
+            # If a term is missing, skip it but note absence
+            results[t] = {"present": False, "message": f"Term '{t}' not found in model."}
+            continue
 
-            # Odds ratio and CI on OR scale using safe_exp
-            or_val = safe_exp(coef)
-            or_ci_low = safe_exp(ci_low) if ci_low is not None else None
-            or_ci_high = safe_exp(ci_high) if ci_high is not None else None
-
-            term_table[t] = {
-                'coef_log_odds': coef,
-                'se': se,
-                'p_value': p,
-                '95CI_log_odds': (ci_low, ci_high) if (ci_low is not None and ci_high is not None) else None,
-                'OR': or_val,
-                '95CI_OR': (or_ci_low, or_ci_high) if (or_ci_low is not None and or_ci_high is not None) else None
-            }
+        # Standard error: prefer bse if available, otherwise use sqrt of diagonal of cov
+        if bse is not None and t in bse.index:
+            se = float(bse[t])
         else:
-            term_table[t] = None
-
-    # Compute marginal effects of a 1-SD increase in relative size at loc adv -1,0,1
-    me_results = {}
-    if params is not None and ('z_RelativeSize' in params.index) and ('z_RelativeSize:z_LocAdv' in params.index):
-        beta_size = float(params.loc['z_RelativeSize'])
-        beta_int = float(params.loc['z_RelativeSize:z_LocAdv'])
-        # Attempt to get variances/covariances
-        cov_available = False
-        if cov is not None:
             try:
-                var_size = float(cov.loc['z_RelativeSize', 'z_RelativeSize'])
-                var_int = float(cov.loc['z_RelativeSize:z_LocAdv', 'z_RelativeSize:z_LocAdv'])
-                cov_size_int = float(cov.loc['z_RelativeSize', 'z_RelativeSize:z_LocAdv'])
-                cov_available = True
+                se = float(np.sqrt(float(cov.loc[t, t])))
             except Exception:
-                cov_available = False
+                se = None
 
-        for loc in [-1.0, 0.0, 1.0]:
-            me_logodds = beta_size + beta_int * loc
-            if cov_available:
-                var_me = var_size + (loc**2) * var_int + 2 * loc * cov_size_int
-                se_me = sqrt(max(var_me, 0.0))
-                zstat = me_logodds / se_me if se_me > 0 else float('nan')
-                p_me = 2 * (1 - stats.norm.cdf(abs(zstat)))
-                ci_low = me_logodds - 1.96 * se_me
-                ci_high = me_logodds + 1.96 * se_me
-            else:
-                se_me = None
-                p_me = None
-                ci_low = None
-                ci_high = None
+        # z-stat and p-value (use normal approximation)
+        if se is not None and se > 0:
+            z = coef / se
+            p = float(2 * (1 - stats.norm.cdf(abs(z))))
+        else:
+            z = None
+            p = None
 
-            me_results[f'LocAdv={loc}'] = {
-                'marginal_effect_log_odds_per_1SD_relSize': me_logodds,
-                'se': se_me,
-                'p_value': p_me,
-                '95CI_log_odds': (ci_low, ci_high) if (ci_low is not None and ci_high is not None) else None,
-                'OR_for_1SD_in_relSize': safe_exp(me_logodds),
-                '95CI_OR': (safe_exp(ci_low), safe_exp(ci_high)) if (ci_low is not None and ci_high is not None) else None
-            }
+        # 95% CI: prefer conf_int if available, otherwise coef +/- 1.96*se
+        if conf_int is not None and t in conf_int.index:
+            ci_lower, ci_upper = float(conf_int.loc[t, 0]), float(conf_int.loc[t, 1])
+        elif se is not None:
+            ci_lower, ci_upper = coef - 1.96 * se, coef + 1.96 * se
+        else:
+            ci_lower, ci_upper = None, None
+
+        # Odds ratio and CI on OR scale
+        try:
+            or_val = exp(coef)
+            or_ci = (exp(ci_lower) if ci_lower is not None else None,
+                     exp(ci_upper) if ci_upper is not None else None)
+        except Exception:
+            or_val = None
+            or_ci = (None, None)
+
+        results[t] = {
+            "present": True,
+            "coef": coef,
+            "se": se,
+            "z": z,
+            "p_value": p,
+            "ci95": (ci_lower, ci_upper),
+            "odds_ratio": or_val,
+            "odds_ratio_ci95": or_ci
+        }
+
+    # Compute combined effect: effect of rel_size when focal_home == 1
+    # coef_comb = coef_rel + coef_interaction
+    if (results.get('rel_size_ratio_z', {}).get('present') and
+        results.get('rel_by_home', {}).get('present')):
+        a = float(params['rel_size_ratio_z'])
+        b = float(params['rel_by_home'])
+        coef_comb = a + b
+
+        # variance = var(a) + var(b) + 2*cov(a,b)
+        try:
+            var_a = float(cov.loc['rel_size_ratio_z', 'rel_size_ratio_z'])
+            var_b = float(cov.loc['rel_by_home', 'rel_by_home'])
+            cov_ab = float(cov.loc['rel_size_ratio_z', 'rel_by_home'])
+            var_comb = var_a + var_b + 2 * cov_ab
+            se_comb = float(np.sqrt(var_comb)) if var_comb >= 0 else None
+        except Exception:
+            se_comb = None
+
+        if se_comb is not None and se_comb > 0:
+            z_comb = coef_comb / se_comb
+            p_comb = float(2 * (1 - stats.norm.cdf(abs(z_comb))))
+            ci_lower_comb = coef_comb - 1.96 * se_comb
+            ci_upper_comb = coef_comb + 1.96 * se_comb
+        else:
+            z_comb = None
+            p_comb = None
+            ci_lower_comb = None
+            ci_upper_comb = None
+
+        try:
+            or_comb = exp(coef_comb)
+            or_comb_ci = (exp(ci_lower_comb) if ci_lower_comb is not None else None,
+                          exp(ci_upper_comb) if ci_upper_comb is not None else None)
+        except Exception:
+            or_comb = None
+            or_comb_ci = (None, None)
+
+        results['rel_size_when_focal_home_1'] = {
+            "coef": coef_comb,
+            "se": se_comb,
+            "z": z_comb,
+            "p_value": p_comb,
+            "ci95": (ci_lower_comb, ci_upper_comb),
+            "odds_ratio": or_comb,
+            "odds_ratio_ci95": or_comb_ci,
+            "interpretation_note": "This is the effect (log-odds) of a one-SD increase in relative group size when the contest is in the focal group's home area (focal_home=1)."
+        }
     else:
-        # If no interaction, provide overall effect if available
-        if params is not None and 'z_RelativeSize' in params.index:
-            beta_size = float(params.loc['z_RelativeSize'])
-            se = float(bse.loc['z_RelativeSize']) if bse is not None and 'z_RelativeSize' in getattr(bse, 'index', []) else None
-            try:
-                ci_low = float(ci_df.loc['z_RelativeSize', 0])
-                ci_high = float(ci_df.loc['z_RelativeSize', 1])
-            except Exception:
-                try:
-                    ci_low = float(ci_df.loc['z_RelativeSize', ci_df.columns[0]])
-                    ci_high = float(ci_df.loc['z_RelativeSize', ci_df.columns[1]])
-                except Exception:
-                    ci_low = None
-                    ci_high = None
+        results['rel_size_when_focal_home_1'] = {
+            "present": False,
+            "message": "Could not compute combined effect because one or both terms are missing."
+        }
 
-            me_results['Overall'] = {
-                'marginal_effect_log_odds_per_1SD_relSize': beta_size,
-                'se': se,
-                'p_value': float(pvalues.loc['z_RelativeSize']) if pvalues is not None and 'z_RelativeSize' in getattr(pvalues, 'index', []) else None,
-                '95CI_log_odds': (ci_low, ci_high) if (ci_low is not None and ci_high is not None) else None,
-                'OR_for_1SD_in_relSize': safe_exp(beta_size),
-                '95CI_OR': (safe_exp(ci_low), safe_exp(ci_high)) if (ci_low is not None and ci_high is not None) else None
+    # Also compute effect of focal_home at rel_size = 0 (this is the focal_home main effect)
+    # and at rel_size = +1 SD (i.e., focal_home effect when rel_size_z = 1)
+    if results.get('focal_home', {}).get('present'):
+        fh_coef = float(params['focal_home'])
+        # var for focal_home
+        try:
+            var_fh = float(cov.loc['focal_home', 'focal_home'])
+            se_fh = float(np.sqrt(var_fh))
+            z_fh = fh_coef / se_fh
+            p_fh = float(2 * (1 - stats.norm.cdf(abs(z_fh))))
+            ci_lower_fh = fh_coef - 1.96 * se_fh
+            ci_upper_fh = fh_coef + 1.96 * se_fh
+            or_fh = exp(fh_coef)
+            or_fh_ci = (exp(ci_lower_fh), exp(ci_upper_fh))
+        except Exception:
+            se_fh = z_fh = p_fh = ci_lower_fh = ci_upper_fh = or_fh = or_fh_ci = None
+
+        results['focal_home_at_rel_size_0'] = {
+            "coef": fh_coef,
+            "se": se_fh,
+            "z": z_fh,
+            "p_value": p_fh,
+            "ci95": (ci_lower_fh, ci_upper_fh),
+            "odds_ratio": or_fh,
+            "odds_ratio_ci95": or_fh_ci,
+            "interpretation_note": "This is the effect (log-odds) of being in the focal group's home area when rel_size_z = 0 (i.e., at mean relative size)."
+        }
+
+        # focal_home effect at rel_size = 1 (coef = focal_home + rel_by_home*1)
+        if results.get('rel_by_home', {}).get('present'):
+            c = float(params['rel_by_home'])
+            coef_fh_r1 = fh_coef + c
+            # variance = var(fh) + var(c) + 2cov(fh,c)
+            try:
+                var_c = float(cov.loc['rel_by_home', 'rel_by_home'])
+                cov_fh_c = float(cov.loc['focal_home', 'rel_by_home'])
+                var_sum = var_fh + var_c + 2 * cov_fh_c
+                se_sum = float(np.sqrt(var_sum))
+                z_sum = coef_fh_r1 / se_sum
+                p_sum = float(2 * (1 - stats.norm.cdf(abs(z_sum))))
+                ci_low_sum = coef_fh_r1 - 1.96 * se_sum
+                ci_up_sum = coef_fh_r1 + 1.96 * se_sum
+                or_sum = exp(coef_fh_r1)
+                or_sum_ci = (exp(ci_low_sum), exp(ci_up_sum))
+            except Exception:
+                se_sum = z_sum = p_sum = ci_low_sum = ci_up_sum = or_sum = or_sum_ci = None
+
+            results['focal_home_at_rel_size_1'] = {
+                "coef": coef_fh_r1,
+                "se": se_sum,
+                "z": z_sum,
+                "p_value": p_sum,
+                "ci95": (ci_low_sum, ci_up_sum),
+                "odds_ratio": or_sum,
+                "odds_ratio_ci95": or_sum_ci,
+                "interpretation_note": "Effect of focal_home when relative size is +1 SD."
             }
 
-    # Interpretation helper
-    def interpret_term(tdict):
-        if tdict is None:
-            return "Term not present in model."
-        p = tdict.get('p_value', None)
-        coef = tdict.get('coef_log_odds', 0.0)
-        orv = tdict.get('OR', None)
-        ci_or = tdict.get('95CI_OR', None)
-        sig_text = ""
-        if p is not None:
-            if p < 0.001:
-                sig_text = "strong evidence (p < 0.001)"
-            elif p < 0.01:
-                sig_text = "strong evidence (p < 0.01)"
-            elif p < 0.05:
-                sig_text = "moderate evidence (p < 0.05)"
-            else:
-                sig_text = f"no strong evidence (p = {p:.3f})"
-        else:
-            sig_text = "p-value not available"
+    # Compose brief description for interpreting results in context
+    description_lines = [
+        "Extracted regression coefficients, standard errors, z-stats, p-values, 95% CIs, and odds-ratios for:",
+        " - rel_size_ratio_z: effect of relative group size (per 1 SD) on log-odds of the focal group winning when focal_home=0 (i.e., baseline).",
+        " - focal_home: effect of contest being in focal group's home when rel_size_z = 0 (mean relative size).",
+        " - rel_by_home: interaction term; whether home-field moderates the effect of relative group size.",
+        "Also computed:",
+        " - rel_size_when_focal_home_1: the effect of relative group size when the contest is in the focal group's home (sum of rel_size_ratio_z and rel_by_home).",
+        " - focal_home_at_rel_size_0 and focal_home_at_rel_size_1: focal_home effect at mean rel_size and at +1 SD rel_size, respectively.",
+        "",
+        "How to interpret:",
+        " - For any coefficient: positive coef -> higher log-odds (and odds ratio >1) of focal group winning; negative -> lower odds.",
+        " - Use p-values (two-sided) to assess statistical significance (conventional threshold p<0.05).",
+        " - If rel_size_ratio_z is positive and significant, larger relative group size increases probability of winning.",
+        " - If rel_by_home is significant, home-field modifies the size effect; check rel_size_when_focal_home_1 to see the size effect inside focal home.",
+    ]
+    description = "\n".join(description_lines)
 
-        direction = "increase" if coef > 0 else ("decrease" if coef < 0 else "no change")
-
-        # Prepare OR and CI text robustly
-        try:
-            or_text = f"{orv:.3f}" if orv is not None else "N/A"
-        except Exception:
-            or_text = str(orv)
-        if ci_or is not None and len(ci_or) == 2 and ci_or[0] is not None and ci_or[1] is not None:
-            try:
-                ci_text = f"{ci_or[0]:.3f}–{ci_or[1]:.3f}"
-            except Exception:
-                ci_text = f"{ci_or[0]}–{ci_or[1]}"
-        else:
-            ci_text = "N/A"
-
-        return (f"Coef (log-odds) = {coef:.3f}; OR = {or_text} (95% CI {ci_text}); "
-                f"{direction} in probability of focal-group win per 1 SD increase. {sig_text}.")
-
-    interp_lines = []
-    interp_lines.append("Key predictors and their interpretation:")
-    interp_lines.append("z_RelativeSize: " + interpret_term(term_table.get('z_RelativeSize')))
-    interp_lines.append("z_LocAdv (home advantage): " + interpret_term(term_table.get('z_LocAdv')))
-    interp_lines.append("Interaction (z_RelativeSize:z_LocAdv): " + interpret_term(term_table.get('z_RelativeSize:z_LocAdv')))
-    interp_lines.append("")
-    interp_lines.append("Marginal effects of a 1-SD increase in relative group size at example location-advantage values:")
-    for k, v in me_results.items():
-        try:
-            me_log = v['marginal_effect_log_odds_per_1SD_relSize']
-            or_me = v['OR_for_1SD_in_relSize']
-            me_desc = f"{k}: log-odds change = {me_log:.3f}; OR = {or_me:.3f}"
-        except Exception:
-            me_desc = f"{k}: log-odds change = {v.get('marginal_effect_log_odds_per_1SD_relSize')}; OR = {v.get('OR_for_1SD_in_relSize')}"
-        if v.get('p_value') is not None:
-            me_desc += f"; p = {v['p_value']:.3f}"
-        interp_lines.append(me_desc)
-
-    description = "\n".join(interp_lines)
-
-    summary_object = {
-        'term_table': term_table,
-        'marginal_effects_of_relSize_at_LocAdv': me_results,
-        'notes': ("Positive coefficients / OR>1 indicate higher odds of the focal group winning. "
-                  "Interaction means the effect of relative group size depends on contest location; "
-                  "marginal effects computed above show the size effect at LocAdv = -1, 0, +1 (in SD units).")
-    }
-
-    return {'object': summary_object, 'description': description}
+    return {"object": results, "description": description}

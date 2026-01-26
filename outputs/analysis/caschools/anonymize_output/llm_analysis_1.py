@@ -1,233 +1,131 @@
-from typing import Any, Dict, List, Optional
-import re
+from typing import Dict, FrozenSet, List, Literal, Optional, Set, Tuple, Any
 import numpy as np
 import pandas as pd
+import sklearn
+import scipy
 import statsmodels.api as sm
+import statsmodels.formula.api as smf
+import matplotlib.pyplot as plt
+import pickle
+  
+df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/analysis/caschools/anonymize_output/caschools.csv')
 
-# Helper: search dataframe columns for likely matches to a list of aliases
-def _find_column(df: pd.DataFrame, aliases: List[str]) -> Optional[str]:
-    cols_lower = {c.lower(): c for c in df.columns}
-    # Exact match (case-insensitive)
-    for a in aliases:
-        if a is None:
-            continue
-        a_low = a.lower()
-        if a_low in cols_lower:
-            return cols_lower[a_low]
-    # Substring match (alias contained in column name)
-    for a in aliases:
-        if a is None:
-            continue
-        a_low = a.lower()
-        for col_low, col_orig in cols_lower.items():
-            if a_low in col_low:
-                return col_orig
-    # Pattern matches for featureN variations (featureN, feature_N, featN, feat_N)
-    for a in aliases:
-        if a is None:
-            continue
-        # if alias like 'feature14' try variations
-        m = re.match(r'^(?:feature|feat|f)?_?(\d{1,3})$', a.lower())
-        if m:
-            n = m.group(1)
-            patterns = [f'feature{n}', f'feature_{n}', f'feat{n}', f'feat_{n}', f'f{n}']
-            for p in patterns:
-                if p in cols_lower:
-                    return cols_lower[p]
-            # also try substring
-            for col_low, col_orig in cols_lower.items():
-                for p in patterns:
-                    if p in col_low:
-                        return col_orig
-    return None
-
+# ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Transform raw dataframe into final analysis-ready dataframe.
+    Transform the raw dataset into the dataframe used by the statistical model.
 
-    Produces required final columns (names must match exactly):
-      - AvgScore
-      - STR_log
-      - ExpenditurePerStudent
-      - ComputersPerClassroom
-      - PercentCalWorks
-      - PercentReducedLunch
-      - PercentEnglishLearners
-      - AvgIncome
-      - GradeSpan_KK08
-      - County (plus County_* dummies)
+    Creates these key columns (exact names used in modeling):
+      - AvgTestScore: average of feature14 (avg reading) and feature15 (avg math)
+      - StudentTeacherRatio: feature6 (enrollment) / feature7 (num teachers)
+      - LogStudentTeacherRatio: natural log of StudentTeacherRatio
+      - Enrollment, NumTeachers, Computers, ComputersPerStudent, ExpenditurePerStudent,
+        PctCalWorks, PctReducedLunch, PctEnglishLearners, DistrictIncomeK,
+        County, GradeSpan, LogEnrollment
 
-    The function is robust to different source column namings by searching
-    for plausible aliases for the original 'featureX' columns.
+    Drops rows with missing or invalid values for critical variables.
     """
+    # copy to avoid modifying input in-place
     df = df.copy()
 
-    # Define aliases for the source features we expect (allow multiple possible names)
-    aliases: Dict[str, List[str]] = {
-        # Dependent variable: reading (feature14) and math (feature15)
-        'feature14': ['feature14', 'feature_14', 'feat14', 'feat_14', 'f14', 'reading', 'reading_score', 'read', 'read_score', 'stanford_reading', 'r15'],
-        'feature15': ['feature15', 'feature_15', 'feat15', 'feat_15', 'f15', 'math', 'math_score', 'mat', 'maths', 'stanford_math'],
+    # Ensure required columns exist. If not, this will raise a KeyError so the user can check schema.
+    required_raw = ['feature6', 'feature7', 'feature14', 'feature15']
+    # drop rows missing the core numeric fields needed to compute outcome and IV
+    df = df.dropna(subset=required_raw)
 
-        # Enrollment and teachers (for student-teacher ratio)
-        'feature6': ['feature6', 'feature_6', 'feat6', 'feat_6', 'f6', 'enrollment', 'enrolled', 'students', 'num_students'],
-        'feature7': ['feature7', 'feature_7', 'feat7', 'feat_7', 'f7', 'num_teachers', 'teachers', 'staff_teachers'],
+    # Rename / create clearer columns from the raw feature names (keep raw columns intact in case user needs them)
+    df['Enrollment'] = df['feature6'].astype(float)
+    df['NumTeachers'] = df['feature7'].astype(float)
+    df['Computers'] = df['feature10'].astype(float) if 'feature10' in df.columns else np.nan
+    df['ExpenditurePerStudent'] = df['feature11'].astype(float) if 'feature11' in df.columns else np.nan
+    df['DistrictIncomeK'] = df['feature12'].astype(float) if 'feature12' in df.columns else np.nan
 
-        # Controls
-        'feature11': ['feature11', 'feature_11', 'feat11', 'feat_11', 'f11', 'expenditure', 'expenditure_per_student', 'exp_per_student', 'expenditureperstudent'],
-        # include 'computer' and variants
-        'feature10': ['feature10', 'feature_10', 'feat10', 'feat_10', 'f10', 'computers', 'computer', 'computers_per_classroom', 'computersperclassroom', 'computer_per_classroom', 'num_computers'],
-        'feature8':  ['feature8', 'feature_8', 'feat8', 'feat_8', 'f8', 'calworks', 'percent_calworks', 'pct_calworks'],
-        # include 'lunch' and variants
-        'feature9':  ['feature9', 'feature_9', 'feat9', 'feat_9', 'f9', 'reduced_lunch', 'percent_reduced_lunch', 'pct_reduced_lunch', 'reduced', 'lunch'],
-        # include 'english' and variants
-        'feature13': ['feature13', 'feature_13', 'feat13', 'feat_13', 'f13', 'english_learners', 'percent_english_learners', 'ell', 'pct_english_learners', 'english'],
-        'feature12': ['feature12', 'feature_12', 'feat12', 'feat_12', 'f12', 'avg_income', 'average_income', 'income'],
-        # include 'grades' and variants for grade span
-        'feature5':  ['feature5', 'feature_5', 'feat5', 'feat_5', 'f5', 'grade_span', 'gradespan', 'grades', 'grade'],
-        'feature4':  ['feature4', 'feature_4', 'feat4', 'feat_4', 'f4', 'county']
-    }
+    # Socioeconomic / demographic percentages
+    df['PctCalWorks'] = df['feature8'].astype(float) if 'feature8' in df.columns else np.nan
+    df['PctReducedLunch'] = df['feature9'].astype(float) if 'feature9' in df.columns else np.nan
+    df['PctEnglishLearners'] = df['feature13'].astype(float) if 'feature13' in df.columns else np.nan
 
-    # Find actual column names in df for each required source feature
-    found: Dict[str, Optional[str]] = {}
-    for key, als in aliases.items():
-        found[key] = _find_column(df, als)
+    # Categorical controls
+    if 'feature4' in df.columns:
+        df['County'] = df['feature4'].astype('category')
+    else:
+        df['County'] = pd.Categorical([None] * len(df))
+    if 'feature5' in df.columns:
+        df['GradeSpan'] = df['feature5'].astype('category')
+    else:
+        df['GradeSpan'] = pd.Categorical([None] * len(df))
 
-    # Helper to raise consistent error if critical source columns are missing
-    def _require(col_keys: List[str]):
-        missing = [k for k in col_keys if found.get(k) is None]
-        if missing:
-            raise KeyError(
-                "Could not find required source columns for: "
-                + ", ".join(missing)
-                + ". Available columns: " + ", ".join(df.columns.tolist())
-            )
+    # Outcome: average of reading and math scores
+    df['AvgTestScore'] = (df['feature14'].astype(float) + df['feature15'].astype(float)) / 2.0
 
-    # Require enrollment and teachers and score columns and core controls exist
-    _require(['feature6', 'feature7', 'feature14', 'feature15',
-              'feature11', 'feature10', 'feature8', 'feature9',
-              'feature13', 'feature12', 'feature5', 'feature4'])
+    # Remove implausible / invalid values: teachers must be > 0
+    df = df[df['NumTeachers'] > 0]
 
-    # Coerce relevant source columns to numeric where appropriate
-    # Reading and math
-    read_col = found['feature14']
-    math_col = found['feature15']
-    df[read_col] = pd.to_numeric(df[read_col], errors='coerce')
-    df[math_col] = pd.to_numeric(df[math_col], errors='coerce')
-
-    # Create dependent variable AvgScore: mean of reading and math
-    df['AvgScore'] = df[[read_col, math_col]].mean(axis=1)
-
-    # Enrollment and teachers -> StudentTeacherRatio
-    enroll_col = found['feature6']
-    teach_col = found['feature7']
-    df[enroll_col] = pd.to_numeric(df[enroll_col], errors='coerce')
-    df[teach_col] = pd.to_numeric(df[teach_col], errors='coerce')
-    df['Enrollment'] = df[enroll_col]
-    df['NumTeachers'] = df[teach_col]
+    # Independent variable: student-to-teacher ratio (students per teacher)
     df['StudentTeacherRatio'] = df['Enrollment'] / df['NumTeachers']
-    df.loc[~np.isfinite(df['StudentTeacherRatio']), 'StudentTeacherRatio'] = np.nan
-    # Remove non-positive ratios (cannot log)
-    df.loc[df['StudentTeacherRatio'] <= 0, 'StudentTeacherRatio'] = np.nan
-    df['STR_log'] = np.log(df['StudentTeacherRatio'])
 
-    # Controls: coerce and rename to required final column names
-    def _coerce_and_assign(src_key: str, final_name: str):
-        src = found[src_key]
-        if src is None:
-            # Shouldn't happen due to earlier _require, but guard defensively
-            df[final_name] = np.nan
-        else:
-            df[src] = pd.to_numeric(df[src], errors='coerce')
-            df[final_name] = df[src]
+    # Log transform to reduce right skew; keep both versions
+    # Protect against non-positive values (shouldn't happen given NumTeachers >0 and Enrollment>0)
+    df['LogStudentTeacherRatio'] = np.log(df['StudentTeacherRatio'].replace(0, np.nan))
 
-    _coerce_and_assign('feature11', 'ExpenditurePerStudent')
-    _coerce_and_assign('feature10', 'ComputersPerClassroom')
-    _coerce_and_assign('feature8', 'PercentCalWorks')
-    _coerce_and_assign('feature9', 'PercentReducedLunch')
-    _coerce_and_assign('feature13', 'PercentEnglishLearners')
-    _coerce_and_assign('feature12', 'AvgIncome')
+    # Additional controls derived
+    # Computers per student (if Enrollment is zero this will produce inf; handle by replacing inf with NaN)
+    df['ComputersPerStudent'] = df['Computers'] / df['Enrollment']
+    df.loc[~np.isfinite(df['ComputersPerStudent']), 'ComputersPerStudent'] = np.nan
 
-    # Grade span indicator (feature5). Map to 1 for KK-08 (or K-8 variants), 0 otherwise.
-    grade_span_src = found['feature5']
+    # Log Enrollment for scale control
+    df['LogEnrollment'] = np.log(df['Enrollment'].replace(0, np.nan))
 
-    def _map_gradespan(val: Any) -> int:
-        if pd.isna(val):
-            return 0
-        s = str(val).strip().lower()
-        # Normalize common separators
-        s_clean = re.sub(r'[\s\._]+', '-', s)
-        # Look for patterns indicating K or KK and 8 (e.g., 'k-8', 'kk-08', 'k8', 'kk8', 'kk08', 'k-08')
-        if re.search(r'\b(k{1,2})[^0-9a-zA-Z]*0?8\b', s_clean):
-            return 1
-        if re.search(r'\b0?8\b', s_clean) and ('k' in s_clean or 'kk' in s_clean):
-            return 1
-        # also accept explicit 'k-8' or 'k8' spelled variations
-        if 'k-8' in s_clean or 'k8' in s_clean or 'kk-8' in s_clean or 'kk8' in s_clean:
-            return 1
-        # treat explicit 'kk-06' or containing '06' as 0; default 0 otherwise
-        return 0
-
-    if grade_span_src is not None:
-        df['GradeSpan_KK08'] = df[grade_span_src].apply(_map_gradespan)
-    else:
-        df['GradeSpan_KK08'] = 0
-
-    # County original column and dummies
-    county_src = found['feature4']
-    if county_src is not None:
-        df['County'] = df[county_src].astype(str)
-    else:
-        df['County'] = 'Unknown'
-    county_dummies = pd.get_dummies(df['County'], prefix='County', dummy_na=False, drop_first=True)
-    df = pd.concat([df, county_dummies], axis=1)
-
-    # Final required columns list (must be present)
-    required_final = [
-        'AvgScore',
-        'STR_log',
-        'ExpenditurePerStudent',
-        'ComputersPerClassroom',
-        'PercentCalWorks',
-        'PercentReducedLunch',
-        'PercentEnglishLearners',
-        'AvgIncome',
-        'GradeSpan_KK08'
+    # Keep only the columns needed for modeling (but we return full df with these columns added)
+    model_cols = [
+        'AvgTestScore', 'StudentTeacherRatio', 'LogStudentTeacherRatio',
+        'Enrollment', 'LogEnrollment', 'NumTeachers', 'Computers', 'ComputersPerStudent',
+        'ExpenditurePerStudent', 'PctCalWorks', 'PctReducedLunch', 'PctEnglishLearners',
+        'DistrictIncomeK', 'County', 'GradeSpan'
     ]
-    # Drop rows missing any of these required variables
-    df = df.dropna(subset=required_final)
 
-    # Return final dataframe (may contain helper columns; that is allowed)
+    # It's fine if some of these are NaN; model function will drop missing rows used in estimation.
+    # Return the augmented dataframe
     return df
 
 
-def model(df: pd.DataFrame) -> Any:
+# ======== MODEL CODE ========
+def model(df: pd.DataFrame):
     """
-    Fit OLS regression of AvgScore on STR_log and controls including county fixed effects.
+    Fit an OLS model estimating the relationship between student-teacher ratio and average test score,
+    controlling for district characteristics and including county and grade-span fixed effects.
 
-    Returns the fitted statsmodels regression results object with HC3 robust SEs.
+    Returns the fitted statsmodels regression result object (with robust HC3 standard errors).
     """
-    # Identify county dummy columns created in transform (prefix 'County_')
-    county_cols = [col for col in df.columns if col.startswith('County_')]
+    import statsmodels.formula.api as smf
 
-    X_cols = [
-        'STR_log',
-        'ExpenditurePerStudent',
-        'ComputersPerClassroom',
-        'PercentCalWorks',
-        'PercentReducedLunch',
-        'PercentEnglishLearners',
-        'AvgIncome',
-        'GradeSpan_KK08'
-    ] + county_cols
+    # Work on a copy
+    df = df.copy()
 
-    # Ensure all X columns exist in df
-    missing = [c for c in X_cols if c not in df.columns]
-    if missing:
-        raise KeyError("Missing columns required for model: " + ", ".join(missing))
+    # Define the list of columns required for the model and drop rows with missing values on these
+    required_for_model = [
+        'AvgTestScore', 'StudentTeacherRatio', 'ExpenditurePerStudent', 'ComputersPerStudent',
+        'PctCalWorks', 'PctReducedLunch', 'PctEnglishLearners', 'DistrictIncomeK', 'LogEnrollment',
+        'County', 'GradeSpan'
+    ]
+    # Drop rows missing any required variable
+    model_df = df.dropna(subset=required_for_model)
 
-    X = df[X_cols].copy()
-    X = sm.add_constant(X, has_constant='add')
-    y = df['AvgScore'].astype(float)
+    # Specify formula. County and GradeSpan entered as categorical fixed effects.
+    # We use StudentTeacherRatio (linear) as the primary IV. Alternative specifications (e.g., log ratio)
+    # can be run separately by replacing StudentTeacherRatio with LogStudentTeacherRatio.
+    formula = (
+        'AvgTestScore ~ StudentTeacherRatio '
+        '+ ExpenditurePerStudent + ComputersPerStudent '
+        '+ PctCalWorks + PctReducedLunch + PctEnglishLearners + DistrictIncomeK '
+        '+ LogEnrollment'
+        ' + C(County) + C(GradeSpan)'
+    )
 
-    model_res = sm.OLS(y, X).fit(cov_type='HC3')
-    return model_res
+    # Fit OLS with robust (HC3) standard errors
+    model = smf.ols(formula, data=model_df).fit(cov_type='HC3')
+
+    # Return the fitted model object (user can call .summary() or access params, bse, etc.)
+    return model
+
+

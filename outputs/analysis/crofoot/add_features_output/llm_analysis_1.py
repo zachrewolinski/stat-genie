@@ -13,115 +13,112 @@ df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/anal
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Transform the raw capuchin intergroup contest dataframe into a modeling-ready dataframe.
-
-    Produces the following new columns used by the model:
-      - RelativeSize = n_focal - n_other
-      - LocAdv = dist_other - dist_focal  (positive = focal closer to its home center)
-      - TotalSize = n_focal + n_other
-      - RelMales = m_focal - m_other
-      - RelFemales = f_focal - f_other
-      - z_... standardized versions of the continuous predictors
-      - dyad as a categorical variable
-
-    Drops rows with missing values in key columns required for the analysis.
+    Transform the raw capuchin intergroup contest data into a dataframe ready for modeling.
+    Outputs (kept in final df):
+      - win: dependent variable (0/1)
+      - rel_size_ratio_z: standardized focal/other group size ratio (IV)
+      - focal_home: binary indicator (1 if contest closer to focal center than other center)
+      - male_diff_z: standardized difference in number of males (m_focal - m_other)
+      - female_diff_z: standardized difference in number of females (f_focal - f_other)
+      - dist_diff_z: standardized (dist_other - dist_focal)
+      - dyad: dyad ID (for clustering)
     """
     df = df.copy()
 
-    # Required columns for the analysis
-    required_cols = [
-        'win', 'n_focal', 'n_other', 'dist_focal', 'dist_other',
-        'm_focal', 'm_other', 'f_focal', 'f_other', 'dyad'
+    # Required columns for transformation and modeling
+    required = [
+        'win', 'n_focal', 'n_other', 'm_focal', 'm_other', 'f_focal', 'f_other',
+        'dist_focal', 'dist_other', 'dyad'
     ]
 
-    # Drop rows missing any of the required values
-    df = df.dropna(subset=required_cols)
+    # Drop rows with missing values in required columns
+    df = df.dropna(subset=required)
 
-    # Compute raw derived variables
-    df['RelativeSize'] = df['n_focal'] - df['n_other']
-    df['LocAdv'] = df['dist_other'] - df['dist_focal']
-    df['TotalSize'] = df['n_focal'] + df['n_other']
-    df['RelMales'] = df['m_focal'] - df['m_other']
-    df['RelFemales'] = df['f_focal'] - df['f_other']
+    # Compute relative size and raw difference
+    df['rel_size_ratio'] = df['n_focal'] / df['n_other']
+    df['rel_size_diff'] = df['n_focal'] - df['n_other']
 
-    # Standardize (z-score) the continuous predictors for interpretability and numeric stability
-    # Use population std (ddof=0) to avoid potential small-sample complications; ddof=1 is also acceptable.
-    def zscore(s: pd.Series) -> pd.Series:
-        if s.std(ddof=0) == 0 or np.isclose(s.std(ddof=0), 0):
-            return (s - s.mean())  # if zero variance, return mean-centered (all zeros)
-        return (s - s.mean()) / s.std(ddof=0)
+    # Sex-composition differences
+    df['male_diff'] = df['m_focal'] - df['m_other']
+    df['female_diff'] = df['f_focal'] - df['f_other']
 
-    df['z_RelativeSize'] = zscore(df['RelativeSize'])
-    df['z_LocAdv'] = zscore(df['LocAdv'])
-    df['z_TotalSize'] = zscore(df['TotalSize'])
-    df['z_RelMales'] = zscore(df['RelMales'])
-    df['z_RelFemales'] = zscore(df['RelFemales'])
+    # Location: positive dist_diff indicates contest is closer to focal group's center
+    df['dist_diff'] = df['dist_other'] - df['dist_focal']
 
-    # Ensure dyad is a categorical variable for fixed effects
-    df['dyad'] = df['dyad'].astype('category')
+    # Binary indicator for focal home advantage (1 if focal is closer to its center than other is to its center)
+    df['focal_home'] = (df['dist_focal'] < df['dist_other']).astype(int)
 
-    # Keep only the columns necessary for modeling (plus commonly useful originals)
-    keep_cols = [
+    # Standardize continuous predictors (z-scores). Use population std (ddof=0) to avoid small-sample ddof warnings
+    cont_cols = ['rel_size_ratio', 'rel_size_diff', 'male_diff', 'female_diff', 'dist_diff']
+    for c in cont_cols:
+        mean = df[c].mean()
+        std = df[c].std(ddof=0)
+        if std == 0 or np.isnan(std):
+            # If no variation, create a zero column to avoid divide-by-zero
+            df[c + '_z'] = 0.0
+        else:
+            df[c + '_z'] = (df[c] - mean) / std
+
+    # Keep only columns necessary for modeling
+    final_cols = [
         'win',
-        'z_RelativeSize',
-        'z_LocAdv',
-        'z_TotalSize',
-        'z_RelMales',
-        'z_RelFemales',
-        'dyad',
-        # raw versions kept for diagnostics if needed
-        'RelativeSize', 'LocAdv', 'TotalSize', 'RelMales', 'RelFemales'
+        'rel_size_ratio_z',
+        'focal_home',
+        'male_diff_z',
+        'female_diff_z',
+        'dist_diff_z',
+        'dyad'
     ]
 
-    # Some datasets may include extra rows; select only those columns that exist after transformation
-    keep_cols_existing = [c for c in keep_cols if c in df.columns]
-    df = df[keep_cols_existing]
+    # Ensure final columns exist (in case some intermediate columns are missing due to earlier problems)
+    for col in final_cols:
+        if col not in df.columns:
+            raise KeyError(f"Expected column {col} in transformed dataframe but it is missing.")
 
-    return df
+    # Return a clean dataframe reset index
+    return df[final_cols].reset_index(drop=True)
 
 
 # ======== MODEL CODE ========
 def model(df: pd.DataFrame) -> Any:
     """
-    Fit a logistic (binomial) generalized linear model predicting focal-group win.
+    Fit a logistic regression predicting probability the focal group won the contest.
+    Model specification:
+      win ~ rel_size_ratio_z + focal_home + rel_size_ratio_z:focal_home +
+            male_diff_z + female_diff_z + dist_diff_z
 
-    Primary specification estimate:
-      win ~ z_RelativeSize * z_LocAdv + z_RelMales + z_RelFemales + z_TotalSize + C(dyad)
+    Standard errors are clustered by dyad to account for repeated dyad observations.
 
-    The interaction term tests whether the effect of relative group size on win-probability
-    depends on contest location (home advantage).
-
-    Returns the fitted GLMResults object (statsmodels) and prints the summary.
+    Returns: statsmodels results object with cluster-robust covariance.
     """
-    import statsmodels.formula.api as smf
-    import statsmodels.api as sm
+    # Prepare design matrix
+    X = df[['rel_size_ratio_z', 'focal_home', 'male_diff_z', 'female_diff_z', 'dist_diff_z']].copy()
 
-    # Ensure required columns are present
-    req = ['win', 'z_RelativeSize', 'z_LocAdv', 'z_RelMales', 'z_RelFemales', 'z_TotalSize', 'dyad']
-    missing = [c for c in req if c not in df.columns]
-    if len(missing) > 0:
-        raise ValueError(f"Missing required columns for modelling: {missing}")
+    # Interaction between relative size and focal_home (tests whether home advantage moderates size effect)
+    X['rel_by_home'] = X['rel_size_ratio_z'] * X['focal_home']
 
-    # Model formula: binomial GLM with dyad fixed effects
-    formula = ('win ~ z_RelativeSize * z_LocAdv '
-               '+ z_RelMales + z_RelFemales + z_TotalSize + C(dyad)')
+    # Add constant
+    X = sm.add_constant(X, has_constant='add')
 
-    # Fit binomial GLM (logit link by default in statsmodels for GLM family=Binomial)
-    glm_binom = smf.glm(formula=formula, data=df, family=sm.families.Binomial()).fit()
+    # Dependent variable
+    y = df['win'].astype(float)
 
-    # Print summary
-    print(glm_binom.summary())
+    # Fit logistic regression (maximum likelihood)
+    logit = sm.Logit(y, X)
+    res = logit.fit(disp=0)
 
-    # For inference robust to dyad clustering, compute cluster-robust covariance if desired
-    # (Requires at least a few clusters; with very few clusters results may be unstable.)
+    # Cluster-robust covariance by dyad
+    # Use get_robustcov_results to obtain clustered standard errors
     try:
-        clustered = glm_binom.get_robustcov_results(cov_type='cluster', groups=df['dyad'])
-        print('\nCluster-robust (by dyad) results:')
-        print(clustered.summary())
-        # Return both the original fit and the clustered-covariance results object
-        return {'fit': glm_binom, 'cluster_robust': clustered}
+        res_clust = res.get_robustcov_results(cov_type='cluster', groups=df['dyad'], use_correction=True)
     except Exception:
-        # If clustering fails (e.g., too few clusters), just return the regular fit
-        return {'fit': glm_binom}
+        # Fallback: if clustering fails (e.g., too few clusters), return unclustered results but warn
+        print("Warning: cluster-robust covariance by dyad failed; returning unclustered results.")
+        res_clust = res
+
+    # Optionally print summary for quick inspection (comment out if undesirable)
+    print(res_clust.summary())
+
+    return res_clust
 
 

@@ -1,192 +1,135 @@
 def extract_final_answer(model_output):
     """
-    Extracts age-related coefficients and culture-specific linear age effects
-    from a fitted statsmodels GLM/RegressionResults object.
+    Extracts statistics describing how age (Age_z) predicts choosing the majority option,
+    using the fitted binary logistic model 'majority_logit_result' from the provided
+    model_output dict. Computes overall Age_z effect and culture-specific simple slopes
+    (Age_z main effect + Age_z:C(culture) interaction when present), with standard errors,
+    z-scores, two-sided p-values, and 95% Wald confidence intervals.
 
-    Returns a dictionary with:
-      - "object": a dict containing:
-          * age_c: coef, se, z, p, 95% CI
-          * age_c_sq: coef, se, z, p, 95% CI
-          * per_culture_linear_age_effects: for each non-reference culture
-              - coef (age_c + interaction), se, z, p, 95% CI
-            and for the reference (baseline) culture:
-              - coef (age_c only), se, z, p, 95% CI
-          * raw_params: full params Series (for inspection)
-      - "description": short explanation of what these numbers mean
+    Returns:
+      {
+        "object": pandas.DataFrame with rows for each culture (including the omitted/reference),
+        "description": str describing what the table contains and how to interpret it
+      }
     """
     import re
     import math
-    import numpy as np
     import pandas as pd
 
-    # Helper: two-sided p-value from z using math.erfc for portability
-    def z_to_p(z):
-        return math.erfc(abs(z) / math.sqrt(2))
+    # Get the binary logistic result that modeled MajorityChoice (majority vs. not)
+    if 'majority_logit_result' not in model_output:
+        raise ValueError("model_output must contain 'majority_logit_result' key")
+    res = model_output['majority_logit_result']
 
-    # Try to get parameter estimates, cov matrix, pvalues, conf_int
-    try:
-        params = model_output.params  # pandas Series
-    except Exception as e:
-        raise ValueError("Could not extract params from model_output: %s" % e)
+    # Parameters and covariance (DataFrame)
+    params = res.params.copy()
+    cov = res.cov_params().copy()
 
-    try:
-        cov = model_output.cov_params()  # DataFrame
-    except Exception as e:
-        # fallback: try to get unscaled cov or raise
-        raise ValueError("Could not extract covariance matrix from model_output: %s" % e)
+    # Find the exact name for the Age_z main effect (robust to slight naming variations)
+    age_name = None
+    for n in params.index:
+        if n == 'Age_z' or n.endswith('.Age_z') or n == 'Age_z' :
+            age_name = n
+            break
+    if age_name is None:
+        # fallback: any name that contains Age_z
+        age_candidates = [n for n in params.index if 'Age_z' in n]
+        if not age_candidates:
+            raise KeyError("Could not find an 'Age_z' parameter in model params")
+        age_name = age_candidates[0]
 
-    try:
-        pvalues = model_output.pvalues
-    except Exception:
-        # compute p-values from params and bse if available
-        if hasattr(model_output, 'bse'):
-            bse = model_output.bse
-            zvals = params / bse
-            pvalues = zvals.apply(z_to_p)
-        else:
-            pvalues = pd.Series(index=params.index, data=[np.nan]*len(params))
+    beta_age = float(params[age_name])
+    var_age = float(cov.loc[age_name, age_name])
+    se_age = math.sqrt(var_age)
+    z_age = beta_age / se_age if se_age > 0 else float('nan')
+    # two-sided p-value using erf for normal cdf
+    cdf = 0.5 * (1 + math.erf(abs(z_age) / math.sqrt(2)))
+    p_age = 2 * (1 - cdf)
+    ci_lower = beta_age - 1.96 * se_age
+    ci_upper = beta_age + 1.96 * se_age
 
-    # Confidence intervals (if available)
-    try:
-        ci_df = model_output.conf_int()
-        # conf_int returns DataFrame with [lower, upper]
-    except Exception:
-        ci_df = None
-
-    # Ensure age_c and age_c_sq exist
-    if 'age_c' not in params.index:
-        raise ValueError("Model does not contain an 'age_c' coefficient in params.")
-
-    if 'age_c_sq' not in params.index:
-        raise ValueError("Model does not contain an 'age_c_sq' coefficient in params.")
-
-    # Base age effects
-    age_coef = float(params['age_c'])
-    age_se = float(np.sqrt(cov.loc['age_c', 'age_c']))
-    age_z = age_coef / age_se if age_se != 0 else np.nan
-    age_p = float(pvalues.get('age_c', z_to_p(age_z)))
-    if ci_df is not None and 'age_c' in ci_df.index:
-        age_ci = tuple(ci_df.loc['age_c'].values)
-    else:
-        age_ci = (age_coef - 1.96 * age_se, age_coef + 1.96 * age_se)
-
-    age_sq_coef = float(params['age_c_sq'])
-    age_sq_se = float(np.sqrt(cov.loc['age_c_sq', 'age_c_sq']))
-    age_sq_z = age_sq_coef / age_sq_se if age_sq_se != 0 else np.nan
-    age_sq_p = float(pvalues.get('age_c_sq', z_to_p(age_sq_z)))
-    if ci_df is not None and 'age_c_sq' in ci_df.index:
-        age_sq_ci = tuple(ci_df.loc['age_c_sq'].values)
-    else:
-        age_sq_ci = (age_sq_coef - 1.96 * age_sq_se, age_sq_coef + 1.96 * age_sq_se)
-
-    # Identify culture levels from parameter names:
-    # Look for patterns like "C(culture_cat)[T.site]" and interactions with age_c
-    param_index = list(params.index.astype(str))
-
-    # Find interaction params where age_c interacts with culture
-    inter_patterns = [
-        re.compile(r'age_c:C\(culture_cat\)\[T\.(.*?)\]'),
-        re.compile(r'C\(culture_cat\)\[T\.(.*?)\]:age_c')
-    ]
-    interaction_map = {}  # culture_label -> param_name
-    for pname in param_index:
-        for pat in inter_patterns:
-            m = pat.search(pname)
-            if m:
-                lab = m.group(1)
-                interaction_map[lab] = pname
-                break
-
-    # Find cultural fixed-effect main terms (to detect which levels are present)
-    main_culture_pattern = re.compile(r'C\(culture_cat\)\[T\.(.*?)\]')
-    culture_levels = set()
-    for pname in param_index:
-        m = main_culture_pattern.search(pname)
+    # Identify interaction terms that involve Age_z and culture
+    # typical names: 'Age_z:C(culture)[T.SITE]' or 'C(culture)[T.SITE]:Age_z'
+    inter_names = [n for n in params.index if ('Age_z' in n) and ('C(culture)' in n or 'C(culture)' in n)]
+    # If not found by that pattern, search for any param names that include both 'Age_z' and 'culture' (robust)
+    if not inter_names:
+        inter_names = [n for n in params.index if ('Age_z' in n) and ('culture' in n)]
+    # Parse culture levels from interaction names
+    culture_levels = []
+    inter_map = {}  # map level -> (name, coef)
+    for n in inter_names:
+        # try extracting with regex pattern for Patsy naming: C(culture)[T.<level>]
+        m = re.search(r"C\(culture\)\[T\.?([^\]]+)\]", n)
         if m:
-            culture_levels.add(m.group(1))
-
-    # The baseline (reference) culture is not present in C(...) terms.
-    # We'll assemble list of cultures for which we can report combined linear age effect:
-    # - 'reference' (baseline): uses age_c only
-    # - any cultures in interaction_map: combined = age_c + interaction_param
-    per_culture = {}
-
-    # Baseline culture (label as 'reference' because we don't know its name)
-    baseline_label = 'reference (model baseline)'
-    per_culture[baseline_label] = {}
-    per_culture[baseline_label]['coef'] = age_coef
-    per_culture[baseline_label]['se'] = age_se
-    per_culture[baseline_label]['z'] = age_z
-    per_culture[baseline_label]['p'] = age_p
-    per_culture[baseline_label]['95_CI'] = age_ci
-
-    # For each detected culture interaction, compute combined coef and SE using cov matrix
-    for lab, pname in interaction_map.items():
-        inter_coef = float(params[pname])
-        # combined coef = age_coef + inter_coef
-        comb_coef = age_coef + inter_coef
-
-        # var(comb) = var(age_c) + var(inter) + 2*cov(age_c, inter)
-        try:
-            var_age = cov.loc['age_c', 'age_c']
-            var_inter = cov.loc[pname, pname]
-            cov_ai = cov.loc['age_c', pname]
-            comb_var = var_age + var_inter + 2.0 * cov_ai
-            comb_se = float(np.sqrt(comb_var)) if comb_var >= 0 else float(np.nan)
-        except Exception:
-            # If cov elements not available, fall back to NaN
-            comb_se = float(np.nan)
-
-        comb_z = comb_coef / comb_se if (comb_se and not np.isnan(comb_se)) else np.nan
-        comb_p = float(z_to_p(comb_z)) if not np.isnan(comb_z) else float(np.nan)
-
-        if ci_df is not None and 'age_c' in ci_df.index and pname in ci_df.index:
-            # We don't have direct CI for the sum; compute via se
-            comb_ci = (comb_coef - 1.96 * comb_se, comb_coef + 1.96 * comb_se)
+            lvl = m.group(1)
         else:
-            comb_ci = (comb_coef - 1.96 * comb_se, comb_coef + 1.96 * comb_se) if not np.isnan(comb_se) else (np.nan, np.nan)
+            # fallback: take the part after last ':' or '.' as level descriptor
+            parts = re.split(r'[:\.]', n)
+            lvl = parts[-1]
+        culture_levels.append(lvl)
+        inter_map[lvl] = (n, float(params[n]))
 
-        per_culture[lab] = {
-            'interaction_param_name': pname,
-            'interaction_coef': inter_coef,
-            'coef': comb_coef,
-            'se': comb_se,
-            'z': comb_z,
-            'p': comb_p,
-            '95_CI': comb_ci
-        }
+    # Determine the "reference" (omitted) culture: it's the one with no interaction term.
+    # We cannot recover its original label from the model output (no data provided),
+    # so we label it 'reference (omitted)' and report its slope = Age_z main effect.
+    rows = []
+    rows.append({
+        'culture': 'reference (omitted)',
+        'slope_logodds': beta_age,
+        'se': se_age,
+        'z': z_age,
+        'p': p_age,
+        'ci_lower': ci_lower,
+        'ci_upper': ci_upper,
+        'coef_parts': f"Age_z"
+    })
 
-    # Prepare output object
-    output_object = {
-        'age_c': {
-            'coef': age_coef,
-            'se': age_se,
-            'z': age_z,
-            'p': age_p,
-            '95_CI': age_ci
-        },
-        'age_c_sq': {
-            'coef': age_sq_coef,
-            'se': age_sq_se,
-            'z': age_sq_z,
-            'p': age_sq_p,
-            '95_CI': age_sq_ci
-        },
-        'per_culture_linear_age_effects': per_culture,
-        'raw_params': params,
-        'raw_cov': cov
-    }
+    # For each explicit culture level with an interaction, compute simple slope and its se/p/ci
+    for lvl in sorted(culture_levels):
+        inter_name, beta_int = inter_map[lvl]
+        slope = beta_age + beta_int
+        # variance = Var(age) + Var(int) + 2 Cov(age,int)
+        if (age_name in cov.index) and (inter_name in cov.index):
+            cov_ai = float(cov.loc[age_name, inter_name])
+            var_int = float(cov.loc[inter_name, inter_name])
+            var_slope = var_age + var_int + 2.0 * cov_ai
+            se_slope = math.sqrt(var_slope) if var_slope > 0 else float('nan')
+            z_slope = slope / se_slope if se_slope > 0 else float('nan')
+            cdf_s = 0.5 * (1 + math.erf(abs(z_slope) / math.sqrt(2)))
+            p_slope = 2 * (1 - cdf_s)
+            ci_l = slope - 1.96 * se_slope
+            ci_u = slope + 1.96 * se_slope
+        else:
+            # if covariance entries missing for some reason, set NaNs
+            se_slope = float('nan')
+            z_slope = float('nan')
+            p_slope = float('nan')
+            ci_l = float('nan')
+            ci_u = float('nan')
+
+        rows.append({
+            'culture': lvl,
+            'slope_logodds': slope,
+            'se': se_slope,
+            'z': z_slope,
+            'p': p_slope,
+            'ci_lower': ci_l,
+            'ci_upper': ci_u,
+            'coef_parts': f"Age_z + {inter_name}"
+        })
+
+    result_df = pd.DataFrame(rows).set_index('culture')
 
     description_lines = [
-        "Extracted statistics relevant to how reliance on the majority develops with age:",
-        "- 'age_c' is the model coefficient for centered age (linear effect). It represents the change in log-odds of choosing the majority per unit increase in age (centered) for the baseline culture.",
-        "- 'age_c_sq' is the quadratic age term (shared across cultures in this model); its sign indicates acceleration (+) or deceleration (-) of the age effect.",
-        "- 'per_culture_linear_age_effects' gives the combined linear age effect for each culture:",
-        "    * For the model baseline (reference) culture, the linear effect is simply the 'age_c' coefficient.",
-        "    * For other cultures, the linear effect = age_c + age_c:C(culture_cat)[T.<level>] (we report coef, SE, z, two-sided p, and 95% CI).",
-        "- All reported coefficients are on the log-odds scale (logit). To convert to change in probability, compute predicted probabilities at representative ages.",
-        "- Use the p-values / 95% CIs to assess whether age effects (overall and culture-specific) are statistically different from zero; differences between cultures are in the interaction coefficients and are reflected in the combined per-culture values reported here."
+        "This table reports how the standardized age variable (Age_z) predicts the log-odds",
+        "of choosing the majority option (MajorityChoice model: majority vs not).",
+        "- 'reference (omitted)' is the baseline culture (the C(culture) reference level omitted by the encoding).",
+        "- For the omitted reference culture the slope is the Age_z main effect; for each listed culture",
+        "  the simple slope = Age_z main effect + Age_z:C(culture)[T.<level>] interaction coefficient.",
+        "- Columns: slope_logodds (log-odds change per 1 SD increase in age), se, z, two-sided p-value, and 95% Wald CI.",
+        "Interpretation: positive slope_logodds => older children are more likely to choose the majority (vs not) in that culture;",
+        "negative => older children are less likely. Use the p-value/CI to judge statistical support."
     ]
     description = " ".join(description_lines)
 
-    return {"object": output_object, "description": description}
+    return {"object": result_df, "description": description}

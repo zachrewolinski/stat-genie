@@ -1,155 +1,195 @@
 def extract_final_answer(model_output):
     """
-    Extract key statistics from a fitted statsmodels GLM (possibly robustified)
-    that predicted 'win' from RelSizeDiff, FocalHomeAdv, their interaction,
-    and controls.
+    Extract coefficients, SEs, p-values, 95% CIs, odds ratios (and CIs), and
+    marginal effects (if available) for the key predictors that test the
+    effects of relative group size and contest location.
 
-    Returns a dictionary with:
-      - "object": a nested dict containing coefficients, SEs, z-stats, p-values,
-                  95% CIs, odds-ratios and odds-ratio CIs for relevant terms,
-                  and combined effects of RelSizeDiff when FocalHomeAdv = 0 and 1.
-      - "description": a short explanation of what the numbers mean for the
-                       research question (how relative group size and contest
-                       location influence the probability of winning).
+    Returns:
+      {
+        "object": {
+          "<variable>": {
+             "coef": float or None,
+             "se": float or None,
+             "p_value": float or None,
+             "odds_ratio": float or None,
+             "or_ci_lower": float or None,
+             "or_ci_upper": float or None,
+             "significant_0.05": bool or None,
+             "marginal_effect": dict or None   # if available (rows from summary_frame)
+          },
+          ...
+          "nobs": int or None
+        },
+        "description": "Human-readable explanation of what the numbers mean and how to interpret them."
+      }
     """
     import numpy as np
-    from math import sqrt
+    import pandas as pd
+
+    # Variables of primary interest in this study
+    target_vars = ['log_size_ratio_z', 'ProximityAdvantage_z', 'size_x_location']
+
+    results = {}
+    # initialize container for extracted model-wide items
+    extracted = {}
+
+    # Try to get basic attributes from the model output
+    params = None
+    bse = None
+    pvalues = None
+    conf = None
+    nobs = None
+
     try:
-        # scipy is usually available; use it for p-values from z
-        from scipy import stats
-        norm_cdf = stats.norm.cdf
+        params = getattr(model_output, 'params', None)
     except Exception:
-        # fallback: approximate using numpy (less convenient); define a simple norm cdf
-        def norm_cdf(x):
-            # Abramowitz and Stegun approximation for normal CDF
-            t = 1.0 / (1.0 + 0.2316419 * abs(x))
-            d = 0.3989423 * np.exp(-x * x / 2.0)
-            prob = d * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))))
-            return 1.0 - prob if x > 0 else prob
-
-    res = model_output
-
-    # Pull parameter/index information
+        params = None
     try:
-        params = res.params.copy()
-        bse = res.bse.copy()
-        cov = res.cov_params().copy()
-        conf = res.conf_int().copy()
-    except Exception as e:
-        raise ValueError("Model output does not appear to have the expected attributes "
-                         "(params, bse, cov_params, conf_int). Error: " + str(e))
+        bse = getattr(model_output, 'bse', None)
+    except Exception:
+        bse = None
+    try:
+        pvalues = getattr(model_output, 'pvalues', None)
+    except Exception:
+        pvalues = None
+    try:
+        # conf_int() usually returns a DataFrame with lower/upper columns
+        conf = model_output.conf_int()
+    except Exception:
+        conf = None
+    try:
+        nobs = int(getattr(model_output, 'nobs', None))
+    except Exception:
+        # fallback to model endog length
+        try:
+            nobs = int(model_output.model.endog.shape[0])
+        except Exception:
+            nobs = None
 
-    # Term names we care about
-    term_rel = 'RelSizeDiff'
-    term_home = 'FocalHomeAdv'
-    # interaction naming in statsmodels is 'RelSizeDiff:FocalHomeAdv'
-    term_int = f'{term_rel}:{term_home}'
+    extracted['nobs'] = nobs
 
-    # Prepare container
-    out = {
-        'terms': {},
-        'combined_effects': {},
-    }
-
-    # Helper to populate term info if present
-    for term in [term_rel, term_home, term_int]:
-        if term in params.index:
-            coef = float(params[term])
-            se = float(bse[term])
-            z = coef / se if se != 0 else np.nan
-            p = float(2 * (1.0 - norm_cdf(abs(z)))) if not np.isnan(z) else np.nan
-            ci_low = float(conf.loc[term, 0])
-            ci_high = float(conf.loc[term, 1])
-            or_est = float(np.exp(coef))
-            or_ci_low = float(np.exp(ci_low))
-            or_ci_high = float(np.exp(ci_high))
-
-            out['terms'][term] = {
-                'coef': coef,
-                'se': se,
-                'z': z,
-                'p_value': p,
-                '95%_CI_coef': [ci_low, ci_high],
-                'odds_ratio': or_est,
-                '95%_CI_odds_ratio': [or_ci_low, or_ci_high],
-            }
-        else:
-            out['terms'][term] = None
-
-    # Compute combined effect of RelSizeDiff when FocalHomeAdv = 0 (i.e., main effect)
-    # and when FocalHomeAdv = 1 (main effect + interaction).
-    # Use covariance matrix to get SE of linear combinations.
-    index = list(params.index)
-
-    def linear_combination(vec_dict):
-        """
-        vec_dict: mapping term -> multiplier (e.g., {'RelSizeDiff':1, 'RelSizeDiff:FocalHomeAdv':1})
-        Returns: (estimate, se, z, p, 95% CI for coef, 95% CI for OR)
-        """
-        L = np.zeros(len(index))
-        for t, mul in vec_dict.items():
-            if t in index:
-                L[index.index(t)] = mul
-            else:
-                # if term not present, multiplier remains zero (effectively ignored)
-                pass
-        est = float(np.dot(L, params.values))
-        var = float(np.dot(L, np.dot(cov.values, L)))
-        se_l = sqrt(var) if var >= 0 else float('nan')
-        z = est / se_l if se_l != 0 else float('nan')
-        p = float(2 * (1.0 - norm_cdf(abs(z)))) if not np.isnan(z) else float('nan')
-        ci_low = est - 1.96 * se_l
-        ci_high = est + 1.96 * se_l
-        or_est = float(np.exp(est))
-        or_ci_low = float(np.exp(ci_low))
-        or_ci_high = float(np.exp(ci_high))
-        return {
-            'coef': est,
-            'se': se_l,
-            'z': z,
-            'p_value': p,
-            '95%_CI_coef': [ci_low, ci_high],
-            'odds_ratio': or_est,
-            '95%_CI_odds_ratio': [or_ci_low, or_ci_high],
+    # For each target variable, try to extract metrics; be robust to missing pieces
+    for var in target_vars:
+        entry = {
+            "coef": None,
+            "se": None,
+            "p_value": None,
+            "odds_ratio": None,
+            "or_ci_lower": None,
+            "or_ci_upper": None,
+            "significant_0.05": None,
+            "marginal_effect": None
         }
 
-    # RelSizeDiff effect when FocalHomeAdv = 0 -> just RelSizeDiff coefficient
-    out['combined_effects']['RelSizeDiff_when_FocalHomeAdv_0'] = linear_combination({term_rel: 1.0})
+        # coefficient
+        try:
+            if params is not None and var in params.index:
+                coef = float(params.loc[var])
+                entry['coef'] = coef
+        except Exception:
+            entry['coef'] = None
 
-    # RelSizeDiff effect when FocalHomeAdv = 1 -> RelSizeDiff + RelSizeDiff:FocalHomeAdv
-    out['combined_effects']['RelSizeDiff_when_FocalHomeAdv_1'] = linear_combination({term_rel: 1.0, term_int: 1.0})
+        # standard error
+        try:
+            if bse is not None and var in bse.index:
+                entry['se'] = float(bse.loc[var])
+        except Exception:
+            entry['se'] = None
 
-    # Also include main effect of FocalHomeAdv (difference in log-odds when RelSizeDiff = 0)
-    out['combined_effects']['FocalHomeAdv_main_effect_at_RelSizeDiff_0'] = linear_combination({term_home: 1.0})
+        # p-value
+        try:
+            if pvalues is not None and var in pvalues.index:
+                entry['p_value'] = float(pvalues.loc[var])
+                entry['significant_0.05'] = (entry['p_value'] is not None) and (entry['p_value'] < 0.05)
+        except Exception:
+            entry['p_value'] = None
+            entry['significant_0.05'] = None
 
-    # Pack final object and human-readable description
-    description_lines = []
-    description_lines.append(
-        "Extracted coefficients, standard errors, z-statistics, two-sided p-values, "
-        "and 95% confidence intervals (for coefficients and odds ratios) for:"
-    )
-    description_lines.append(" - RelSizeDiff (numerical advantage of focal over other group)")
-    description_lines.append(" - FocalHomeAdv (1 if contest closer to focal group's home-range center)")
-    description_lines.append(" - Their interaction (RelSizeDiff:FocalHomeAdv)")
-    description_lines.append("")
-    description_lines.append(
-        "Interpretation guidance: a positive coefficient for RelSizeDiff means that an "
-        "increase of one unit in focal group's numerical advantage increases the log-odds "
-        "of the focal group winning; the odds ratio > 1 means multiplicative increase in odds. "
-        "The interaction term shows whether the effect of numerical advantage differs when the contest "
-        "is nearer the focal group's home range (FocalHomeAdv = 1)."
-    )
-    description_lines.append(
-        "The 'combined_effects' entries give the estimated effect (and inference) of a one-unit increase "
-        "in RelSizeDiff when FocalHomeAdv = 0 and when FocalHomeAdv = 1 (i.e., they show how the slope changes "
-        "with location). The p-values indicate whether these effects are statistically distinguishable from 0."
-    )
-    description_lines.append(
-        "Use the odds_ratio and its CI to state effect size on the multiplicative scale: e.g., an odds_ratio of 1.5 "
-        "means a one-unit increase in the predictor multiplies the odds of focal group winning by 1.5."
-    )
+        # confidence interval and odds ratio (exp of coef)
+        ci_lower = ci_upper = None
+        try:
+            if conf is not None:
+                # conf may be a DataFrame indexed by parameter names
+                try:
+                    row = conf.loc[var]
+                    ci_lower = float(row.iloc[0])
+                    ci_upper = float(row.iloc[1])
+                except Exception:
+                    # fallback to positional lookup if name-based fails
+                    try:
+                        idx = list(params.index).index(var)
+                        row = conf.iloc[idx]
+                        ci_lower = float(row.iloc[0])
+                        ci_upper = float(row.iloc[1])
+                    except Exception:
+                        ci_lower = ci_upper = None
+        except Exception:
+            ci_lower = ci_upper = None
 
-    return {
-        "object": out,
-        "description": "\n".join(description_lines)
-    }
+        try:
+            if entry['coef'] is not None:
+                entry['odds_ratio'] = float(np.exp(entry['coef']))
+            if (ci_lower is not None) and (ci_upper is not None):
+                entry['or_ci_lower'] = float(np.exp(ci_lower))
+                entry['or_ci_upper'] = float(np.exp(ci_upper))
+        except Exception:
+            entry['odds_ratio'] = entry['or_ci_lower'] = entry['or_ci_upper'] = None
+
+        # marginal effects if attached to the returned object by the modeling code
+        me_info = None
+        try:
+            margeff_obj = getattr(model_output, 'margeff', None)
+            if margeff_obj is not None:
+                # Attempt to read a summary frame if available
+                try:
+                    sf = margeff_obj.summary_frame()
+                    # summary_frame typically has one row per variable
+                    if var in sf.index:
+                        # convert the entire row to dict for completeness
+                        me_info = sf.loc[var].to_dict()
+                    else:
+                        # if var not found in index, try positional match
+                        try:
+                            idx = list(params.index).index(var)
+                            me_info = sf.iloc[idx].to_dict()
+                        except Exception:
+                            me_info = None
+                except Exception:
+                    # If no summary_frame, try to access .margeff attribute (array-like)
+                    try:
+                        me_array = getattr(margeff_obj, 'margeff', None)
+                        me_var = None
+                        if (me_array is not None) and (params is not None):
+                            if var in params.index:
+                                idx = list(params.index).index(var)
+                                me_var = float(me_array[idx])
+                                me_info = {"margeff": me_var}
+                    except Exception:
+                        me_info = None
+        except Exception:
+            me_info = None
+
+        entry['marginal_effect'] = me_info
+        results[var] = entry
+
+    # Compose a human-readable description that explains what was extracted
+    description_lines = [
+        "Extracted coefficients, standard errors, p-values, 95% confidence intervals,",
+        "and odds ratios (exp(coef)) for the main predictors testing the effects of",
+        "relative group size and contest location on the probability that the focal",
+        "group wins an intergroup contest. Interpretation guidance:",
+        "- coef: change in log-odds of focal group winning per 1 SD increase in predictor (predictors were z-scored).",
+        "- odds_ratio: multiplicative change in the odds of focal group winning per 1 SD increase (OR>1 -> higher odds).",
+        "- p_value: statistical significance (commonly using alpha = 0.05).",
+        "- or_ci_lower / or_ci_upper: 95% confidence interval for the odds ratio.",
+        "- marginal_effect (if present): estimated change in predicted probability (dy/dx) at the sample mean.",
+        "",
+        "Returned object 'object' contains one entry per target variable (log_size_ratio_z,",
+        "ProximityAdvantage_z, size_x_location) with numeric summaries, and 'nobs' giving sample size.",
+        "Use the sign and magnitude of 'coef' (or 'odds_ratio') together with 'p_value' to judge",
+        "whether a predictor increases or decreases the focal group's win probability and whether",
+        "that effect is statistically significant at conventional thresholds."
+    ]
+    description = "\n".join(description_lines)
+
+    return {"object": {**results, **extracted}, "description": description}

@@ -1,5 +1,5 @@
 
-===================[PROMPT (API Time: 47.85504865646362, Cache Time: None)]=====================
+===================[PROMPT (API Time: 79.89702773094177, Cache Time: None)]=====================
 =====[SYSTEM]=====:
 You are an AI Data Analysis Assistant who is an expert at writing an end-to-end scientific analysis given a research question and a dataset. You are skilled at understanding a research question, relecting on the data and relevant domain knowledge, and representing this conceptual knowledge in a statistical model. Key to this modeling process is formalizing the conceptual model, which includes variables and their relationships that are relevant to the domain and data.
 =====[USER]=====:
@@ -20,6 +20,16 @@ import sklearn
 import scipy
 import statsmodels.api as sm
 import matplotlib.pyplot as plt
+
+You are also allowed to use common machine learning libraries, including but not limited to:
+- xgboost
+- lightgbm
+- catboost
+- tensorflow / keras
+- torch (PyTorch)
+- pytorch-lightning
+- sklearn.experimental modules
+- imbalanced-learn (imblearn)
 
 Here is the code template for the transform function:
 ```python
@@ -270,7 +280,7 @@ Result: {
   "m_code": "model = smf.ols('AvgReligiosity ~ InRelationship * FertilityGroup', data=df).fit()\n# Display the regression results\nprint(model.summary())\n"
 }
 </Example>
-Research Question: How do relative group size and contest location influence the probability of a capuchin monkey group winning an intergroup contest? 
+Research Question: Do relative group size and contest location influence the probability of a capuchin monkey group winning an intergroup contest?
 Dataset Schema: {
   "dataset_description": "Intergroup competition is a common phenomenon observed in many social animals, ranging from ants to primates, and plays a crucial role in shaping access to resources and, consequently, fitness. Capuchin monkeys (Cebus capucinus) are known for their intense intergroup competition, which can sometimes even lead to lethal aggression. Researchers have been curious to understand the factors influencing the outcome of these contests. While the common belief is that larger groups have a competitive advantage, smaller capuchin groups have been observed defeating larger neighboring groups. This study by Crofoot et al. investigates how the location of an intergroup contest and the relative group sizes influence the probability of winning. The researchers used an Automated Radio Telemetry System (ARTS) to track the movements of six capuchin social groups of varying sizes on Barro Colorado Island, Panama. By analyzing the data on intergroup interactions and their locations, the researchers aim to shed light on the complex dynamics of intergroup competition in capuchin monkeys.",
   "fields": [
@@ -496,32 +506,32 @@ Dataset Schema: {
 }
 Result: 
 
-===================[gpt-5-mini RESPONSE (3173)]=====================
+===================[gpt-5-mini RESPONSE (4191)]=====================
 {
   "cvars": {
     "ivs": [
       {
-        "description": "Relative group size of the focal group compared to the other group, computed as number of individuals in focal group minus number in other group (positive => focal larger). Standardized for modeling.",
+        "description": "Relative group size advantage: difference between focal and other group size (n_focal - n_other), standardized (z-score). Positive values = focal larger than other.",
         "columns": [
           "size_diff_z"
         ]
       },
       {
-        "description": "Contest location advantage for the focal group computed as dist_other - dist_focal (positive => contest is closer to focal group's home center than to the other group's center). Standardized for modeling.",
+        "description": "Contest location advantage: relative proximity to home-range center computed as (dist_other - dist_focal), standardized (z-score). Positive values = focal is closer to its home-range center than the other group (location advantage).",
         "columns": [
-          "location_adv_z"
+          "dist_diff_z"
         ]
       }
     ],
     "dv": {
-      "description": "Outcome of the intergroup contest: 1 if the focal group won, 0 if focal group lost.",
+      "description": "Outcome of the contest: 1 if the focal group won the contest, 0 if the other group won.",
       "columns": [
         "win"
       ]
     },
     "controls": [
       {
-        "description": "Difference in number of adult males between focal and other group (m_focal - m_other). Controls for male composition that may influence contest outcome. Standardized for modeling.",
+        "description": "Difference in number of adult males (m_focal - m_other), standardized (z-score). Controls for male composition which may affect contest outcomes.",
         "is_moderator": false,
         "moderator_on": null,
         "columns": [
@@ -529,31 +539,31 @@ Result:
         ]
       },
       {
-        "description": "Dyad identifier for the pair of groups involved in the contest. Included for use as a clustering variable when estimating robust standard errors (not as a regression predictor).",
+        "description": "Binary indicator whether the focal group was closer to its home-range center than the other group (1 = focal closer, 0 = not). Treated as a potential moderator of the effect of relative group size (i.e., location may change how size affects winning).",
+        "is_moderator": true,
+        "moderator_on": "size_diff_z",
+        "columns": [
+          "FocalCloser"
+        ]
+      },
+      {
+        "description": "Dyad identifier for the pair of groups involved in the contest. Used for clustering standard errors (accounts for non-independence within dyads).",
         "is_moderator": false,
         "moderator_on": null,
         "columns": [
           "dyad"
         ]
-      },
-      {
-        "description": "Categorical version of contest location: 'FocalSide' if contest is substantially closer to focal group's home (location_adv > 50 m), 'OtherSide' if substantially closer to other group's home (location_adv < -50 m), 'Neutral' otherwise. Provided for inspection and descriptive analyses.",
-        "is_moderator": false,
-        "moderator_on": null,
-        "columns": [
-          "contest_location"
-        ]
       }
     ]
   },
-  "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    # Work on a copy\n    df = df.copy()\n\n    # Required original columns\n    required_cols = ['win', 'dist_focal', 'dist_other', 'n_focal', 'n_other', 'm_focal', 'm_other', 'dyad']\n    # Drop rows missing any required fields for modeling\n    df = df.dropna(subset=required_cols)\n\n    # Ensure types\n    df['win'] = df['win'].astype(int)\n    for c in ['dist_focal', 'dist_other', 'n_focal', 'n_other', 'm_focal', 'm_other']:\n        df[c] = pd.to_numeric(df[c], errors='coerce')\n\n    # Derived predictors\n    # Relative group size (difference and ratio)\n    df['size_diff'] = df['n_focal'] - df['n_other']\n    df['size_ratio'] = df['n_focal'] / df['n_other'].replace(0, np.nan)\n\n    # Location advantage: positive when contest is closer to focal group's home center\n    # (dist_other - dist_focal). Larger positive => greater focal home advantage.\n    df['location_adv'] = df['dist_other'] - df['dist_focal']\n\n    # Categorical location for descriptive checks (threshold = 50 meters to define \"neutral\")\n    def _loc_cat(x):\n        if x > 50:\n            return 'FocalSide'\n        elif x < -50:\n            return 'OtherSide'\n        else:\n            return 'Neutral'\n    df['contest_location'] = df['location_adv'].apply(_loc_cat)\n\n    # Male composition difference control\n    df['m_diff'] = df['m_focal'] - df['m_other']\n\n    # Standardize continuous predictors for model stability/interpretation (z-scores)\n    # use population std (ddof=0) to avoid small-sample ddof effects; safe for interpretation\n    for col in ['size_diff', 'location_adv', 'm_diff']:\n        mu = df[col].mean()\n        sigma = df[col].std(ddof=0)\n        # If sigma is zero (no variation), create zeros to avoid division by zero\n        if sigma == 0 or np.isnan(sigma):\n            df[col + '_z'] = 0.0\n        else:\n            df[col + '_z'] = (df[col] - mu) / sigma\n\n    # Final dataframe returned contains original columns plus derived columns used in the model\n    # Key columns used by the model: 'win', 'size_diff_z', 'location_adv_z', 'm_diff_z', 'dyad'\n    return df\n",
-  "m_code": "def model(df: pd.DataFrame):\n    import statsmodels.formula.api as smf\n\n    # Ensure the transformed columns exist\n    needed = ['win', 'size_diff_z', 'location_adv_z', 'm_diff_z', 'dyad']\n    missing = [c for c in needed if c not in df.columns]\n    if missing:\n        raise ValueError(f\"Missing required columns for modeling: {missing}\")\n\n    # Specify a logistic regression (GLM with binomial family). Include interaction between\n    # relative group size and location advantage to test whether location modulates the\n    # effect of relative group size on win probability.\n    formula = 'win ~ size_diff_z * location_adv_z + m_diff_z'\n\n    glm = smf.glm(formula=formula, data=df, family=sm.families.Binomial())\n\n    # Fit with cluster-robust standard errors clustered by dyad (accounts for non-independence\n    # of contests between the same pair of groups). If dyad clustering is inappropriate,\n    # this can be changed to another cluster or to default (non-robust) SEs.\n    results = glm.fit(cov_type='cluster', cov_kwds={'groups': df['dyad']})\n\n    # Return the fitted results object (contains coefficients, SEs, summary, predictions, etc.)\n    print(results.summary())\n    return results\n"
+  "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw capuchin contest dataframe into a modeling-ready dataframe.\n\n    Produces standardized (z-scored) predictors and a few derived columns:\n    - size_diff_z: standardized n_focal - n_other\n    - dist_diff_z: standardized dist_other - dist_focal (positive -> focal closer -> location advantage)\n    - m_diff_z: standardized m_focal - m_other\n    - FocalCloser: binary indicator dist_focal < dist_other\n\n    Keeps columns: win, size_diff_z, dist_diff_z, m_diff_z, FocalCloser, dyad (and also log_size_ratio_z and f_diff_z for potential supplementary analyses)\n    \"\"\"\n    df = df.copy()\n\n    # Required columns for the analysis\n    required = ['win', 'n_focal', 'n_other', 'dist_focal', 'dist_other', 'm_focal', 'm_other', 'f_focal', 'f_other', 'dyad']\n    missing = [c for c in required if c not in df.columns]\n    if len(missing) > 0:\n        raise ValueError(f\"Missing required columns in input dataframe: {missing}\")\n\n    # Drop rows with missing critical values\n    df = df.dropna(subset=required)\n\n    # Ensure proper dtypes\n    df['win'] = df['win'].astype(int)\n    df['dyad'] = df['dyad'].astype(int)\n\n    # Derived predictors\n    df['size_diff'] = df['n_focal'] - df['n_other']\n    # log ratio as alternative relative-size measure (keeps numerical stability)\n    df['log_size_ratio'] = np.log((df['n_focal'] + 1e-6) / (df['n_other'] + 1e-6))\n    # Positive dist_diff means focal is closer to its home-range center than other (advantage)\n    df['dist_diff'] = df['dist_other'] - df['dist_focal']\n    df['FocalCloser'] = (df['dist_focal'] < df['dist_other']).astype(int)\n    df['m_diff'] = df['m_focal'] - df['m_other']\n    df['f_diff'] = df['f_focal'] - df['f_other']\n\n    # Z-score (standardize) continuous predictors to aid interpretation and numerical stability\n    for col in ['size_diff', 'log_size_ratio', 'dist_diff', 'm_diff', 'f_diff']:\n        mean = df[col].mean()\n        std = df[col].std(ddof=0)\n        # avoid division by zero\n        if std == 0 or np.isnan(std):\n            df[col + '_z'] = 0.0\n        else:\n            df[col + '_z'] = (df[col] - mean) / std\n\n    # Final dataframe columns used for modeling\n    keep_cols = [\n        'win',\n        'size_diff_z',\n        'log_size_ratio_z',\n        'dist_diff_z',\n        'FocalCloser',\n        'm_diff_z',\n        'f_diff_z',\n        'dyad'\n    ]\n\n    # If any keep_cols missing (e.g., because std was NaN), create them filled with zeros (safe fallback)\n    for c in keep_cols:\n        if c not in df.columns:\n            df[c] = 0\n\n    return df[keep_cols]\n",
+  "m_code": "def model(df: pd.DataFrame):\n    \"\"\"\n    Fit a logistic regression (GLM with binomial family) predicting probability that the focal group wins.\n\n    Primary model tests main effects of standardized relative group size (size_diff_z) and standardized\n    location advantage (dist_diff_z), their interaction, and controls for male difference and focal proximity.\n\n    Cluster-robust standard errors are computed at the dyad level to account for non-independence of contests\n    within the same dyad.\n\n    Returns:\n      - the fitted GLM result object (statsmodels GLMResults)\n    \"\"\"\n    import statsmodels.formula.api as smf\n    import statsmodels.api as sm\n\n    # Check required columns\n    required = ['win', 'size_diff_z', 'dist_diff_z', 'm_diff_z', 'FocalCloser', 'dyad']\n    missing = [c for c in required if c not in df.columns]\n    if len(missing) > 0:\n        raise ValueError(f\"Missing required columns for modeling: {missing}\")\n\n    # Formula: main effects + interaction between relative size and location advantage\n    formula = 'win ~ size_diff_z * dist_diff_z + m_diff_z + FocalCloser'\n\n    # Fit GLM (logistic regression)\n    glm_binom = smf.glm(formula=formula, data=df, family=sm.families.Binomial())\n    # Use cluster-robust SEs clustered on dyad\n    results = glm_binom.fit(cov_type='cluster', cov_kwds={'groups': df['dyad']})\n\n    # Print a compact summary and return full results object for downstream inspection\n    print(results.summary())\n    return results\n"
 }
 ===================[TOKENS]=====================
-Number of prompt tokens: 5166
-Number of total tokens: 8339
+Number of prompt tokens: 5227
+Number of total tokens: 9418
 
-===================[PROMPT (API Time: 53.71412420272827, Cache Time: None)]=====================
+===================[PROMPT (API Time: 68.65964388847351, Cache Time: None)]=====================
 =====[SYSTEM]=====:
 You are an AI Data Analysis Assistant who is an expert at writing an end-to-end scientific analysis given a research question and a dataset. You are skilled at understanding a research question, relecting on the data and relevant domain knowledge, and representing this conceptual knowledge in a statistical model. Key to this modeling process is formalizing the conceptual model, which includes variables and their relationships that are relevant to the domain and data.
 =====[USER]=====:
@@ -574,6 +584,16 @@ import sklearn
 import scipy
 import statsmodels.api as sm
 import matplotlib.pyplot as plt
+
+You are also allowed to use common machine learning libraries, including but not limited to:
+- xgboost
+- lightgbm
+- catboost
+- tensorflow / keras
+- torch (PyTorch)
+- pytorch-lightning
+- sklearn.experimental modules
+- imbalanced-learn (imblearn)
 
 Here is the code template for the transform function:
 ```python
@@ -824,7 +844,7 @@ Result: {
   "m_code": "model = smf.ols('AvgReligiosity ~ InRelationship * FertilityGroup', data=df).fit()\n# Display the regression results\nprint(model.summary())\n"
 }
 </Example>
-Research Question: How do relative group size and contest location influence the probability of a capuchin monkey group winning an intergroup contest? 
+Research Question: Do relative group size and contest location influence the probability of a capuchin monkey group winning an intergroup contest?
 Dataset Schema: {
   "dataset_description": "Intergroup competition is a common phenomenon observed in many social animals, ranging from ants to primates, and plays a crucial role in shaping access to resources and, consequently, fitness. Capuchin monkeys (Cebus capucinus) are known for their intense intergroup competition, which can sometimes even lead to lethal aggression. Researchers have been curious to understand the factors influencing the outcome of these contests. While the common belief is that larger groups have a competitive advantage, smaller capuchin groups have been observed defeating larger neighboring groups. This study by Crofoot et al. investigates how the location of an intergroup contest and the relative group sizes influence the probability of winning. The researchers used an Automated Radio Telemetry System (ARTS) to track the movements of six capuchin social groups of varying sizes on Barro Colorado Island, Panama. By analyzing the data on intergroup interactions and their locations, the researchers aim to shed light on the complex dynamics of intergroup competition in capuchin monkeys.",
   "fields": [
@@ -1050,58 +1070,72 @@ Dataset Schema: {
 }
 Result: 
 
-===================[gpt-5-mini RESPONSE (3974)]=====================
+===================[gpt-5-mini RESPONSE (4604)]=====================
 {
   "cvars": {
     "ivs": [
       {
-        "description": "Relative group size of the focal group vs the other group. Calculated as the ratio n_focal / n_other (RelSize) and standardized (RelSize_z). Positive values >1 indicate focal larger than other. Model uses the standardized ratio column 'RelSize_z'.",
+        "description": "Relative group size advantage (focal - other). Continuous predictor representing how many more (or fewer) individuals the focal group had compared to the other group. Mean-centered for modeling.",
         "columns": [
-          "RelSize_z"
+          "SizeAdv_c"
         ]
       },
       {
-        "description": "Contest location relative to group home-range centers. Categorical variable with values 'FocalHome' (contest closer to focal group's home), 'OtherHome' (closer to other group's home), and 'Neutral' (within a small distance of both). Stored in column 'Location'. The model uses dummy variables derived from this column (Loc_FocalHome and Loc_OtherHome), with 'Neutral' as the reference category.",
+        "description": "Contest location advantage measured as distance advantage (dist_other - dist_focal). Positive values mean the focal group was closer to its home-range center than the other group (a location advantage). Mean-centered for modeling.",
         "columns": [
-          "Location",
-          "Loc_FocalHome",
-          "Loc_OtherHome"
+          "DistAdv_c"
         ]
       }
     ],
     "dv": {
-      "description": "Outcome of the contest: whether the focal group won (1) or lost (0). Binary dependent variable stored in column 'win'.",
+      "description": "Binary outcome: whether the focal group won the contest (1 = focal won, 0 = other won).",
       "columns": [
         "win"
       ]
     },
     "controls": [
       {
-        "description": "Relative number of adult males: difference m_focal - m_other, standardized (RelMales_z). Controls for sex-composition advantage that might affect contest outcome.",
-        "is_moderator": false,
-        "moderator_on": null,
+        "description": "Binary indicator whether the focal group was closer to its home-range center than the other group (1 = focal closer, 0 = other closer). Treated as a moderator on the effect of size advantage to test whether location (being closer to home) changes the size advantage effect.",
+        "is_moderator": true,
+        "moderator_on": "SizeAdv_c",
         "columns": [
-          "RelMales_z"
+          "FocalCloser"
         ]
       },
       {
-        "description": "Relative proximity to home-range centers, continuous: dist_other - dist_focal (RelDist). Positive values indicate the focal group is closer to its center than the other group. Standardized version (RelDist_z) is used as a control to capture continuous location effect beyond the categorical Location variable.",
+        "description": "Male advantage in the focal group (m_focal - m_other). Controls for differences in number of adult males between groups. Mean-centered.",
         "is_moderator": false,
         "moderator_on": null,
         "columns": [
-          "RelDist_z"
+          "MaleAdv_c"
+        ]
+      },
+      {
+        "description": "Female advantage in the focal group (f_focal - f_other). Controls for differences in number of adult females between groups. Mean-centered.",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "FemaleAdv_c"
+        ]
+      },
+      {
+        "description": "Total number of individuals in the interaction (n_focal + n_other). Controls for absolute group sizes (mean-centered).",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "TotalN_c"
         ]
       }
     ]
   },
-  "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Clean and derive variables needed for the analysis.\n\n    Final dataframe columns used in the model:\n      - win: binary outcome (0/1)\n      - RelSize, RelSize_diff, RelSize_z: relative size measures and standardized ratio\n      - Location: categorical location label ('FocalHome', 'OtherHome', 'Neutral')\n      - Loc_FocalHome, Loc_OtherHome: dummy columns for Location (Neutral is reference)\n      - RelMales, RelMales_z: male difference and standardized\n      - RelDist, RelDist_z: continuous relative distance and standardized (dist_other - dist_focal)\n    \"\"\"\n    df = df.copy()\n\n    # Required columns\n    required = ['win', 'n_focal', 'n_other', 'dist_focal', 'dist_other', 'm_focal', 'm_other']\n    missing = [c for c in required if c not in df.columns]\n    if len(missing) > 0:\n        raise ValueError(f\"Input dataframe is missing required columns: {missing}\")\n\n    # Drop rows with missing values in any required columns\n    df = df.dropna(subset=required)\n\n    # Ensure types\n    df['win'] = df['win'].astype(int)\n    numeric_cols = ['n_focal','n_other','dist_focal','dist_other','m_focal','m_other']\n    for c in numeric_cols:\n        df[c] = pd.to_numeric(df[c], errors='coerce')\n    df = df.dropna(subset=numeric_cols + ['win'])\n\n    # Relative size metrics\n    # Ratio (preferred for multiplicative effects) and difference\n    # Protect against division by zero, though n_other should be >=5 per schema\n    df['RelSize'] = df['n_focal'] / df['n_other']\n    df['RelSize_diff'] = df['n_focal'] - df['n_other']\n\n    # Relative male counts\n    df['RelMales'] = df['m_focal'] - df['m_other']\n\n    # Relative distance: positive => focal is closer to contest location than other\n    df['RelDist'] = df['dist_other'] - df['dist_focal']\n\n    # Define categorical location. Use a small buffer (30 m) to define 'Neutral' band where contest is roughly equidistant.\n    buffer = 30.0\n    df['Location'] = 'Neutral'\n    df.loc[df['dist_focal'] + buffer < df['dist_other'], 'Location'] = 'FocalHome'\n    df.loc[df['dist_other'] + buffer < df['dist_focal'], 'Location'] = 'OtherHome'\n\n    # Standardize continuous predictors (z-score). Use population std (ddof=0) to avoid small-sample ddof issues.\n    for col in ['RelSize', 'RelSize_diff', 'RelMales', 'RelDist']:\n        mean = df[col].mean()\n        std = df[col].std(ddof=0)\n        if std == 0 or np.isnan(std):\n            # If no variance, create a zero column\n            df[col + '_z'] = 0.0\n        else:\n            df[col + '_z'] = (df[col] - mean) / std\n\n    # Create dummy variables for Location. Keep dummies for FocalHome and OtherHome; Neutral will be the reference.\n    loc_dummies = pd.get_dummies(df['Location'], prefix='Loc')\n    # Ensure expected dummy column names exist even if zero in sample\n    for cname in ['Loc_FocalHome', 'Loc_OtherHome', 'Loc_Neutral']:\n        if cname not in loc_dummies.columns:\n            loc_dummies[cname] = 0\n    df = pd.concat([df, loc_dummies[['Loc_FocalHome', 'Loc_OtherHome', 'Loc_Neutral']]], axis=1)\n\n    # For modeling, we'll use Loc_FocalHome and Loc_OtherHome and treat Loc_Neutral as reference.\n    # Keep only the columns needed for the model (plus some extras for inspection).\n    keep_cols = [\n        'focal','other','dyad','win',\n        'n_focal','n_other','RelSize','RelSize_diff','RelSize_z',\n        'm_focal','m_other','RelMales','RelMales_z',\n        'dist_focal','dist_other','RelDist','RelDist_z',\n        'Location','Loc_FocalHome','Loc_OtherHome','Loc_Neutral'\n    ]\n    # Some of these columns exist in the original df; filter to those present\n    keep_cols = [c for c in keep_cols if c in df.columns]\n\n    return df[keep_cols]\n",
-  "m_code": "def model(df: pd.DataFrame) -> Any:\n    \"\"\"\n    Fit a logistic regression predicting probability that focal group wins (win==1).\n\n    Model specification (main analysis):\n      logit( P(win=1) ) = b0 + b1*RelSize_z + b2*Loc_FocalHome + b3*Loc_OtherHome\n                         + b4*(RelSize_z * Loc_FocalHome) + b5*(RelSize_z * Loc_OtherHome)\n                         + b6*RelMales_z + b7*RelDist_z\n\n    Location 'Neutral' is the omitted reference category. Interactions test whether effect of relative size differs across locations.\n\n    Returns the fitted statsmodels results object for the Logit model.\n    \"\"\"\n    df = df.copy()\n\n    # Check required columns\n    required = ['win','RelSize_z','RelMales_z','RelDist_z','Loc_FocalHome','Loc_OtherHome']\n    missing = [c for c in required if c not in df.columns]\n    if len(missing) > 0:\n        raise ValueError(f\"Transformed dataframe is missing columns required for modeling: {missing}\")\n\n    # Ensure dummies are numeric\n    df['Loc_FocalHome'] = pd.to_numeric(df['Loc_FocalHome'], errors='coerce').fillna(0).astype(float)\n    df['Loc_OtherHome'] = pd.to_numeric(df['Loc_OtherHome'], errors='coerce').fillna(0).astype(float)\n\n    # Interaction terms\n    df['RelSize_z_x_Loc_FocalHome'] = df['RelSize_z'] * df['Loc_FocalHome']\n    df['RelSize_z_x_Loc_OtherHome'] = df['RelSize_z'] * df['Loc_OtherHome']\n\n    # Design matrix\n    X_cols = [\n        'RelSize_z',\n        'Loc_FocalHome',\n        'Loc_OtherHome',\n        'RelSize_z_x_Loc_FocalHome',\n        'RelSize_z_x_Loc_OtherHome',\n        'RelMales_z',\n        'RelDist_z'\n    ]\n    X = df[X_cols].astype(float)\n    X = sm.add_constant(X, has_constant='add')\n\n    y = df['win'].astype(float)\n\n    # Fit logistic regression (maximum likelihood)\n    logit_model = sm.Logit(y, X)\n    try:\n        results = logit_model.fit(disp=False)\n    except Exception as e:\n        # If convergence issues occur, try with method='newton' and more iterations\n        results = logit_model.fit(disp=False, method='newton', maxiter=200)\n\n    return results\n"
+  "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw capuchin contest dataset into a dataframe containing the variables used in modeling.\n\n    Produces the following new columns (returned in the dataframe):\n      - SizeAdv = n_focal - n_other\n      - DistAdv = dist_other - dist_focal\n      - FocalCloser = 1 if dist_focal < dist_other else 0\n      - MaleAdv = m_focal - m_other\n      - FemaleAdv = f_focal - f_other\n      - TotalN = n_focal + n_other\n      - size- and location-centered versions: SizeAdv_c, DistAdv_c, MaleAdv_c, FemaleAdv_c, TotalN_c\n    \"\"\"\n    # Make a copy to avoid modifying original\n    df = df.copy()\n\n    # Required columns\n    required_cols = ['win', 'n_focal', 'n_other', 'dist_focal', 'dist_other',\n                     'm_focal', 'm_other', 'f_focal', 'f_other', 'dyad']\n\n    # Drop rows missing any required columns\n    df = df.dropna(subset=required_cols)\n\n    # Ensure numeric types where relevant\n    numeric_cols = ['win', 'n_focal', 'n_other', 'dist_focal', 'dist_other',\n                    'm_focal', 'm_other', 'f_focal', 'f_other']\n    for c in numeric_cols:\n        df[c] = pd.to_numeric(df[c], errors='coerce')\n\n    # Drop again if conversion produced NaNs\n    df = df.dropna(subset=numeric_cols)\n\n    # Derived variables\n    df['SizeAdv'] = df['n_focal'] - df['n_other']\n    # Positive DistAdv means focal is closer to its center than other (focal location advantage)\n    df['DistAdv'] = df['dist_other'] - df['dist_focal']\n    df['FocalCloser'] = (df['dist_focal'] < df['dist_other']).astype(int)\n    df['MaleAdv'] = df['m_focal'] - df['m_other']\n    df['FemaleAdv'] = df['f_focal'] - df['f_other']\n    df['TotalN'] = df['n_focal'] + df['n_other']\n\n    # Mean-center continuous predictors for interpretability\n    df['SizeAdv_c'] = df['SizeAdv'] - df['SizeAdv'].mean()\n    df['DistAdv_c'] = df['DistAdv'] - df['DistAdv'].mean()\n    df['MaleAdv_c'] = df['MaleAdv'] - df['MaleAdv'].mean()\n    df['FemaleAdv_c'] = df['FemaleAdv'] - df['FemaleAdv'].mean()\n    df['TotalN_c'] = df['TotalN'] - df['TotalN'].mean()\n\n    # Keep only columns necessary for modeling (but retain dyad and identifying columns)\n    model_cols = ['focal', 'other', 'dyad', 'win', 'SizeAdv_c', 'DistAdv_c', 'FocalCloser',\n                  'MaleAdv_c', 'FemaleAdv_c', 'TotalN_c',\n                  # keep raw versions for possible diagnostics\n                  'SizeAdv', 'DistAdv', 'MaleAdv', 'FemaleAdv', 'TotalN']\n\n    existing_model_cols = [c for c in model_cols if c in df.columns]\n    df = df[existing_model_cols]\n\n    # Reset index for cleanliness\n    df = df.reset_index(drop=True)\n\n    return df\n",
+  "m_code": "def model(df: pd.DataFrame):\n    \"\"\"\n    Fit a logistic regression to predict the probability that the focal group wins (win = 1).\n\n    Primary model tests:\n      - main effect of size advantage (SizeAdv_c)\n      - main effect of location advantage (DistAdv_c)\n      - interaction of size advantage with being closer to home (SizeAdv_c * FocalCloser)\n    Controls: MaleAdv_c, FemaleAdv_c, TotalN_c\n\n    Uses cluster-robust standard errors clustered on dyad to account for non-independence within dyads.\n\n    Returns:\n      - results: statsmodels results object with clustered robust covariance\n    \"\"\"\n    import statsmodels.formula.api as smf\n    import statsmodels.api as sm\n\n    # Ensure required variables exist\n    required = ['win', 'SizeAdv_c', 'DistAdv_c', 'FocalCloser', 'MaleAdv_c', 'FemaleAdv_c', 'TotalN_c', 'dyad']\n    missing = [c for c in required if c not in df.columns]\n    if len(missing) > 0:\n        raise ValueError(f\"Missing required columns for modeling: {missing}\")\n\n    # Fit logistic regression (logit)\n    # Interaction between size advantage and FocalCloser tests whether location (being closer) moderates the size effect\n    formula = 'win ~ SizeAdv_c * FocalCloser + DistAdv_c + MaleAdv_c + FemaleAdv_c + TotalN_c'\n    logit_model = smf.logit(formula, data=df).fit(disp=False)\n\n    # Get cluster-robust covariance (clustered on dyad)\n    try:\n        results = logit_model.get_robustcov_results(cov_type='cluster', groups=df['dyad'])\n    except Exception:\n        # Fallback to heteroskedasticity-robust (HC1) if clustering fails\n        results = logit_model.get_robustcov_results(cov_type='HC1')\n\n    # Return the results object (has .summary() and parameter table)\n    return results\n"
 }
 ===================[TOKENS]=====================
-Number of prompt tokens: 5166
-Number of total tokens: 9140
+Number of prompt tokens: 5227
+Number of total tokens: 9831
 
-===================[PROMPT (API Time: 67.96995425224304, Cache Time: None)]=====================
+===================[PROMPT (API Time: 67.65867471694946, Cache Time: None)]=====================
 =====[SYSTEM]=====:
 You are an AI Data Analysis Assistant who is an expert at writing an end-to-end scientific analysis given a research question and a dataset. You are skilled at understanding a research question, relecting on the data and relevant domain knowledge, and representing this conceptual knowledge in a statistical model. Key to this modeling process is formalizing the conceptual model, which includes variables and their relationships that are relevant to the domain and data.
 =====[USER]=====:
@@ -1122,6 +1156,16 @@ import sklearn
 import scipy
 import statsmodels.api as sm
 import matplotlib.pyplot as plt
+
+You are also allowed to use common machine learning libraries, including but not limited to:
+- xgboost
+- lightgbm
+- catboost
+- tensorflow / keras
+- torch (PyTorch)
+- pytorch-lightning
+- sklearn.experimental modules
+- imbalanced-learn (imblearn)
 
 Here is the code template for the transform function:
 ```python
@@ -1372,7 +1416,7 @@ Result: {
   "m_code": "model = smf.ols('AvgReligiosity ~ InRelationship * FertilityGroup', data=df).fit()\n# Display the regression results\nprint(model.summary())\n"
 }
 </Example>
-Research Question: How do relative group size and contest location influence the probability of a capuchin monkey group winning an intergroup contest? 
+Research Question: Do relative group size and contest location influence the probability of a capuchin monkey group winning an intergroup contest?
 Dataset Schema: {
   "dataset_description": "Intergroup competition is a common phenomenon observed in many social animals, ranging from ants to primates, and plays a crucial role in shaping access to resources and, consequently, fitness. Capuchin monkeys (Cebus capucinus) are known for their intense intergroup competition, which can sometimes even lead to lethal aggression. Researchers have been curious to understand the factors influencing the outcome of these contests. While the common belief is that larger groups have a competitive advantage, smaller capuchin groups have been observed defeating larger neighboring groups. This study by Crofoot et al. investigates how the location of an intergroup contest and the relative group sizes influence the probability of winning. The researchers used an Automated Radio Telemetry System (ARTS) to track the movements of six capuchin social groups of varying sizes on Barro Colorado Island, Panama. By analyzing the data on intergroup interactions and their locations, the researchers aim to shed light on the complex dynamics of intergroup competition in capuchin monkeys.",
   "fields": [
@@ -1598,56 +1642,1184 @@ Dataset Schema: {
 }
 Result: 
 
-===================[gpt-5-mini RESPONSE (4220)]=====================
+===================[gpt-5-mini RESPONSE (4140)]=====================
 {
   "cvars": {
     "ivs": [
       {
-        "description": "Relative group size advantage for the focal group (focal group size minus other group size), standardized (z-score). Positive values indicate the focal group is larger.",
+        "description": "Relative group size: log ratio of focal to other group size (standardized). Positive values mean focal group is larger than the other group. Used as independent predictor and in interaction with location advantage.",
         "columns": [
-          "SizeAdv_z"
+          "z_RelSize_log"
         ]
       },
       {
-        "description": "Relative contest location measured as the difference in distance of the other group and the focal group from their respective home-range centers (dist_other - dist_focal), standardized (z-score). Positive values indicate the contest is closer to the focal group's home center (i.e., in focal home area); negative values indicate it is closer to the other group's home center.",
+        "description": "Contest location advantage (standardized): continuous measure computed as dist_other - dist_focal (meters). Positive values indicate the contest occurred relatively closer to the focal group's home range center (i.e., a 'home advantage' for the focal group). Used as independent predictor and in interaction with relative group size.",
+        "columns": [
+          "z_LocationAdv"
+        ]
+      }
+    ],
+    "dv": {
+      "description": "Outcome of the intergroup contest: 1 if the focal group won, 0 if the other group won.",
+      "columns": [
+        "win"
+      ]
+    },
+    "controls": [
+      {
+        "description": "Relative number of adult males: focal males minus other males (standardized). Controls for sex-composition difference which may affect contest outcomes.",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "z_RelMales"
+        ]
+      },
+      {
+        "description": "Total group size in the contest (n_focal + n_other) (standardized). Controls for absolute scale of the contest.",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "z_TotalSize"
+        ]
+      }
+    ]
+  },
+  "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw dataset to the analysis-ready dataframe.\n\n    Produces the following analysis columns (all required by the model):\n      - win (kept as-is)                    : dependent binary outcome\n      - RelSize_log                         : log(n_focal / n_other)\n      - LocationAdv                         : dist_other - dist_focal (positive => nearer focal)\n      - LocationNearFocal                   : binary indicator (1 if dist_focal < dist_other)\n      - RelMales                            : m_focal - m_other\n      - TotalSize                           : n_focal + n_other\n      - z_RelSize_log, z_LocationAdv, z_RelMales, z_TotalSize : standardized versions used in the model\n      - dyad                                : kept for clustering of SEs\n\n    The function drops rows with missing values in essential columns.\n    \"\"\"\n    df = df.copy()\n\n    # Required columns for analysis\n    required = ['win', 'n_focal', 'n_other', 'dist_focal', 'dist_other', 'm_focal', 'm_other', 'dyad']\n    missing_required = [c for c in required if c not in df.columns]\n    if len(missing_required) > 0:\n        raise ValueError(f\"Missing required columns: {missing_required}\")\n\n    # Drop rows with NA in required columns\n    df = df.dropna(subset=required)\n\n    # Ensure numeric types\n    numeric_cols = ['win', 'n_focal', 'n_other', 'dist_focal', 'dist_other', 'm_focal', 'm_other', 'dyad']\n    for c in numeric_cols:\n        df[c] = pd.to_numeric(df[c], errors='coerce')\n\n    # Drop rows that turned NA after coercion\n    df = df.dropna(subset=numeric_cols)\n\n    # Create relative size: log ratio (use raw counts; counts here are >=5 so no zero issue)\n    df['RelSize_log'] = np.log(df['n_focal'] / df['n_other'])\n\n    # Location advantage: positive => contest closer to focal group's home center (dist_other > dist_focal)\n    df['LocationAdv'] = df['dist_other'] - df['dist_focal']\n\n    # Binary indicator: contest occurs nearer focal group's home center\n    df['LocationNearFocal'] = (df['dist_focal'] < df['dist_other']).astype(int)\n\n    # Relative number of adult males (could be important in contests)\n    df['RelMales'] = df['m_focal'] - df['m_other']\n\n    # Total size of participants (control)\n    df['TotalSize'] = df['n_focal'] + df['n_other']\n\n    # Standardize continuous predictors (z-scoring). Use population std (ddof=0) to be explicit.\n    for col in ['RelSize_log', 'LocationAdv', 'RelMales', 'TotalSize']:\n        mean = df[col].mean()\n        std = df[col].std(ddof=0)\n        if std == 0 or np.isnan(std):\n            # If no variation, create zero column to avoid division by zero\n            df['z_' + col] = 0.0\n        else:\n            df['z_' + col] = (df[col] - mean) / std\n\n    # Ensure win is integer 0/1\n    df['win'] = df['win'].astype(int)\n\n    # Keep columns necessary for modeling and diagnostics\n    keep_cols = ['win', 'RelSize_log', 'LocationAdv', 'LocationNearFocal', 'RelMales', 'TotalSize',\n                 'z_RelSize_log', 'z_LocationAdv', 'z_RelMales', 'z_TotalSize', 'dyad',\n                 'n_focal', 'n_other', 'm_focal', 'm_other', 'dist_focal', 'dist_other']\n    # Some of these may already exist; return a dataframe with at least these columns (if any missing, they will be added above)\n    df = df[keep_cols].reset_index(drop=True)\n\n    return df\n",
+  "m_code": "def model(df: pd.DataFrame):\n    \"\"\"\n    Fit a logistic regression (binomial GLM) predicting probability focal wins (win)\n    from relative group size, location advantage, their interaction, and the control covariates.\n\n    Uses cluster-robust standard errors clustered by 'dyad' to account for non-independence\n    of contests within the same dyad.\n\n    Model formula (Patsy-compatible):\n      win ~ z_RelSize_log * z_LocationAdv + z_RelMales + z_TotalSize\n\n    Returns the fitted model results with cluster-robust covariances.\n    \"\"\"\n    # Check required columns\n    required_model_cols = ['win', 'z_RelSize_log', 'z_LocationAdv', 'z_RelMales', 'z_TotalSize', 'dyad']\n    missing = [c for c in required_model_cols if c not in df.columns]\n    if missing:\n        raise ValueError(f\"Dataframe is missing columns required for modeling: {missing}\")\n\n    # Build model using formula interface\n    formula = 'win ~ z_RelSize_log * z_LocationAdv + z_RelMales + z_TotalSize'\n\n    # Fit binomial GLM\n    model_glm = sm.GLM.from_formula(formula, data=df, family=sm.families.Binomial())\n    res = model_glm.fit()\n\n    # Obtain cluster-robust covariance (clustered by dyad)\n    # .get_robustcov_results is used to adapt the covariance matrix\n    try:\n        res_cluster = res.get_robustcov_results(cov_type='cluster', groups=df['dyad'])\n    except Exception:\n        # Fallback: if clustering fails, return the original fit but warn the user\n        import warnings\n        warnings.warn('Clustered SE computation failed; returning the original GLM results without clustering.')\n        res_cluster = res\n\n    # Optionally, attach predicted probabilities and marginal effects for interpretation\n    df = df.copy()\n    df['pred_prob'] = res_cluster.predict(df)\n\n    # Return a dictionary with useful objects\n    return {\n        'results_clustered': res_cluster,\n        'predicted_dataframe': df,\n        'formula': formula\n    }\n"
+}
+===================[TOKENS]=====================
+Number of prompt tokens: 5227
+Number of total tokens: 9367
+
+===================[PROMPT (API Time: 56.70993208885193, Cache Time: None)]=====================
+=====[SYSTEM]=====:
+You are an AI Data Analysis Assistant who is an expert at writing an end-to-end scientific analysis given a research question and a dataset. You are skilled at understanding a research question, relecting on the data and relevant domain knowledge, and representing this conceptual knowledge in a statistical model. Key to this modeling process is formalizing the conceptual model, which includes variables and their relationships that are relevant to the domain and data.
+=====[USER]=====:
+<Instruction> 
+Given the research question, dataset formulate the conceptual model and write an analysis including all necessary data transformations and a statistical model to answer the research question. 
+</Instruction>
+
+<Format Instructions>
+You will return 3 things:
+1. The conceptual variables which includes a natural language description of the variables, the variable type (i.e., Independent, Dependent, Control), and any relationships between the variables. Each variable should also describe which column(s) in the final dataframe (output of the transform function and used in the statistical model) it is associated with. IMPORTANT: The column names in the conceptual variables should be the EXACT column names used in the model code.     
+2. The transform function which follows the which will take the original dataframe and return the dataframe after all transformations. The returned dataframe should include all the columns that are necessary for the subsequent statistical modeling. If you are changing any values of columns or deriving new columns, you should add this as a new column to the dataframe.     
+3. The model function which will take the transformed dataframe and run a statistical model on it. The model function should return the results of the model.
+
+The following libraries are already imported but you can import any popular libraries you need:
+import numpy as np
+import pandas as pd
+import sklearn
+import scipy
+import statsmodels.api as sm
+import matplotlib.pyplot as plt
+
+You are also allowed to use common machine learning libraries, including but not limited to:
+- xgboost
+- lightgbm
+- catboost
+- tensorflow / keras
+- torch (PyTorch)
+- pytorch-lightning
+- sklearn.experimental modules
+- imbalanced-learn (imblearn)
+
+Here is the code template for the transform function:
+```python
+def transform(df: pd.DataFrame) -> pd.DataFrame:
+    # Your code here
+    return df
+```
+Here is the code template for the model function:
+```python
+def model(df: pd.DataFrame) -> Any:
+    # Your code here
+    return results
+```
+
+Please return the conceptual variables, the transform function, and the model function in the format specified below:
+The output should be formatted as a JSON instance that conforms to the JSON schema below.
+
+As an example, for the schema {"properties": {"foo": {"title": "Foo", "description": "a list of strings", "type": "array", "items": {"type": "string"}}}, "required": ["foo"]}
+the object {"foo": ["bar", "baz"]} is a well-formatted instance of the schema. The object {"properties": {"foo": ["bar", "baz"]}} is not well-formatted.
+
+Here is the output schema:
+```
+{"$defs": {"AgentCVarsWithCol": {"properties": {"ivs": {"items": {"$ref": "#/$defs/IVarWithCol"}, "title": "Independent variables", "type": "array"}, "dv": {"allOf": [{"$ref": "#/$defs/DVarWithCol"}], "title": "Dependent variable"}, "controls": {"items": {"$ref": "#/$defs/ControlVarWithCol"}, "title": "Control variables", "type": "array"}}, "required": ["ivs", "dv", "controls"], "title": "AgentCVarsWithCol", "type": "object"}, "ControlVarWithCol": {"properties": {"description": {"title": "Description of the control variable variable", "type": "string"}, "is_moderator": {"title": "Whether the variable is a moderator.", "type": "boolean"}, "moderator_on": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": "", "title": "The variable that the control variable is moderating. Only applicable for control variables that are moderators."}, "columns": {"items": {"type": "string"}, "title": "The column(s) in the FINAL dataframe used in the STATISTICAL MODEL that corresponds to the control variable", "type": "array"}}, "required": ["description", "is_moderator", "columns"], "title": "ControlVarWithCol", "type": "object"}, "DVarWithCol": {"properties": {"description": {"title": "Description of the dependent variable variable", "type": "string"}, "columns": {"items": {"type": "string"}, "title": "The column(s) in the FINAL dataframe used in the STATISTICAL MODEL that corresponds to the dependent variable", "type": "array"}}, "required": ["description", "columns"], "title": "DVarWithCol", "type": "object"}, "IVarWithCol": {"properties": {"description": {"title": "Description of the independent variable variable", "type": "string"}, "columns": {"items": {"type": "string"}, "title": "The column(s) in the FINAL dataframe used in the STATISTICAL MODEL that corresponds to the independent variable", "type": "array"}}, "required": ["description", "columns"], "title": "IVarWithCol", "type": "object"}}, "properties": {"cvars": {"allOf": [{"$ref": "#/$defs/AgentCVarsWithCol"}], "title": "Conceptual variables"}, "transform_code": {"title": "The code that transforms the data", "type": "string"}, "m_code": {"title": "The code for the statistical modeling", "type": "string"}}, "required": ["cvars", "transform_code", "m_code"]}
+```
+</Format Instructions>
+<Example>
+Research Question: What is the effect of hormonal fluctuations associated with fertility on women's religiosity?
+Dataset Schema: {
+  "dataset_description": "A total of 275 women participated in the study for this dataset. Each participant was asked to answer three religiosity items using a 9-point scale. Further, each participant was asked to indicate the typical length of her menstrual cycle, the start date of her last menstrual period, and the start date of her previous menstrual period. In addition, each woman indicated how sure she was about these two start dates, using a 9-point scale. Finally, each woman was asked to indicate her current romantic relationship status with the following four response options: (1) not dating/romantically involved with anyone, (2) dating or involved with only one partner, (3) engaged or living with my partner, and (4) married.",
+  "fields": [
+    {
+      "column": "WorkerID",
+      "properties": {
+        "dtype": "number",
+        "std": 79.52986860293433,
+        "min": 1,
+        "max": 275,
+        "samples": [
+          31,
+          140,
+          196
+        ],
+        "num_unique_values": 275,
+        "description": "The unique identifier of a participant."
+      }
+    },
+    {
+      "column": "Rel1",
+      "properties": {
+        "dtype": "number",
+        "std": 3.284246850080361,
+        "min": 1,
+        "max": 9,
+        "samples": [
+          4,
+          1,
+          9
+        ],
+        "num_unique_values": 9,
+        "description": "'How much do you believe in God?' 1 \u2013 9"
+      }
+    },
+    {
+      "column": "Rel2",
+      "properties": {
+        "dtype": "number",
+        "std": 3.087872913331648,
+        "min": 1.0,
+        "max": 9.0,
+        "samples": [
+          4.0,
+          2.0,
+          6.0
+        ],
+        "num_unique_values": 9,
+        "description": "'I see myself as a religiously oriented person.' 1 \u2013 9"
+      }
+    },
+    {
+      "column": "Rel3",
+      "properties": {
+        "dtype": "number",
+        "std": 3.333610823065186,
+        "min": 1.0,
+        "max": 9.0,
+        "samples": [
+          3.0,
+          1.0,
+          7.0
+        ],
+        "num_unique_values": 9,
+        "description": "'I believe that God or a Higher Power is responsible for my existence.' 1 \u2013 9"
+      }
+    },
+    {
+      "column": "Sure1",
+      "properties": {
+        "dtype": "number",
+        "std": 1.5732501786909676,
+        "min": 1,
+        "max": 9,
+        "samples": [
+          4,
+          7,
+          9
+        ],
+        "num_unique_values": 8,
+        "description": "In reference to `StartDateofLastPeriod`,  'How sure are you about that date?' 1 \u2013 9."
+      }
+    },
+    {
+      "column": "Sure2",
+      "properties": {
+        "dtype": "number",
+        "std": 2.221975065515302,
+        "min": 1,
+        "max": 9,
+        "samples": [
+          6,
+          3,
+          7
+        ],
+        "num_unique_values": 9,
+        "description": "In reference to `StartDateofPeriodBeforeLast`,  'How sure are you about that date?' 1 \u2013 9."
+      }
+    },
+    {
+      "column": "Relationship",
+      "properties": {
+        "dtype": "number",
+        "std": 1.167327837424664,
+        "min": 1,
+        "max": 4,
+        "samples": [
+          1,
+          2,
+          3
+        ],
+        "num_unique_values": 4,
+        "description": "Answer to 'What is your current romantic relationship status?' (1) not dating/romantically involved with anyone, (2) dating or involved with only one partner, (3) engaged or living with my partner, (4) married"
+      }
+    },
+    {
+      "column": "ReportedCycleLength",
+      "properties": {
+        "dtype": "number",
+        "std": 2.6714983210492633,
+        "min": 21.0,
+        "max": 38.0,
+        "samples": [
+          21.0,
+          22.0,
+          26.0
+        ],
+        "num_unique_values": 17,
+        "description": "Answer to 'How many days long are your menstrual cycles? (for most women, the range is between 25-35 days) Keep in mind this is the number of days from the start of one menstrual period to the start of the next menstrual period and NOT the length of your menstrual bleeding.'"
+      }
+    },
+    {
+      "column": "DateTesting",
+      "properties": {
+        "dtype": "date",
+        "min": "03/12/12",
+        "max": "04/27/12",
+        "samples": [
+          "04/06/12",
+          "04/26/12",
+          "03/12/12"
+        ],
+        "num_unique_values": 13,
+        "description": "Date of participant filling in the questionnaire"
+      }
+    },
+    {
+      "column": "StartDateofLastPeriod",
+      "properties": {
+        "dtype": "date",
+        "min": "02/06/12",
+        "max": "04/26/12",
+        "samples": [
+          "02/16/12",
+          "03/01/12",
+          "04/25/12"
+        ],
+        "num_unique_values": 61,
+        "description": "Answer to 'Please give your best estimate of the date on which you started your last period (please be as precise as possible). This date was probably within the last few weeks. Sometimes thinking of where you were when you started your last period helps. For instance, was it on a weekend?, were you at work, was it during a football game?, etc. Please write the date in mm/dd/yyyy format (e.g., 8/18/2012).'"
+      }
+    },
+    {
+      "column": "StartDateofPeriodBeforeLast",
+      "properties": {
+        "dtype": "date",
+        "min": "01/03/12",
+        "max": "03/29/12",
+        "samples": [
+          "01/15/12",
+          "02/04/12",
+          "03/24/12"
+        ],
+        "num_unique_values": 61,
+        "description": "Answer to 'Please give your best estimate of the date on which you started the period before your last period (please be as precise as possible). Please write the date in mm/dd/yyyy format (e.g., 7/18/2012).'"
+      }
+    }
+  ],
+  "num_rows": 275,
+  "field_names": [
+    "WorkerID",
+    "Rel1",
+    "Rel2",
+    "Rel3",
+    "Sure1",
+    "Sure2",
+    "Relationship",
+    "ReportedCycleLength",
+    "DateTesting",
+    "StartDateofLastPeriod",
+    "StartDateofPeriodBeforeLast"
+  ]
+}
+Result: {
+  "cvars": {
+    "ivs": [
+      {
+        "description": "Women's fertility",
+        "columns": [
+          "FertilityGroup"
+        ]
+      }
+    ],
+    "dv": {
+      "description": "Women's religiosity",
+      "columns": [
+        "AvgReligiosity"
+      ]
+    },
+    "controls": [
+      {
+        "description": "Relationship status of the individual",
+        "is_moderator": true,
+        "moderator_on": "Women's fertility",
+        "columns": [
+          "InRelationship"
+        ]
+      }
+    ]
+  },
+  "transform_code": "# drop the rows with missing values in the ReportedCycleLength, Rel1, Rel2, and Rel3 columns\ndf = df.dropna(subset=['ReportedCycleLength'])\ndf = df.dropna(subset=['Rel1', 'Rel2', 'Rel3'])\n\ndf['AvgReligiosity'] = df[['Rel1', 'Rel2', 'Rel3']].mean(axis=1)\n\n\n# Convert date columns to datetime format\ndf['DateTesting'] = pd.to_datetime(df['DateTesting'], format='%m/%d/%y')\ndf['StartDateofLastPeriod'] = pd.to_datetime(df['StartDateofLastPeriod'], format='%m/%d/%y')\ndf['StartDateofPeriodBeforeLast'] = pd.to_datetime(df['StartDateofPeriodBeforeLast'], format='%m/%d/%y')\n\n# Calculate the cycle length based on provided dates\ndf['ReportedCycleLength'] = (df['StartDateofLastPeriod'] - df['StartDateofPeriodBeforeLast']).dt.days\n# Calculate the expected start date of the next menstrual period\n\ndf['ExpectedNextPeriod'] = df['StartDateofLastPeriod'] + pd.to_timedelta(df['ReportedCycleLength'], unit='d')\n\n# Calculate the day of ovulation by subtracting 14 days from the expected start date of the next period\n# since ovulation typically occurs around 14 days before the start of the next period\ndf['OvulationDate'] = df['ExpectedNextPeriod'] - pd.to_timedelta(14, unit='d')\n# Calculate the cycle day on the date of testing\ndf['CycleDay'] = (df['DateTesting'] - df['OvulationDate']).dt.days + 14\n# Define high-fertility (cycle days 6-14) and low-fertility (cycle days 17-27) groups\ndf['FertilityGroup'] = df['CycleDay'].apply(lambda x: 'High-Fertility' if 6 <= x <= 14 else ('Low-Fertility' if 17 <= x <= 27 else 'Other'))\n# Filter out the 'Other' group to focus on the high and low fertility groups\ndf = df[df['FertilityGroup'].isin(['High-Fertility', 'Low-Fertility'])]\n\n\ndf['IsIncommittedRelationship'] = df['Relationship'].apply(lambda x: 0 if x in [1,2] else 1)\ndf['InRelationship'] = df['Relationship'].apply(lambda x: 0 if x == 1 else 1)\ndf['IsInRelationship'] = df['Relationship'].apply(lambda x: 0 if x == 1 else 1)\n",
+  "m_code": "model = smf.ols('AvgReligiosity ~ InRelationship * FertilityGroup', data=df).fit()\n# Display the regression results\nprint(model.summary())\n"
+}
+</Example>
+Research Question: Do relative group size and contest location influence the probability of a capuchin monkey group winning an intergroup contest?
+Dataset Schema: {
+  "dataset_description": "Intergroup competition is a common phenomenon observed in many social animals, ranging from ants to primates, and plays a crucial role in shaping access to resources and, consequently, fitness. Capuchin monkeys (Cebus capucinus) are known for their intense intergroup competition, which can sometimes even lead to lethal aggression. Researchers have been curious to understand the factors influencing the outcome of these contests. While the common belief is that larger groups have a competitive advantage, smaller capuchin groups have been observed defeating larger neighboring groups. This study by Crofoot et al. investigates how the location of an intergroup contest and the relative group sizes influence the probability of winning. The researchers used an Automated Radio Telemetry System (ARTS) to track the movements of six capuchin social groups of varying sizes on Barro Colorado Island, Panama. By analyzing the data on intergroup interactions and their locations, the researchers aim to shed light on the complex dynamics of intergroup competition in capuchin monkeys.",
+  "fields": [
+    {
+      "column": "focal",
+      "properties": {
+        "dtype": "number",
+        "std": 1.7600287353976036,
+        "min": 1,
+        "max": 6,
+        "samples": [
+          2,
+          6,
+          3
+        ],
+        "num_unique_values": 6,
+        "semantic_type": "",
+        "description": "ID of focal group"
+      }
+    },
+    {
+      "column": "other",
+      "properties": {
+        "dtype": "number",
+        "std": 1.7076922867303992,
+        "min": 1,
+        "max": 6,
+        "samples": [
+          1,
+          5,
+          3
+        ],
+        "num_unique_values": 6,
+        "semantic_type": "",
+        "description": "ID of other group"
+      }
+    },
+    {
+      "column": "dyad",
+      "properties": {
+        "dtype": "number",
+        "std": 1.8654044648016352,
+        "min": 1,
+        "max": 8,
+        "samples": [
+          5,
+          8,
+          1
+        ],
+        "num_unique_values": 8,
+        "semantic_type": "",
+        "description": "ID of specific dyad pair of groups"
+      }
+    },
+    {
+      "column": "win",
+      "properties": {
+        "dtype": "number",
+        "std": 0.5016608833298435,
+        "min": 0,
+        "max": 1,
+        "samples": [
+          1,
+          0
+        ],
+        "num_unique_values": 2,
+        "semantic_type": "",
+        "description": "1 if focal won contest, 0 if other won"
+      }
+    },
+    {
+      "column": "dist_focal",
+      "properties": {
+        "dtype": "number",
+        "std": 148.7312352492844,
+        "min": 72,
+        "max": 749,
+        "samples": [
+          181,
+          259,
+          328
+        ],
+        "num_unique_values": 54,
+        "semantic_type": "",
+        "description": "Distance in meters of focal group from the center of its home range"
+      }
+    },
+    {
+      "column": "dist_other",
+      "properties": {
+        "dtype": "number",
+        "std": 182.0470877706074,
+        "min": 55,
+        "max": 853,
+        "samples": [
+          577,
+          538,
+          469
+        ],
+        "num_unique_values": 56,
+        "semantic_type": "",
+        "description": "Distance in meters of other group from the center of its home range"
+      }
+    },
+    {
+      "column": "n_focal",
+      "properties": {
+        "dtype": "number",
+        "std": 3.1236370288433455,
+        "min": 5,
+        "max": 13,
+        "samples": [
+          10,
+          13,
+          5
+        ],
+        "num_unique_values": 4,
+        "semantic_type": "",
+        "description": "Number of individuals in focal group"
+      }
+    },
+    {
+      "column": "n_other",
+      "properties": {
+        "dtype": "number",
+        "std": 2.7450665200750644,
+        "min": 5,
+        "max": 13,
+        "samples": [
+          6,
+          5,
+          13
+        ],
+        "num_unique_values": 4,
+        "semantic_type": "",
+        "description": "Number of individuals in other group"
+      }
+    },
+    {
+      "column": "m_focal",
+      "properties": {
+        "dtype": "number",
+        "std": 0.7582975168210291,
+        "min": 2,
+        "max": 4,
+        "samples": [
+          2,
+          3,
+          4
+        ],
+        "num_unique_values": 3,
+        "semantic_type": "",
+        "description": "Number of males in focal group"
+      }
+    },
+    {
+      "column": "m_other",
+      "properties": {
+        "dtype": "number",
+        "std": 0.653530594811373,
+        "min": 2,
+        "max": 4,
+        "samples": [
+          4,
+          2,
+          3
+        ],
+        "num_unique_values": 3,
+        "semantic_type": "",
+        "description": "Number of males in other group"
+      }
+    },
+    {
+      "column": "f_focal",
+      "properties": {
+        "dtype": "number",
+        "std": 2.37806064131954,
+        "min": 3,
+        "max": 9,
+        "samples": [
+          7,
+          9,
+          3
+        ],
+        "num_unique_values": 4,
+        "semantic_type": "",
+        "description": "Number of females in focal group"
+      }
+    },
+    {
+      "column": "f_other",
+      "properties": {
+        "dtype": "number",
+        "std": 2.1052177853549865,
+        "min": 3,
+        "max": 9,
+        "samples": [
+          4,
+          3,
+          9
+        ],
+        "num_unique_values": 4,
+        "semantic_type": "",
+        "description": "Number of females in other group"
+      }
+    }
+  ],
+  "num_rows": 58,
+  "field_names": [
+    "focal",
+    "other",
+    "dyad",
+    "win",
+    "dist_focal",
+    "dist_other",
+    "n_focal",
+    "n_other",
+    "m_focal",
+    "m_other",
+    "f_focal",
+    "f_other"
+  ]
+}
+Result: 
+
+===================[gpt-5-mini RESPONSE (3516)]=====================
+{
+  "cvars": {
+    "ivs": [
+      {
+        "description": "Relative group size (focal minus other). Primary predictor capturing whether the focal group is numerically larger than the opponent. Standardized (z) to aid model estimation and interpretation.",
+        "columns": [
+          "RelSize_diff_z"
+        ]
+      },
+      {
+        "description": "Relative contest location expressed as distance difference (other group distance from its home-range center minus focal group distance from its home-range center). Positive values indicate the focal group is closer to its home-range center than the other group (potential home advantage). This predictor is standardized (z).",
+        "columns": [
+          "dist_diff_z"
+        ]
+      }
+    ],
+    "dv": {
+      "description": "Outcome: whether the focal group won the intergroup contest (1 = focal won, 0 = other won).",
+      "columns": [
+        "win"
+      ]
+    },
+    "controls": [
+      {
+        "description": "Binary indicator whether the focal group was closer to its home-range center than the other group (1 = focal closer, 0 = not). Treated as a moderator on the effect of relative group size to test whether size advantage depends on being closer to home.",
+        "is_moderator": true,
+        "moderator_on": "Relative group size",
+        "columns": [
+          "FocalCloser"
+        ]
+      },
+      {
+        "description": "Difference in number of adult males (focal - other). Controls for composition differences that may influence contest outcome beyond total group size.",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "RelMale_diff"
+        ]
+      },
+      {
+        "description": "Difference in number of adult females (focal - other). Controls for composition differences that may influence contest outcome beyond total group size.",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "RelFem_diff"
+        ]
+      },
+      {
+        "description": "Dyad identifier used for cluster-robust standard errors (groups of repeated encounters between the same group pair). Not a covariate in the regression formula but used to compute clustered SEs.",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "dyad"
+        ]
+      }
+    ]
+  },
+  "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform original dataframe to produce the columns required for modeling.\n    - Drops rows with missing values in key columns used to compute predictors/outcome.\n    - Creates relative size and composition differences.\n    - Creates distance difference and a binary focal-closer indicator.\n    - Standardizes continuous predictors (z-scores) and returns the dataframe with all required columns.\n    \"\"\"\n    # copy to avoid modifying original\n    df = df.copy()\n\n    # Ensure required columns exist\n    required = ['win', 'n_focal', 'n_other', 'm_focal', 'm_other', 'f_focal', 'f_other', 'dist_focal', 'dist_other', 'dyad']\n    missing = [c for c in required if c not in df.columns]\n    if len(missing) > 0:\n        raise ValueError(f\"Missing required columns in input dataframe: {missing}\")\n\n    # Drop rows with missing critical values\n    df = df.dropna(subset=required)\n\n    # Create relative size: difference (focal - other) and ratio\n    df['RelSize_diff'] = df['n_focal'] - df['n_other']\n    # ratio (keep for diagnostics; not required for the primary model but helpful)\n    # guard division by zero, though n_other >=5 in this dataset\n    df['RelSize_ratio'] = df['n_focal'] / df['n_other'].replace({0: np.nan})\n\n    # Composition differences (males, females)\n    df['RelMale_diff'] = df['m_focal'] - df['m_other']\n    df['RelFem_diff'] = df['f_focal'] - df['f_other']\n\n    # Location: other distance minus focal distance. Positive => focal is closer to its home center than other.\n    df['dist_diff'] = df['dist_other'] - df['dist_focal']\n\n    # Binary indicator whether focal is closer to its home-range center than the other\n    df['FocalCloser'] = (df['dist_focal'] < df['dist_other']).astype(int)\n\n    # Standardize continuous predictors (z-scores). Use population std (ddof=0) for consistency.\n    for col in ['RelSize_diff', 'dist_diff']:\n        mean = df[col].mean()\n        std = df[col].std(ddof=0)\n        if std == 0 or np.isnan(std):\n            # if no variance, create zeroed z-score\n            df[col + '_z'] = 0.0\n        else:\n            df[col + '_z'] = (df[col] - mean) / std\n\n    # Rename standardized columns to match those referenced in the conceptual variables\n    # RelSize_diff_z and dist_diff_z are created above\n\n    # Ensure win is integer 0/1\n    df['win'] = df['win'].astype(int)\n\n    # Keep only columns necessary for modeling plus identifiers for inspection\n    keep_cols = ['focal', 'other', 'dyad', 'win',\n                 'RelSize_diff', 'RelSize_ratio', 'RelSize_diff_z',\n                 'RelMale_diff', 'RelFem_diff',\n                 'dist_diff', 'dist_diff_z', 'FocalCloser']\n\n    # Some columns (e.g., focal/other) may have been missing in required earlier; they are optional but helpful\n    cols_present = [c for c in keep_cols if c in df.columns]\n    df = df[cols_present]\n\n    return df\n",
+  "m_code": "def model(df: pd.DataFrame) -> Any:\n    \"\"\"\n    Fit a logistic regression predicting probability focal group wins ('win').\n    - Primary predictors: RelSize_diff_z (standardized size difference) and dist_diff_z (standardized distance difference).\n    - Test for moderation by FocalCloser via an interaction between RelSize_diff_z and FocalCloser.\n    - Controls: RelMale_diff and RelFem_diff.\n    - Use dyad-clustered robust standard errors to account for non-independence of repeated dyad encounters.\n\n    Returns the fitted results object with clustered robust covariance.\n    \"\"\"\n    import statsmodels.formula.api as smf\n\n    # Check that required columns exist\n    needed = ['win', 'RelSize_diff_z', 'dist_diff_z', 'FocalCloser', 'RelMale_diff', 'RelFem_diff', 'dyad']\n    miss = [c for c in needed if c not in df.columns]\n    if len(miss) > 0:\n        raise ValueError(f\"Missing required columns for modeling: {miss}\")\n\n    # Build formula with interaction between size and focal-closer (moderation test)\n    formula = 'win ~ RelSize_diff_z * FocalCloser + dist_diff_z + RelMale_diff + RelFem_diff'\n\n    # Fit binomial logistic regression\n    model = smf.logit(formula=formula, data=df)\n    res = model.fit(disp=False)\n\n    # Obtain cluster-robust standard errors clustered on dyad\n    try:\n        res_cluster = res.get_robustcov_results(cov_type='cluster', groups=df['dyad'])\n    except Exception:\n        # Fallback: if clustering fails, return regular result but warn the user\n        import warnings\n        warnings.warn('Cluster-robust SEs failed; returning unclustered results.')\n        res_cluster = res\n\n    # Print summary for user inspection and also return the robust results object\n    print(res_cluster.summary())\n\n    return res_cluster\n"
+}
+===================[TOKENS]=====================
+Number of prompt tokens: 5227
+Number of total tokens: 8743
+
+===================[PROMPT (API Time: 66.00507426261902, Cache Time: None)]=====================
+=====[SYSTEM]=====:
+You are an AI Data Analysis Assistant who is an expert at writing an end-to-end scientific analysis given a research question and a dataset. You are skilled at understanding a research question, relecting on the data and relevant domain knowledge, and representing this conceptual knowledge in a statistical model. Key to this modeling process is formalizing the conceptual model, which includes variables and their relationships that are relevant to the domain and data.
+=====[USER]=====:
+<Instruction> 
+Given the research question, dataset formulate the conceptual model and write an analysis including all necessary data transformations and a statistical model to answer the research question. 
+</Instruction>
+
+<Format Instructions>
+You will return 3 things:
+1. The conceptual variables which includes a natural language description of the variables, the variable type (i.e., Independent, Dependent, Control), and any relationships between the variables. Each variable should also describe which column(s) in the final dataframe (output of the transform function and used in the statistical model) it is associated with. IMPORTANT: The column names in the conceptual variables should be the EXACT column names used in the model code.     
+2. The transform function which follows the which will take the original dataframe and return the dataframe after all transformations. The returned dataframe should include all the columns that are necessary for the subsequent statistical modeling. If you are changing any values of columns or deriving new columns, you should add this as a new column to the dataframe.     
+3. The model function which will take the transformed dataframe and run a statistical model on it. The model function should return the results of the model.
+
+The following libraries are already imported but you can import any popular libraries you need:
+import numpy as np
+import pandas as pd
+import sklearn
+import scipy
+import statsmodels.api as sm
+import matplotlib.pyplot as plt
+
+You are also allowed to use common machine learning libraries, including but not limited to:
+- xgboost
+- lightgbm
+- catboost
+- tensorflow / keras
+- torch (PyTorch)
+- pytorch-lightning
+- sklearn.experimental modules
+- imbalanced-learn (imblearn)
+
+Here is the code template for the transform function:
+```python
+def transform(df: pd.DataFrame) -> pd.DataFrame:
+    # Your code here
+    return df
+```
+Here is the code template for the model function:
+```python
+def model(df: pd.DataFrame) -> Any:
+    # Your code here
+    return results
+```
+
+Please return the conceptual variables, the transform function, and the model function in the format specified below:
+The output should be formatted as a JSON instance that conforms to the JSON schema below.
+
+As an example, for the schema {"properties": {"foo": {"title": "Foo", "description": "a list of strings", "type": "array", "items": {"type": "string"}}}, "required": ["foo"]}
+the object {"foo": ["bar", "baz"]} is a well-formatted instance of the schema. The object {"properties": {"foo": ["bar", "baz"]}} is not well-formatted.
+
+Here is the output schema:
+```
+{"$defs": {"AgentCVarsWithCol": {"properties": {"ivs": {"items": {"$ref": "#/$defs/IVarWithCol"}, "title": "Independent variables", "type": "array"}, "dv": {"allOf": [{"$ref": "#/$defs/DVarWithCol"}], "title": "Dependent variable"}, "controls": {"items": {"$ref": "#/$defs/ControlVarWithCol"}, "title": "Control variables", "type": "array"}}, "required": ["ivs", "dv", "controls"], "title": "AgentCVarsWithCol", "type": "object"}, "ControlVarWithCol": {"properties": {"description": {"title": "Description of the control variable variable", "type": "string"}, "is_moderator": {"title": "Whether the variable is a moderator.", "type": "boolean"}, "moderator_on": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": "", "title": "The variable that the control variable is moderating. Only applicable for control variables that are moderators."}, "columns": {"items": {"type": "string"}, "title": "The column(s) in the FINAL dataframe used in the STATISTICAL MODEL that corresponds to the control variable", "type": "array"}}, "required": ["description", "is_moderator", "columns"], "title": "ControlVarWithCol", "type": "object"}, "DVarWithCol": {"properties": {"description": {"title": "Description of the dependent variable variable", "type": "string"}, "columns": {"items": {"type": "string"}, "title": "The column(s) in the FINAL dataframe used in the STATISTICAL MODEL that corresponds to the dependent variable", "type": "array"}}, "required": ["description", "columns"], "title": "DVarWithCol", "type": "object"}, "IVarWithCol": {"properties": {"description": {"title": "Description of the independent variable variable", "type": "string"}, "columns": {"items": {"type": "string"}, "title": "The column(s) in the FINAL dataframe used in the STATISTICAL MODEL that corresponds to the independent variable", "type": "array"}}, "required": ["description", "columns"], "title": "IVarWithCol", "type": "object"}}, "properties": {"cvars": {"allOf": [{"$ref": "#/$defs/AgentCVarsWithCol"}], "title": "Conceptual variables"}, "transform_code": {"title": "The code that transforms the data", "type": "string"}, "m_code": {"title": "The code for the statistical modeling", "type": "string"}}, "required": ["cvars", "transform_code", "m_code"]}
+```
+</Format Instructions>
+<Example>
+Research Question: What is the effect of hormonal fluctuations associated with fertility on women's religiosity?
+Dataset Schema: {
+  "dataset_description": "A total of 275 women participated in the study for this dataset. Each participant was asked to answer three religiosity items using a 9-point scale. Further, each participant was asked to indicate the typical length of her menstrual cycle, the start date of her last menstrual period, and the start date of her previous menstrual period. In addition, each woman indicated how sure she was about these two start dates, using a 9-point scale. Finally, each woman was asked to indicate her current romantic relationship status with the following four response options: (1) not dating/romantically involved with anyone, (2) dating or involved with only one partner, (3) engaged or living with my partner, and (4) married.",
+  "fields": [
+    {
+      "column": "WorkerID",
+      "properties": {
+        "dtype": "number",
+        "std": 79.52986860293433,
+        "min": 1,
+        "max": 275,
+        "samples": [
+          31,
+          140,
+          196
+        ],
+        "num_unique_values": 275,
+        "description": "The unique identifier of a participant."
+      }
+    },
+    {
+      "column": "Rel1",
+      "properties": {
+        "dtype": "number",
+        "std": 3.284246850080361,
+        "min": 1,
+        "max": 9,
+        "samples": [
+          4,
+          1,
+          9
+        ],
+        "num_unique_values": 9,
+        "description": "'How much do you believe in God?' 1 \u2013 9"
+      }
+    },
+    {
+      "column": "Rel2",
+      "properties": {
+        "dtype": "number",
+        "std": 3.087872913331648,
+        "min": 1.0,
+        "max": 9.0,
+        "samples": [
+          4.0,
+          2.0,
+          6.0
+        ],
+        "num_unique_values": 9,
+        "description": "'I see myself as a religiously oriented person.' 1 \u2013 9"
+      }
+    },
+    {
+      "column": "Rel3",
+      "properties": {
+        "dtype": "number",
+        "std": 3.333610823065186,
+        "min": 1.0,
+        "max": 9.0,
+        "samples": [
+          3.0,
+          1.0,
+          7.0
+        ],
+        "num_unique_values": 9,
+        "description": "'I believe that God or a Higher Power is responsible for my existence.' 1 \u2013 9"
+      }
+    },
+    {
+      "column": "Sure1",
+      "properties": {
+        "dtype": "number",
+        "std": 1.5732501786909676,
+        "min": 1,
+        "max": 9,
+        "samples": [
+          4,
+          7,
+          9
+        ],
+        "num_unique_values": 8,
+        "description": "In reference to `StartDateofLastPeriod`,  'How sure are you about that date?' 1 \u2013 9."
+      }
+    },
+    {
+      "column": "Sure2",
+      "properties": {
+        "dtype": "number",
+        "std": 2.221975065515302,
+        "min": 1,
+        "max": 9,
+        "samples": [
+          6,
+          3,
+          7
+        ],
+        "num_unique_values": 9,
+        "description": "In reference to `StartDateofPeriodBeforeLast`,  'How sure are you about that date?' 1 \u2013 9."
+      }
+    },
+    {
+      "column": "Relationship",
+      "properties": {
+        "dtype": "number",
+        "std": 1.167327837424664,
+        "min": 1,
+        "max": 4,
+        "samples": [
+          1,
+          2,
+          3
+        ],
+        "num_unique_values": 4,
+        "description": "Answer to 'What is your current romantic relationship status?' (1) not dating/romantically involved with anyone, (2) dating or involved with only one partner, (3) engaged or living with my partner, (4) married"
+      }
+    },
+    {
+      "column": "ReportedCycleLength",
+      "properties": {
+        "dtype": "number",
+        "std": 2.6714983210492633,
+        "min": 21.0,
+        "max": 38.0,
+        "samples": [
+          21.0,
+          22.0,
+          26.0
+        ],
+        "num_unique_values": 17,
+        "description": "Answer to 'How many days long are your menstrual cycles? (for most women, the range is between 25-35 days) Keep in mind this is the number of days from the start of one menstrual period to the start of the next menstrual period and NOT the length of your menstrual bleeding.'"
+      }
+    },
+    {
+      "column": "DateTesting",
+      "properties": {
+        "dtype": "date",
+        "min": "03/12/12",
+        "max": "04/27/12",
+        "samples": [
+          "04/06/12",
+          "04/26/12",
+          "03/12/12"
+        ],
+        "num_unique_values": 13,
+        "description": "Date of participant filling in the questionnaire"
+      }
+    },
+    {
+      "column": "StartDateofLastPeriod",
+      "properties": {
+        "dtype": "date",
+        "min": "02/06/12",
+        "max": "04/26/12",
+        "samples": [
+          "02/16/12",
+          "03/01/12",
+          "04/25/12"
+        ],
+        "num_unique_values": 61,
+        "description": "Answer to 'Please give your best estimate of the date on which you started your last period (please be as precise as possible). This date was probably within the last few weeks. Sometimes thinking of where you were when you started your last period helps. For instance, was it on a weekend?, were you at work, was it during a football game?, etc. Please write the date in mm/dd/yyyy format (e.g., 8/18/2012).'"
+      }
+    },
+    {
+      "column": "StartDateofPeriodBeforeLast",
+      "properties": {
+        "dtype": "date",
+        "min": "01/03/12",
+        "max": "03/29/12",
+        "samples": [
+          "01/15/12",
+          "02/04/12",
+          "03/24/12"
+        ],
+        "num_unique_values": 61,
+        "description": "Answer to 'Please give your best estimate of the date on which you started the period before your last period (please be as precise as possible). Please write the date in mm/dd/yyyy format (e.g., 7/18/2012).'"
+      }
+    }
+  ],
+  "num_rows": 275,
+  "field_names": [
+    "WorkerID",
+    "Rel1",
+    "Rel2",
+    "Rel3",
+    "Sure1",
+    "Sure2",
+    "Relationship",
+    "ReportedCycleLength",
+    "DateTesting",
+    "StartDateofLastPeriod",
+    "StartDateofPeriodBeforeLast"
+  ]
+}
+Result: {
+  "cvars": {
+    "ivs": [
+      {
+        "description": "Women's fertility",
+        "columns": [
+          "FertilityGroup"
+        ]
+      }
+    ],
+    "dv": {
+      "description": "Women's religiosity",
+      "columns": [
+        "AvgReligiosity"
+      ]
+    },
+    "controls": [
+      {
+        "description": "Relationship status of the individual",
+        "is_moderator": true,
+        "moderator_on": "Women's fertility",
+        "columns": [
+          "InRelationship"
+        ]
+      }
+    ]
+  },
+  "transform_code": "# drop the rows with missing values in the ReportedCycleLength, Rel1, Rel2, and Rel3 columns\ndf = df.dropna(subset=['ReportedCycleLength'])\ndf = df.dropna(subset=['Rel1', 'Rel2', 'Rel3'])\n\ndf['AvgReligiosity'] = df[['Rel1', 'Rel2', 'Rel3']].mean(axis=1)\n\n\n# Convert date columns to datetime format\ndf['DateTesting'] = pd.to_datetime(df['DateTesting'], format='%m/%d/%y')\ndf['StartDateofLastPeriod'] = pd.to_datetime(df['StartDateofLastPeriod'], format='%m/%d/%y')\ndf['StartDateofPeriodBeforeLast'] = pd.to_datetime(df['StartDateofPeriodBeforeLast'], format='%m/%d/%y')\n\n# Calculate the cycle length based on provided dates\ndf['ReportedCycleLength'] = (df['StartDateofLastPeriod'] - df['StartDateofPeriodBeforeLast']).dt.days\n# Calculate the expected start date of the next menstrual period\n\ndf['ExpectedNextPeriod'] = df['StartDateofLastPeriod'] + pd.to_timedelta(df['ReportedCycleLength'], unit='d')\n\n# Calculate the day of ovulation by subtracting 14 days from the expected start date of the next period\n# since ovulation typically occurs around 14 days before the start of the next period\ndf['OvulationDate'] = df['ExpectedNextPeriod'] - pd.to_timedelta(14, unit='d')\n# Calculate the cycle day on the date of testing\ndf['CycleDay'] = (df['DateTesting'] - df['OvulationDate']).dt.days + 14\n# Define high-fertility (cycle days 6-14) and low-fertility (cycle days 17-27) groups\ndf['FertilityGroup'] = df['CycleDay'].apply(lambda x: 'High-Fertility' if 6 <= x <= 14 else ('Low-Fertility' if 17 <= x <= 27 else 'Other'))\n# Filter out the 'Other' group to focus on the high and low fertility groups\ndf = df[df['FertilityGroup'].isin(['High-Fertility', 'Low-Fertility'])]\n\n\ndf['IsIncommittedRelationship'] = df['Relationship'].apply(lambda x: 0 if x in [1,2] else 1)\ndf['InRelationship'] = df['Relationship'].apply(lambda x: 0 if x == 1 else 1)\ndf['IsInRelationship'] = df['Relationship'].apply(lambda x: 0 if x == 1 else 1)\n",
+  "m_code": "model = smf.ols('AvgReligiosity ~ InRelationship * FertilityGroup', data=df).fit()\n# Display the regression results\nprint(model.summary())\n"
+}
+</Example>
+Research Question: Do relative group size and contest location influence the probability of a capuchin monkey group winning an intergroup contest?
+Dataset Schema: {
+  "dataset_description": "Intergroup competition is a common phenomenon observed in many social animals, ranging from ants to primates, and plays a crucial role in shaping access to resources and, consequently, fitness. Capuchin monkeys (Cebus capucinus) are known for their intense intergroup competition, which can sometimes even lead to lethal aggression. Researchers have been curious to understand the factors influencing the outcome of these contests. While the common belief is that larger groups have a competitive advantage, smaller capuchin groups have been observed defeating larger neighboring groups. This study by Crofoot et al. investigates how the location of an intergroup contest and the relative group sizes influence the probability of winning. The researchers used an Automated Radio Telemetry System (ARTS) to track the movements of six capuchin social groups of varying sizes on Barro Colorado Island, Panama. By analyzing the data on intergroup interactions and their locations, the researchers aim to shed light on the complex dynamics of intergroup competition in capuchin monkeys.",
+  "fields": [
+    {
+      "column": "focal",
+      "properties": {
+        "dtype": "number",
+        "std": 1.7600287353976036,
+        "min": 1,
+        "max": 6,
+        "samples": [
+          2,
+          6,
+          3
+        ],
+        "num_unique_values": 6,
+        "semantic_type": "",
+        "description": "ID of focal group"
+      }
+    },
+    {
+      "column": "other",
+      "properties": {
+        "dtype": "number",
+        "std": 1.7076922867303992,
+        "min": 1,
+        "max": 6,
+        "samples": [
+          1,
+          5,
+          3
+        ],
+        "num_unique_values": 6,
+        "semantic_type": "",
+        "description": "ID of other group"
+      }
+    },
+    {
+      "column": "dyad",
+      "properties": {
+        "dtype": "number",
+        "std": 1.8654044648016352,
+        "min": 1,
+        "max": 8,
+        "samples": [
+          5,
+          8,
+          1
+        ],
+        "num_unique_values": 8,
+        "semantic_type": "",
+        "description": "ID of specific dyad pair of groups"
+      }
+    },
+    {
+      "column": "win",
+      "properties": {
+        "dtype": "number",
+        "std": 0.5016608833298435,
+        "min": 0,
+        "max": 1,
+        "samples": [
+          1,
+          0
+        ],
+        "num_unique_values": 2,
+        "semantic_type": "",
+        "description": "1 if focal won contest, 0 if other won"
+      }
+    },
+    {
+      "column": "dist_focal",
+      "properties": {
+        "dtype": "number",
+        "std": 148.7312352492844,
+        "min": 72,
+        "max": 749,
+        "samples": [
+          181,
+          259,
+          328
+        ],
+        "num_unique_values": 54,
+        "semantic_type": "",
+        "description": "Distance in meters of focal group from the center of its home range"
+      }
+    },
+    {
+      "column": "dist_other",
+      "properties": {
+        "dtype": "number",
+        "std": 182.0470877706074,
+        "min": 55,
+        "max": 853,
+        "samples": [
+          577,
+          538,
+          469
+        ],
+        "num_unique_values": 56,
+        "semantic_type": "",
+        "description": "Distance in meters of other group from the center of its home range"
+      }
+    },
+    {
+      "column": "n_focal",
+      "properties": {
+        "dtype": "number",
+        "std": 3.1236370288433455,
+        "min": 5,
+        "max": 13,
+        "samples": [
+          10,
+          13,
+          5
+        ],
+        "num_unique_values": 4,
+        "semantic_type": "",
+        "description": "Number of individuals in focal group"
+      }
+    },
+    {
+      "column": "n_other",
+      "properties": {
+        "dtype": "number",
+        "std": 2.7450665200750644,
+        "min": 5,
+        "max": 13,
+        "samples": [
+          6,
+          5,
+          13
+        ],
+        "num_unique_values": 4,
+        "semantic_type": "",
+        "description": "Number of individuals in other group"
+      }
+    },
+    {
+      "column": "m_focal",
+      "properties": {
+        "dtype": "number",
+        "std": 0.7582975168210291,
+        "min": 2,
+        "max": 4,
+        "samples": [
+          2,
+          3,
+          4
+        ],
+        "num_unique_values": 3,
+        "semantic_type": "",
+        "description": "Number of males in focal group"
+      }
+    },
+    {
+      "column": "m_other",
+      "properties": {
+        "dtype": "number",
+        "std": 0.653530594811373,
+        "min": 2,
+        "max": 4,
+        "samples": [
+          4,
+          2,
+          3
+        ],
+        "num_unique_values": 3,
+        "semantic_type": "",
+        "description": "Number of males in other group"
+      }
+    },
+    {
+      "column": "f_focal",
+      "properties": {
+        "dtype": "number",
+        "std": 2.37806064131954,
+        "min": 3,
+        "max": 9,
+        "samples": [
+          7,
+          9,
+          3
+        ],
+        "num_unique_values": 4,
+        "semantic_type": "",
+        "description": "Number of females in focal group"
+      }
+    },
+    {
+      "column": "f_other",
+      "properties": {
+        "dtype": "number",
+        "std": 2.1052177853549865,
+        "min": 3,
+        "max": 9,
+        "samples": [
+          4,
+          3,
+          9
+        ],
+        "num_unique_values": 4,
+        "semantic_type": "",
+        "description": "Number of females in other group"
+      }
+    }
+  ],
+  "num_rows": 58,
+  "field_names": [
+    "focal",
+    "other",
+    "dyad",
+    "win",
+    "dist_focal",
+    "dist_other",
+    "n_focal",
+    "n_other",
+    "m_focal",
+    "m_other",
+    "f_focal",
+    "f_other"
+  ]
+}
+Result: 
+
+===================[gpt-5-mini RESPONSE (4105)]=====================
+{
+  "cvars": {
+    "ivs": [
+      {
+        "description": "Relative group size of the focal group compared to the other group, standardized (z-score). Positive values indicate the focal group is larger than the other group. This variable will be used to test whether larger relative group size increases the probability of winning, and will be included in an interaction with contest location.",
+        "columns": [
+          "SizeRatio_z"
+        ]
+      },
+      {
+        "description": "Contest location advantage for the focal group, defined as (dist_other - dist_focal) and standardized (z-score). Positive values indicate the focal group was closer to the center of its home range than the other group (a 'home' advantage). This variable will be used to test whether fighting closer to home influences winning and to test interaction with relative group size.",
+        "columns": [
+          "LocationAdvantage_z"
+        ]
+      }
+    ],
+    "dv": {
+      "description": "Binary outcome indicating whether the focal group won the contest (1) or not (0).",
+      "columns": [
+        "win"
+      ]
+    },
+    "controls": [
+      {
+        "description": "Difference in number of adult males: m_focal - m_other. Controls for variation in male composition which may influence contest outcomes.",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "MaleDiff_z"
+        ]
+      },
+      {
+        "description": "Difference in number of adult females: f_focal - f_other. Controls for variation in female composition which may influence contest outcomes.",
+        "is_moderator": false,
+        "moderator_on": null,
+        "columns": [
+          "FemaleDiff_z"
+        ]
+      },
+      {
+        "description": "Distance difference (dist_other - dist_focal). This is numerically identical to LocationAdvantage but included as an explicit control column so models can report main effect while the IV list contains the standardized version used for interaction. Positive values indicate focal is closer to its home-center than other.",
+        "is_moderator": false,
+        "moderator_on": null,
         "columns": [
           "DistDiff_z"
         ]
-      }
-    ],
-    "dv": {
-      "description": "Outcome of the intergroup contest for the focal group (1 = focal won, 0 = focal lost).",
-      "columns": [
-        "win"
-      ]
-    },
-    "controls": [
-      {
-        "description": "Difference in number of adult/subadult males (m_focal - m_other), standardized (z-score). Controls for differences in male composition which may influence contest outcomes.",
-        "is_moderator": false,
-        "moderator_on": null,
-        "columns": [
-          "MaleAdv_z"
-        ]
       },
       {
-        "description": "Total number of individuals involved in the contest (n_focal + n_other), standardized (z-score). Controls for overall group sizes (contest scale).",
-        "is_moderator": false,
-        "moderator_on": null,
-        "columns": [
-          "TotalSize_z"
-        ]
-      },
-      {
-        "description": "Categorical contest-location label derived from DistDiff to identify contests that are clearly on the focal side, clearly on the other side, or near neutral. Included as an additional (non-numeric) control to capture non-linear location effects.",
-        "is_moderator": false,
-        "moderator_on": null,
-        "columns": [
-          "LocationCat"
-        ]
-      },
-      {
-        "description": "Dyad identifier for the specific pair of groups interacting. Used for clustered (robust) standard errors to account for non-independence of multiple contests within the same dyad.",
+        "description": "Dyad identifier (pair of groups). Used for clustered (robust) standard errors to account for non-independence of contests within dyads.",
         "is_moderator": false,
         "moderator_on": null,
         "columns": [
@@ -1656,1113 +2828,9 @@ Result:
       }
     ]
   },
-  "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw capuchin contest dataframe into the analysis-ready dataframe.\n\n    Produces the following new columns used in the model:\n      - SizeAdv_z: standardized (z) of (n_focal - n_other)\n      - DistDiff_z: standardized (z) of (dist_other - dist_focal)\n      - MaleAdv_z: standardized (z) of (m_focal - m_other)\n      - TotalSize_z: standardized (z) of (n_focal + n_other)\n      - LocationCat: categorical label of contest location: 'FocalHome', 'OtherHome', or 'Neutral'\n\n    Keeps original 'win' and 'dyad' columns.\n    \"\"\"\n    # Make a copy to avoid modifying original\n    df = df.copy()\n\n    # Ensure numeric types\n    numeric_cols = ['dist_focal', 'dist_other', 'n_focal', 'n_other', 'm_focal', 'm_other']\n    for c in numeric_cols:\n        df[c] = pd.to_numeric(df[c], errors='coerce')\n\n    # Drop rows with missing values in key columns\n    df = df.dropna(subset=['win', 'dist_focal', 'dist_other', 'n_focal', 'n_other', 'm_focal', 'm_other', 'dyad'])\n\n    # Basic derived variables\n    df['SizeAdv'] = df['n_focal'] - df['n_other']\n    # A positive DistDiff means dist_other > dist_focal -> contest is closer to focal group's home center\n    df['DistDiff'] = df['dist_other'] - df['dist_focal']\n    df['MaleAdv'] = df['m_focal'] - df['m_other']\n    df['TotalSize'] = df['n_focal'] + df['n_other']\n\n    # Create a simple categorical location label to capture nonlinearity / thresholds\n    # If the distances are very similar (within 20 meters) we label as 'Neutral'\n    # Otherwise, DistDiff > 20 -> 'FocalHome' (contest closer to focal center)\n    # DistDiff < -20 -> 'OtherHome' (contest closer to other group's center)\n    def categorize_location(x, tol=20.0):\n        if pd.isna(x):\n            return pd.NA\n        if abs(x) <= tol:\n            return 'Neutral'\n        return 'FocalHome' if x > 0 else 'OtherHome'\n\n    df['LocationCat'] = df['DistDiff'].apply(categorize_location)\n\n    # Standardize (z-score) the continuous predictors used in models\n    for raw_col, z_col in [('SizeAdv', 'SizeAdv_z'), ('DistDiff', 'DistDiff_z'), ('MaleAdv', 'MaleAdv_z'), ('TotalSize', 'TotalSize_z')]:\n        col = df[raw_col]\n        # Use population std (ddof=0) to be explicit; fall back safely when constant\n        std = col.std(ddof=0)\n        if std == 0 or pd.isna(std):\n            df[z_col] = 0.0\n        else:\n            df[z_col] = (col - col.mean()) / std\n\n    # Ensure win is integer (0/1)\n    df['win'] = df['win'].astype(int)\n\n    # Ensure dyad is integer/categorical for clustering\n    df['dyad'] = df['dyad'].astype(int)\n\n    # Drop any rows that may have become NA in categorical LocationCat\n    df = df.dropna(subset=['LocationCat'])\n\n    # Final columns required for modeling: keep them and return\n    required_cols = ['win', 'SizeAdv_z', 'DistDiff_z', 'MaleAdv_z', 'TotalSize_z', 'LocationCat', 'dyad']\n    # If any required column missing for a row, drop that row\n    df = df.dropna(subset=required_cols)\n\n    return df\n",
-  "m_code": "def model(df: pd.DataFrame) -> any:\n    \"\"\"\n    Fit a logistic regression (GLM with binomial family) predicting the probability that the focal group wins.\n\n    Model specification:\n      win ~ SizeAdv_z * DistDiff_z + MaleAdv_z + TotalSize_z + C(LocationCat)\n\n    We also compute cluster-robust standard errors clustered on dyad to account for repeated contests\n    between the same pair of groups.\n\n    Returns a dictionary with the original fitted GLM results and the cluster-robust results.\n    \"\"\"\n    import statsmodels.formula.api as smf\n    import statsmodels.api as sm\n\n    # Ensure required columns exist\n    needed = ['win', 'SizeAdv_z', 'DistDiff_z', 'MaleAdv_z', 'TotalSize_z', 'LocationCat', 'dyad']\n    missing = [c for c in needed if c not in df.columns]\n    if missing:\n        raise ValueError(f\"Missing required columns for modeling: {missing}\")\n\n    # Fit the GLM (logistic regression)\n    formula = 'win ~ SizeAdv_z * DistDiff_z + MaleAdv_z + TotalSize_z + C(LocationCat)'\n    glm_res = smf.glm(formula=formula, data=df, family=sm.families.Binomial()).fit()\n\n    # Compute cluster-robust standard errors clustered by dyad\n    # Note: .get_robustcov_results returns a results instance with adjusted covariances\n    clustered_res = glm_res.get_robustcov_results(cov_type='cluster', groups=df['dyad'])\n\n    # Return both objects so the analyst can inspect coefficients and robust summaries\n    return {\n        'glm_results': glm_res,\n        'clustered_results': clustered_res\n    }\n"
+  "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Prepare variables for modeling the probability that the focal group wins an intergroup contest.\n\n    Adds standardized (z) predictors used in the model:\n      - SizeRatio_z: standardized (n_focal / n_other)\n      - LocationAdvantage_z: standardized (dist_other - dist_focal) so positive = focal closer to its home center\n      - MaleDiff_z: standardized (m_focal - m_other)\n      - FemaleDiff_z: standardized (f_focal - f_other)\n      - DistDiff_z: standardized (dist_other - dist_focal) (same numeric quantity as LocationAdvantage but explicitly named as control)\n\n    Also checks and drops rows with missing or invalid values (e.g., zero n_other) to avoid division by zero.\n    \"\"\"\n    import numpy as np\n    import pandas as pd\n\n    df = df.copy()\n\n    # Required columns for the analysis\n    required_cols = [\n        'win', 'n_focal', 'n_other', 'dist_focal', 'dist_other',\n        'm_focal', 'm_other', 'f_focal', 'f_other', 'dyad'\n    ]\n\n    # Coerce numeric columns and dyad to integer if possible\n    for c in ['win', 'n_focal', 'n_other', 'dist_focal', 'dist_other', 'm_focal', 'm_other', 'f_focal', 'f_other']:\n        if c in df.columns:\n            df[c] = pd.to_numeric(df[c], errors='coerce')\n\n    # Ensure dyad exists and is treated as categorical / integer grouping variable\n    if 'dyad' in df.columns:\n        df['dyad'] = pd.to_numeric(df['dyad'], errors='coerce')\n\n    # Drop rows with missing values in any required column\n    df = df.dropna(subset=required_cols)\n\n    # Remove rows where n_other is zero or negative (to prevent division by zero) or where n_focal <= 0\n    df = df[(df['n_other'] > 0) & (df['n_focal'] > 0)]\n\n    # Core derived variables\n    # Size ratio: focal size relative to other\n    df['SizeRatio'] = df['n_focal'] / df['n_other']\n    # Log transform can help skewed ratios (keep raw for diagnostics)\n    # Use a small epsilon if necessary (already filtered n_other>0)\n    df['LogSizeRatio'] = np.log(df['SizeRatio'])\n\n    # Location advantage: positive means focal is closer to its home center than the other group\n    df['LocationAdvantage'] = df['dist_other'] - df['dist_focal']\n    # For clarity also store DistDiff (same quantity)\n    df['DistDiff'] = df['LocationAdvantage']\n\n    # Sex composition differences\n    df['MaleDiff'] = df['m_focal'] - df['m_other']\n    df['FemaleDiff'] = df['f_focal'] - df['f_other']\n\n    # Standardize (z-score) numeric predictors used in modeling for easier interpretation\n    def zscore(s: pd.Series) -> pd.Series:\n        return (s - s.mean()) / (s.std(ddof=0) if s.std(ddof=0) != 0 else 1.0)\n\n    df['SizeRatio_z'] = zscore(df['SizeRatio'])\n    df['LocationAdvantage_z'] = zscore(df['LocationAdvantage'])\n    df['MaleDiff_z'] = zscore(df['MaleDiff'])\n    df['FemaleDiff_z'] = zscore(df['FemaleDiff'])\n    df['DistDiff_z'] = zscore(df['DistDiff'])\n\n    # Ensure the outcome is integer 0/1\n    df['win'] = df['win'].astype(int)\n\n    # Optionally, create a categorical indicator for location (useful for descriptive stats)\n    df['LocationCategory'] = pd.Categorical(\n        np.where(df['LocationAdvantage'] > 0, 'FocalCloser',\n                 np.where(df['LocationAdvantage'] < 0, 'OtherCloser', 'EqualDistance'))\n    )\n\n    # Keep all original columns plus newly derived ones\n    return df\n",
+  "m_code": "def model(df: pd.DataFrame) -> Any:\n    \"\"\"\n    Fit a logistic regression predicting probability focal group wins (win = 1) from:\n      - standardized relative group size (SizeRatio_z)\n      - standardized location advantage (LocationAdvantage_z)\n      - their interaction\n    while controlling for male and female differences and clustering standard errors by dyad.\n\n    Returns a dict with the fitted model and a robust (clustered) covariance results object.\n    \"\"\"\n    import statsmodels.api as sm\n    import statsmodels.formula.api as smf\n\n    # Ensure required predictor columns exist\n    required = ['win', 'SizeRatio_z', 'LocationAdvantage_z', 'MaleDiff_z', 'FemaleDiff_z', 'DistDiff_z', 'dyad']\n    missing = [c for c in required if c not in df.columns]\n    if len(missing) > 0:\n        raise ValueError(f\"Missing required columns for modeling: {missing}\")\n\n    # Formula: include interaction between size and location\n    formula = 'win ~ SizeRatio_z * LocationAdvantage_z + MaleDiff_z + FemaleDiff_z + DistDiff_z'\n\n    # Fit GLM with binomial family\n    model_glm = smf.glm(formula=formula, data=df, family=sm.families.Binomial()).fit()\n\n    # Compute cluster-robust SEs by dyad to account for repeated contests within dyads\n    # get_robustcov_results returns a results instance with robust covariance\n    robust_results = model_glm.get_robustcov_results(cov_type='cluster', groups=df['dyad'])\n\n    # Print summaries for convenience (in an interactive session)\n    try:\n        print('Standard GLM results:')\n        print(model_glm.summary())\n        print('\\nCluster-robust (by dyad) results:')\n        print(robust_results.summary())\n    except Exception:\n        # If printing fails in some environments, just pass\n        pass\n\n    # Prepare a compact dictionary of key outputs\n    outputs = {\n        'formula': formula,\n        'n_obs': int(model_glm.nobs),\n        'glm_results': model_glm,\n        'cluster_robust_results': robust_results\n    }\n\n    return outputs\n"
 }
 ===================[TOKENS]=====================
-Number of prompt tokens: 5166
-Number of total tokens: 9386
-
-===================[PROMPT (API Time: 64.73011660575867, Cache Time: None)]=====================
-=====[SYSTEM]=====:
-You are an AI Data Analysis Assistant who is an expert at writing an end-to-end scientific analysis given a research question and a dataset. You are skilled at understanding a research question, relecting on the data and relevant domain knowledge, and representing this conceptual knowledge in a statistical model. Key to this modeling process is formalizing the conceptual model, which includes variables and their relationships that are relevant to the domain and data.
-=====[USER]=====:
-<Instruction> 
-Given the research question, dataset formulate the conceptual model and write an analysis including all necessary data transformations and a statistical model to answer the research question. 
-</Instruction>
-
-<Format Instructions>
-You will return 3 things:
-1. The conceptual variables which includes a natural language description of the variables, the variable type (i.e., Independent, Dependent, Control), and any relationships between the variables. Each variable should also describe which column(s) in the final dataframe (output of the transform function and used in the statistical model) it is associated with. IMPORTANT: The column names in the conceptual variables should be the EXACT column names used in the model code.     
-2. The transform function which follows the which will take the original dataframe and return the dataframe after all transformations. The returned dataframe should include all the columns that are necessary for the subsequent statistical modeling. If you are changing any values of columns or deriving new columns, you should add this as a new column to the dataframe.     
-3. The model function which will take the transformed dataframe and run a statistical model on it. The model function should return the results of the model.
-
-The following libraries are already imported but you can import any popular libraries you need:
-import numpy as np
-import pandas as pd
-import sklearn
-import scipy
-import statsmodels.api as sm
-import matplotlib.pyplot as plt
-
-Here is the code template for the transform function:
-```python
-def transform(df: pd.DataFrame) -> pd.DataFrame:
-    # Your code here
-    return df
-```
-Here is the code template for the model function:
-```python
-def model(df: pd.DataFrame) -> Any:
-    # Your code here
-    return results
-```
-
-Please return the conceptual variables, the transform function, and the model function in the format specified below:
-The output should be formatted as a JSON instance that conforms to the JSON schema below.
-
-As an example, for the schema {"properties": {"foo": {"title": "Foo", "description": "a list of strings", "type": "array", "items": {"type": "string"}}}, "required": ["foo"]}
-the object {"foo": ["bar", "baz"]} is a well-formatted instance of the schema. The object {"properties": {"foo": ["bar", "baz"]}} is not well-formatted.
-
-Here is the output schema:
-```
-{"$defs": {"AgentCVarsWithCol": {"properties": {"ivs": {"items": {"$ref": "#/$defs/IVarWithCol"}, "title": "Independent variables", "type": "array"}, "dv": {"allOf": [{"$ref": "#/$defs/DVarWithCol"}], "title": "Dependent variable"}, "controls": {"items": {"$ref": "#/$defs/ControlVarWithCol"}, "title": "Control variables", "type": "array"}}, "required": ["ivs", "dv", "controls"], "title": "AgentCVarsWithCol", "type": "object"}, "ControlVarWithCol": {"properties": {"description": {"title": "Description of the control variable variable", "type": "string"}, "is_moderator": {"title": "Whether the variable is a moderator.", "type": "boolean"}, "moderator_on": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": "", "title": "The variable that the control variable is moderating. Only applicable for control variables that are moderators."}, "columns": {"items": {"type": "string"}, "title": "The column(s) in the FINAL dataframe used in the STATISTICAL MODEL that corresponds to the control variable", "type": "array"}}, "required": ["description", "is_moderator", "columns"], "title": "ControlVarWithCol", "type": "object"}, "DVarWithCol": {"properties": {"description": {"title": "Description of the dependent variable variable", "type": "string"}, "columns": {"items": {"type": "string"}, "title": "The column(s) in the FINAL dataframe used in the STATISTICAL MODEL that corresponds to the dependent variable", "type": "array"}}, "required": ["description", "columns"], "title": "DVarWithCol", "type": "object"}, "IVarWithCol": {"properties": {"description": {"title": "Description of the independent variable variable", "type": "string"}, "columns": {"items": {"type": "string"}, "title": "The column(s) in the FINAL dataframe used in the STATISTICAL MODEL that corresponds to the independent variable", "type": "array"}}, "required": ["description", "columns"], "title": "IVarWithCol", "type": "object"}}, "properties": {"cvars": {"allOf": [{"$ref": "#/$defs/AgentCVarsWithCol"}], "title": "Conceptual variables"}, "transform_code": {"title": "The code that transforms the data", "type": "string"}, "m_code": {"title": "The code for the statistical modeling", "type": "string"}}, "required": ["cvars", "transform_code", "m_code"]}
-```
-</Format Instructions>
-<Example>
-Research Question: What is the effect of hormonal fluctuations associated with fertility on women's religiosity?
-Dataset Schema: {
-  "dataset_description": "A total of 275 women participated in the study for this dataset. Each participant was asked to answer three religiosity items using a 9-point scale. Further, each participant was asked to indicate the typical length of her menstrual cycle, the start date of her last menstrual period, and the start date of her previous menstrual period. In addition, each woman indicated how sure she was about these two start dates, using a 9-point scale. Finally, each woman was asked to indicate her current romantic relationship status with the following four response options: (1) not dating/romantically involved with anyone, (2) dating or involved with only one partner, (3) engaged or living with my partner, and (4) married.",
-  "fields": [
-    {
-      "column": "WorkerID",
-      "properties": {
-        "dtype": "number",
-        "std": 79.52986860293433,
-        "min": 1,
-        "max": 275,
-        "samples": [
-          31,
-          140,
-          196
-        ],
-        "num_unique_values": 275,
-        "description": "The unique identifier of a participant."
-      }
-    },
-    {
-      "column": "Rel1",
-      "properties": {
-        "dtype": "number",
-        "std": 3.284246850080361,
-        "min": 1,
-        "max": 9,
-        "samples": [
-          4,
-          1,
-          9
-        ],
-        "num_unique_values": 9,
-        "description": "'How much do you believe in God?' 1 \u2013 9"
-      }
-    },
-    {
-      "column": "Rel2",
-      "properties": {
-        "dtype": "number",
-        "std": 3.087872913331648,
-        "min": 1.0,
-        "max": 9.0,
-        "samples": [
-          4.0,
-          2.0,
-          6.0
-        ],
-        "num_unique_values": 9,
-        "description": "'I see myself as a religiously oriented person.' 1 \u2013 9"
-      }
-    },
-    {
-      "column": "Rel3",
-      "properties": {
-        "dtype": "number",
-        "std": 3.333610823065186,
-        "min": 1.0,
-        "max": 9.0,
-        "samples": [
-          3.0,
-          1.0,
-          7.0
-        ],
-        "num_unique_values": 9,
-        "description": "'I believe that God or a Higher Power is responsible for my existence.' 1 \u2013 9"
-      }
-    },
-    {
-      "column": "Sure1",
-      "properties": {
-        "dtype": "number",
-        "std": 1.5732501786909676,
-        "min": 1,
-        "max": 9,
-        "samples": [
-          4,
-          7,
-          9
-        ],
-        "num_unique_values": 8,
-        "description": "In reference to `StartDateofLastPeriod`,  'How sure are you about that date?' 1 \u2013 9."
-      }
-    },
-    {
-      "column": "Sure2",
-      "properties": {
-        "dtype": "number",
-        "std": 2.221975065515302,
-        "min": 1,
-        "max": 9,
-        "samples": [
-          6,
-          3,
-          7
-        ],
-        "num_unique_values": 9,
-        "description": "In reference to `StartDateofPeriodBeforeLast`,  'How sure are you about that date?' 1 \u2013 9."
-      }
-    },
-    {
-      "column": "Relationship",
-      "properties": {
-        "dtype": "number",
-        "std": 1.167327837424664,
-        "min": 1,
-        "max": 4,
-        "samples": [
-          1,
-          2,
-          3
-        ],
-        "num_unique_values": 4,
-        "description": "Answer to 'What is your current romantic relationship status?' (1) not dating/romantically involved with anyone, (2) dating or involved with only one partner, (3) engaged or living with my partner, (4) married"
-      }
-    },
-    {
-      "column": "ReportedCycleLength",
-      "properties": {
-        "dtype": "number",
-        "std": 2.6714983210492633,
-        "min": 21.0,
-        "max": 38.0,
-        "samples": [
-          21.0,
-          22.0,
-          26.0
-        ],
-        "num_unique_values": 17,
-        "description": "Answer to 'How many days long are your menstrual cycles? (for most women, the range is between 25-35 days) Keep in mind this is the number of days from the start of one menstrual period to the start of the next menstrual period and NOT the length of your menstrual bleeding.'"
-      }
-    },
-    {
-      "column": "DateTesting",
-      "properties": {
-        "dtype": "date",
-        "min": "03/12/12",
-        "max": "04/27/12",
-        "samples": [
-          "04/06/12",
-          "04/26/12",
-          "03/12/12"
-        ],
-        "num_unique_values": 13,
-        "description": "Date of participant filling in the questionnaire"
-      }
-    },
-    {
-      "column": "StartDateofLastPeriod",
-      "properties": {
-        "dtype": "date",
-        "min": "02/06/12",
-        "max": "04/26/12",
-        "samples": [
-          "02/16/12",
-          "03/01/12",
-          "04/25/12"
-        ],
-        "num_unique_values": 61,
-        "description": "Answer to 'Please give your best estimate of the date on which you started your last period (please be as precise as possible). This date was probably within the last few weeks. Sometimes thinking of where you were when you started your last period helps. For instance, was it on a weekend?, were you at work, was it during a football game?, etc. Please write the date in mm/dd/yyyy format (e.g., 8/18/2012).'"
-      }
-    },
-    {
-      "column": "StartDateofPeriodBeforeLast",
-      "properties": {
-        "dtype": "date",
-        "min": "01/03/12",
-        "max": "03/29/12",
-        "samples": [
-          "01/15/12",
-          "02/04/12",
-          "03/24/12"
-        ],
-        "num_unique_values": 61,
-        "description": "Answer to 'Please give your best estimate of the date on which you started the period before your last period (please be as precise as possible). Please write the date in mm/dd/yyyy format (e.g., 7/18/2012).'"
-      }
-    }
-  ],
-  "num_rows": 275,
-  "field_names": [
-    "WorkerID",
-    "Rel1",
-    "Rel2",
-    "Rel3",
-    "Sure1",
-    "Sure2",
-    "Relationship",
-    "ReportedCycleLength",
-    "DateTesting",
-    "StartDateofLastPeriod",
-    "StartDateofPeriodBeforeLast"
-  ]
-}
-Result: {
-  "cvars": {
-    "ivs": [
-      {
-        "description": "Women's fertility",
-        "columns": [
-          "FertilityGroup"
-        ]
-      }
-    ],
-    "dv": {
-      "description": "Women's religiosity",
-      "columns": [
-        "AvgReligiosity"
-      ]
-    },
-    "controls": [
-      {
-        "description": "Relationship status of the individual",
-        "is_moderator": true,
-        "moderator_on": "Women's fertility",
-        "columns": [
-          "InRelationship"
-        ]
-      }
-    ]
-  },
-  "transform_code": "# drop the rows with missing values in the ReportedCycleLength, Rel1, Rel2, and Rel3 columns\ndf = df.dropna(subset=['ReportedCycleLength'])\ndf = df.dropna(subset=['Rel1', 'Rel2', 'Rel3'])\n\ndf['AvgReligiosity'] = df[['Rel1', 'Rel2', 'Rel3']].mean(axis=1)\n\n\n# Convert date columns to datetime format\ndf['DateTesting'] = pd.to_datetime(df['DateTesting'], format='%m/%d/%y')\ndf['StartDateofLastPeriod'] = pd.to_datetime(df['StartDateofLastPeriod'], format='%m/%d/%y')\ndf['StartDateofPeriodBeforeLast'] = pd.to_datetime(df['StartDateofPeriodBeforeLast'], format='%m/%d/%y')\n\n# Calculate the cycle length based on provided dates\ndf['ReportedCycleLength'] = (df['StartDateofLastPeriod'] - df['StartDateofPeriodBeforeLast']).dt.days\n# Calculate the expected start date of the next menstrual period\n\ndf['ExpectedNextPeriod'] = df['StartDateofLastPeriod'] + pd.to_timedelta(df['ReportedCycleLength'], unit='d')\n\n# Calculate the day of ovulation by subtracting 14 days from the expected start date of the next period\n# since ovulation typically occurs around 14 days before the start of the next period\ndf['OvulationDate'] = df['ExpectedNextPeriod'] - pd.to_timedelta(14, unit='d')\n# Calculate the cycle day on the date of testing\ndf['CycleDay'] = (df['DateTesting'] - df['OvulationDate']).dt.days + 14\n# Define high-fertility (cycle days 6-14) and low-fertility (cycle days 17-27) groups\ndf['FertilityGroup'] = df['CycleDay'].apply(lambda x: 'High-Fertility' if 6 <= x <= 14 else ('Low-Fertility' if 17 <= x <= 27 else 'Other'))\n# Filter out the 'Other' group to focus on the high and low fertility groups\ndf = df[df['FertilityGroup'].isin(['High-Fertility', 'Low-Fertility'])]\n\n\ndf['IsIncommittedRelationship'] = df['Relationship'].apply(lambda x: 0 if x in [1,2] else 1)\ndf['InRelationship'] = df['Relationship'].apply(lambda x: 0 if x == 1 else 1)\ndf['IsInRelationship'] = df['Relationship'].apply(lambda x: 0 if x == 1 else 1)\n",
-  "m_code": "model = smf.ols('AvgReligiosity ~ InRelationship * FertilityGroup', data=df).fit()\n# Display the regression results\nprint(model.summary())\n"
-}
-</Example>
-Research Question: How do relative group size and contest location influence the probability of a capuchin monkey group winning an intergroup contest? 
-Dataset Schema: {
-  "dataset_description": "Intergroup competition is a common phenomenon observed in many social animals, ranging from ants to primates, and plays a crucial role in shaping access to resources and, consequently, fitness. Capuchin monkeys (Cebus capucinus) are known for their intense intergroup competition, which can sometimes even lead to lethal aggression. Researchers have been curious to understand the factors influencing the outcome of these contests. While the common belief is that larger groups have a competitive advantage, smaller capuchin groups have been observed defeating larger neighboring groups. This study by Crofoot et al. investigates how the location of an intergroup contest and the relative group sizes influence the probability of winning. The researchers used an Automated Radio Telemetry System (ARTS) to track the movements of six capuchin social groups of varying sizes on Barro Colorado Island, Panama. By analyzing the data on intergroup interactions and their locations, the researchers aim to shed light on the complex dynamics of intergroup competition in capuchin monkeys.",
-  "fields": [
-    {
-      "column": "focal",
-      "properties": {
-        "dtype": "number",
-        "std": 1.7600287353976036,
-        "min": 1,
-        "max": 6,
-        "samples": [
-          2,
-          6,
-          3
-        ],
-        "num_unique_values": 6,
-        "semantic_type": "",
-        "description": "ID of focal group"
-      }
-    },
-    {
-      "column": "other",
-      "properties": {
-        "dtype": "number",
-        "std": 1.7076922867303992,
-        "min": 1,
-        "max": 6,
-        "samples": [
-          1,
-          5,
-          3
-        ],
-        "num_unique_values": 6,
-        "semantic_type": "",
-        "description": "ID of other group"
-      }
-    },
-    {
-      "column": "dyad",
-      "properties": {
-        "dtype": "number",
-        "std": 1.8654044648016352,
-        "min": 1,
-        "max": 8,
-        "samples": [
-          5,
-          8,
-          1
-        ],
-        "num_unique_values": 8,
-        "semantic_type": "",
-        "description": "ID of specific dyad pair of groups"
-      }
-    },
-    {
-      "column": "win",
-      "properties": {
-        "dtype": "number",
-        "std": 0.5016608833298435,
-        "min": 0,
-        "max": 1,
-        "samples": [
-          1,
-          0
-        ],
-        "num_unique_values": 2,
-        "semantic_type": "",
-        "description": "1 if focal won contest, 0 if other won"
-      }
-    },
-    {
-      "column": "dist_focal",
-      "properties": {
-        "dtype": "number",
-        "std": 148.7312352492844,
-        "min": 72,
-        "max": 749,
-        "samples": [
-          181,
-          259,
-          328
-        ],
-        "num_unique_values": 54,
-        "semantic_type": "",
-        "description": "Distance in meters of focal group from the center of its home range"
-      }
-    },
-    {
-      "column": "dist_other",
-      "properties": {
-        "dtype": "number",
-        "std": 182.0470877706074,
-        "min": 55,
-        "max": 853,
-        "samples": [
-          577,
-          538,
-          469
-        ],
-        "num_unique_values": 56,
-        "semantic_type": "",
-        "description": "Distance in meters of other group from the center of its home range"
-      }
-    },
-    {
-      "column": "n_focal",
-      "properties": {
-        "dtype": "number",
-        "std": 3.1236370288433455,
-        "min": 5,
-        "max": 13,
-        "samples": [
-          10,
-          13,
-          5
-        ],
-        "num_unique_values": 4,
-        "semantic_type": "",
-        "description": "Number of individuals in focal group"
-      }
-    },
-    {
-      "column": "n_other",
-      "properties": {
-        "dtype": "number",
-        "std": 2.7450665200750644,
-        "min": 5,
-        "max": 13,
-        "samples": [
-          6,
-          5,
-          13
-        ],
-        "num_unique_values": 4,
-        "semantic_type": "",
-        "description": "Number of individuals in other group"
-      }
-    },
-    {
-      "column": "m_focal",
-      "properties": {
-        "dtype": "number",
-        "std": 0.7582975168210291,
-        "min": 2,
-        "max": 4,
-        "samples": [
-          2,
-          3,
-          4
-        ],
-        "num_unique_values": 3,
-        "semantic_type": "",
-        "description": "Number of males in focal group"
-      }
-    },
-    {
-      "column": "m_other",
-      "properties": {
-        "dtype": "number",
-        "std": 0.653530594811373,
-        "min": 2,
-        "max": 4,
-        "samples": [
-          4,
-          2,
-          3
-        ],
-        "num_unique_values": 3,
-        "semantic_type": "",
-        "description": "Number of males in other group"
-      }
-    },
-    {
-      "column": "f_focal",
-      "properties": {
-        "dtype": "number",
-        "std": 2.37806064131954,
-        "min": 3,
-        "max": 9,
-        "samples": [
-          7,
-          9,
-          3
-        ],
-        "num_unique_values": 4,
-        "semantic_type": "",
-        "description": "Number of females in focal group"
-      }
-    },
-    {
-      "column": "f_other",
-      "properties": {
-        "dtype": "number",
-        "std": 2.1052177853549865,
-        "min": 3,
-        "max": 9,
-        "samples": [
-          4,
-          3,
-          9
-        ],
-        "num_unique_values": 4,
-        "semantic_type": "",
-        "description": "Number of females in other group"
-      }
-    }
-  ],
-  "num_rows": 58,
-  "field_names": [
-    "focal",
-    "other",
-    "dyad",
-    "win",
-    "dist_focal",
-    "dist_other",
-    "n_focal",
-    "n_other",
-    "m_focal",
-    "m_other",
-    "f_focal",
-    "f_other"
-  ]
-}
-Result: 
-
-===================[gpt-5-mini RESPONSE (3831)]=====================
-{
-  "cvars": {
-    "ivs": [
-      {
-        "description": "Relative group size: difference in number of individuals (focal - other). Larger positive values indicate the focal group is larger. Used as a primary predictor (standardized) and raw difference included for interpretability.",
-        "columns": [
-          "RelSize_z",
-          "RelSize"
-        ]
-      },
-      {
-        "description": "Contest location relative to groups' home-range centers. Computed as dist_other - dist_focal (positive values indicate the contest is closer to the focal group's center). Represented both as a continuous standardized measure and a 3-level categorical location (FocalCenter / OtherCenter / Neutral).",
-        "columns": [
-          "DistDiff_z",
-          "dist_diff",
-          "Location"
-        ]
-      }
-    ],
-    "dv": {
-      "description": "Outcome of the contest: 1 if the focal group won, 0 if the other group won (binary).",
-      "columns": [
-        "win"
-      ]
-    },
-    "controls": [
-      {
-        "description": "Difference in number of adult males (m_focal - m_other). Males can have a disproportionate effect on contest outcomes; included as a numeric control (standardized).",
-        "is_moderator": false,
-        "moderator_on": "",
-        "columns": [
-          "MaleDiff_z",
-          "MaleDiff"
-        ]
-      },
-      {
-        "description": "Dyad identifier of the interacting pair. Included as a categorical control (fixed effect) and used to cluster standard errors to account for non-independence of observations within dyads.",
-        "is_moderator": false,
-        "moderator_on": "",
-        "columns": [
-          "dyad"
-        ]
-      }
-    ]
-  },
-  "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transforms the raw data into the final dataframe used for modeling.\n\n    Adds the following columns:\n    - RelSize: n_focal - n_other\n    - dist_diff: dist_other - dist_focal (positive => contest closer to focal center)\n    - Location: categorical label (FocalCenter / OtherCenter / Neutral) based on dist_diff threshold\n    - MaleDiff: m_focal - m_other\n    - RelSize_z, DistDiff_z, MaleDiff_z: z-scored versions of the above continuous predictors\n\n    Also ensures dyad is categorical and drops rows with missing values in required columns.\n    \"\"\"\n    # required columns for the analysis\n    required = ['win', 'n_focal', 'n_other', 'dist_focal', 'dist_other', 'm_focal', 'm_other', 'dyad']\n    # drop rows missing any of the required columns\n    df = df.dropna(subset=required).copy()\n\n    # compute relative size (focal - other)\n    df['RelSize'] = df['n_focal'] - df['n_other']\n\n    # compute distance difference: positive => contest is closer to the focal group's center\n    df['dist_diff'] = df['dist_other'] - df['dist_focal']\n\n    # categorical location label\n    # threshold chosen to create a 'neutral' zone when distances are similar (here 50 meters); adjust if desired\n    thresh = 50.0\n    df['Location'] = pd.np.where(df['dist_diff'] > thresh, 'FocalCenter',\n                         pd.np.where(df['dist_diff'] < -thresh, 'OtherCenter', 'Neutral'))\n\n    # male difference\n    df['MaleDiff'] = df['m_focal'] - df['m_other']\n\n    # z-score continuous predictors (use population std; guard against zero std)\n    for col in ['RelSize', 'dist_diff', 'MaleDiff']:\n        mean = df[col].mean()\n        std = df[col].std(ddof=0)\n        if pd.isna(std) or std == 0:\n            df[col + '_z'] = df[col] - mean\n        else:\n            df[col + '_z'] = (df[col] - mean) / std\n\n    # ensure dyad is categorical (keeps it for formula and clustering)\n    df['dyad'] = df['dyad'].astype('category')\n\n    # keep only columns that are necessary for later analysis plus originals for interpretability\n    keep_cols = list(df.columns)\n    return df\n",
-  "m_code": "def model(df: pd.DataFrame) -> any:\n    \"\"\"\n    Fits a logistic regression predicting the probability that the focal group won (win = 1).\n\n    Primary model:\n      win ~ RelSize_z * DistDiff_z + MaleDiff_z + C(Location) + C(dyad)\n\n    This includes an interaction between relative size and contest-location (continuous) to test whether the effect\n    of relative group size depends on where the contest occurred. Dyad is included as a categorical fixed effect,\n    and standard errors are clustered by dyad to account for non-independence.\n\n    Returns the model results object with cluster-robust covariance.\n    \"\"\"\n    import statsmodels.formula.api as smf\n\n    # check that transform has been applied\n    required_cols = ['win', 'RelSize_z', 'DistDiff_z', 'MaleDiff_z', 'Location', 'dyad']\n    missing = [c for c in required_cols if c not in df.columns]\n    if missing:\n        raise ValueError(f\"Dataframe is missing required columns for modeling: {missing}\")\n\n    # specify formula with interaction between relative size and distance-difference (continuous)\n    formula = 'win ~ RelSize_z * DistDiff_z + MaleDiff_z + C(Location) + C(dyad)'\n\n    # fit logistic regression\n    logit_res = smf.logit(formula, data=df).fit(disp=False)\n\n    # obtain cluster-robust standard errors clustered by dyad\n    # groups must be aligned with the dataframe rows\n    clustered = logit_res.get_robustcov_results(cov_type='cluster', groups=df['dyad'])\n\n    # return the clustered results object (has .summary(), .params, .pvalues, etc.)\n    return clustered\n"
-}
-===================[TOKENS]=====================
-Number of prompt tokens: 5166
-Number of total tokens: 8997
-
-===================[PROMPT (API Time: 42.07491946220398, Cache Time: None)]=====================
-=====[SYSTEM]=====:
-You are an AI Data Analysis Assistant who is an expert at writing an end-to-end scientific analysis given a research question and a dataset. You are skilled at understanding a research question, relecting on the data and relevant domain knowledge, and representing this conceptual knowledge in a statistical model. Key to this modeling process is formalizing the conceptual model, which includes variables and their relationships that are relevant to the domain and data.
-=====[USER]=====:
-<Instruction> 
-Given the research question, dataset formulate the conceptual model and write an analysis including all necessary data transformations and a statistical model to answer the research question. 
-</Instruction>
-
-<Format Instructions>
-You will return 3 things:
-1. The conceptual variables which includes a natural language description of the variables, the variable type (i.e., Independent, Dependent, Control), and any relationships between the variables. Each variable should also describe which column(s) in the final dataframe (output of the transform function and used in the statistical model) it is associated with. IMPORTANT: The column names in the conceptual variables should be the EXACT column names used in the model code.     
-2. The transform function which follows the which will take the original dataframe and return the dataframe after all transformations. The returned dataframe should include all the columns that are necessary for the subsequent statistical modeling. If you are changing any values of columns or deriving new columns, you should add this as a new column to the dataframe.     
-3. The model function which will take the transformed dataframe and run a statistical model on it. The model function should return the results of the model.
-
-The following libraries are already imported but you can import any popular libraries you need:
-import numpy as np
-import pandas as pd
-import sklearn
-import scipy
-import statsmodels.api as sm
-import matplotlib.pyplot as plt
-
-Here is the code template for the transform function:
-```python
-def transform(df: pd.DataFrame) -> pd.DataFrame:
-    # Your code here
-    return df
-```
-Here is the code template for the model function:
-```python
-def model(df: pd.DataFrame) -> Any:
-    # Your code here
-    return results
-```
-
-Please return the conceptual variables, the transform function, and the model function in the format specified below:
-The output should be formatted as a JSON instance that conforms to the JSON schema below.
-
-As an example, for the schema {"properties": {"foo": {"title": "Foo", "description": "a list of strings", "type": "array", "items": {"type": "string"}}}, "required": ["foo"]}
-the object {"foo": ["bar", "baz"]} is a well-formatted instance of the schema. The object {"properties": {"foo": ["bar", "baz"]}} is not well-formatted.
-
-Here is the output schema:
-```
-{"$defs": {"AgentCVarsWithCol": {"properties": {"ivs": {"items": {"$ref": "#/$defs/IVarWithCol"}, "title": "Independent variables", "type": "array"}, "dv": {"allOf": [{"$ref": "#/$defs/DVarWithCol"}], "title": "Dependent variable"}, "controls": {"items": {"$ref": "#/$defs/ControlVarWithCol"}, "title": "Control variables", "type": "array"}}, "required": ["ivs", "dv", "controls"], "title": "AgentCVarsWithCol", "type": "object"}, "ControlVarWithCol": {"properties": {"description": {"title": "Description of the control variable variable", "type": "string"}, "is_moderator": {"title": "Whether the variable is a moderator.", "type": "boolean"}, "moderator_on": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": "", "title": "The variable that the control variable is moderating. Only applicable for control variables that are moderators."}, "columns": {"items": {"type": "string"}, "title": "The column(s) in the FINAL dataframe used in the STATISTICAL MODEL that corresponds to the control variable", "type": "array"}}, "required": ["description", "is_moderator", "columns"], "title": "ControlVarWithCol", "type": "object"}, "DVarWithCol": {"properties": {"description": {"title": "Description of the dependent variable variable", "type": "string"}, "columns": {"items": {"type": "string"}, "title": "The column(s) in the FINAL dataframe used in the STATISTICAL MODEL that corresponds to the dependent variable", "type": "array"}}, "required": ["description", "columns"], "title": "DVarWithCol", "type": "object"}, "IVarWithCol": {"properties": {"description": {"title": "Description of the independent variable variable", "type": "string"}, "columns": {"items": {"type": "string"}, "title": "The column(s) in the FINAL dataframe used in the STATISTICAL MODEL that corresponds to the independent variable", "type": "array"}}, "required": ["description", "columns"], "title": "IVarWithCol", "type": "object"}}, "properties": {"cvars": {"allOf": [{"$ref": "#/$defs/AgentCVarsWithCol"}], "title": "Conceptual variables"}, "transform_code": {"title": "The code that transforms the data", "type": "string"}, "m_code": {"title": "The code for the statistical modeling", "type": "string"}}, "required": ["cvars", "transform_code", "m_code"]}
-```
-</Format Instructions>
-<Example>
-Research Question: What is the effect of hormonal fluctuations associated with fertility on women's religiosity?
-Dataset Schema: {
-  "dataset_description": "A total of 275 women participated in the study for this dataset. Each participant was asked to answer three religiosity items using a 9-point scale. Further, each participant was asked to indicate the typical length of her menstrual cycle, the start date of her last menstrual period, and the start date of her previous menstrual period. In addition, each woman indicated how sure she was about these two start dates, using a 9-point scale. Finally, each woman was asked to indicate her current romantic relationship status with the following four response options: (1) not dating/romantically involved with anyone, (2) dating or involved with only one partner, (3) engaged or living with my partner, and (4) married.",
-  "fields": [
-    {
-      "column": "WorkerID",
-      "properties": {
-        "dtype": "number",
-        "std": 79.52986860293433,
-        "min": 1,
-        "max": 275,
-        "samples": [
-          31,
-          140,
-          196
-        ],
-        "num_unique_values": 275,
-        "description": "The unique identifier of a participant."
-      }
-    },
-    {
-      "column": "Rel1",
-      "properties": {
-        "dtype": "number",
-        "std": 3.284246850080361,
-        "min": 1,
-        "max": 9,
-        "samples": [
-          4,
-          1,
-          9
-        ],
-        "num_unique_values": 9,
-        "description": "'How much do you believe in God?' 1 \u2013 9"
-      }
-    },
-    {
-      "column": "Rel2",
-      "properties": {
-        "dtype": "number",
-        "std": 3.087872913331648,
-        "min": 1.0,
-        "max": 9.0,
-        "samples": [
-          4.0,
-          2.0,
-          6.0
-        ],
-        "num_unique_values": 9,
-        "description": "'I see myself as a religiously oriented person.' 1 \u2013 9"
-      }
-    },
-    {
-      "column": "Rel3",
-      "properties": {
-        "dtype": "number",
-        "std": 3.333610823065186,
-        "min": 1.0,
-        "max": 9.0,
-        "samples": [
-          3.0,
-          1.0,
-          7.0
-        ],
-        "num_unique_values": 9,
-        "description": "'I believe that God or a Higher Power is responsible for my existence.' 1 \u2013 9"
-      }
-    },
-    {
-      "column": "Sure1",
-      "properties": {
-        "dtype": "number",
-        "std": 1.5732501786909676,
-        "min": 1,
-        "max": 9,
-        "samples": [
-          4,
-          7,
-          9
-        ],
-        "num_unique_values": 8,
-        "description": "In reference to `StartDateofLastPeriod`,  'How sure are you about that date?' 1 \u2013 9."
-      }
-    },
-    {
-      "column": "Sure2",
-      "properties": {
-        "dtype": "number",
-        "std": 2.221975065515302,
-        "min": 1,
-        "max": 9,
-        "samples": [
-          6,
-          3,
-          7
-        ],
-        "num_unique_values": 9,
-        "description": "In reference to `StartDateofPeriodBeforeLast`,  'How sure are you about that date?' 1 \u2013 9."
-      }
-    },
-    {
-      "column": "Relationship",
-      "properties": {
-        "dtype": "number",
-        "std": 1.167327837424664,
-        "min": 1,
-        "max": 4,
-        "samples": [
-          1,
-          2,
-          3
-        ],
-        "num_unique_values": 4,
-        "description": "Answer to 'What is your current romantic relationship status?' (1) not dating/romantically involved with anyone, (2) dating or involved with only one partner, (3) engaged or living with my partner, (4) married"
-      }
-    },
-    {
-      "column": "ReportedCycleLength",
-      "properties": {
-        "dtype": "number",
-        "std": 2.6714983210492633,
-        "min": 21.0,
-        "max": 38.0,
-        "samples": [
-          21.0,
-          22.0,
-          26.0
-        ],
-        "num_unique_values": 17,
-        "description": "Answer to 'How many days long are your menstrual cycles? (for most women, the range is between 25-35 days) Keep in mind this is the number of days from the start of one menstrual period to the start of the next menstrual period and NOT the length of your menstrual bleeding.'"
-      }
-    },
-    {
-      "column": "DateTesting",
-      "properties": {
-        "dtype": "date",
-        "min": "03/12/12",
-        "max": "04/27/12",
-        "samples": [
-          "04/06/12",
-          "04/26/12",
-          "03/12/12"
-        ],
-        "num_unique_values": 13,
-        "description": "Date of participant filling in the questionnaire"
-      }
-    },
-    {
-      "column": "StartDateofLastPeriod",
-      "properties": {
-        "dtype": "date",
-        "min": "02/06/12",
-        "max": "04/26/12",
-        "samples": [
-          "02/16/12",
-          "03/01/12",
-          "04/25/12"
-        ],
-        "num_unique_values": 61,
-        "description": "Answer to 'Please give your best estimate of the date on which you started your last period (please be as precise as possible). This date was probably within the last few weeks. Sometimes thinking of where you were when you started your last period helps. For instance, was it on a weekend?, were you at work, was it during a football game?, etc. Please write the date in mm/dd/yyyy format (e.g., 8/18/2012).'"
-      }
-    },
-    {
-      "column": "StartDateofPeriodBeforeLast",
-      "properties": {
-        "dtype": "date",
-        "min": "01/03/12",
-        "max": "03/29/12",
-        "samples": [
-          "01/15/12",
-          "02/04/12",
-          "03/24/12"
-        ],
-        "num_unique_values": 61,
-        "description": "Answer to 'Please give your best estimate of the date on which you started the period before your last period (please be as precise as possible). Please write the date in mm/dd/yyyy format (e.g., 7/18/2012).'"
-      }
-    }
-  ],
-  "num_rows": 275,
-  "field_names": [
-    "WorkerID",
-    "Rel1",
-    "Rel2",
-    "Rel3",
-    "Sure1",
-    "Sure2",
-    "Relationship",
-    "ReportedCycleLength",
-    "DateTesting",
-    "StartDateofLastPeriod",
-    "StartDateofPeriodBeforeLast"
-  ]
-}
-Result: {
-  "cvars": {
-    "ivs": [
-      {
-        "description": "Women's fertility",
-        "columns": [
-          "FertilityGroup"
-        ]
-      }
-    ],
-    "dv": {
-      "description": "Women's religiosity",
-      "columns": [
-        "AvgReligiosity"
-      ]
-    },
-    "controls": [
-      {
-        "description": "Relationship status of the individual",
-        "is_moderator": true,
-        "moderator_on": "Women's fertility",
-        "columns": [
-          "InRelationship"
-        ]
-      }
-    ]
-  },
-  "transform_code": "# drop the rows with missing values in the ReportedCycleLength, Rel1, Rel2, and Rel3 columns\ndf = df.dropna(subset=['ReportedCycleLength'])\ndf = df.dropna(subset=['Rel1', 'Rel2', 'Rel3'])\n\ndf['AvgReligiosity'] = df[['Rel1', 'Rel2', 'Rel3']].mean(axis=1)\n\n\n# Convert date columns to datetime format\ndf['DateTesting'] = pd.to_datetime(df['DateTesting'], format='%m/%d/%y')\ndf['StartDateofLastPeriod'] = pd.to_datetime(df['StartDateofLastPeriod'], format='%m/%d/%y')\ndf['StartDateofPeriodBeforeLast'] = pd.to_datetime(df['StartDateofPeriodBeforeLast'], format='%m/%d/%y')\n\n# Calculate the cycle length based on provided dates\ndf['ReportedCycleLength'] = (df['StartDateofLastPeriod'] - df['StartDateofPeriodBeforeLast']).dt.days\n# Calculate the expected start date of the next menstrual period\n\ndf['ExpectedNextPeriod'] = df['StartDateofLastPeriod'] + pd.to_timedelta(df['ReportedCycleLength'], unit='d')\n\n# Calculate the day of ovulation by subtracting 14 days from the expected start date of the next period\n# since ovulation typically occurs around 14 days before the start of the next period\ndf['OvulationDate'] = df['ExpectedNextPeriod'] - pd.to_timedelta(14, unit='d')\n# Calculate the cycle day on the date of testing\ndf['CycleDay'] = (df['DateTesting'] - df['OvulationDate']).dt.days + 14\n# Define high-fertility (cycle days 6-14) and low-fertility (cycle days 17-27) groups\ndf['FertilityGroup'] = df['CycleDay'].apply(lambda x: 'High-Fertility' if 6 <= x <= 14 else ('Low-Fertility' if 17 <= x <= 27 else 'Other'))\n# Filter out the 'Other' group to focus on the high and low fertility groups\ndf = df[df['FertilityGroup'].isin(['High-Fertility', 'Low-Fertility'])]\n\n\ndf['IsIncommittedRelationship'] = df['Relationship'].apply(lambda x: 0 if x in [1,2] else 1)\ndf['InRelationship'] = df['Relationship'].apply(lambda x: 0 if x == 1 else 1)\ndf['IsInRelationship'] = df['Relationship'].apply(lambda x: 0 if x == 1 else 1)\n",
-  "m_code": "model = smf.ols('AvgReligiosity ~ InRelationship * FertilityGroup', data=df).fit()\n# Display the regression results\nprint(model.summary())\n"
-}
-</Example>
-Research Question: How do relative group size and contest location influence the probability of a capuchin monkey group winning an intergroup contest? 
-Dataset Schema: {
-  "dataset_description": "Intergroup competition is a common phenomenon observed in many social animals, ranging from ants to primates, and plays a crucial role in shaping access to resources and, consequently, fitness. Capuchin monkeys (Cebus capucinus) are known for their intense intergroup competition, which can sometimes even lead to lethal aggression. Researchers have been curious to understand the factors influencing the outcome of these contests. While the common belief is that larger groups have a competitive advantage, smaller capuchin groups have been observed defeating larger neighboring groups. This study by Crofoot et al. investigates how the location of an intergroup contest and the relative group sizes influence the probability of winning. The researchers used an Automated Radio Telemetry System (ARTS) to track the movements of six capuchin social groups of varying sizes on Barro Colorado Island, Panama. By analyzing the data on intergroup interactions and their locations, the researchers aim to shed light on the complex dynamics of intergroup competition in capuchin monkeys.",
-  "fields": [
-    {
-      "column": "focal",
-      "properties": {
-        "dtype": "number",
-        "std": 1.7600287353976036,
-        "min": 1,
-        "max": 6,
-        "samples": [
-          2,
-          6,
-          3
-        ],
-        "num_unique_values": 6,
-        "semantic_type": "",
-        "description": "ID of focal group"
-      }
-    },
-    {
-      "column": "other",
-      "properties": {
-        "dtype": "number",
-        "std": 1.7076922867303992,
-        "min": 1,
-        "max": 6,
-        "samples": [
-          1,
-          5,
-          3
-        ],
-        "num_unique_values": 6,
-        "semantic_type": "",
-        "description": "ID of other group"
-      }
-    },
-    {
-      "column": "dyad",
-      "properties": {
-        "dtype": "number",
-        "std": 1.8654044648016352,
-        "min": 1,
-        "max": 8,
-        "samples": [
-          5,
-          8,
-          1
-        ],
-        "num_unique_values": 8,
-        "semantic_type": "",
-        "description": "ID of specific dyad pair of groups"
-      }
-    },
-    {
-      "column": "win",
-      "properties": {
-        "dtype": "number",
-        "std": 0.5016608833298435,
-        "min": 0,
-        "max": 1,
-        "samples": [
-          1,
-          0
-        ],
-        "num_unique_values": 2,
-        "semantic_type": "",
-        "description": "1 if focal won contest, 0 if other won"
-      }
-    },
-    {
-      "column": "dist_focal",
-      "properties": {
-        "dtype": "number",
-        "std": 148.7312352492844,
-        "min": 72,
-        "max": 749,
-        "samples": [
-          181,
-          259,
-          328
-        ],
-        "num_unique_values": 54,
-        "semantic_type": "",
-        "description": "Distance in meters of focal group from the center of its home range"
-      }
-    },
-    {
-      "column": "dist_other",
-      "properties": {
-        "dtype": "number",
-        "std": 182.0470877706074,
-        "min": 55,
-        "max": 853,
-        "samples": [
-          577,
-          538,
-          469
-        ],
-        "num_unique_values": 56,
-        "semantic_type": "",
-        "description": "Distance in meters of other group from the center of its home range"
-      }
-    },
-    {
-      "column": "n_focal",
-      "properties": {
-        "dtype": "number",
-        "std": 3.1236370288433455,
-        "min": 5,
-        "max": 13,
-        "samples": [
-          10,
-          13,
-          5
-        ],
-        "num_unique_values": 4,
-        "semantic_type": "",
-        "description": "Number of individuals in focal group"
-      }
-    },
-    {
-      "column": "n_other",
-      "properties": {
-        "dtype": "number",
-        "std": 2.7450665200750644,
-        "min": 5,
-        "max": 13,
-        "samples": [
-          6,
-          5,
-          13
-        ],
-        "num_unique_values": 4,
-        "semantic_type": "",
-        "description": "Number of individuals in other group"
-      }
-    },
-    {
-      "column": "m_focal",
-      "properties": {
-        "dtype": "number",
-        "std": 0.7582975168210291,
-        "min": 2,
-        "max": 4,
-        "samples": [
-          2,
-          3,
-          4
-        ],
-        "num_unique_values": 3,
-        "semantic_type": "",
-        "description": "Number of males in focal group"
-      }
-    },
-    {
-      "column": "m_other",
-      "properties": {
-        "dtype": "number",
-        "std": 0.653530594811373,
-        "min": 2,
-        "max": 4,
-        "samples": [
-          4,
-          2,
-          3
-        ],
-        "num_unique_values": 3,
-        "semantic_type": "",
-        "description": "Number of males in other group"
-      }
-    },
-    {
-      "column": "f_focal",
-      "properties": {
-        "dtype": "number",
-        "std": 2.37806064131954,
-        "min": 3,
-        "max": 9,
-        "samples": [
-          7,
-          9,
-          3
-        ],
-        "num_unique_values": 4,
-        "semantic_type": "",
-        "description": "Number of females in focal group"
-      }
-    },
-    {
-      "column": "f_other",
-      "properties": {
-        "dtype": "number",
-        "std": 2.1052177853549865,
-        "min": 3,
-        "max": 9,
-        "samples": [
-          4,
-          3,
-          9
-        ],
-        "num_unique_values": 4,
-        "semantic_type": "",
-        "description": "Number of females in other group"
-      }
-    }
-  ],
-  "num_rows": 58,
-  "field_names": [
-    "focal",
-    "other",
-    "dyad",
-    "win",
-    "dist_focal",
-    "dist_other",
-    "n_focal",
-    "n_other",
-    "m_focal",
-    "m_other",
-    "f_focal",
-    "f_other"
-  ]
-}
-Result: 
-
-===================[gpt-5-mini RESPONSE (2862)]=====================
-{
-  "cvars": {
-    "ivs": [
-      {
-        "description": "Relative group size of the focal group compared to the other group. Positive values indicate the focal group is larger. This is standardized (z-scored) for modeling.",
-        "columns": [
-          "rel_size_z"
-        ]
-      },
-      {
-        "description": "Contest location advantage measured as the other group's distance from its home-range center minus the focal group's distance from its home-range center (dist_other - dist_focal). Positive values mean the focal group is relatively closer to its home-range center than the other group. This is standardized (z-scored) for modeling.",
-        "columns": [
-          "dist_adv_z"
-        ]
-      }
-    ],
-    "dv": {
-      "description": "Binary indicator whether the focal group won the contest (1 = focal won, 0 = focal lost).",
-      "columns": [
-        "win"
-      ]
-    },
-    "controls": [
-      {
-        "description": "Difference in number of adult/subadult males between focal and other group (m_focal - m_other), standardized (z-scored). Controls for sex-specific composition that could influence contest outcome.",
-        "is_moderator": false,
-        "moderator_on": null,
-        "columns": [
-          "male_diff_z"
-        ]
-      },
-      {
-        "description": "Difference in number of adult/subadult females between focal and other group (f_focal - f_other), standardized (z-scored). Controls for sex-specific composition that could influence contest outcome.",
-        "is_moderator": false,
-        "moderator_on": null,
-        "columns": [
-          "female_diff_z"
-        ]
-      },
-      {
-        "description": "Dyad identifier for the pair of groups involved (categorical). Included as a control (fixed effect) to account for dyad-specific unobserved heterogeneity.",
-        "is_moderator": false,
-        "moderator_on": null,
-        "columns": [
-          "dyad"
-        ]
-      }
-    ]
-  },
-  "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    # Work on a copy\n    df = df.copy()\n\n    # Ensure key columns are numeric\n    num_cols = ['win', 'dist_focal', 'dist_other', 'n_focal', 'n_other', 'm_focal', 'm_other', 'f_focal', 'f_other', 'dyad']\n    for c in num_cols:\n        if c in df.columns:\n            df[c] = pd.to_numeric(df[c], errors='coerce')\n\n    # Drop rows with missing outcome or essential predictors\n    df = df.dropna(subset=['win', 'dist_focal', 'dist_other', 'n_focal', 'n_other', 'm_focal', 'm_other', 'f_focal', 'f_other', 'dyad'])\n\n    # Compute relative size measures\n    # rel_size: difference in total group size (focal - other)\n    df['rel_size'] = df['n_focal'] - df['n_other']\n    # male and female differences\n    df['male_diff'] = df['m_focal'] - df['m_other']\n    df['female_diff'] = df['f_focal'] - df['f_other']\n\n    # Compute location advantage: other distance minus focal distance.\n    # Positive => focal is closer to its home center than other is to its.\n    df['dist_adv'] = df['dist_other'] - df['dist_focal']\n\n    # Standardize continuous predictors (z-score). Use population std (ddof=0) for interpretability.\n    def zscore(s: pd.Series) -> pd.Series:\n        return (s - s.mean()) / (s.std(ddof=0) if s.std(ddof=0) != 0 else 1.0)\n\n    df['rel_size_z'] = zscore(df['rel_size'])\n    df['dist_adv_z'] = zscore(df['dist_adv'])\n    df['male_diff_z'] = zscore(df['male_diff'])\n    df['female_diff_z'] = zscore(df['female_diff'])\n\n    # Ensure dyad is an integer/categorical column used as a control in modeling\n    df['dyad'] = df['dyad'].astype('category')\n\n    # Final check: keep only rows with finite standardized predictors\n    df = df.replace([np.inf, -np.inf], np.nan).dropna(subset=['rel_size_z', 'dist_adv_z', 'male_diff_z', 'female_diff_z'])\n\n    return df\n",
-  "m_code": "def model(df: pd.DataFrame) -> Any:\n    import statsmodels.formula.api as smf\n    import statsmodels.api as sm\n\n    # Expected columns in df: 'win', 'rel_size_z', 'dist_adv_z', 'male_diff_z', 'female_diff_z', 'dyad'\n\n    # Fit a logistic regression (GLM with binomial family) predicting probability focal wins.\n    # Include interaction between relative size and location advantage to test whether the effect\n    # of group size depends on contest location. Include dyad fixed effects to control\n    # for pair-specific heterogeneity.\n    formula = 'win ~ rel_size_z * dist_adv_z + male_diff_z + female_diff_z + C(dyad)'\n\n    model = smf.glm(formula=formula, data=df, family=sm.families.Binomial())\n    results = model.fit()\n\n    # It's useful to also provide clustered robust standard errors by dyad if desired.\n    # Attempt to compute cluster-robust covariances; if it fails, fall back to default.\n    try:\n        clustered = results.get_robustcov_results(cov_type='cluster', groups=df['dyad'])\n    except Exception:\n        clustered = results\n\n    # Return the fitted results with cluster-robust SEs when available\n    return clustered\n"
-}
-===================[TOKENS]=====================
-Number of prompt tokens: 5166
-Number of total tokens: 8028
+Number of prompt tokens: 5227
+Number of total tokens: 9332

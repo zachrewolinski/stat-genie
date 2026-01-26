@@ -13,205 +13,134 @@ df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/anal
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Transform the raw Fair affairs dataset into a dataframe suitable for Tobit modeling.
+    Transform the raw Fair (1978) affairs dataset into a modeling-ready dataframe.
 
-    Output columns (kept/created):
-      - affairs: numeric (dependent variable)
-      - Children: binary (1 if children present, 0 if no)
-      - Female: binary (1 if female, 0 if male)
-      - Age: numeric
-      - YearsMarried: numeric
-      - Religiousness: numeric
-      - Education: numeric
-      - Occupation: numeric
-      - Rating: numeric
+    Produces the following new columns used in the model:
+    - affair_count: integer count of affairs (from 'affairs')
+    - children_binary: 1 if children present in marriage, 0 otherwise
+    - gender_male: 1 if male, 0 if female
+    - age_c, yearsmarried_c, religiousness_c, education_c, occupation_c, rating_c: centered numeric controls
 
-    The function coerces types, maps categorical values to binaries, and drops rows with missing values in any of the columns used by the model.
+    Drops rows with missing values in the outcome, IV, or key controls.
     """
     df = df.copy()
 
-    # Ensure dependent and key columns exist
-    required_cols = ['affairs', 'children', 'gender', 'age', 'yearsmarried',
-                     'religiousness', 'education', 'occupation', 'rating']
-    missing = [c for c in required_cols if c not in df.columns]
-    if missing:
-        raise ValueError(f"Input dataframe is missing required columns: {missing}")
+    # Keep only rows with non-missing outcome and children indicator
+    df = df.dropna(subset=['affairs', 'children'])
 
-    # Standardize column name casing used in output
-    # Rename source columns if necessary (keep original 'affairs')
+    # Create a clean integer affair count column
+    # The original coding uses numeric values (0,1,2,3,7,12) to reflect categories/frequencies.
+    df['affair_count'] = pd.to_numeric(df['affairs'], errors='coerce')
 
-    # Map children to binary: allow values 'yes'/'no', 'Yes'/'No', 1/0
-    def map_children(x):
+    # Map children to binary -- handle lowercase/uppercase variants
+    def _map_children(x):
         if pd.isna(x):
             return np.nan
-        if isinstance(x, str):
-            xv = x.strip().lower()
-            if xv in ['yes', 'y', 'true', '1']:
-                return 1
-            if xv in ['no', 'n', 'false', '0']:
-                return 0
-        try:
-            # numeric
-            if float(x) == 1:
-                return 1
-            if float(x) == 0:
-                return 0
-        except Exception:
-            pass
+        s = str(x).strip().lower()
+        if s in ['yes', 'y', '1', 'true']:
+            return 1
+        if s in ['no', 'n', '0', 'false']:
+            return 0
         return np.nan
 
-    df['Children'] = df['children'].apply(map_children)
+    df['children_binary'] = df['children'].apply(_map_children)
 
-    # Map gender to Female dummy (female=1, male=0). Handle common string forms.
-    def map_female(x):
+    # Map gender to binary male/female
+    def _map_gender(x):
         if pd.isna(x):
             return np.nan
-        if isinstance(x, str):
-            xv = x.strip().lower()
-            if xv in ['female', 'f', 'woman', 'women']:
-                return 1
-            if xv in ['male', 'm', 'man', 'men']:
-                return 0
-        try:
-            # if numeric coding 1/0 observed
-            if float(x) == 1:
-                # ambiguous: assume 1 means female only if dataset documented so; but default to NaN
-                return np.nan
-        except Exception:
-            pass
+        s = str(x).strip().lower()
+        if s.startswith('m'):
+            return 1
+        if s.startswith('f'):
+            return 0
         return np.nan
 
-    df['Female'] = df['gender'].apply(map_female)
+    df['gender_male'] = df['gender'].apply(_map_gender)
 
-    # Coerce numeric controls to numeric and copy to new standardized column names
-    df['Age'] = pd.to_numeric(df['age'], errors='coerce')
-    df['YearsMarried'] = pd.to_numeric(df['yearsmarried'], errors='coerce')
-    df['Religiousness'] = pd.to_numeric(df['religiousness'], errors='coerce')
-    df['Education'] = pd.to_numeric(df['education'], errors='coerce')
-    df['Occupation'] = pd.to_numeric(df['occupation'], errors='coerce')
-    df['Rating'] = pd.to_numeric(df['rating'], errors='coerce')
+    # Controls we will require
+    required_controls = ['age', 'yearsmarried', 'religiousness', 'education', 'occupation', 'rating']
 
-    # Dependent variable: ensure numeric
-    df['affairs'] = pd.to_numeric(df['affairs'], errors='coerce')
+    # Convert required controls to numeric where possible
+    for col in required_controls:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
 
-    # Drop rows with missing values in any variables we will use
-    model_cols = ['affairs', 'Children', 'Female', 'Age', 'YearsMarried',
-                  'Religiousness', 'Education', 'Occupation', 'Rating']
-    df = df.dropna(subset=model_cols).reset_index(drop=True)
+    # Drop rows with missing values in the core modeling variables
+    core_required = ['affair_count', 'children_binary'] + required_controls
+    df = df.dropna(subset=core_required)
 
-    # Ensure types are integer where appropriate
-    df['Children'] = df['Children'].astype(int)
-    df['Female'] = df['Female'].astype(int)
+    # Ensure affair_count integer and non-negative
+    df['affair_count'] = df['affair_count'].astype(int)
+    df = df[df['affair_count'] >= 0]
 
-    # (Optional) Keep only realistic affairs values: ensure non-negative
-    df = df[df['affairs'] >= 0].copy()
+    # Create centered versions of numeric controls for interpretability
+    for col in required_controls:
+        df[f'{col}_c'] = df[col] - df[col].mean()
 
-    # Return trimmed dataframe for modeling
+    # Cast binary indicators to int
+    df['children_binary'] = df['children_binary'].astype(int)
+    df['gender_male'] = df['gender_male'].astype(int)
+
+    # Final columns required by the statistical model are kept; others remain but model will only reference the listed ones
     return df
 
 
 # ======== MODEL CODE ========
-def model(df: pd.DataFrame) -> Any:
+def model(df: pd.DataFrame):
     """
-    Fit a Tobit (left-censored at 0) model of affairs on Children and controls.
+    Fit count regression models to estimate the association between having children and extramarital affairs.
 
-    Model specification:
-      affairs_i* = X_i beta + u_i, u_i ~ N(0, sigma^2)
-      observed affairs_i = max(0, affairs_i*)
+    Primary specification: Negative Binomial regression (accounts for overdispersion relative to Poisson).
+    Secondary specification: Zero-Inflated Negative Binomial (attempted) to allow for excess zeros.
 
-    We include an interaction term between Children and Female (to examine whether the effect
-    of having children differs by gender), and main controls.
-
-    Returns the fitted results object (statsmodels GenericLikelihoodModelResults).
+    Returns a dictionary with model results objects. The keys are 'nb_model' and (if available) 'zinb_model'.
     """
-    # Build design matrix
-    exog_cols = [
-        'Children',
-        'Female',
-        # interaction
-        # we'll create a dedicated column for interaction
-        'Children_x_Female',
-        'Age',
-        'YearsMarried',
-        'Religiousness',
-        'Education',
-        'Occupation',
-        'Rating'
+    import statsmodels.api as sm
+    from statsmodels.tools import add_constant
+
+    # Prepare design matrix and outcome variable using the exact transformed column names
+    exog_vars = [
+        'children_binary',
+        'gender_male',
+        'age_c',
+        'yearsmarried_c',
+        'religiousness_c',
+        'education_c',
+        'occupation_c',
+        'rating_c'
     ]
 
-    df = df.copy()
-    df['Children_x_Female'] = df['Children'] * df['Female']
+    # Ensure columns present
+    for v in exog_vars + ['affair_count']:
+        if v not in df.columns:
+            raise ValueError(f"Required column '{v}' not found in dataframe")
 
-    # Add intercept inside the Tobit implementation (exog will include a constant)
-    X = df[exog_cols]
-    X = sm.add_constant(X, has_constant='add')
-    y = df['affairs']
+    X = df[exog_vars]
+    X = add_constant(X, has_constant='add')
+    y = df['affair_count']
 
-    # Generic Tobit implementation (left-censoring at 0)
-    from statsmodels.base.model import GenericLikelihoodModel
+    results = {}
 
-    class TobitLeft(GenericLikelihoodModel):
-        def __init__(self, endog, exog, left_censor=0.0, **kwds):
-            super().__init__(endog, exog, **kwds)
-            self.left_censor = left_censor
+    # 1) Negative binomial via GLM (uses NB likelihood in GLM framework)
+    nb_glm = sm.GLM(y, X, family=sm.families.NegativeBinomial())
+    nb_res = nb_glm.fit()
+    results['nb_model'] = nb_res
 
-        def nloglikeobs(self, params):
-            # return negative log-likelihood contributions for each observation
-            # but GenericLikelihoodModel expects loglikeobs method; we implement nloglikeobs and loglike later
-            return -self.loglikeobs(params)
+    # 2) Try a more flexible discrete-count model: Zero-Inflated Negative Binomial (if available)
+    try:
+        from statsmodels.discrete.count_model import ZeroInflatedNegativeBinomialP
+        # Use the same exog for the count and the inflation model for simplicity
+        zinb = ZeroInflatedNegativeBinomialP(endog=y, exog=X, exog_infl=X, inflation='logit')
+        zinb_res = zinb.fit(disp=0)
+        results['zinb_model'] = zinb_res
+    except Exception as e:
+        # If ZeroInflatedNegativeBinomialP is unavailable or fails to converge, return the error message
+        results['zinb_error'] = str(e)
 
-        def loglikeobs(self, params):
-            # params: [beta (k), log_sigma]
-            k = self.exog.shape[1]
-            beta = params[:k]
-            log_sigma = params[k]
-            sigma = np.exp(log_sigma)
+    # Optionally report a simple summary dictionary of coefficients for quick programmatic access
+    coef_summary = nb_res.summary2().tables[1][['Coef.', 'Std.Err.', 'P>|z|']]
+    results['nb_coef_table'] = coef_summary
 
-            mu = np.dot(self.exog, beta)
-            y = self.endog
-
-            # For y > left_censor: density contribution
-            z = (y - mu) / sigma
-            # pdf and cdf values
-            pdf_z = scipy.stats.norm.pdf(z)
-            cdf_z_at_left = scipy.stats.norm.cdf((self.left_censor - mu) / sigma)
-
-            # contribution arrays
-            ll = np.zeros_like(y, dtype=float)
-
-            mask_uncensored = y > self.left_censor
-            # density contribution for uncensored obs: log(1/sigma * phi(z))
-            ll[mask_uncensored] = -np.log(sigma) + np.log(pdf_z[mask_uncensored] + 1e-20)
-
-            # censored observations: log( Phi((left - mu)/sigma) )
-            mask_censored = ~mask_uncensored
-            ll[mask_censored] = np.log(cdf_z_at_left[mask_censored] + 1e-20)
-
-            return ll
-
-        def loglike(self, params):
-            return np.sum(self.loglikeobs(params))
-
-    # Initial parameters: OLS for beta, log(sigma) from residuals
-    ols_res = sm.OLS(y, X).fit()
-    beta_init = ols_res.params.values
-    resid = ols_res.resid
-    sigma_init = max(1e-6, resid.std())
-    start_params = np.concatenate([beta_init, [np.log(sigma_init)]])
-
-    # Fit Tobit model
-    mod = TobitLeft(y.values, X.values, left_censor=0.0)
-    # use BFGS; set maxiter and disp
-    res = mod.fit(start_params=start_params, method='bfgs', disp=False)
-
-    # Attach pandas-friendly summary: build a results summary similar to statsmodels
-    # The returned object is a GenericLikelihoodModelResults instance
-    # Caller can inspect res.summary() or res.params
-    return res
-
-# Example usage (outside this function):
-# df_trans = transform(raw_df)
-# results = model(df_trans)
-# print(results.summary())
+    return results
 
 

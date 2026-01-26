@@ -1,130 +1,167 @@
+import numpy as np
+
 def extract_final_answer(model_output):
     """
-    Extracts the effect of 'is_human' from the model output and interprets whether
-    modern humans have higher AMTL after accounting for covariates.
-
-    Returns a dict with:
-      - "object": dict with numeric results (coef, se, z, p, odds_ratio, or_ci_lower, or_ci_upper,
-                  significant (bool), decision_text)
-      - "description": brief plain-language interpretation of the result in context
+    Extracts the coefficient, standard error, test statistic, p-value, 95% CI, and odds ratio
+    (with CI) for the 'IsHuman' predictor from a statsmodels result-like object (e.g., RobustResults).
+    Returns a dictionary with keys:
+      - "object": dict of numeric results and a boolean 'humans_higher' indicating whether the
+                  result supports that Homo sapiens have higher AMTL (coef > 0) and 'significant'
+                  indicating p < 0.05.
+      - "description": short interpretation of the extracted statistics in the study context.
     """
-    import numpy as np
-    import pandas as pd
-    import scipy.stats as stats
+    res = model_output
+    var = "IsHuman"
 
-    # Prefer clustered results (robust to within-specimen correlation); fallback to glm_results
-    clustered = model_output.get('clustered_results') or model_output.get('glm_results')
-    results = model_output.get('glm_results')
+    # Basic sanity checks
+    if not hasattr(res, "params"):
+        raise AttributeError("model_output does not have 'params' attribute; expected a statsmodels result object.")
 
-    # Obtain parameter vector
-    if not hasattr(clustered, 'params'):
-        raise ValueError("Provided model_output does not contain params in clustered_results or glm_results.")
-
-    params = clustered.params
-
-    if 'is_human' not in params.index:
-        raise KeyError("'is_human' not found in model parameters.")
-
-    # Try to get standard errors, confidence intervals from clustered object
-    # ClusteredResults created in the model provides: cov_params(), bse, conf_int()
+    # Build parameter index list for name->position lookups
     try:
-        # bse may be an array or Series; normalize to Series
-        bse = clustered.bse
-        if not isinstance(bse, pd.Series):
-            bse = pd.Series(bse, index=params.index)
+        params_index = list(res.params.index)
     except Exception:
-        # Fallback: attempt to compute SE from covariance matrix if available
+        # params is not indexable by name; fallback to sequence of positions
         try:
-            cov = clustered.cov_params()
-            se_vals = np.sqrt(np.diag(cov))
-            bse = pd.Series(se_vals, index=params.index)
+            params_index = list(range(len(res.params)))
         except Exception:
-            bse = None
+            raise RuntimeError("Unable to determine parameter names/positions from model_output.params.")
 
+    if var not in params_index:
+        raise KeyError(f"'{var}' not found in model coefficients. Available vars: {params_index}")
+
+    # Helper to safely get element by name or by position from various container types
+    def _safe_get(container, name, params_index):
+        """
+        Try container[name]; if that fails, find position of name in params_index and
+        return container[pos]. Works for pandas Series/DataFrame, numpy arrays, lists.
+        """
+        # Direct name-based access (works for pandas Series/DataFrame or dict)
+        try:
+            return container[name]
+        except Exception:
+            pass
+
+        # Position-based access
+        try:
+            pos = params_index.index(name)
+        except ValueError:
+            raise KeyError(f"'{name}' not found in params index {params_index}")
+
+        arr = np.asarray(container)
+        # If 1D, return arr[pos]; if 2D and pos is row index, return arr[pos]
+        try:
+            return arr[pos]
+        except Exception as e:
+            raise RuntimeError(f"Could not index into container to retrieve '{name}': {e}")
+
+    # Extract coefficient
     try:
-        conf = clustered.conf_int()
+        coef = float(_safe_get(res.params, var, params_index))
+    except Exception as e:
+        raise RuntimeError(f"Could not extract coefficient for '{var}': {e}")
+
+    # Extract standard error (bse) with fallbacks
+    se = None
+    if hasattr(res, "bse"):
+        try:
+            se_candidate = _safe_get(res.bse, var, params_index)
+            se = float(se_candidate)
+        except Exception:
+            se = None
+
+    # If se still None, try to derive from conf_int
+    if se is None:
+        try:
+            ci_mat = res.conf_int()
+            # try name-based access first
+            try:
+                ci_row = ci_mat.loc[var]
+                ci_lower, ci_upper = float(ci_row[0]), float(ci_row[1])
+            except Exception:
+                # fallback by position
+                pos = params_index.index(var)
+                ci_arr = np.asarray(ci_mat)
+                ci_lower, ci_upper = float(ci_arr[pos, 0]), float(ci_arr[pos, 1])
+            se = (ci_upper - ci_lower) / (2 * 1.96)
+        except Exception:
+            raise RuntimeError("Could not extract standard errors or confidence intervals from model_output.")
+
+    # Test statistic (z/t): compute as coef / se
+    try:
+        stat = float(coef / se) if se != 0 else float("nan")
     except Exception:
-        conf = None
+        stat = float("nan")
 
-    coef = float(params['is_human'])
-    se = float(bse['is_human']) if bse is not None else None
+    # p-value extraction
+    pval = float("nan")
+    if hasattr(res, "pvalues"):
+        try:
+            pval_candidate = _safe_get(res.pvalues, var, params_index)
+            pval = float(pval_candidate)
+        except Exception:
+            pval = float("nan")
 
-    # z and p-value (use normal approximation for clustered sandwich SE)
-    if se is not None and se > 0:
-        z = coef / se
-        p_value = float(2 * (1 - stats.norm.cdf(abs(z))))
-    else:
-        z = None
-        p_value = None
+    # Confidence interval (95%)
+    try:
+        ci_mat = res.conf_int()
+        try:
+            ci_row = ci_mat.loc[var]
+            ci_lower, ci_upper = float(ci_row[0]), float(ci_row[1])
+        except Exception:
+            pos = params_index.index(var)
+            ci_arr = np.asarray(ci_mat)
+            ci_lower, ci_upper = float(ci_arr[pos, 0]), float(ci_arr[pos, 1])
+    except Exception:
+        # fallback using se
+        ci_lower = coef - 1.96 * se
+        ci_upper = coef + 1.96 * se
 
-    # Odds ratio and CI (on exponentiated scale)
+    # Odds ratio and its CI (since model is binomial-logit)
     odds_ratio = float(np.exp(coef))
-    if conf is not None:
-        # conf expected as DataFrame with columns [0,1]
-        try:
-            ci_lower = float(np.exp(conf.loc['is_human', 0]))
-            ci_upper = float(np.exp(conf.loc['is_human', 1]))
-        except Exception:
-            # fallback if indexing differs
-            row = conf.loc['is_human']
-            ci_lower = float(np.exp(row.iloc[0]))
-            ci_upper = float(np.exp(row.iloc[1]))
-    else:
-        # approximate 95% CI using coef +/- 1.96*se on log-odds scale
-        if se is not None:
-            ci_lower = float(np.exp(coef - 1.96 * se))
-            ci_upper = float(np.exp(coef + 1.96 * se))
-        else:
-            ci_lower = None
-            ci_upper = None
+    or_ci_lower = float(np.exp(ci_lower))
+    or_ci_upper = float(np.exp(ci_upper))
 
-    # Decision: higher AMTL if OR > 1 and p < 0.05
-    significant = (p_value is not None) and (p_value < 0.05)
-    higher = (odds_ratio > 1) and significant
+    # Decision: do humans have higher AMTL?
+    humans_higher_direction = coef > 0
+    significant = (not np.isnan(pval)) and (pval < 0.05)
+    humans_higher = humans_higher_direction and significant
 
-    # Short interpretation text
-    if significant:
-        decision_text = (
-            "Yes — after adjusting for age, sex probability, and tooth class, modern humans "
-            "have significantly higher odds of antemortem tooth loss compared to the included "
-            "non-human primates."
-        )
-    else:
-        decision_text = (
-            "No — there is not strong evidence that modern humans differ from the non-human "
-            "primates in AMTL after adjusting for the covariates."
-        )
-
-    # Include dispersion if available as contextual caution (overdispersion may affect inference)
-    dispersion = model_output.get('dispersion', None)
-
-    output_obj = {
-        'coef_logit_is_human': coef,
-        'se_logit_is_human': se,
-        'z_value': z,
-        'p_value': p_value,
-        'odds_ratio_is_human': odds_ratio,
-        'or_ci_lower_95': ci_lower,
-        'or_ci_upper_95': ci_upper,
-        'significant_at_0.05': significant,
-        'decision_higher_amtl': higher,
-        'dispersion': float(dispersion) if dispersion is not None else None,
-        'decision_text': decision_text
+    # Build return object
+    result_obj = {
+        "variable": var,
+        "coefficient_log_odds": coef,
+        "std_error": se,
+        "statistic": stat,
+        "p_value": pval,
+        "ci_95_log_odds": [ci_lower, ci_upper],
+        "odds_ratio": odds_ratio,
+        "odds_ratio_ci_95": [or_ci_lower, or_ci_upper],
+        "humans_higher_direction": humans_higher_direction,
+        "significant_at_0.05": significant,
+        "humans_higher": humans_higher  # True only if coef>0 AND p<0.05
     }
 
-    # Human-readable description
-    description_lines = []
-    description_lines.append(
-        f"Estimated odds ratio for is_human = {odds_ratio:.3f} "
-        f"(95% CI: {ci_lower:.3f} – {ci_upper:.3f})"
-        if (ci_lower is not None and ci_upper is not None) else
-        f"Estimated odds ratio for is_human = {odds_ratio:.3f} (CI unavailable)"
-    )
-    if p_value is not None:
-        description_lines.append(f"Two-sided p-value (Wald z) = {p_value:.3g}.")
-    if dispersion is not None:
-        description_lines.append(f"Model dispersion = {dispersion:.3f} (values >>1 suggest overdispersion).")
-    description_lines.append(decision_text)
-    description = " ".join(description_lines)
+    # Short interpretation
+    if np.isnan(pval):
+        significance_text = "p-value not available"
+    else:
+        significance_text = ("statistically significant (p < 0.05)"
+                             if significant else "not statistically significant (p >= 0.05)")
 
-    return {'object': output_obj, 'description': description}
+    direction_text = ("positive coefficient (higher log-odds of AMTL for Homo sapiens)"
+                      if humans_higher_direction else
+                      "negative coefficient (lower log-odds of AMTL for Homo sapiens)")
+
+    description = (
+        f"IsHuman coefficient = {coef:.4f} (SE = {se:.4f}, stat = {stat:.3f}, p = {pval:.4g}). "
+        f"95% CI on log-odds: [{ci_lower:.4f}, {ci_upper:.4f}]. Odds ratio = {odds_ratio:.3f} "
+        f"95% CI: [{or_ci_lower:.3f}, {or_ci_upper:.3f}].\n"
+        f"Interpretation: {direction_text}; {significance_text}. "
+        f"In plain terms, a positive and significant coefficient means modern humans have a higher "
+        f"frequency of AMTL than non-human primates after adjusting for age, sex (prob_male), tooth class, "
+        f"and population. The 'humans_higher' boolean in the 'object' indicates whether both direction and "
+        f"statistical significance support that conclusion."
+    )
+
+    return {"object": result_obj, "description": description}

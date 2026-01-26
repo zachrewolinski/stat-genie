@@ -1,240 +1,182 @@
 def extract_final_answer(model_output):
     """
-    Extracts statistics about the effect of ChildrenBinary on AffairsCount from a
-    fitted statsmodels ZeroInflatedNegativeBinomialResultsWrapper.
+    Extracts coefficients, standard errors, p-values, confidence intervals, and effect sizes
+    for the effect of 'children_yes' (and its interaction with gender if present) from the
+    provided model_output dict. Also returns group descriptives by children.
 
-    Returns a dictionary with:
-      - "object": a dict of numeric results (count-model coef, IRR, p-values, CIs;
-                  interaction; marginal effects for males/females; inflation-model
-                  coef and odds-ratio)
-      - "description": a short plain-language interpretation of those statistics
-                       in context (whether having children appears to decrease
-                       engagement in extramarital affairs, and how that may differ
-                       by gender).
+    Returns a dict with keys:
+      - "object": dict with per-model numeric summaries and an overall conclusion decision
+      - "description": brief plain-language interpretation of those results
     """
     import numpy as np
-    from scipy.stats import norm
 
-    res = model_output
+    def safe_get_param_stats(res, target_terms):
+        """
+        Given a statsmodels results object `res` and a list of strings `target_terms`
+        (e.g., ['children_yes'] or ['children_yes','gender_male'] for an interaction),
+        attempt to find matching parameter names and return a dict of stats.
+        Matching tries exact name first, then parameter names that contain all terms.
+        Returns None if no matching parameter is found.
+        """
+        if res is None:
+            return None
+        try:
+            params = res.params
+            bse = res.bse
+            pvalues = res.pvalues
+            conf = res.conf_int()
+        except Exception:
+            # Not a statsmodels-like results object
+            return None
 
-    params = res.params
-    bse = res.bse
-    pvals = res.pvalues
-    try:
-        conf = res.conf_int()
-    except Exception:
-        # fallback if conf_int fails
-        conf = None
-    cov = res.cov_params()
+        # list of parameter names (index)
+        names = list(params.index)
 
-    # Helper to find parameter names robustly
-    def find_param(name_substr, inflation=False):
-        for name in params.index:
-            if name_substr in name:
-                if inflation:
-                    if name.startswith('inflate') or 'inflate' in name:
-                        return name
-                else:
-                    if not (name.startswith('inflate') or 'inflate' in name):
-                        return name
-        return None
-
-    # Locate relevant parameter names
-    count_children_name = find_param('ChildrenBinary', inflation=False)
-    interaction_name = find_param('Children_GenderInteraction', inflation=False)
-    infl_children_name = find_param('ChildrenBinary', inflation=True)
-    infl_gender_name = find_param('GenderMale', inflation=True)
-
-    output = {}
-    desc_lines = []
-
-    # Extract count-model children coefficient
-    if count_children_name is not None:
-        coef = float(params[count_children_name])
-        se = float(bse[count_children_name]) if count_children_name in bse.index else None
-        p = float(pvals[count_children_name]) if count_children_name in pvals.index else None
-        if conf is not None and count_children_name in conf.index:
-            ci_low, ci_high = map(float, conf.loc[count_children_name])
+        # 1) try exact matches
+        joined = ':'.join(target_terms)
+        if joined in names:
+            name = joined
+        elif target_terms[0] in names:
+            # prefer exact single-term match if target_terms length==1
+            if len(target_terms) == 1:
+                name = target_terms[0]
+            else:
+                # look for any name that contains all terms
+                name = None
+                for n in names:
+                    if all(t in n for t in target_terms):
+                        name = n
+                        break
         else:
-            ci_low = coef - 1.96 * se if se is not None else None
-            ci_high = coef + 1.96 * se if se is not None else None
-        irr = float(np.exp(coef))
-        irr_ci = [float(np.exp(ci_low)), float(np.exp(ci_high))] if (ci_low is not None and ci_high is not None) else [None, None]
+            # 2) fallback: find first parameter name that contains all target terms
+            name = None
+            for n in names:
+                if all(t in n for t in target_terms):
+                    name = n
+                    break
 
-        output['count_children'] = {
-            'param_name': count_children_name,
-            'coef': coef,
-            'se': se,
-            'p_value': p,
-            '95ci_coef': [ci_low, ci_high],
-            'incidence_rate_ratio': irr,
-            '95ci_irr': irr_ci
+        if name is None:
+            return None
+
+        try:
+            coef = float(params[name])
+            se = float(bse[name]) if name in bse.index else float(bse.loc[name])
+            p = float(pvalues[name]) if name in pvalues.index else float(pvalues.loc[name])
+            ci_low, ci_high = float(conf.loc[name, 0]), float(conf.loc[name, 1])
+        except Exception:
+            # If any indexing fails, return None
+            return None
+
+        return {"param_name": name, "coef": coef, "se": se, "pvalue": p, "ci_lower": ci_low, "ci_upper": ci_high}
+
+    summary = {}
+    models = ['ols', 'neg_bin', 'zinb']
+    for m in models:
+        res = model_output.get(m)
+        if res is None:
+            summary[m] = {"present": False, "note": "model not present or failed"}
+            continue
+
+        # Extract main 'children_yes' effect
+        main = safe_get_param_stats(res, ['children_yes'])
+
+        # Extract interaction 'children_yes:gender_male' or similar if present
+        interaction = safe_get_param_stats(res, ['children_yes', 'gender_male'])
+
+        # For count models, compute exp(coef) and exp(CI) as IRR if coef available
+        irr = None
+        irr_ci = None
+        if main is not None:
+            try:
+                irr = float(np.exp(main['coef']))
+                irr_ci = (float(np.exp(main['ci_lower'])), float(np.exp(main['ci_upper'])))
+            except Exception:
+                irr = None
+                irr_ci = None
+
+        summary[m] = {
+            "present": True,
+            "main": main,
+            "interaction": interaction,
+            "irr": irr,
+            "irr_ci": irr_ci
         }
 
-        desc_lines.append(
-            f"Count model (among those at-risk of affairs): '{count_children_name}' coef={coef:.4f}, "
-            f"IRR={irr:.4f}, p={p:.3g}."
-        )
-    else:
-        desc_lines.append("Count-model ChildrenBinary parameter not found in model output.")
-    
-    # Extract interaction parameter (children x gender)
-    if interaction_name is not None:
-        coef_int = float(params[interaction_name])
-        se_int = float(bse[interaction_name]) if interaction_name in bse.index else None
-        p_int = float(pvals[interaction_name]) if interaction_name in pvals.index else None
-        if conf is not None and interaction_name in conf.index:
-            ci_low_int, ci_high_int = map(float, conf.loc[interaction_name])
+    # Add descriptive stats if present
+    desc = model_output.get('descriptive_by_children')
+    if desc is not None:
+        summary['descriptive_by_children'] = desc
+
+    # Formulate simple verdicts per model about whether 'having children' decreases affairs
+    verdicts = {}
+    for m in models:
+        info = summary.get(m)
+        if not info or not info.get("present"):
+            verdicts[m] = {"conclusion": "no_model", "reason": "model not available"}
+            continue
+        main = info.get("main")
+        if main is None:
+            verdicts[m] = {"conclusion": "no_estimate", "reason": "no 'children_yes' parameter found in model"}
+            continue
+
+        coef = main['coef']
+        p = main['pvalue']
+        # significance at alpha=0.05
+        sig = (p < 0.05)
+        if coef < 0:
+            if sig:
+                conclusion = "decrease_significant"
+                reason = f"Coefficient {coef:.4f} (p={p:.3g}) indicates a statistically significant decrease."
+            else:
+                conclusion = "decrease_nonsig"
+                reason = f"Coefficient {coef:.4f} (p={p:.3g}) indicates a non-significant decrease."
+        elif coef > 0:
+            if sig:
+                conclusion = "increase_significant"
+                reason = f"Coefficient {coef:.4f} (p={p:.3g}) indicates a statistically significant increase."
+            else:
+                conclusion = "increase_nonsig"
+                reason = f"Coefficient {coef:.4f} (p={p:.3g}) indicates a non-significant increase."
         else:
-            ci_low_int = coef_int - 1.96 * se_int if se_int is not None else None
-            ci_high_int = coef_int + 1.96 * se_int if se_int is not None else None
+            conclusion = "no_effect"
+            reason = f"Coefficient is {coef:.4f} (p={p:.3g})."
 
-        output['count_children_gender_interaction'] = {
-            'param_name': interaction_name,
-            'coef': coef_int,
-            'se': se_int,
-            'p_value': p_int,
-            '95ci_coef': [ci_low_int, ci_high_int]
-        }
+        # For count models, add IRR interpretation if available
+        irr = info.get("irr")
+        if irr is not None:
+            reason += f" IRR = {irr:.3f}"
+            if info.get("irr_ci") is not None:
+                reason += f" (CI {info['irr_ci'][0]:.3f} - {info['irr_ci'][1]:.3f})"
 
-        desc_lines.append(
-            f"Interaction '{interaction_name}' coef={coef_int:.4f}, p={p_int:.3g} "
-            "(this modifies the children effect for males)."
-        )
+        verdicts[m] = {"conclusion": conclusion, "reason": reason, "pvalue": p, "coef": coef}
+
+    # Aggregate a simple overall conclusion:
+    # Count models that show significant decrease vs significant increase
+    sig_decrease = sum(1 for v in verdicts.values() if v.get('conclusion') == 'decrease_significant')
+    sig_increase = sum(1 for v in verdicts.values() if v.get('conclusion') == 'increase_significant')
+
+    if sig_decrease > 0 and sig_increase == 0:
+        overall = "Having children appears to decrease engagement in extramarital affairs (statistically significant in one or more models)."
+    elif sig_increase > 0 and sig_decrease == 0:
+        overall = "Having children does NOT decrease engagement in extramarital affairs; models show an increase (statistically significant in one or more models)."
+    elif sig_decrease == 0 and sig_increase == 0:
+        overall = "There is no consistent statistically significant evidence that having children decreases engagement in extramarital affairs across the fitted models."
     else:
-        desc_lines.append("Interaction parameter (Children x Gender) not found in model output.")
+        overall = "Mixed evidence: some models show a significant decrease and others a significant increase."
 
-    # Compute marginal effects for females and males in the count model
-    # Female (GenderMale=0): effect = coef_children
-    # Male (GenderMale=1): effect = coef_children + coef_interaction
-    try:
-        female_effect = None
-        male_effect = None
-        if count_children_name is not None:
-            female_coef = float(params[count_children_name])
-            female_se = float(bse[count_children_name]) if count_children_name in bse.index else None
-            female_irr = float(np.exp(female_coef))
-            female_ci = [float(np.exp(output['count_children']['95ci_coef'][0])),
-                         float(np.exp(output['count_children']['95ci_coef'][1]))] if output.get('count_children') else [None, None]
-            output['marginal_effect_female'] = {
-                'coef': female_coef,
-                'se': female_se,
-                'incidence_rate_ratio': female_irr,
-                '95ci_irr': female_ci,
-                'p_value': float(pvals[count_children_name]) if count_children_name in pvals.index else None
-            }
-            desc_lines.append(
-                f"For females (GenderMale=0): children coef={female_coef:.4f}, IRR={female_irr:.4f}, p={pvals[count_children_name]:.3g}."
-            )
+    # Compose the returned object
+    results_object = {
+        "per_model_summary": summary,
+        "model_verdicts": verdicts,
+        "overall_conclusion": overall
+    }
 
-            if interaction_name is not None:
-                # male effect = coef_children + coef_interaction
-                male_coef = float(params[count_children_name]) + float(params[interaction_name])
-                # variance
-                try:
-                    var_c = cov.loc[count_children_name, count_children_name]
-                    var_i = cov.loc[interaction_name, interaction_name]
-                    cov_ci = cov.loc[count_children_name, interaction_name]
-                    var_sum = var_c + var_i + 2.0 * cov_ci
-                    male_se = float(np.sqrt(var_sum))
-                except Exception:
-                    male_se = None
-                male_irr = float(np.exp(male_coef))
-                # p-value for linear combination
-                if male_se is not None:
-                    z = male_coef / male_se
-                    p_male = float(2 * (1 - norm.cdf(abs(z))))
-                    ci_low_male = male_coef - 1.96 * male_se
-                    ci_high_male = male_coef + 1.96 * male_se
-                    ci_irr_male = [float(np.exp(ci_low_male)), float(np.exp(ci_high_male))]
-                else:
-                    p_male = None
-                    ci_irr_male = [None, None]
+    # Short description
+    description_lines = [
+        "Extracted per-model estimates for the 'children_yes' effect (coefficient, SE, p-value, 95% CI).",
+        "For count models (Negative Binomial / ZINB) the exponentiated coefficient (IRR) is also provided where available.",
+        "A simple per-model verdict (significant increase/decrease/no effect) and an overall conclusion are included."
+    ]
+    description = " ".join(description_lines) + " Overall conclusion: " + overall
 
-                output['marginal_effect_male'] = {
-                    'coef': male_coef,
-                    'se': male_se,
-                    'incidence_rate_ratio': male_irr,
-                    '95ci_irr': ci_irr_male,
-                    'p_value': p_male
-                }
-                desc_lines.append(
-                    f"For males (GenderMale=1): children marginal coef={male_coef:.4f}, IRR={male_irr:.4f}, p={p_male:.3g if p_male is not None else 'NA'}."
-                )
-            else:
-                desc_lines.append("Cannot compute male marginal effect because interaction parameter was not found.")
-    except Exception as e:
-        desc_lines.append(f"Error computing marginal effects: {e}")
-
-    # Extract inflation-model children coefficient (odds of being an "always-zero" case)
-    if infl_children_name is not None:
-        coef_infl = float(params[infl_children_name])
-        se_infl = float(bse[infl_children_name]) if infl_children_name in bse.index else None
-        p_infl = float(pvals[infl_children_name]) if infl_children_name in pvals.index else None
-        if conf is not None and infl_children_name in conf.index:
-            ci_low_infl, ci_high_infl = map(float, conf.loc[infl_children_name])
-        else:
-            ci_low_infl = coef_infl - 1.96 * se_infl if se_infl is not None else None
-            ci_high_infl = coef_infl + 1.96 * se_infl if se_infl is not None else None
-        or_infl = float(np.exp(coef_infl))
-        or_ci = [float(np.exp(ci_low_infl)), float(np.exp(ci_high_infl))] if (ci_low_infl is not None and ci_high_infl is not None) else [None, None]
-
-        output['inflation_children'] = {
-            'param_name': infl_children_name,
-            'coef': coef_infl,
-            'se': se_infl,
-            'p_value': p_infl,
-            '95ci_coef': [ci_low_infl, ci_high_infl],
-            'odds_ratio': or_infl,
-            '95ci_or': or_ci
-        }
-
-        desc_lines.append(
-            f"Inflation model (probability of structural zero): '{infl_children_name}' coef={coef_infl:.4f}, "
-            f"OR={or_infl:.4f}, p={p_infl:.3g}."
-        )
-    else:
-        desc_lines.append("Inflation-model ChildrenBinary parameter not found in model output.")
-
-    # Brief interpretation: does having children decrease engagement in extramarital affairs?
-    # We'll synthesize a cautious statement based on sign and significance of count and inflation effects.
-    interpret = []
-    # check count effect significance
-    try:
-        cnt = output.get('count_children')
-        if cnt:
-            if cnt['p_value'] is not None and cnt['p_value'] < 0.05:
-                if cnt['coef'] < 0:
-                    interpret.append("In the count model, having children is associated with a statistically significant decrease in the expected number of affairs (IRR<1).")
-                else:
-                    interpret.append("In the count model, having children is associated with a statistically significant increase in the expected number of affairs (IRR>1).")
-            else:
-                interpret.append("In the count model, the coefficient for having children is not statistically significant.")
-    except Exception:
-        pass
-
-    # check inflation effect significance
-    try:
-        infl = output.get('inflation_children')
-        if infl:
-            if infl['p_value'] is not None and infl['p_value'] < 0.05:
-                if infl['coef'] > 0:
-                    interpret.append("In the inflation model, having children significantly increases the odds of being in the 'always zero' group (i.e., more likely to report zero affairs), which implies fewer people with any affairs.")
-                else:
-                    interpret.append("In the inflation model, having children significantly decreases the odds of being an 'always zero' (i.e., less likely to report zero affairs).")
-            else:
-                interpret.append("In the inflation model, the coefficient for having children is not statistically significant.")
-    except Exception:
-        pass
-
-    if not interpret:
-        interpret.append("No clear evidence from either submodel (count or inflation) was found in the model output to claim a statistically significant effect of children on affairs.")
-
-    # Combine description
-    description = (
-        "Extracted statistics for ChildrenBinary (count and inflation parts) and marginal effects by gender.\n"
-        + "\n".join(desc_lines)
-        + "\n\nSummary interpretation:\n- " + "\n- ".join(interpret)
-    )
-
-    return {"object": output, "description": description}
+    return {"object": results_object, "description": description}

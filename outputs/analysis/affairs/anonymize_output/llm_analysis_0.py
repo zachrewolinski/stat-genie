@@ -1,4 +1,4 @@
-from typing import Any, Dict, FrozenSet, List, Literal, Optional, Set, Tuple
+from typing import Dict, FrozenSet, List, Literal, Optional, Set, Tuple, Any
 import numpy as np
 import pandas as pd
 import sklearn
@@ -13,202 +13,130 @@ df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/anal
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Transform the raw Fair (Psychology Today) dataset into analysis-ready columns.
+    Transforms the raw dataset to the modeling dataframe. Produces the following columns used in models:
+      - AnyAffair: binary indicator (1 if feature2 > 0, else 0)
+      - NumAffairs: numeric original frequency variable (feature2)
+      - Children: 1 if feature6 == 'yes', 0 if 'no'
+      - Female: 1 if feature3 == 'female', 0 if 'male'
+      - Age: numeric (feature4)
+      - YearsMarried: numeric (feature5)
+      - Religiosity: numeric (feature7)
+      - Education: numeric (feature8)
+      - Occupation: numeric (feature9)
+      - MaritalHappiness: numeric (feature10)
 
-    Inputs expected: columns named feature1..feature10 as in the provided schema
-    Outputs (added/renamed columns):
-      - AffairCount (numeric) -- original feature2
-      - AffairAny (binary) -- 1 if AffairCount > 0, else 0
-      - LogAffairCount (numeric) -- log(AffairCount) for AffairCount>0, else NaN
-      - HasChildren (binary) -- 1 if children present, 0 if not
-      - Gender_Female (binary) -- 1 if female, 0 if male
-      - Age, YearsMarried, Religiousness, Education, Occupation, MaritalHappiness (numeric)
-
-    Rows with missing values in the variables used for the principal models are dropped.
+    Drops rows with missing values in any of the columns above.
     """
+    df = df.copy()
 
-    # Rename relevant columns to meaningful names
-    rename_map = {
-        'feature2': 'AffairCount',
-        'feature3': 'Gender',
-        'feature4': 'Age',
-        'feature5': 'YearsMarried',
-        'feature6': 'Children',
-        'feature7': 'Religiousness',
-        'feature8': 'Education',
-        'feature9': 'Occupation',
-        'feature10': 'MaritalHappiness'
-    }
-    df = df.rename(columns=rename_map)
+    # Create numeric count/frequency of extramarital intercourse
+    df['NumAffairs'] = pd.to_numeric(df['feature2'], errors='coerce')
 
-    # Define the exact required final columns (per contract)
-    required_for_models = [
-        'AffairCount', 'AffairAny', 'HasChildren', 'Gender_Female', 'Age', 'YearsMarried',
-        'Religiousness', 'Education', 'Occupation', 'MaritalHappiness'
-    ]
+    # Binary indicator: any affair (primary DV)
+    df['AnyAffair'] = (df['NumAffairs'] > 0).astype(int)
 
-    # Ensure all required columns exist in the dataframe (create as NaN if missing).
-    # This guarantees the transform returns a dataframe with the required column names.
-    for col in required_for_models:
-        if col not in df.columns:
-            df[col] = np.nan
+    # Children present in the marriage (feature6: 'yes'/'no') -> 1/0
+    df['Children'] = df['feature6'].astype(str).str.lower().map({'yes': 1, 'no': 0})
 
-    # Ensure numeric columns are numeric (coerce non-numeric to NaN)
-    num_cols = ['AffairCount', 'Age', 'YearsMarried', 'Religiousness', 'Education', 'Occupation', 'MaritalHappiness']
-    for col in num_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
+    # Gender: map female/male to 1/0
+    df['Female'] = df['feature3'].astype(str).str.lower().map({'female': 1, 'male': 0})
 
-    # Create binary indicator for any affair
-    # Preserve NaN where AffairCount is missing
-    if 'AffairCount' in df.columns:
-        affaircount = df['AffairCount']
-        affair_any = np.where(affaircount.isna(), np.nan, (affaircount > 0).astype(int))
-        df['AffairAny'] = pd.Series(affair_any, index=df.index)
-    else:
-        df['AffairAny'] = np.nan
+    # Controls: keep numeric versions (coerce errors -> NaN)
+    df['Age'] = pd.to_numeric(df['feature4'], errors='coerce')
+    df['YearsMarried'] = pd.to_numeric(df['feature5'], errors='coerce')
+    df['Religiosity'] = pd.to_numeric(df['feature7'], errors='coerce')
+    df['Education'] = pd.to_numeric(df['feature8'], errors='coerce')
+    df['Occupation'] = pd.to_numeric(df['feature9'], errors='coerce')
+    df['MaritalHappiness'] = pd.to_numeric(df['feature10'], errors='coerce')
 
-    # Log of positive counts for second-stage modeling (NaN for zeros/nonpositive/missing)
-    df['LogAffairCount'] = np.where(df['AffairCount'] > 0, np.log(df['AffairCount']), np.nan)
+    # Select relevant columns for modeling
+    model_cols = ['AnyAffair', 'NumAffairs', 'Children', 'Female',
+                  'Age', 'YearsMarried', 'Religiosity', 'Education',
+                  'Occupation', 'MaritalHappiness']
 
-    # Standardize / binarize children indicator
-    if 'Children' in df.columns:
-        # map various textual representations to lower-case then to binary
-        children_series = df['Children'].astype(str).str.strip().str.lower()
-        mapped = children_series.map({'yes': 1, 'no': 0, 'y': 1, 'n': 0})
-        df['HasChildren'] = mapped
-        # if there are alternative codings (like 1/0), attempt numeric coercion for those
-        mask_na = df['HasChildren'].isna()
-        if mask_na.any():
-            coerced = pd.to_numeric(df.loc[mask_na, 'Children'], errors='coerce')
-            df.loc[mask_na, 'HasChildren'] = coerced
-    else:
-        # If original 'Children' column absent, HasChildren was already created above as NaN
-        pass
+    # Drop rows with missing values in any modeling column
+    df_model = df[model_cols].dropna().reset_index(drop=True)
 
-    # Coerce HasChildren to numeric (will remain NA where unknown)
-    df['HasChildren'] = pd.to_numeric(df['HasChildren'], errors='coerce')
+    # Optional: ensure integer dtypes for binary indicators
+    df_model['AnyAffair'] = df_model['AnyAffair'].astype(int)
+    df_model['Children'] = df_model['Children'].astype(int)
+    df_model['Female'] = df_model['Female'].astype(int)
 
-    # Gender: create Female indicator (1 = female, 0 = male)
-    if 'Gender' in df.columns:
-        gender_s = df['Gender'].astype(str).str.strip().str.lower()
-        mapped_g = gender_s.map({'female': 1, 'male': 0, 'f': 1, 'm': 0})
-        df['Gender_Female'] = mapped_g
-        # If gender encoded differently (e.g., 1/0) try coercion for the remaining NAs
-        mask_g_na = df['Gender_Female'].isna()
-        if mask_g_na.any():
-            coerced_g = pd.to_numeric(df.loc[mask_g_na, 'Gender'], errors='coerce')
-            df.loc[mask_g_na, 'Gender_Female'] = coerced_g
-    else:
-        # If original 'Gender' column absent, Gender_Female was already created above as NaN
-        pass
-
-    df['Gender_Female'] = pd.to_numeric(df['Gender_Female'], errors='coerce')
-
-    # Now drop any rows that are missing any of the required modeling variables
-    # (this enforces "Rows with missing values in the variables used for the principal models are dropped.")
-    df = df.dropna(subset=required_for_models)
-
-    # Ensure final columns are standard numpy-backed dtypes (not pandas nullable dtypes)
-    # Cast binary indicators to float (they are guaranteed non-missing after dropna) to avoid pandas extension dtypes
-    df['AffairAny'] = df['AffairAny'].astype(float)
-    df['HasChildren'] = df['HasChildren'].astype(float)
-    df['Gender_Female'] = df['Gender_Female'].astype(float)
-
-    # Reset index for cleanliness
-    df = df.reset_index(drop=True)
-
-    return df
+    return df_model
 
 
 # ======== MODEL CODE ========
-def model(df: pd.DataFrame) -> Any:
+def model(df: pd.DataFrame) -> dict:
     """
-    Run a two-part analysis to estimate the association between having children and extramarital affairs.
+    Fits a primary logistic regression for probability of any extramarital affair (AnyAffair)
+    and conditional count models (Poisson and Negative Binomial) for NumAffairs among
+    respondents who report > 0 affairs.
 
-    1) Logistic regression for probability of any affair (AffairAny ~ HasChildren + controls)
-    2) Linear OLS on log(AffairCount) among those with AffairCount>0 (LogAffairCount ~ HasChildren + controls)
-
-    Returns a dictionary with fitted model result objects for both parts.
+    Returns a dictionary with fitted results objects and textual summaries:
+      - 'logit_res': fitted Logit results (statsmodels)
+      - 'logit_summary': text summary
+      - 'poisson_res' & 'poisson_summary' (only if there are positive counts)
+      - 'negbin_res' & 'negbin_summary' (only if there are positive counts)
     """
-
-    # Define control variables to include
-    controls = [
-        'Gender_Female',
-        'Age',
-        'YearsMarried',
-        'Religiousness',
-        'Education',
-        'Occupation',
-        'MaritalHappiness'
-    ]
-
-    # Ensure required columns are present
-    required_cols = ['AffairAny', 'HasChildren'] + controls
+    # Expect df is already transformed (output of transform). If not, try to transform.
+    required_cols = ['AnyAffair', 'NumAffairs', 'Children', 'Female',
+                     'Age', 'YearsMarried', 'Religiosity', 'Education',
+                     'Occupation', 'MaritalHappiness']
     missing = [c for c in required_cols if c not in df.columns]
-    if len(missing) > 0:
-        raise ValueError(f"Missing columns required for modeling: {missing}")
+    if missing:
+        raise ValueError(f"Dataframe is missing required columns for modeling: {missing}")
 
-    # Prepare design matrix for logistic regression (any affair)
-    X_logit = df[['HasChildren'] + controls].copy()
-    # Ensure numeric dtype for design matrix
-    X_logit = X_logit.apply(pd.to_numeric, errors='coerce').astype(float)
-    X_logit = sm.add_constant(X_logit, has_constant='add')
-    y_logit = pd.to_numeric(df['AffairAny'], errors='coerce').astype(float)
+    # Build predictors and include interaction Children x Female to test moderation by gender
+    X = df[['Children', 'Female', 'Age', 'YearsMarried', 'Religiosity', 'Education', 'Occupation', 'MaritalHappiness']].copy()
+    X['Children_Female'] = X['Children'] * X['Female']
+    X = sm.add_constant(X, has_constant='add')
 
-    # Align and drop any rows with missing data for the logistic model
-    data_logit = pd.concat([X_logit, y_logit.rename('AffairAny')], axis=1)
-    data_logit = data_logit.dropna()
-    if data_logit.shape[0] == 0:
-        # No complete cases: return None results rather than raising an error
-        return {
-            'logit_model': None,
-            'ols_positive_model': None
-        }
-    y_logit_clean = data_logit['AffairAny']
-    X_logit_clean = data_logit.drop(columns=['AffairAny'])
+    y = df['AnyAffair']
 
-    # Fit logistic regression (probability of any affair)
-    logit_model = None
+    results = {}
+
+    # Logistic regression for any affair
     try:
-        logit_model = sm.Logit(y_logit_clean, X_logit_clean).fit(disp=False)
-    except Exception:
-        # If Logit fails to converge or raises, fall back to GLM with binomial family
-        try:
-            logit_model = sm.GLM(y_logit_clean, X_logit_clean, family=sm.families.Binomial()).fit()
-        except Exception:
-            # If fallback also fails, leave as None
-            logit_model = None
+        logit_model = sm.Logit(y, X)
+        logit_res = logit_model.fit(disp=False, maxiter=200)
+        results['logit_res'] = logit_res
+        results['logit_summary'] = logit_res.summary().as_text()
+    except Exception as e:
+        results['logit_res'] = None
+        results['logit_error'] = str(e)
 
-    # Second-stage model: among respondents with AffairCount > 0
-    # Ensure LogAffairCount exists in dataframe (transform guarantees it)
-    df_pos = df[df['AffairCount'] > 0].copy()
-    results_pos = None
-    if len(df_pos) >= (len(controls) + 2):
-        X_pos = df_pos[['HasChildren'] + controls].copy()
-        X_pos = X_pos.apply(pd.to_numeric, errors='coerce').astype(float)
+    # Conditional count models among respondents who reported any affairs (NumAffairs > 0)
+    df_pos = df[df['NumAffairs'] > 0].copy()
+    if df_pos.shape[0] >= 10:  # require a modest sample size to attempt count models
+        X_pos = df_pos[['Children', 'Female', 'Age', 'YearsMarried', 'Religiosity', 'Education', 'Occupation', 'MaritalHappiness']].copy()
+        X_pos['Children_Female'] = X_pos['Children'] * X_pos['Female']
         X_pos = sm.add_constant(X_pos, has_constant='add')
-        y_pos = pd.to_numeric(df_pos['LogAffairCount'], errors='coerce').astype(float)
-        # Align and drop missing for OLS
-        data_pos = pd.concat([X_pos, y_pos.rename('LogAffairCount')], axis=1)
-        data_pos = data_pos.dropna()
-        if data_pos.shape[0] >= (len(controls) + 2):
-            y_pos_clean = data_pos['LogAffairCount']
-            X_pos_clean = data_pos.drop(columns=['LogAffairCount'])
-            # Fit OLS on the log-transformed positive counts
-            try:
-                ols_model = sm.OLS(y_pos_clean, X_pos_clean).fit()
-                results_pos = ols_model
-            except Exception:
-                results_pos = None
-        else:
-            results_pos = None
-    else:
-        # Not enough positive observations to estimate second-stage model
-        results_pos = None
+        y_pos = df_pos['NumAffairs']
 
-    # Return both fitted results
-    return {
-        'logit_model': logit_model,
-        'ols_positive_model': results_pos
-    }
+        # Poisson
+        try:
+            poisson_model = sm.GLM(y_pos, X_pos, family=sm.families.Poisson())
+            poisson_res = poisson_model.fit()
+            results['poisson_res'] = poisson_res
+            results['poisson_summary'] = poisson_res.summary().as_text()
+        except Exception as e:
+            results['poisson_res'] = None
+            results['poisson_error'] = str(e)
+
+        # Negative binomial (to allow overdispersion)
+        try:
+            negbin_model = sm.GLM(y_pos, X_pos, family=sm.families.NegativeBinomial())
+            negbin_res = negbin_model.fit()
+            results['negbin_res'] = negbin_res
+            results['negbin_summary'] = negbin_res.summary().as_text()
+        except Exception as e:
+            results['negbin_res'] = None
+            results['negbin_error'] = str(e)
+    else:
+        results['poisson_res'] = None
+        results['negbin_res'] = None
+        results['count_model_note'] = 'Not enough positive-count observations to fit count models (NumAffairs > 0).'
+
+    return results
+
+

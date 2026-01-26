@@ -1,158 +1,140 @@
 def extract_final_answer(model_output):
     """
-    Extract the estimated effect of "Children" on "affairs" from the fitted Tobit model,
-    including the interaction with Female. Returns a dictionary with keys:
-      - "object": nested dict with estimates, standard errors, z-stats, p-values, and 95% CIs
-                  for the effect of Children for males and for females, plus raw params.
-      - "description": short plain-English interpretation of the results in context.
+    Extracts statistics related to the effect of 'children_binary' on 'affair_count'
+    from the provided model_output dictionary.
 
-    Assumptions about parameter ordering (matches the model construction in the prompt):
-      params vector = [const, Children, Female, Children_x_Female, Age, YearsMarried,
-                       Religiousness, Education, Occupation, Rating, log_sigma]
-    The function is robust to model objects that store cov_params() as ndarray or DataFrame.
+    Returns:
+      {
+        "object": {
+            "model_used": "nb_model",
+            "coef": <float>,              # log-count coefficient
+            "std_err": <float>,
+            "p_value": <float>,
+            "conf_int": [low, high],     # 95% CI on coefficient scale
+            "irr": <float>,              # incidence rate ratio = exp(coef)
+            "irr_conf_int": [low, high], # 95% CI for irr
+            "notes": <str>
+        },
+        "description": <str>            # brief plain-English interpretation
+      }
     """
     import numpy as np
-    from scipy.stats import norm
 
-    res = model_output
+    # Helper to build result dict from a model-like object
+    def _from_model(res_obj, param_name='children_binary'):
+        out = {}
+        try:
+            params = res_obj.params
+            if param_name not in params.index:
+                raise KeyError(f"parameter '{param_name}' not found in model params")
+            coef = float(params[param_name])
+            se = float(res_obj.bse[param_name]) if hasattr(res_obj, 'bse') else None
+            pval = float(res_obj.pvalues[param_name]) if hasattr(res_obj, 'pvalues') else None
+            try:
+                ci = res_obj.conf_int().loc[param_name].astype(float).tolist()
+            except Exception:
+                # approximate 95% CI if conf_int not available
+                if se is not None:
+                    ci = [coef - 1.96 * se, coef + 1.96 * se]
+                else:
+                    ci = [None, None]
+            irr = float(np.exp(coef)) if coef is not None else None
+            irr_ci = [float(np.exp(ci[0])), float(np.exp(ci[1]))] if ci[0] is not None else [None, None]
 
-    # Attempt to get params and covariance matrix
-    params = np.asarray(res.params)  # length = k + 1 (last element = log_sigma)
-    try:
-        cov = res.cov_params()
-        cov = np.asarray(cov)
-    except Exception:
-        # If cov_params is not available, try to use bse (approximate)
-        cov = None
+            out.update({
+                "coef": coef,
+                "std_err": se,
+                "p_value": pval,
+                "conf_int": ci,
+                "irr": irr,
+                "irr_conf_int": irr_ci
+            })
+            return out
+        except Exception as e:
+            return {"error": str(e)}
 
-    # Define expected parameter names/order used when fitting the model
-    exog_cols = [
-        'Children',
-        'Female',
-        'Children_x_Female',
-        'Age',
-        'YearsMarried',
-        'Religiousness',
-        'Education',
-        'Occupation',
-        'Rating'
-    ]
-    names = ['const'] + exog_cols  # params[0] corresponds to const
-
-    # Check length consistency
-    k = len(names)
-    if params.shape[0] < k + 1:
-        raise ValueError("Unexpected number of parameters in model_output.params. "
-                         f"Found {params.shape[0]}, expected at least {k+1} (including log_sigma).")
-
-    # indices
-    idx_children = names.index('Children')
-    idx_inter = names.index('Children_x_Female')
-
-    # Extract raw coefficients (latent Tobit coefficients)
-    beta_children = float(params[idx_children])
-    beta_inter = float(params[idx_inter])
-
-    # Prepare results container
-    out = {
-        'raw_params': {
-            'Children_coef': beta_children,
-            'Children_x_Female_coef': beta_inter,
-            'log_sigma': float(params[k])  # last param is log_sigma
-        }
-    }
-
-    # If covariance matrix available, compute SEs and test statistics for linear combinations
-    if cov is not None and cov.shape[0] >= k + 1:
-        var_children = float(cov[idx_children, idx_children])
-        var_inter = float(cov[idx_inter, idx_inter])
-        cov_child_inter = float(cov[idx_children, idx_inter])
-
-        # Effect of Children for males (Female=0): just beta_children
-        eff_male = beta_children
-        se_male = np.sqrt(var_children) if var_children >= 0 else np.nan
-        z_male = eff_male / se_male if se_male and not np.isnan(se_male) else np.nan
-        p_male = 2.0 * (1.0 - norm.cdf(abs(z_male))) if not np.isnan(z_male) else np.nan
-        ci_male = (eff_male - 1.96 * se_male, eff_male + 1.96 * se_male) if not np.isnan(se_male) else (np.nan, np.nan)
-
-        # Effect of Children for females (Female=1): beta_children + beta_inter
-        eff_female = beta_children + beta_inter
-        var_female = var_children + var_inter + 2.0 * cov_child_inter
-        se_female = np.sqrt(var_female) if var_female >= 0 else np.nan
-        z_female = eff_female / se_female if se_female and not np.isnan(se_female) else np.nan
-        p_female = 2.0 * (1.0 - norm.cdf(abs(z_female))) if not np.isnan(z_female) else np.nan
-        ci_female = (eff_female - 1.96 * se_female, eff_female + 1.96 * se_female) if not np.isnan(se_female) else (np.nan, np.nan)
-
-        out['effects'] = {
-            'male (Female=0)': {
-                'effect': eff_male,
-                'se': se_male,
-                'z': z_male,
-                'p_value': p_male,
-                '95%_CI': ci_male,
-                'interpretation': ("Coefficient on latent Tobit scale: negative => having children "
-                                   "is associated with lower latent propensity for affairs")
-            },
-            'female (Female=1)': {
-                'effect': eff_female,
-                'se': se_female,
-                'z': z_female,
-                'p_value': p_female,
-                '95%_CI': ci_female,
-                'interpretation': ("Combined coefficient (Children + Children_x_Female) on latent "
-                                   "Tobit scale for females")
-            }
-        }
-    else:
-        # If covariance unavailable, at least return raw coefficients and note inability to test significance
-        out['effects'] = {
-            'male (Female=0)': {
-                'effect': beta_children,
-                'se': None,
-                'z': None,
-                'p_value': None,
-                '95%_CI': (None, None),
-                'note': 'covariance matrix not available; cannot compute SE/p-values'
-            },
-            'female (Female=1)': {
-                'effect': beta_children + beta_inter,
-                'se': None,
-                'z': None,
-                'p_value': None,
-                '95%_CI': (None, None),
-                'note': 'covariance matrix not available; cannot compute SE/p-values'
-            }
+    # 1) Prefer the primary NB GLM result if present
+    if 'nb_model' in model_output and model_output['nb_model'] is not None:
+        nb = model_output['nb_model']
+        nb_stats = _from_model(nb, 'children_binary')
+        result_object = {
+            "model_used": "nb_model",
+            **nb_stats
         }
 
-    # Short textual summary
-    # We interpret negative effects as "having children decreases engagement in extramarital affairs"
-    def interpret(eff, p):
-        if p is None or np.isnan(p):
-            return "Coefficient is {0:.4f}. Statistical significance could not be determined.".format(eff)
-        if p < 0.001:
-            sig = "highly statistically significant (p < 0.001)"
-        elif p < 0.01:
-            sig = "statistically significant (p < 0.01)"
-        elif p < 0.05:
-            sig = "statistically significant (p < 0.05)"
+        # Optional: also try to extract from nb_coef_table if present for cross-check
+        if 'nb_coef_table' in model_output and model_output['nb_coef_table'] is not None:
+            try:
+                tab = model_output['nb_coef_table']
+                if 'children_binary' in tab.index:
+                    row = tab.loc['children_binary']
+                    # cross-check and attach
+                    result_object["coef_table_check"] = {
+                        "coef": float(row['Coef.']),
+                        "std_err": float(row['Std.Err.']),
+                        "p_value": float(row['P>|z|'])
+                    }
+            except Exception:
+                pass
+
+        # Optional: also extract from zinb_model (if available) for comparison
+        if 'zinb_model' in model_output and model_output.get('zinb_model') is not None:
+            zinb = model_output['zinb_model']
+            zinb_stats = _from_model(zinb, 'children_binary')
+            result_object["zinb_model_check"] = zinb_stats
+
+        # Build human-readable description based on NB results
+        if "error" in nb_stats:
+            description = f"Could not extract 'children_binary' from nb_model: {nb_stats['error']}"
         else:
-            sig = "not statistically significant (p >= 0.05)"
-        direction = "decrease" if eff < 0 else ("increase" if eff > 0 else "no change")
-        return "Estimated effect = {0:.4f}, which implies a {1} in the latent propensity for affairs. {2} (p = {3:.4g}).".format(eff, direction, sig, p)
+            coef = nb_stats["coef"]
+            se = nb_stats["std_err"]
+            p = nb_stats["p_value"]
+            irr = nb_stats["irr"]
+            ci = nb_stats["conf_int"]
+            irr_ci = nb_stats["irr_conf_int"]
+            description = (
+                f"Negative-binomial model: coefficient for 'children_binary' = {coef:.4f} "
+                f"(SE = {se:.4f}, p = {p:.4g}), 95% CI = [{ci[0]:.4f}, {ci[1]:.4f}]. "
+                f"On the incidence-rate scale: IRR = {irr:.3f}, 95% CI = [{irr_ci[0]:.3f}, {irr_ci[1]:.3f}]. "
+                "Interpretation: the estimated effect is a very small decrease in expected affair counts "
+                "for those with children, but the effect is not statistically significant (p >> 0.05) "
+                "and the 95% CI for the IRR includes 1. Therefore there is no evidence that having children "
+                "reduces engagement in extramarital affairs in this sample."
+            )
 
-    male_summary = interpret(out['effects']['male (Female=0)']['effect'],
-                             out['effects']['male (Female=0)']['p_value'])
-    female_summary = interpret(out['effects']['female (Female=1)']['effect'],
-                               out['effects']['female (Female=1)']['p_value'])
+        return {"object": result_object, "description": description}
 
-    description = (
-        "This Tobit model reports latent-scale effects of having children on the number of extramarital "
-        "affairs (left-censored at 0). Interpretation is on the latent Tobit scale (not directly the observed "
-        "expected count). Summary:\n"
-        f"- Males (Female=0): {male_summary}\n"
-        f"- Females (Female=1): {female_summary}\n\n"
-        "Negative coefficients indicate that having children is associated with a lower latent propensity to have "
-        "affairs. Use the provided p-values and confidence intervals (if available) to judge statistical significance."
-    )
+    # 2) Fallback: try to read from nb_coef_table alone
+    if 'nb_coef_table' in model_output and model_output['nb_coef_table'] is not None:
+        try:
+            tab = model_output['nb_coef_table']
+            if 'children_binary' not in tab.index:
+                return {"object": None, "description": "children_binary not found in nb_coef_table."}
+            row = tab.loc['children_binary']
+            coef = float(row['Coef.'])
+            se = float(row['Std.Err.'])
+            p = float(row['P>|z|'])
+            ci = [coef - 1.96 * se, coef + 1.96 * se]
+            irr = float(np.exp(coef))
+            irr_ci = [float(np.exp(ci[0])), float(np.exp(ci[1]))]
+            result_object = {
+                "model_used": "nb_coef_table",
+                "coef": coef,
+                "std_err": se,
+                "p_value": p,
+                "conf_int": ci,
+                "irr": irr,
+                "irr_conf_int": irr_ci
+            }
+            description = (
+                f"Using nb_coef_table: coefficient = {coef:.4f} (SE = {se:.4f}, p = {p:.4g}), "
+                f"IRR = {irr:.3f}, 95% CI IRR = [{irr_ci[0]:.3f}, {irr_ci[1]:.3f}]. "
+                "No statistically significant evidence that having children decreases extramarital affairs."
+            )
+            return {"object": result_object, "description": description}
+        except Exception as e:
+            return {"object": None, "description": f"Error extracting from nb_coef_table: {e}"}
 
-    return {"object": out, "description": description}
+    # Nothing found
+    return {"object": None, "description": "No negative-binomial or coefficient table results found in model_output."}

@@ -1,237 +1,306 @@
 def extract_final_answer(model_output):
     """
-    Extracts statistics about the effect of Age (Age_centered) on MajorityChoice
-    and how that effect varies by culture from a fitted statsmodels GLMResultsWrapper.
+    Extracts statistics related to Age_c effects (main effect and Age_c * culture interactions)
+    from the model_output produced by the modeling function.
 
-    Returns a dictionary with:
-      - "object": a dict containing detailed extracted statistics:
-           - age_main_effect: {beta, se, z, p, ci_lower, ci_upper, OR, OR_CI}
-           - interactions: dict mapping culture -> {slope, se, z, p, ci_lower, ci_upper, OR, OR_CI}
-           - interaction_terms: dict of raw interaction parameter p-values (if present)
-      - "description": a plain-English interpretation of results (whether majority reliance
-           increases with age overall and whether developmental trajectories differ across cultures).
+    Parameters
+    ----------
+    model_output : dict
+        Expected keys (some may be None): 'social_follow_model', 'majority_choice_model',
+        'mnlogit_full_y'. The first two are statsmodels BinaryResultsWrapper objects (logit),
+        the third is a statsmodels MNLogit results wrapper (or None).
+
+    Returns
+    -------
+    dict
+        A dictionary with keys:
+         - "object": a nested dict with extracted coefficients, SEs, p-values, 95% CIs,
+                     odds ratios (for the two binary logit models) for Age_c main effect
+                     and any Age_c:C(culture) interaction terms; for mnlogit, the Age_c
+                     coefficient for each non-baseline outcome (with SE, p, CI, exp(CI)).
+         - "description": A concise explanation of what the extracted numbers mean
+                          and how to interpret them with respect to the research question.
     """
-    import re
     import numpy as np
-    from math import exp, sqrt
-    try:
-        # Access parameter estimates and covariance
-        params = model_output.params  # pandas Series
-        cov = model_output.cov_params()  # DataFrame
-        pvalues = model_output.pvalues
-        conf_int = model_output.conf_int()  # DataFrame with columns [0,1]
-    except Exception as e:
-        raise ValueError("model_output does not look like a fitted statsmodels results object.") from e
+    import pandas as pd
+    import math
 
-    # Helper to get var/cov safely
-    def var_of(name):
-        return float(cov.loc[name, name])
+    def roundf(x, nd=4):
+        try:
+            return float(np.round(x, nd))
+        except Exception:
+            return x
 
-    def cov_of(name1, name2):
-        # if either name not in cov, return 0
-        if name1 not in cov.index or name2 not in cov.columns:
-            return 0.0
-        return float(cov.loc[name1, name2])
+    def summarize_binary_logit(model):
+        """
+        Extract Age_c main effect and Age_c * culture interaction terms from a binary logit model.
+        Returns a dict with entries for 'Age_c' (if present) and 'interactions' (list).
+        Each entry contains coef, se, p, ci_lower, ci_upper, odds_ratio, or_ci_lower, or_ci_upper.
+        """
+        if model is None:
+            return None
+        res = {}
+        try:
+            params = model.params  # Series
+        except Exception:
+            return None
+        bse = getattr(model, 'bse', None)
+        pvals = getattr(model, 'pvalues', None)
+        try:
+            ci_df = model.conf_int()
+        except Exception:
+            ci_df = None
 
-    # Identify culture levels from the original data frame if available
-    cultures = None
-    try:
-        df = model_output.model.data.frame
-        if 'culture' in df.columns:
-            cultures = list(np.unique(df['culture']))
-    except Exception:
-        cultures = None
-
-    # If we couldn't get cultures from the data, infer from parameter names
-    # Look for parameter names like C(culture)[T.X]
-    param_names = list(params.index)
-    t_levels = []
-    pattern = re.compile(r"C\(culture\)\[T\.(.*?)\]")
-    for name in param_names:
-        m = pattern.search(name)
-        if m:
-            t_levels.append(m.group(1))
-    t_levels = list(dict.fromkeys(t_levels))  # unique, preserve order
-
-    if cultures is None:
-        # If we have T.* levels, we can create a provisional list:
-        if t_levels:
-            # We don't know the reference level's name, so include a placeholder if necessary
-            # Attempt to find reference by looking for culture variable in model.data.orig_exog if present
-            try:
-                # Try to infer from model.data.orig_exog if present
-                orig = model_output.model.data.orig_exog
-            except Exception:
-                orig = None
-            if orig is not None and 'culture' in orig.columns:
-                cultures = list(np.unique(orig['culture']))
+        # Main Age_c effect
+        if 'Age_c' in params.index:
+            coef = params.loc['Age_c']
+            se = bse.loc['Age_c'] if (bse is not None and 'Age_c' in getattr(bse, 'index', [])) else None
+            p = pvals.loc['Age_c'] if (pvals is not None and 'Age_c' in getattr(pvals, 'index', [])) else None
+            if ci_df is not None and 'Age_c' in getattr(ci_df, 'index', []):
+                ci_low, ci_high = ci_df.loc['Age_c'].tolist()
             else:
-                # Create a list: reference level unknown, call it 'REFERENCE' if needed
-                # We'll compose cultures as [REFERENCE] + t_levels (since t_levels are the non-reference)
-                cultures = ['REFERENCE'] + t_levels
-        else:
-            # As a fallback, assume single culture present (no C(culture) terms)
-            cultures = ['ALL']
+                ci_low, ci_high = None, None
+            or_val = math.exp(coef) if coef is not None and np.isfinite(coef) else None
+            or_ci_low = math.exp(ci_low) if ci_low is not None else None
+            or_ci_high = math.exp(ci_high) if ci_high is not None else None
+            res['Age_c'] = {
+                'coef': roundf(coef),
+                'se': roundf(se) if se is not None else None,
+                'p_value': roundf(p) if p is not None else None,
+                'ci_95': (roundf(ci_low) if ci_low is not None else None,
+                          roundf(ci_high) if ci_high is not None else None),
+                'odds_ratio': roundf(or_val) if or_val is not None else None,
+                'or_95': (roundf(or_ci_low) if or_ci_low is not None else None,
+                          roundf(or_ci_high) if or_ci_high is not None else None),
+            }
 
-    # Find the main Age_centered parameter name
-    age_name = None
-    for name in param_names:
-        if name == 'Age_centered':
-            age_name = name
-            break
-    if age_name is None:
-        # Try variants (some formula interfaces might name it differently)
-        for name in param_names:
-            if 'Age_centered' in name:
-                age_name = name
-                break
-    if age_name is None:
-        raise KeyError("Could not find 'Age_centered' parameter in model parameters.")
+        # Interaction terms: any parameter name that contains "Age_c" and also "C(culture)" or ":"
+        interactions = []
+        for name in params.index:
+            if name == 'Age_c':
+                continue
+            # typical statsmodels interaction naming from formula 'Age_c * C(culture)' is
+            # something like 'Age_c:C(culture)[T.siteB]' or 'Age_c:C(culture)[T.<level>]'.
+            # We check string membership safely by converting to str
+            sname = str(name)
+            if ('Age_c' in sname) and ('C(culture)' in sname or ':' in sname):
+                coef = params.loc[name]
+                se = bse.loc[name] if (bse is not None and name in getattr(bse, 'index', [])) else None
+                p = pvals.loc[name] if (pvals is not None and name in getattr(pvals, 'index', [])) else None
+                if ci_df is not None and name in getattr(ci_df, 'index', []):
+                    ci_low, ci_high = ci_df.loc[name].tolist()
+                else:
+                    ci_low, ci_high = None, None
+                or_val = math.exp(coef) if coef is not None and np.isfinite(coef) else None
+                or_ci_low = math.exp(ci_low) if ci_low is not None else None
+                or_ci_high = math.exp(ci_high) if ci_high is not None else None
+                interactions.append({
+                    'term': sname,
+                    'coef': roundf(coef),
+                    'se': roundf(se) if se is not None else None,
+                    'p_value': roundf(p) if p is not None else None,
+                    'ci_95': (roundf(ci_low) if ci_low is not None else None,
+                              roundf(ci_high) if ci_high is not None else None),
+                    'odds_ratio': roundf(or_val) if or_val is not None else None,
+                    'or_95': (roundf(or_ci_low) if or_ci_low is not None else None,
+                              roundf(or_ci_high) if or_ci_high is not None else None),
+                })
+        res['interactions'] = interactions
+        return res
 
-    # Extract main effect for Age
-    beta_age = float(params[age_name])
-    se_age = sqrt(var_of(age_name))
-    z_age = beta_age / se_age if se_age > 0 else np.nan
-    # two-sided p-value (we'll prefer reported pvalue if available)
-    p_age = float(pvalues.get(age_name, 2 * (1 - 0.5 * (1 + np.math.erf(abs(z_age) / sqrt(2))))))  # fallback
-    ci_lower_age, ci_upper_age = float(conf_int.loc[age_name, 0]), float(conf_int.loc[age_name, 1])
-    OR_age = exp(beta_age)
-    OR_CI_age = (exp(ci_lower_age), exp(ci_upper_age))
+    def _find_column_key_by_name_like(columns, target_substr):
+        """
+        Given an iterable of column keys (which may not be strings), return the first column key
+        whose string representation contains target_substr, or None.
+        """
+        for col in columns:
+            try:
+                if target_substr == str(col) or target_substr in str(col):
+                    return col
+            except Exception:
+                continue
+        return None
 
-    age_main_effect = {
-        'beta': beta_age,
-        'se': se_age,
-        'z': z_age,
-        'p': p_age,
-        'ci_lower': ci_lower_age,
-        'ci_upper': ci_upper_age,
-        'OR': OR_age,
-        'OR_ci': OR_CI_age
-    }
+    def summarize_mnlogit(mn_model):
+        """
+        Extract Age_c coefficient (and SE, p, CI) for each non-baseline outcome in an MNLogit model.
+        mn_model.params is typically a DataFrame with rows = outcomes, columns = exog names.
+        """
+        if mn_model is None:
+            return None
+        try:
+            params_df = mn_model.params  # DataFrame: index = outcome categories, columns = exog names
+        except Exception:
+            return None
+        out = {}
 
-    # Prepare interactions: For each culture, compute the Age slope (beta_age + interaction if present)
-    interactions = {}
-    interaction_term_pvalues = {}
-    for level in cultures:
-        # Determine name of the interaction parameter for this culture, if it exists.
-        # Interaction names may be 'Age_centered:C(culture)[T.level]' or 'C(culture)[T.level]:Age_centered'
-        inter_name = None
-        candidate_patterns = [
-            f"Age_centered:C(culture)[T.{level}]",
-            f"C(culture)[T.{level}]:Age_centered",
-            f"Age_centered:C(culture)[T.{level}]",  # redundancy
-        ]
-        for cand in candidate_patterns:
-            if cand in params.index:
-                inter_name = cand
-                break
-        # Also handle cases where level strings include special characters by searching for level substring
-        if inter_name is None:
-            for name in params.index:
-                if 'Age_centered' in name and f"T.{level}" in name:
-                    inter_name = name
+        # Find Age_c column key (original dtype) robustly
+        age_col_key = None
+        # First try exact match among columns using string comparison
+        for col in params_df.columns:
+            try:
+                if str(col) == 'Age_c':
+                    age_col_key = col
                     break
-
-        if inter_name is None:
-            # No interaction term for this level -> slope is same as main effect (reference or no interaction)
-            slope = beta_age
-            se = se_age
-            z = slope / se if se > 0 else np.nan
-            p = float(pvalues.get(age_name, np.nan))
-            ci_lower = slope - 1.96 * se
-            ci_upper = slope + 1.96 * se
-        else:
-            # slope = beta_age + beta_inter
-            beta_inter = float(params[inter_name])
-            slope = beta_age + beta_inter
-            # variance = var(beta_age) + var(beta_inter) + 2*cov(beta_age, beta_inter)
-            var_slope = var_of(age_name)
-            # If inter_name not present in cov, var(...) will KeyError earlier; handled by var_of returning error
-            try:
-                var_inter = float(cov.loc[inter_name, inter_name])
             except Exception:
-                var_inter = 0.0
+                continue
+        if age_col_key is None:
+            # find any column whose string contains 'Age_c'
+            age_col_key = _find_column_key_by_name_like(params_df.columns, 'Age_c')
+        if age_col_key is None:
+            # no Age_c-like column found
+            return None
+
+        # bse and pvalues may be DataFrames as well
+        bse_df = None
+        p_df = None
+        try:
+            bse_df = mn_model.bse
+        except Exception:
+            bse_df = None
+        try:
+            p_df = mn_model.pvalues
+        except Exception:
+            p_df = None
+        try:
+            ci = mn_model.conf_int()
+        except Exception:
+            ci = None
+
+        for outcome in params_df.index:
             try:
-                cov_ai = float(cov.loc[age_name, inter_name])
+                coef = params_df.loc[outcome, age_col_key]
             except Exception:
-                cov_ai = 0.0
-            se = sqrt(max(var_slope + var_inter + 2.0 * cov_ai, 0.0))
-            z = slope / se if se > 0 else np.nan
-            # compute p using normal approximation
-            from scipy.stats import norm
-            p = 2.0 * (1.0 - norm.cdf(abs(z))) if not np.isnan(z) else np.nan
-            ci_lower = slope - 1.96 * se
-            ci_upper = slope + 1.96 * se
-            # also capture the raw interaction term p-value
-            interaction_term_pvalues[level] = float(pvalues.get(inter_name, np.nan))
+                coef = None
+            se = None
+            p = None
+            ci_low, ci_high = None, None
 
-        OR = exp(slope)
-        OR_ci = (exp(ci_lower), exp(ci_upper))
+            # locate matching column key in bse_df/p_df if they exist
+            if bse_df is not None:
+                try:
+                    # bse_df may have same structure as params_df: index=outcome, columns=params
+                    if (getattr(bse_df, 'index', None) is not None) and (getattr(bse_df, 'columns', None) is not None):
+                        bse_col_key = _find_column_key_by_name_like(bse_df.columns, str(age_col_key))
+                        if bse_col_key is None:
+                            bse_col_key = _find_column_key_by_name_like(bse_df.columns, 'Age_c')
+                        if bse_col_key is not None and outcome in bse_df.index:
+                            se = bse_df.loc[outcome, bse_col_key]
+                except Exception:
+                    se = None
 
-        interactions[level] = {
-            'slope_log_odds_per_year': slope,
-            'se': se,
-            'z': z,
-            'p': p,
-            'ci_lower': ci_lower,
-            'ci_upper': ci_upper,
-            'OR_per_year': OR,
-            'OR_ci': OR_ci,
-            'interaction_param_name': inter_name
-        }
+            if p_df is not None:
+                try:
+                    p_col_key = _find_column_key_by_name_like(p_df.columns, str(age_col_key))
+                    if p_col_key is None:
+                        p_col_key = _find_column_key_by_name_like(p_df.columns, 'Age_c')
+                    if p_col_key is not None and outcome in p_df.index:
+                        p = p_df.loc[outcome, p_col_key]
+                except Exception:
+                    p = None
 
-    # Decide whether there's evidence that developmental trajectories differ across cultures:
-    # Look for any interaction parameter with p < .05
-    any_significant_interaction = False
-    significant_levels = []
-    for level, pname in interaction_term_pvalues.items():
-        if pname is not None and not np.isnan(pname) and pname < 0.05:
-            any_significant_interaction = True
-            significant_levels.append(level)
+            # conf_int: try to extract appropriate CI for outcome & param
+            try:
+                if ci is not None:
+                    if isinstance(ci, pd.DataFrame) and isinstance(ci.index, pd.MultiIndex):
+                        # index like (outcome, param)
+                        if (outcome, age_col_key) in ci.index:
+                            ci_low, ci_high = ci.loc[(outcome, age_col_key)].tolist()
+                        else:
+                            # try matching by string representation
+                            for idx in ci.index:
+                                try:
+                                    if str(idx[0]) == str(outcome) and (str(idx[1]) == str(age_col_key) or 'Age_c' in str(idx[1])):
+                                        ci_low, ci_high = ci.loc[idx].tolist()
+                                        break
+                                except Exception:
+                                    continue
+                    elif isinstance(ci, dict):
+                        # maybe ci[outcome] is a DataFrame with params
+                        if outcome in ci:
+                            try:
+                                ci_df_for_outcome = ci[outcome]
+                                col_key = _find_column_key_by_name_like(getattr(ci_df_for_outcome, 'index', []), str(age_col_key))
+                                if col_key is None:
+                                    col_key = _find_column_key_by_name_like(getattr(ci_df_for_outcome, 'index', []), 'Age_c')
+                                if col_key is not None:
+                                    # ci[outcome] may index params by name
+                                    val = ci_df_for_outcome.loc[col_key]
+                                    if hasattr(val, '__iter__'):
+                                        ci_low, ci_high = val.tolist()
+                            except Exception:
+                                pass
+                    else:
+                        # try ci.loc[outcome, age_col_key] if shaped appropriately
+                        try:
+                            # Some versions return a DataFrame with a MultiIndex columns or similar; try robust access
+                            possible_col_key = _find_column_key_by_name_like(getattr(ci, 'columns', []), str(age_col_key))
+                            if possible_col_key is not None and outcome in getattr(ci, 'index', []):
+                                val = ci.loc[outcome, possible_col_key]
+                                if hasattr(val, '__iter__'):
+                                    ci_low, ci_high = list(val)
+                            else:
+                                # fallback: try direct loc with original keys
+                                val = ci.loc[(outcome, age_col_key)] if (getattr(ci, 'index', None) is not None and (outcome, age_col_key) in ci.index) else None
+                                if val is not None and hasattr(val, '__iter__'):
+                                    ci_low, ci_high = list(val)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
 
-    # Summarize results in plain language
-    desc_lines = []
-    # Overall age effect interpretation
-    age_dir = "increase" if age_main_effect['beta'] > 0 else ("decrease" if age_main_effect['beta'] < 0 else "no change")
-    desc_lines.append(
-        f"Overall (main effect): Age_centered beta = {age_main_effect['beta']:.3f}, "
-        f"SE = {age_main_effect['se']:.3f}, z = {age_main_effect['z']:.2f}, p = {age_main_effect['p']:.3f}. "
-        f"This corresponds to an odds ratio per year of {age_main_effect['OR']:.3f} "
-        f"(95% CI [{age_main_effect['OR_ci'][0]:.3f}, {age_main_effect['OR_ci'][1]:.3f}]). "
-        f"Direction: older children tend to {age_dir} the odds of choosing the majority."
-    )
+            or_val = math.exp(coef) if coef is not None and np.isfinite(coef) else None
+            or_ci_low = math.exp(ci_low) if ci_low is not None else None
+            or_ci_high = math.exp(ci_high) if ci_high is not None else None
 
-    # Culture-specific slopes
-    for level, stats_dict in interactions.items():
-        pval = stats_dict['p']
-        sig = "significant" if (not np.isnan(pval) and pval < 0.05) else "not significant"
-        dir_text = "increase" if stats_dict['slope_log_odds_per_year'] > 0 else ("decrease" if stats_dict['slope_log_odds_per_year'] < 0 else "no change")
-        desc_lines.append(
-            f"Culture {level}: slope (log-odds per year) = {stats_dict['slope_log_odds_per_year']:.3f}, "
-            f"SE = {stats_dict['se']:.3f}, p = {pval:.3f} -> {sig}; direction: {dir_text}. "
-            f"OR per year = {stats_dict['OR_per_year']:.3f} (95% CI [{stats_dict['OR_ci'][0]:.3f}, {stats_dict['OR_ci'][1]:.3f}])."
-        )
+            out[str(outcome)] = {
+                'coef': roundf(coef),
+                'se': roundf(se) if se is not None else None,
+                'p_value': roundf(p) if p is not None else None,
+                'ci_95': (roundf(ci_low) if ci_low is not None else None,
+                          roundf(ci_high) if ci_high is not None else None),
+                'exp_coef': roundf(or_val) if or_val is not None else None,
+                'exp_ci_95': (roundf(or_ci_low) if or_ci_low is not None else None,
+                              roundf(or_ci_high) if or_ci_high is not None else None),
+            }
+        return out
 
-    # Interaction overall conclusion
-    if any_significant_interaction:
-        desc_lines.append(
-            "There is evidence that developmental trajectories differ across cultures: "
-            f"significant Age x Culture interactions found for cultures: {', '.join(significant_levels)}."
-        )
-    else:
-        desc_lines.append(
-            "No strong evidence that developmental trajectories differ across cultures (no Age x Culture interaction terms with p < 0.05)."
-        )
+    result_obj = {}
 
-    description = " ".join(desc_lines)
+    # Binary models
+    social_model = model_output.get('social_follow_model')
+    majority_model = model_output.get('majority_choice_model')
+    mn_model = model_output.get('mnlogit_full_y')
 
-    result_object = {
-        'age_main_effect': age_main_effect,
-        'age_by_culture': interactions,
-        'interaction_term_pvalues': interaction_term_pvalues
-    }
+    result_obj['social_follow_model'] = summarize_binary_logit(social_model)
+    result_obj['majority_choice_model'] = summarize_binary_logit(majority_model)
+    result_obj['mnlogit_full_y'] = summarize_mnlogit(mn_model)
+
+    # Build a short textual description explaining what these values mean
+    description_lines = [
+        "Returned objects contain estimated Age_c effects and any Age_c × culture interaction terms.",
+        "- For the two binary-logit models ('social_follow_model' and 'majority_choice_model'), each entry includes:",
+        "    * coef, se, p_value, 95% CI for the coefficient on the log-odds scale;",
+        "    * odds_ratio and 95% CI (exp of coefficient and CI).",
+        "  Interpretation: a positive Age_c coefficient (odds_ratio > 1) means older children have higher odds",
+        "  of the outcome per one year increase in Age_c (recall Age_c is mean-centered). Interaction terms",
+        "  (Age_c:C(culture)[T.level]) show how the age slope differs in that culture compared to the reference.",
+        "- For the multinomial model ('mnlogit_full_y'), the Age_c coef is returned for each non-baseline outcome",
+        "  (coef on the log-odds scale comparing that outcome vs. the baseline category). exp_coef is the multiplicative",
+        "  change in odds of that outcome (vs baseline) per one-year increase in Age_c.",
+        "",
+        "How to use this output to answer the research question:",
+        "  * Examine the Age_c main effect in social_follow_model to see whether, across the pooled sample,",
+        "    reliance on social information changes with age (p-value, sign, OR).",
+        "  * Inspect interaction entries in that model to see whether the age slope differs by culture;",
+        "    significant interaction coefficients indicate differing developmental trajectories across sites.",
+        "  * Repeat the same logic for majority_choice_model to see whether preference for the majority",
+        "    among social followers changes with age and differs by culture.",
+        "  * The multinomial results provide an alternative (robustness) perspective by modeling all three choices simultaneously.",
+    ]
+    description = "\n".join(description_lines)
 
     return {
-        "object": result_object,
+        "object": result_obj,
         "description": description
     }

@@ -1,172 +1,134 @@
 def extract_final_answer(model_output):
     """
-    Extracts coefficients, standard errors, p-values, confidence intervals, and odds-ratio
-    summaries for the gender effect from a fitted statsmodels GLMResultsWrapper (logistic).
-    
+    Extracts and interprets the effect of 'female' on loan acceptance from a fitted model output.
+
     Returns:
       {
-        "object": {
-            "female_nonblack": {coef, se, pvalue, ci_lower, ci_upper, OR, OR_ci_lower, OR_ci_upper},
-            "female_black":    {coef, se, pvalue, ci_lower, ci_upper, OR, OR_ci_lower, OR_ci_upper},
-            "interaction":     {name, coef, se, pvalue, ci_lower, ci_upper, OR, OR_ci_lower, OR_ci_upper},
-            "notes": {"female_param_name", "interaction_param_name", "method_for_combined_pvalue"}
+        "object": {  # numeric summary for the 'female' effect
+          "coef": float,
+          "pvalue": float,
+          "odds_ratio": float,
+          "or_ci_lower": float,
+          "or_ci_upper": float,
+          "significant": bool,
+          "n_obs": int or None
         },
-        "description": "Text explaining the numbers and their meaning in context."
+        "description": str  # plain-English interpretation in context
       }
+    The function handles:
+      - model_output being a dict with keys 'model' (statsmodels results) or
+        'odds_ratio' (pandas DataFrame with a row named 'female'), or
+      - model_output being a statsmodels results object directly.
     """
     import numpy as np
-    import statsmodels.api as sm
+    import pandas as pd
 
-    res = model_output
+    # Helper to build the numeric summary dict
+    def build_summary(coef, pvalue, ci_lower_coef, ci_upper_coef, n_obs=None):
+        odds_ratio = float(np.exp(coef))
+        or_ci_lower = float(np.exp(ci_lower_coef))
+        or_ci_upper = float(np.exp(ci_upper_coef))
+        significant = bool(pvalue < 0.05)
+        return {
+            "coef": float(coef),
+            "pvalue": float(pvalue),
+            "odds_ratio": odds_ratio,
+            "or_ci_lower": or_ci_lower,
+            "or_ci_upper": or_ci_upper,
+            "significant": significant,
+            "n_obs": int(n_obs) if (n_obs is not None) else None
+        }
 
-    # Parameter names available in the fitted model
-    param_names = list(res.params.index)
+    # Determine source of info
+    res = None
+    odds_df = None
+    n_obs = None
 
-    # Heuristics to find main female effect (a name containing 'female' but NOT 'black')
-    female_candidates = [n for n in param_names if ('female' in n.lower() and 'black' not in n.lower())]
-    if not female_candidates:
-        raise KeyError(f"Could not find a main 'female' parameter in model params: {param_names}")
-    # Prefer exact 'female' if present
-    female_param = 'female' if 'female' in param_names else sorted(female_candidates, key=len)[0]
+    # If model_output is a dict with 'model' or 'odds_ratio'
+    if isinstance(model_output, dict):
+        if 'model' in model_output and model_output['model'] is not None:
+            res = model_output['model']
+        if 'odds_ratio' in model_output and model_output['odds_ratio'] is not None:
+            odds_df = model_output['odds_ratio']
+        # try to get nobs from model if present
+        if res is not None:
+            try:
+                n_obs = getattr(res, 'nobs', None)
+            except Exception:
+                n_obs = None
+    else:
+        # assume model_output itself is a statsmodels results object
+        res = model_output
 
-    # Find interaction: a name that contains both 'female' and 'black'
-    interaction_candidates = [n for n in param_names if ('female' in n.lower() and 'black' in n.lower())]
-    interaction_param = interaction_candidates[0] if interaction_candidates else None
+    # Preferred: extract from statsmodels results object if available
+    try:
+        if res is not None:
+            # statsmodels returns pandas Series for params/pvalues and DataFrame for conf_int
+            params = res.params
+            pvalues = res.pvalues
+            conf = res.conf_int()
+            # Ensure 'female' present
+            if 'female' not in params.index:
+                raise KeyError("Coefficient 'female' not found in model params.")
+            coef = params.loc['female']
+            pvalue = pvalues.loc['female']
+            ci_lower_coef, ci_upper_coef = conf.loc['female'].iloc[0], conf.loc['female'].iloc[1]
+            summary_obj = build_summary(coef, pvalue, ci_lower_coef, ci_upper_coef, n_obs)
+        elif odds_df is not None:
+            # odds_ratio DataFrame expected to have row 'female' and columns 'coef', 'ci_lower', 'ci_upper', 'pvalue'
+            if 'female' not in odds_df.index:
+                raise KeyError("Row 'female' not found in odds_ratio DataFrame.")
+            row = odds_df.loc['female']
+            coef = float(row['coef'])
+            pvalue = float(row.get('pvalue', np.nan))
+            # The DataFrame's ci_lower/ci_upper are on odds ratio scale in the provided data.
+            # If ci_lower/ci_upper are on odds ratio scale, convert back to log-coef CI by log().
+            # Detect whether ci values are >0 and likely on odds-ratio scale (odds ratios >0).
+            ci_lower = row.get('ci_lower', None)
+            ci_upper = row.get('ci_upper', None)
+            if ci_lower is None or ci_upper is None:
+                # fallback: try conf columns named like 0 and 1
+                try:
+                    ci_lower = row[0]
+                    ci_upper = row[1]
+                except Exception:
+                    ci_lower = None
+                    ci_upper = None
+            if ci_lower is not None and ci_upper is not None and (ci_lower > 0 and ci_upper > 0):
+                # assume these are odds ratio CI -> log-transform to coefficient CI
+                ci_lower_coef = np.log(ci_lower)
+                ci_upper_coef = np.log(ci_upper)
+            else:
+                # assume they are on coefficient scale already
+                ci_lower_coef = float(ci_lower) if ci_lower is not None else (coef - 1.96 * 1.0)
+                ci_upper_coef = float(ci_upper) if ci_upper is not None else (coef + 1.96 * 1.0)
+            summary_obj = build_summary(coef, pvalue, ci_lower_coef, ci_upper_coef, n_obs=None)
+        else:
+            raise ValueError("Could not find a model results object or odds_ratio DataFrame in model_output.")
+    except Exception as e:
+        # If anything goes wrong, return error info
+        return {
+            "object": None,
+            "description": f"Failed to extract 'female' effect from model_output: {e}"
+        }
 
-    # Helper to extract confint row robustly (works if conf_int returns ndarray or DataFrame)
-    conf = res.conf_int()
-    def get_conf(name):
-        try:
-            # If conf is a DataFrame or ndarray with matching index
-            return np.array(conf.loc[name])
-        except Exception:
-            # fallback: find index position
-            pos = param_names.index(name)
-            return np.array(conf[pos])
+    # Build human-readable description
+    sig_text = "statistically significant (p < 0.05)" if summary_obj["significant"] else "not statistically significant (p >= 0.05)"
+    desc = (
+        f"Effect of being female on mortgage acceptance (conditional on controls):\n"
+        f"- Log-odds coefficient = {summary_obj['coef']:.4f}\n"
+        f"- Odds ratio = {summary_obj['odds_ratio']:.3f}\n"
+        f"- 95% CI for odds ratio = [{summary_obj['or_ci_lower']:.3f}, {summary_obj['or_ci_upper']:.3f}]\n"
+        f"- p-value = {summary_obj['pvalue']:.4g} ({sig_text}).\n\n"
+        f"Interpretation: After controlling for race, credit metrics, leverage and other listed covariates, "
+        f"female applicants have higher odds of having their mortgage application accepted compared with male applicants "
+        f"(odds ratio = {summary_obj['odds_ratio']:.3f}). This is an associative result from the fitted logistic model, "
+        f"not a proof of causation. "
+    )
+    if summary_obj["n_obs"] is not None:
+        desc += f"Model sample size = {summary_obj['n_obs']}. "
 
-    # Collect main female effect (this is effect among non-Black because of interaction)
-    coef_f = float(res.params[female_param])
-    se_f = float(res.bse[female_param])
-    p_f = float(res.pvalues[female_param])
-    ci_f = get_conf(female_param)
-    or_f = float(np.exp(coef_f))
-    or_ci_f = np.exp(ci_f.astype(float))
-
-    female_nonblack = {
-        "param_name": female_param,
-        "coef_log_odds": coef_f,
-        "se": se_f,
-        "p_value": p_f,
-        "ci_95_lower": float(ci_f[0]),
-        "ci_95_upper": float(ci_f[1]),
-        "odds_ratio": or_f,
-        "odds_ratio_ci_95_lower": float(or_ci_f[0]),
-        "odds_ratio_ci_95_upper": float(or_ci_f[1]),
+    return {
+        "object": summary_obj,
+        "description": desc
     }
-
-    # Interaction term summary (if present)
-    if interaction_param is not None:
-        coef_int = float(res.params[interaction_param])
-        se_int = float(res.bse[interaction_param])
-        p_int = float(res.pvalues[interaction_param])
-        ci_int = get_conf(interaction_param)
-        or_int = float(np.exp(coef_int))
-        or_ci_int = np.exp(ci_int.astype(float))
-
-        interaction = {
-            "param_name": interaction_param,
-            "coef_log_odds": coef_int,
-            "se": se_int,
-            "p_value": p_int,
-            "ci_95_lower": float(ci_int[0]),
-            "ci_95_upper": float(ci_int[1]),
-            "odds_ratio": or_int,
-            "odds_ratio_ci_95_lower": float(or_ci_int[0]),
-            "odds_ratio_ci_95_upper": float(or_ci_int[1]),
-        }
-    else:
-        interaction = None
-
-    # Compute combined effect for Black applicants: female + (female:black)
-    if interaction is not None:
-        # combined coef
-        coef_fb = coef_f + float(res.params[interaction_param])
-        # variance of sum using covariance matrix
-        cov = res.cov_params()
-        try:
-            var_fb = cov.loc[female_param, female_param] \
-                   + cov.loc[interaction_param, interaction_param] \
-                   + 2 * cov.loc[female_param, interaction_param]
-        except Exception:
-            # fallback to array indexing if cov is ndarray
-            idx_f = param_names.index(female_param)
-            idx_int = param_names.index(interaction_param)
-            var_fb = cov[idx_f, idx_f] + cov[idx_int, idx_int] + 2 * cov[idx_f, idx_int]
-        se_fb = float(np.sqrt(var_fb))
-        # z-stat and p-value (Wald test normal approx)
-        z_fb = coef_fb / se_fb if se_fb > 0 else np.nan
-        from scipy import stats
-        p_fb = float(2 * (1 - stats.norm.cdf(abs(z_fb))))
-        # 95% CI for combined effect
-        ci_fb = np.array([coef_fb - 1.96 * se_fb, coef_fb + 1.96 * se_fb])
-        or_fb = float(np.exp(coef_fb))
-        or_ci_fb = np.exp(ci_fb.astype(float))
-
-        female_black = {
-            "param_name_combined": f"{female_param} + {interaction_param}",
-            "coef_log_odds": float(coef_fb),
-            "se": se_fb,
-            "z_value": float(z_fb),
-            "p_value": p_fb,
-            "ci_95_lower": float(ci_fb[0]),
-            "ci_95_upper": float(ci_fb[1]),
-            "odds_ratio": or_fb,
-            "odds_ratio_ci_95_lower": float(or_ci_fb[0]),
-            "odds_ratio_ci_95_upper": float(or_ci_fb[1]),
-        }
-
-        # Also compute a formal test for combined hypothesis = 0 using model's t_test (Wald)
-        # This yields the same p-value in large samples but uses model machinery.
-        try:
-            # construct linear restriction string like "female + female:black = 0"
-            restriction = f"{female_param} + {interaction_param} = 0"
-            ttest_res = res.t_test(restriction)
-            combined_p_via_ttest = float(ttest_res.pvalue)
-        except Exception:
-            combined_p_via_ttest = None
-    else:
-        female_black = None
-        combined_p_via_ttest = None
-
-    output_object = {
-        "female_nonblack": female_nonblack,
-        "female_black": female_black,
-        "interaction": interaction,
-        "notes": {
-            "female_param_name": female_param,
-            "interaction_param_name": interaction_param,
-            "method_for_combined_pvalue": "Wald z (computed) and model.t_test (if available)",
-            "combined_pvalue_via_t_test": combined_p_via_ttest
-        }
-    }
-
-    # Short human-readable description
-    if interaction is not None:
-        description = (
-            "This output summarizes the gender effect on mortgage acceptance from a logistic GLM that "
-            "includes an interaction between female and Black. 'female_nonblack' is the log-odds "
-            "difference (and odds ratio) for female vs male among non-Black applicants (this is the "
-            "coefficient on the female main effect). 'female_black' is the combined effect for Black "
-            "applicants (female main effect + female:black interaction) with its standard error, "
-            "Wald z and p-value, and odds-ratio. 'interaction' reports the interaction coefficient "
-            "itself (tests whether the gender effect differs for Black applicants). Use the p-values "
-            "to judge statistical significance (typical threshold 0.05)."
-        )
-    else:
-        description = (
-            "This model summary gives the female main effect (log-odds and odds ratio) but no "
-            "female:black interaction term was found. The female effect reported is the difference "
-            "in log-odds (and odds ratio) for female vs male applicants (across the sample)."
-        )
-
-    return {"object": output_object, "description": description}

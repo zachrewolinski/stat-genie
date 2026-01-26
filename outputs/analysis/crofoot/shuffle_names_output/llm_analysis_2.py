@@ -12,120 +12,123 @@ df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/anal
 
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
-    # Make a copy to avoid modifying original
+    """
+    Transform the raw Crofoot intergroup contest data into an analysis-ready dataframe.
+
+    Produces the following new/renamed columns used in the model:
+      - focal_size: number of individuals in the focal group (from 'f_focal')
+      - other_size: number of individuals in the other group (from 'f_other')
+      - group_size_diff: focal_size - other_size
+      - size_ratio: focal_size / other_size
+      - focal_dist: distance (m) of focal group from its home-range center (from 'win')
+      - other_dist: distance (m) of other group from its home-range center (from 'm_focal')
+      - contest_location: categorical ('FocalHome', 'OtherHome', 'Neutral')
+      - contest_location_*: dummy columns for contest_location (drop_first=True)
+      - n_males_focal: number of males in focal group (from 'n_focal')
+      - n_males_other: number of males in other group (from 'other')
+
+    Notes/assumptions: variable names in the source file have inconsistent textual descriptions; this transform uses the numeric columns by name as provided.
+    """
     df = df.copy()
 
-    # Required columns check - will raise if missing
-    required = ['dyad', 'win', 'm_focal', 'f_other', 'f_focal', 'n_focal', 'other', 'm_other']
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        raise KeyError(f"Missing required columns for transformation: {missing}")
+    # Keep rows with the key variables present
+    req_cols = ['dyad', 'f_focal', 'f_other', 'win', 'm_focal', 'n_focal', 'other', 'm_other']
+    df = df.dropna(subset=req_cols)
 
-    # Drop rows with missing values in essential columns
-    df = df.dropna(subset=['dyad', 'win', 'm_focal', 'f_other', 'f_focal', 'n_focal', 'other', 'm_other'])
+    # Create numeric group size variables. We interpret 'f_focal' as focal group size and 'f_other' as other group size.
+    df['focal_size'] = pd.to_numeric(df['f_focal'], errors='coerce')
+    df['other_size'] = pd.to_numeric(df['f_other'], errors='coerce')
 
-    # Ensure integer/numeric types where appropriate
-    numeric_cols = ['dyad', 'win', 'm_focal', 'f_other', 'f_focal', 'n_focal', 'other']
-    for c in numeric_cols:
-        df[c] = pd.to_numeric(df[c], errors='coerce')
-    df = df.dropna(subset=numeric_cols)
+    # Absolute and relative size metrics
+    df['group_size_diff'] = df['focal_size'] - df['other_size']
+    # avoid division by zero
+    df['size_ratio'] = df['focal_size'] / df['other_size'].replace({0: np.nan})
 
-    # Derive total group sizes
-    # NOTE: field descriptions in the provided schema are inconsistent, so we assume
-    #   - f_other contains the number of adult females in the focal group
-    #   - f_focal contains the number of adult females in the other group
-    #   - n_focal contains the number of adult males in the focal group
-    #   - other contains the number of adult males in the other group
-    # These assumptions are documented above and used to compute totals below.
-    df['total_focal'] = df['f_other'] + df['n_focal']
-    df['total_other'] = df['f_focal'] + df['other']
+    # Distances from home-range centers: use 'win' as focal distance and 'm_focal' as other distance (as per dataset numeric ranges)
+    df['focal_dist'] = pd.to_numeric(df['win'], errors='coerce')
+    df['other_dist'] = pd.to_numeric(df['m_focal'], errors='coerce')
 
-    # Guard against division by zero when computing ratios
-    eps = 1e-6
-    df['total_other'] = df['total_other'].replace({0: eps})
-    df['rel_size_ratio'] = df['total_focal'] / df['total_other']
-    df['rel_size_diff'] = df['total_focal'] - df['total_other']
+    # Contest location: closer to focal group's center => FocalHome; closer to other group's center => OtherHome; equal (or near equal) => Neutral
+    # Use a small threshold (1 meter) to treat ties as Neutral.
+    df['contest_location'] = np.where(df['focal_dist'] + 1 < df['other_dist'], 'FocalHome',
+                                      np.where(df['other_dist'] + 1 < df['focal_dist'], 'OtherHome', 'Neutral'))
 
-    # Log-transformed relative size (symmetric and interpretable)
-    # Add small epsilon to avoid log(0)
-    df['log_rel_size'] = np.log(df['rel_size_ratio'].replace(0, eps))
+    # Create dummies for contest_location and drop first to avoid multicollinearity (reference = first alphabetical or remaining category depending on presence).
+    dummies = pd.get_dummies(df['contest_location'], prefix='contest_location', drop_first=True)
+    df = pd.concat([df, dummies], axis=1)
 
-    # Operationalize contest location using distances to group centers.
-    # We assume 'win' is the distance (m) from contest location to the focal group's home-range center
-    # and 'm_focal' is the distance (m) from contest location to the other group's home-range center
-    # (these names / descriptions were inconsistent in the schema; we adopt this mapping below).
-    df['dist_to_focal'] = df['win']
-    df['dist_to_other'] = df['m_focal']
+    # Ensure outcome is binary integer
+    df['dyad'] = pd.to_numeric(df['dyad'], errors='coerce').astype('Int64')
 
-    # Define contest location categorical variable using a practical threshold.
-    # If focal is at least 50 m closer than other -> 'Focal'; if other is >=50 m closer -> 'Other'; else 'Neutral'
-    # (50 m threshold chosen as a reasonable buffer given meter-scale distances in the data; adjust if needed.)
-    df['ContestLocation'] = 'Neutral'
-    df.loc[df['dist_to_focal'] + 50 < df['dist_to_other'], 'ContestLocation'] = 'Focal'
-    df.loc[df['dist_to_other'] + 50 < df['dist_to_focal'], 'ContestLocation'] = 'Other'
+    # Male counts controls
+    df['n_males_focal'] = pd.to_numeric(df['n_focal'], errors='coerce')
+    df['n_males_other'] = pd.to_numeric(df['other'], errors='coerce')
 
-    # Binary dummy columns for modeling (Neutral is reference)
-    df['ContestLoc_Focal'] = (df['ContestLocation'] == 'Focal').astype(int)
-    df['ContestLoc_Other'] = (df['ContestLocation'] == 'Other').astype(int)
+    # Final drop of any rows that still have NA in required model columns
+    model_cols = ['dyad', 'size_ratio', 'group_size_diff', 'focal_dist', 'other_dist', 'n_males_focal', 'n_males_other', 'm_other']
+    # also include any contest dummy columns that were created
+    contest_dummy_cols = [c for c in df.columns if c.startswith('contest_location_')]
+    model_cols += contest_dummy_cols
 
-    # Ensure dyad is integer 0/1
-    df['dyad'] = df['dyad'].astype(int)
-    df = df[df['dyad'].isin([0, 1])]
+    df = df.dropna(subset=model_cols)
 
-    # Keep only columns needed for modeling and diagnostics
-    cols_keep = [
-        'dyad',
-        'total_focal', 'total_other', 'rel_size_ratio', 'rel_size_diff', 'log_rel_size',
-        'ContestLocation', 'ContestLoc_Focal', 'ContestLoc_Other',
-        'n_focal', 'other', 'm_other',
-        'dist_to_focal', 'dist_to_other'
-    ]
-    # Some of these columns may overlap with original columns; ensure we only return existing ones
-    cols_keep = [c for c in cols_keep if c in df.columns]
+    # Convert m_other to integer ID for clustering purposes
+    df['m_other'] = df['m_other'].astype(int)
 
-    return df[cols_keep].reset_index(drop=True)
+    # Return the transformed dataframe (keeps original columns plus the engineered variables)
+    return df
 
 
 # ======== MODEL CODE ========
-def model(df: pd.DataFrame) -> Any:
-    # Build design matrix for logistic regression (Binomial GLM)
-    # Predictors: log_rel_size, Contest location dummies, controls (n_focal, other), and interactions between size and location
+def model(df: pd.DataFrame):
+    """
+    Fit a binomial (logistic) regression predicting the probability the focal group wins (dyad == 1).
+
+    Model specification (primary):
+      dyad ~ size_ratio * contest_location + group_size_diff + focal_dist + other_dist + n_males_focal + n_males_other
+
+    contest_location enters via its dummy columns (prefix 'contest_location_'); interaction with size_ratio is included.
+    Standard errors are clustered by dyad-pair identifier 'm_other' when possible.
+
+    Returns the fitted statsmodels results object.
+    """
+    import statsmodels.api as sm
+
     df = df.copy()
 
-    required = ['dyad', 'log_rel_size', 'ContestLoc_Focal', 'ContestLoc_Other', 'n_focal', 'other', 'm_other']
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        raise KeyError(f"Missing required columns for modeling: {missing}")
+    # Response
+    y = df['dyad'].astype(int)
 
-    # Interaction terms: size x location
-    df['log_size_x_Focal'] = df['log_rel_size'] * df['ContestLoc_Focal']
-    df['log_size_x_Other'] = df['log_rel_size'] * df['ContestLoc_Other']
+    # Base predictors
+    predictors = ['size_ratio', 'group_size_diff', 'focal_dist', 'other_dist', 'n_males_focal', 'n_males_other']
 
-    # Predictor matrix
-    predictors = [
-        'log_rel_size',
-        'ContestLoc_Focal', 'ContestLoc_Other',
-        'log_size_x_Focal', 'log_size_x_Other',
-        'n_focal', 'other'
-    ]
+    # Add contest-location dummies (if any): e.g., contest_location_OtherHome, contest_location_Neutral
+    contest_cols = [c for c in df.columns if c.startswith('contest_location_')]
+    predictors += contest_cols
+
+    # Add interaction terms between size_ratio and each contest-location dummy
+    # Create interaction columns in the dataframe (explicitly) so they appear in the model results with clear names
+    for c in contest_cols:
+        inter_name = f'size_ratio_x_{c}'
+        df[inter_name] = df['size_ratio'] * df[c]
+        predictors.append(inter_name)
 
     X = df[predictors]
-    X = sm.add_constant(X, has_constant='add')
-    y = df['dyad']
+    X = sm.add_constant(X)
 
-    # Fit Binomial GLM (logit link)
-    model_glm = sm.GLM(y, X, family=sm.families.Binomial())
-    res = model_glm.fit()
+    # Fit GLM with binomial family (logit link) and attempt clustered SE by 'm_other'
+    family = sm.families.Binomial()
+    glm_model = sm.GLM(y, X, family=family)
 
-    # Obtain cluster-robust standard errors clustered by dyad pair identifier (m_other)
     try:
-        res_clust = res.get_robustcov_results(cov_type='cluster', groups=df['m_other'])
+        # Clustered standard errors by dyad pair (m_other)
+        results = glm_model.fit(cov_type='cluster', cov_kwds={'groups': df['m_other']})
     except Exception:
-        # If clustering fails for any reason, fall back to the default results
-        res_clust = res
+        # Fallback to default fitting if clustering fails
+        results = glm_model.fit()
 
-    # Print a concise summary and return the robust result object
-    print(res_clust.summary())
-    return res_clust
+    # Print summary for convenience and return the results object
+    print(results.summary())
+    return results
 
 

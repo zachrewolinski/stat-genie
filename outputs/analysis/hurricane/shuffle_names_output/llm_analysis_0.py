@@ -1,196 +1,138 @@
-from typing import Any
+from typing import Dict, FrozenSet, List, Literal, Optional, Set, Tuple, Any
 import numpy as np
 import pandas as pd
+import sklearn
+import scipy
 import statsmodels.api as sm
-
-# Top-level read (kept for compatibility with original script usage)
+import statsmodels.formula.api as smf
+import matplotlib.pyplot as plt
+import pickle
+  
 df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/analysis/hurricane/shuffle_names_output/hurricane.csv')
 
-
+# ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
-    # Work on a copy
+    """
+    Transform the raw hurricane dataset into a modeling dataframe containing:
+      - deaths: raw death counts (from 'ndam15')
+      - log_deaths: log(1 + deaths) for robustness/OLS models
+      - femininity: original continuous masculinity-femininity index from 'name' (higher = more feminine)
+      - female_name: binary indicator from 'elapsedyrs' (0 male, 1 female)
+      - standardized controls: wind_z, min_z, ind_z, year_z
+    The function drops rows missing essential variables.
+    """
+    # Ensure we operate on a copy
     df = df.copy()
 
-    # Coerce key columns to numeric where appropriate; create columns if absent.
-    # 'name' is the femininity index (continuous)
-    if 'name' in df.columns:
-        df['name'] = pd.to_numeric(df['name'], errors='coerce')
-    else:
-        df['name'] = np.nan
+    # Normalize/clean column names expected in the dataset
+    # The dataset schema indicates:
+    #  - 'name' is the continuous masculinity-femininity index (higher -> more feminine)
+    #  - 'ndam15' is total number of deaths
+    #  - 'elapsedyrs' is a binary indicator (0 male, 1 female)
+    #  - 'wind', 'min', 'ind', 'alldeaths' provide intensity/damage/year info
 
-    # total deaths (count)
+    # Convert relevant columns to numeric, coercing errors to NaN
+    numeric_cols = ['name', 'ndam15', 'elapsedyrs', 'wind', 'min', 'ind', 'alldeaths']
+    for c in numeric_cols:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors='coerce')
+
+    # Rename/derive columns used in analysis
+    # deaths: use ndam15 (total deaths). If ndam15 not present but ndam exists, user can modify accordingly.
     if 'ndam15' in df.columns:
-        df['ndam15'] = pd.to_numeric(df['ndam15'], errors='coerce')
+        df['deaths'] = df['ndam15']
+    elif 'ndam' in df.columns:
+        # fallback: try 'ndam' if present and numeric
+        df['deaths'] = pd.to_numeric(df['ndam'], errors='coerce')
     else:
-        df['ndam15'] = np.nan
+        df['deaths'] = np.nan
 
-    # max wind (named 'min' in dataset) -> we'll create final 'max_wind' later
-    if 'min' in df.columns:
-        df['min'] = pd.to_numeric(df['min'], errors='coerce')
-    else:
-        df['min'] = np.nan
+    # femininity continuous score
+    df['femininity'] = df['name'] if 'name' in df.columns else np.nan
 
-    # normalized property damage
-    if 'ind' in df.columns:
-        df['ind'] = pd.to_numeric(df['ind'], errors='coerce')
-    else:
-        df['ind'] = np.nan
-
-    # elapsedyrs in dataset is a binary gender indicator (0 male, 1 female)
+    # binary female name indicator
+    # elapsedyrs is described as 0 for male, 1 for female in the schema; coerce to integer 0/1
     if 'elapsedyrs' in df.columns:
-        df['elapsedyrs'] = pd.to_numeric(df['elapsedyrs'], errors='coerce')
+        df['female_name'] = df['elapsedyrs'].fillna(0).astype(int)
     else:
-        df['elapsedyrs'] = np.nan
+        df['female_name'] = 0
 
-    # used as event year per schema
+    # Year: schema uses 'alldeaths' as year
     if 'alldeaths' in df.columns:
-        df['alldeaths'] = pd.to_numeric(df['alldeaths'], errors='coerce')
+        df['year'] = df['alldeaths']
+    elif 'year' in df.columns:
+        df['year'] = df['year']
     else:
-        df['alldeaths'] = np.nan
+        df['year'] = np.nan
 
-    # Ensure category is string (will be converted to dummies later)
-    if 'category' in df.columns:
-        df['category'] = df['category'].fillna('Unknown').astype(str)
-    else:
-        df['category'] = 'Unknown'
+    # Controls: wind, min (pressure), ind (normalized damage)
+    df['wind'] = df['wind'] if 'wind' in df.columns else np.nan
+    df['min'] = df['min'] if 'min' in df.columns else np.nan
+    df['ind'] = df['ind'] if 'ind' in df.columns else np.nan
 
-    # Only drop rows missing the primary dependent variable:
-    # ndam15 (DV) is required. For 'name' (IV), we'll impute missing values to preserve rows.
-    df = df.dropna(subset=['ndam15'])
+    # Drop rows missing the primary outcome or primary IV
+    df = df.dropna(subset=['deaths', 'femininity'])
 
-    # Fill defaults for controls if missing so we don't accidentally drop all rows.
-    # For max wind (min), use 0 if missing (conservative).
-    df['min'] = df['min'].fillna(0.0)
-    # For damage (ind), use 0 if missing (no reported damage).
-    df['ind'] = df['ind'].fillna(0.0)
-    # event_year from alldeaths: fill with median year if available else 0
-    if df['alldeaths'].notna().any():
-        median_year = int(df['alldeaths'].median(skipna=True))
-    else:
-        median_year = 0
-    df['alldeaths'] = df['alldeaths'].fillna(median_year)
+    # Create a logged death outcome for OLS robustness
+    df['log_deaths'] = np.log1p(df['deaths'])
 
-    # Binary indicator from elapsedyrs column (if absent, default to 0)
-    if df['elapsedyrs'].notna().any():
-        df['elapsedyrs'] = df['elapsedyrs'].fillna(0)
-        # Clip to 0/1 and cast to int
-        df['elapsedyrs'] = df['elapsedyrs'].astype(int).clip(0, 1)
-    else:
-        df['elapsedyrs'] = 0
+    # Standardize continuous predictors for interpretability in the model
+    def zscore(series: pd.Series) -> pd.Series:
+        if series.dropna().shape[0] <= 1:
+            return (series - series.mean())
+        return (series - series.mean()) / (series.std(ddof=0) if series.std(ddof=0) != 0 else 1.0)
 
-    # For the femininity index 'name', impute missing values with the mean (so rows are retained),
-    # then standardize to create 'name_z'.
-    if df['name'].notna().any():
-        name_mean = df['name'].mean(skipna=True)
-    else:
-        # If no valid 'name' values exist, assume mean 0 for imputation (neutral)
-        name_mean = 0.0
-    df['name'] = df['name'].fillna(name_mean)
+    # Standardize femininity and controls
+    df['fem_z'] = zscore(df['femininity'])
+    df['wind_z'] = zscore(df['wind'])
+    df['min_z'] = zscore(df['min'])
+    df['ind_z'] = zscore(df['ind'])
+    df['year_z'] = zscore(df['year'])
 
-    name_mean = df['name'].mean()
-    name_std = df['name'].std(ddof=0)
-    if pd.isna(name_std) or name_std == 0:
-        name_std = 1.0
-    df['name_z'] = (df['name'] - name_mean) / name_std
-
-    # Ensure ndam15 is integer where possible (counts)
-    df['ndam15'] = pd.to_numeric(df['ndam15'], errors='coerce')
-    # Round to nearest integer for counts and ensure non-negative
-    df['ndam15'] = df['ndam15'].round().clip(lower=0).astype(int)
-
-    # For downstream use, logged version for diagnostics
-    df['log_ndam15'] = np.log1p(df['ndam15'].astype(float))
-
-    # Rename / copy columns to analysis-friendly names (these final names are fixed by contract)
-    df['max_wind'] = df['min'].astype(float)
-    # Ensure non-negative before log1p
-    df['log_damage_ind'] = np.log1p(df['ind'].clip(lower=0).astype(float))
-    # event_year from alldeaths per schema
-    df['event_year'] = df['alldeaths'].round().astype(int)
-
-    # Binary indicator from elapsedyrs column
-    df['is_female_name'] = df['elapsedyrs'].astype(int).clip(0, 1)
-
-    # Ensure category is string
-    df['category'] = df['category'].fillna('Unknown').astype(str)
-
-    # Final check: drop any rows that still have NA in variables used in the model
-    needed_cols = ['name_z', 'ndam15', 'max_wind', 'log_damage_ind', 'event_year', 'is_female_name', 'category']
-    df = df.dropna(subset=needed_cols)
-
-    # Ensure correct dtypes for final dataframe columns
-    df['name_z'] = pd.to_numeric(df['name_z'], errors='coerce').astype(float)
-    df['ndam15'] = df['ndam15'].astype(int)
-    df['max_wind'] = pd.to_numeric(df['max_wind'], errors='coerce').astype(float)
-    df['log_damage_ind'] = pd.to_numeric(df['log_damage_ind'], errors='coerce').astype(float)
-    df['event_year'] = pd.to_numeric(df['event_year'], errors='coerce').astype(int)
-    df['is_female_name'] = df['is_female_name'].astype(int)
-    df['category'] = df['category'].astype(str)
-
-    # Reset index for cleanliness
-    df = df.reset_index(drop=True)
-
+    # Keep only columns necessary for modeling (but return full df copy with these columns present)
+    # The model function will select the columns it needs by name.
     return df
 
 
-def model(df: pd.DataFrame) -> Any:
-    # Work on a copy
-    df = df.copy()
+# ======== MODEL CODE ========
+def model(df: pd.DataFrame) -> dict:
+    """
+    Fit a primary negative binomial regression of death counts on name femininity
+    controlling for storm intensity and damage, and a robustness OLS on log_deaths.
 
-    # Verify required final columns exist
-    required_cols = {'name_z', 'ndam15', 'max_wind', 'log_damage_ind', 'event_year', 'is_female_name', 'category'}
-    missing = required_cols.difference(df.columns)
-    if missing:
-        raise KeyError(f"Transformed dataframe is missing required columns: {missing}")
+    Returns a dictionary with fitted model results objects (statsmodels results).
+    """
+    # Columns expected in df (output of transform):
+    # 'deaths' (count), 'log_deaths', 'fem_z', 'female_name', 'wind_z', 'min_z', 'ind_z', 'year_z'
 
-    # Check that there is at least one observation to fit the model
-    if df.shape[0] == 0:
-        raise ValueError("Transformed dataframe contains zero rows; cannot fit model.")
+    # Select model predictors
+    exog_cols = ['fem_z', 'female_name', 'wind_z', 'min_z', 'ind_z', 'year_z']
+    missing = [c for c in exog_cols + ['deaths', 'log_deaths'] if c not in df.columns]
+    if len(missing) > 0:
+        raise ValueError(f"Missing required columns for modeling: {missing}")
 
-    # Prepare predictors (controls + IV). Include category as dummies (drop first to avoid collinearity).
-    predictors = ['name_z', 'max_wind', 'log_damage_ind', 'event_year', 'is_female_name']
-    # Ensure predictor columns are present and numeric
-    X = df[predictors].copy()
-    for col in X.columns:
-        X[col] = pd.to_numeric(X[col], errors='coerce')
+    # Drop rows with any NA in the predictors or outcomes used for the model
+    model_df = df.dropna(subset=exog_cols + ['deaths', 'log_deaths']).copy()
 
-    # If any predictor column has become all-NA, raise an informative error
-    all_na_cols = [c for c in X.columns if X[c].isna().all()]
-    if all_na_cols:
-        raise ValueError(f"The following predictor columns contain only NA after coercion: {all_na_cols}")
+    # Add constant
+    X = sm.add_constant(model_df[exog_cols])
+    y_counts = model_df['deaths']
 
-    # Add categorical dummies for 'category'
-    cat_dummies = pd.get_dummies(df['category'].astype(str), prefix='cat', drop_first=True)
-    if not cat_dummies.empty:
-        # ensure dummies are numeric
-        cat_dummies = cat_dummies.astype(float)
-        X = pd.concat([X, cat_dummies], axis=1)
+    # Primary model: Negative Binomial GLM (handles overdispersed count data)
+    try:
+        nb_model = sm.GLM(y_counts, X, family=sm.families.NegativeBinomial()).fit()
+    except Exception:
+        # Fallback to Poisson if NB fails to converge
+        nb_model = sm.GLM(y_counts, X, family=sm.families.Poisson()).fit()
 
-    # Add intercept
-    X = sm.add_constant(X, has_constant='add')
+    # Robustness: OLS on log(1 + deaths)
+    ols_model = sm.OLS(model_df['log_deaths'], X).fit(cov_type='HC3')
 
-    # Outcome: count of deaths
-    y = pd.to_numeric(df['ndam15'], errors='coerce')
+    # Return results objects; callers can inspect .summary()
+    return {
+        'nb_model': nb_model,
+        'ols_log_model': ols_model,
+        'model_dataframe': model_df
+    }
 
-    # Final checks before model fitting
-    if X.shape[1] == 0:
-        raise ValueError("No predictor columns available to fit the model.")
-    if X.isna().any().any() or pd.isna(y).any():
-        # Align and drop any rows with NA in X or y
-        combined = pd.concat([X, y.rename('ndam15')], axis=1)
-        combined = combined.dropna()
-        if combined.shape[0] == 0:
-            raise ValueError("No complete cases available to fit the model after dropping NA.")
-        y = combined['ndam15']
-        X = combined.drop(columns=['ndam15'])
 
-    # Ensure numeric numpy arrays
-    X_np = np.asarray(X, dtype=float)
-    y_np = np.asarray(y, dtype=float)
-
-    # Fit a Negative Binomial GLM to account for over-dispersion in counts.
-    model_nb = sm.GLM(y_np, X_np, family=sm.families.NegativeBinomial())
-    results_nb = model_nb.fit()
-
-    # Return the fitted results object (has summary(), params, pvalues, etc.)
-    return results_nb

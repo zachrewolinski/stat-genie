@@ -1,286 +1,126 @@
-from typing import Any
-import warnings
+from typing import Dict, FrozenSet, List, Literal, Optional, Set, Tuple, Any
 import numpy as np
 import pandas as pd
+import sklearn
+import scipy
 import statsmodels.api as sm
 import statsmodels.formula.api as smf
-
-# Example top-level read (kept for compatibility; transform accepts a dataframe argument)
-# Adjust path as needed when running in a different environment.
-try:
-    df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/analysis/amtl/anonymize_output/amtl.csv')
-except Exception:
-    df = pd.DataFrame()
-
+import matplotlib.pyplot as plt
+import pickle
+  
+df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/analysis/amtl/anonymize_output/amtl.csv')
 
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Transform raw input dataframe (with original columns feature1..feature9 or possibly already-renamed
-    columns) into the final analytic dataframe.
+    Transform raw dataset into analysis-ready dataframe.
 
-    Produces columns used in the model (exact required final column names are preserved):
-      - MissingCount: number of missing teeth of given class (integer, clipped to socket count)
-      - SocketCount: number of observable sockets (integer, >0)
-      - Genus: cleaned categorical genus (e.g., 'Homo sapiens', 'Pan', 'Pongo', 'Papio')
-      - ToothClass: cleaned tooth class categorical ('Anterior','Posterior','Premolar')
-      - AgeAtDeath: original estimated age
-      - AgeUncertainty: uncertainty in age estimate
-      - SexEstimate: original numeric sex estimate
-      - SexMale: binary sex indicator (1 if SexEstimate >= 0.5 else 0)
-      - Age_std: standardized age (mean 0, sd 1)
-      - Region: cleaned region
-      - SpecimenID: identifier (kept for reference)
+    Inputs (original columns expected):
+      - feature1: tooth class (Anterior/Posterior/Premolar)
+      - feature2: specimen id
+      - feature3: number of teeth missing of given class
+      - feature4: number of observable sockets for that class (trials)
+      - feature5: estimated age at death
+      - feature6: age uncertainty
+      - feature7: sex estimate (numeric between 0 and 1)
+      - feature8: genus (Homo sapiens, Pan, Pongo, Papio)
+      - feature9: region
+
+    Outputs (columns used in modeling):
+      - n_missing, n_observed, prop_missing, IsHuman, Genus,
+        ToothClass, Age, Age_c, Age_c2, SexEstimate, SexF, Region,
+        SpecimenID, AgeUncertainty
     """
-    # Work on a copy
     df = df.copy()
 
-    # Rename incoming feature columns to meaningful names used in modeling when present
-    rename_map = {
-        'feature1': 'ToothClass',
-        'feature2': 'SpecimenID',
-        'feature3': 'MissingCount',
-        'feature4': 'SocketCount',
-        'feature5': 'AgeAtDeath',
-        'feature6': 'AgeUncertainty',
-        'feature7': 'SexEstimate',
-        'feature8': 'Genus',
-        'feature9': 'Region'
-    }
-    # Only rename those source columns that actually exist in the incoming dataframe
-    rename_dict = {src: dst for src, dst in rename_map.items() if src in df.columns}
-    if rename_dict:
-        df = df.rename(columns=rename_dict)
+    # Rename raw features to meaningful names
+    df['ToothClass'] = df['feature1'].astype(str)
+    df['SpecimenID'] = df['feature2']
 
-    # Ensure all final required columns exist in the dataframe (create as NaN if missing so later coercion can operate)
-    final_expected_cols = [
-        'SpecimenID', 'MissingCount', 'SocketCount', 'Genus', 'ToothClass',
-        'AgeAtDeath', 'AgeUncertainty', 'SexEstimate', 'Region'
-    ]
-    for col in final_expected_cols:
-        if col not in df.columns:
-            df[col] = np.nan
+    # Counts of missing teeth and number observed (trials). Coerce to numeric and integer if possible.
+    df['n_missing'] = pd.to_numeric(df['feature3'], errors='coerce')
+    df['n_observed'] = pd.to_numeric(df['feature4'], errors='coerce')
 
-    # Coerce numeric columns first (safe coercion to numeric)
-    df['SocketCount'] = pd.to_numeric(df['SocketCount'], errors='coerce')
-    df['MissingCount'] = pd.to_numeric(df['MissingCount'], errors='coerce')
-    df['AgeAtDeath'] = pd.to_numeric(df['AgeAtDeath'], errors='coerce')
-    df['AgeUncertainty'] = pd.to_numeric(df['AgeUncertainty'], errors='coerce')
-    df['SexEstimate'] = pd.to_numeric(df['SexEstimate'], errors='coerce')
+    # Age and uncertainty
+    df['Age'] = pd.to_numeric(df['feature5'], errors='coerce')
+    df['AgeUncertainty'] = pd.to_numeric(df['feature6'], errors='coerce')
 
-    # Clean categorical text columns and coerce to pandas string dtype while preserving NA
-    def clean_text_series(s: pd.Series) -> pd.Series:
-        s = s.copy()
-        # Convert non-null values to string and strip; leave NA as-is
-        notna_mask = s.notna()
-        if notna_mask.any():
-            s.loc[notna_mask] = s.loc[notna_mask].astype(str).str.strip()
-        # Replace common placeholders that indicate missingness with actual NA
-        s = s.replace({'': pd.NA, 'nan': pd.NA, 'None': pd.NA})
-        # Ensure pandas string dtype so .str accessor works even if all values are NA
-        try:
-            s = s.astype("string")
-        except Exception:
-            # Fallback: return as-is if astype fails for unexpected reasons
-            pass
-        return s
+    # Sex estimate: numeric score (e.g., probability or estimate). Keep original and derive binary.
+    df['SexEstimate'] = pd.to_numeric(df['feature7'], errors='coerce')
 
-    df['Genus'] = clean_text_series(df['Genus'])
-    df['ToothClass'] = clean_text_series(df['ToothClass'])
-    df['Region'] = clean_text_series(df['Region'])
+    # Genus and region
+    df['Genus'] = df['feature8'].astype(str)
+    df['Region'] = df['feature9'].astype(str)
 
-    # Normalize common genus variants
-    # Ensure we operate on string-safe series (some entries may be <NA>)
-    df['Genus'] = df['Genus'].replace({
-        'Homo': 'Homo sapiens',
-        'homo sapiens': 'Homo sapiens',
-        'Homo sapiens': 'Homo sapiens'
-    })
+    # Basic cleaning: drop rows without observed sockets or missing counts
+    df = df[~df['n_observed'].isna() & ~df['n_missing'].isna()]
 
-    # Standardize tooth class labels (map several possible variants to canonical ones)
-    # Use .str methods on pandas StringDtype; this is safe even when series is all NA
-    if df['ToothClass'].dtype == "string" or df['ToothClass'].dtype == object:
-        # Capitalize entries where present
-        try:
-            df['ToothClass'] = df['ToothClass'].str.capitalize()
-        except Exception:
-            # In rare cases where .str isn't applicable, convert to string safely first
-            df['ToothClass'] = df['ToothClass'].astype("string")
-            df['ToothClass'] = df['ToothClass'].str.capitalize()
-    else:
-        df['ToothClass'] = df['ToothClass'].astype("string")
-        df['ToothClass'] = df['ToothClass'].str.capitalize()
+    # Ensure integer counts where sensible; floor/round missing counts, ensure non-negative
+    df['n_observed'] = df['n_observed'].round().astype(int)
+    df['n_missing'] = df['n_missing'].round().astype(int)
 
-    df['ToothClass'] = df['ToothClass'].replace({
-        'Anterior': 'Anterior',
-        'Posterior': 'Posterior',
-        'Premolar': 'Premolar',
-        'Premolar(s)': 'Premolar'
-    })
+    # Remove impossible rows
+    df = df[df['n_observed'] > 0]
+    df.loc[df['n_missing'] < 0, 'n_missing'] = 0
+    # If n_missing > n_observed (recording error), cap to n_observed
+    df.loc[df['n_missing'] > df['n_observed'], 'n_missing'] = df.loc[df['n_missing'] > df['n_observed'], 'n_observed']
 
-    # SexEstimate: numeric proportion or score; produce a binary SexMale indicator
-    df['SexMale'] = (df['SexEstimate'] >= 0.5).astype(float)  # keep float for now; will cast later
+    # Proportion missing (dependent variable in binomial model). Keep for modeling convenience.
+    df['prop_missing'] = df['n_missing'] / df['n_observed']
 
-    # After coercion and cleaning, drop rows missing critical variables necessary for analysis
-    required_cols = ['MissingCount', 'SocketCount', 'Genus', 'ToothClass', 'AgeAtDeath', 'SexEstimate']
-    # If dataframe is empty (no rows), just ensure columns exist and return empty DF with expected columns
-    if df.empty:
-        # Create empty DataFrame with the final schema to preserve contract
-        keep_cols = [
-            'SpecimenID', 'MissingCount', 'SocketCount', 'PropMissing', 'Genus', 'ToothClass',
-            'AgeAtDeath', 'Age_std', 'AgeUncertainty', 'SexEstimate', 'SexMale', 'Region'
-        ]
-        empty_df = pd.DataFrame({c: pd.Series(dtype="float") for c in keep_cols})
-        # Ensure string columns are string dtype
-        for s_col in ['SpecimenID', 'Genus', 'ToothClass', 'Region']:
-            if s_col in empty_df.columns:
-                empty_df[s_col] = empty_df[s_col].astype("string")
-        return empty_df
+    # Primary IV: human vs non-human. Use exact match for 'Homo sapiens' but allow small variations.
+    df['IsHuman'] = df['Genus'].apply(lambda x: 1 if isinstance(x, str) and ('Homo' in x or 'Homo sapiens' in x) else 0)
 
-    df = df.dropna(subset=required_cols)
+    # Derive binary sex indicator: SexF = 1 for female-like estimates (SexEstimate >= 0.5), 0 for male-like (< 0.5), NaN preserved if missing
+    df['SexF'] = df['SexEstimate'].apply(lambda v: (1 if (not pd.isna(v) and v >= 0.5) else (0 if (not pd.isna(v) and v < 0.5) else np.nan)))
 
-    # Ensure SocketCount is numeric and positive integer; drop impossible rows
-    df['SocketCount'] = pd.to_numeric(df['SocketCount'], errors='coerce')
-    df = df[df['SocketCount'] > 0]
+    # Center age and add quadratic term to model nonlinearity
+    df['Age_c'] = df['Age'] - df['Age'].median()
+    df['Age_c2'] = df['Age_c'] ** 2
 
-    # Ensure MissingCount is numeric and non-negative
-    df['MissingCount'] = pd.to_numeric(df['MissingCount'], errors='coerce')
-    df['MissingCount'] = df['MissingCount'].clip(lower=0)
+    # Keep only columns needed for analysis (but return full transformed df for downstream checks)
+    keep_cols = ['SpecimenID', 'Genus', 'IsHuman', 'ToothClass', 'n_missing', 'n_observed', 'prop_missing',
+                 'Age', 'AgeUncertainty', 'Age_c', 'Age_c2', 'SexEstimate', 'SexF', 'Region']
+    df = df.loc[:, [c for c in keep_cols if c in df.columns]]
 
-    # Clip MissingCount so it does not exceed SocketCount and round to integer counts
-    # Use a safe vectorized approach
-    df['MissingCount'] = np.minimum(df['MissingCount'], df['SocketCount'])
-    # Fill any remaining NaN MissingCount with 0 (should be none after dropna above)
-    df['MissingCount'] = df['MissingCount'].fillna(0)
-    # Round/truncate to integer counts
-    df['MissingCount'] = df['MissingCount'].astype(int)
-    df['SocketCount'] = df['SocketCount'].astype(int)
-
-    # Recompute SexMale as integer 0/1
-    df['SexMale'] = (df['SexEstimate'] >= 0.5).astype(int)
-
-    # Standardize age for the model (handle constant or empty series)
-    if not df['AgeAtDeath'].empty:
-        age_mean = df['AgeAtDeath'].mean()
-        age_std = df['AgeAtDeath'].std(ddof=0)
-        if not np.isfinite(age_std) or age_std == 0:
-            age_std = 1.0
-        df['Age_std'] = (df['AgeAtDeath'] - age_mean) / age_std
-    else:
-        df['Age_std'] = np.nan
-
-    # Create proportion column (useful for quick checks). Keep as float.
-    # Avoid division by zero (SocketCount > 0 enforced above)
-    df['PropMissing'] = df['MissingCount'] / df['SocketCount']
-
-    # Ensure Region is trimmed (already cleaned above)
-    df['Region'] = clean_text_series(df['Region'])
-
-    # Keep only columns needed for modeling + SpecimenID for reference
-    keep_cols = [
-        'SpecimenID', 'MissingCount', 'SocketCount', 'PropMissing', 'Genus', 'ToothClass',
-        'AgeAtDeath', 'Age_std', 'AgeUncertainty', 'SexEstimate', 'SexMale', 'Region'
-    ]
-    # Ensure we only select columns that exist (they should, but guard anyway)
-    keep_existing = [c for c in keep_cols if c in df.columns]
-    df = df[keep_existing]
-
-    # Final safety: drop rows where SocketCount <= 0 or MissingCount < 0 (should be none)
-    if 'SocketCount' in df.columns and 'MissingCount' in df.columns:
-        df = df[(df['SocketCount'] > 0) & (df['MissingCount'] >= 0)]
-
-    # Reset index
+    # Reset index for cleanliness
     df = df.reset_index(drop=True)
 
     return df
 
 
 # ======== MODEL CODE ========
-def model(df: pd.DataFrame) -> Any:
+def model(df: pd.DataFrame):
     """
-    Fit a binomial GLM (logit link) modeling the proportion of missing teeth (AMTL) as a function
-    of Genus (categorical; primary IV), controlling for age, sex, tooth class, age uncertainty, and region.
+    Fit a binomial (logistic) generalized linear model for AMTL proportion.
 
-    The model uses the observed SocketCount as frequency weights so counts are modeled as binomial trials.
+    Model specification:
+      prop_missing ~ IsHuman + C(ToothClass) + Age_c + Age_c2 + SexF
+    Binomial family with weights equal to number of observable sockets (n_observed).
 
-    Returns the fitted statsmodels results object, or None if the input data are insufficient.
+    Returns the fitted GLMResults object (statsmodels).
     """
+    import statsmodels.formula.api as smf
+
     # Work on a copy
     df = df.copy()
 
-    # Basic sanity checks
-    if df is None or not isinstance(df, pd.DataFrame):
-        raise ValueError("Input must be a pandas DataFrame.")
-    if df.empty:
-        warnings.warn("Input dataframe is empty. No data available to fit the model. Returning None.", UserWarning)
-        return None
+    # Drop rows where required model inputs are missing
+    # We require n_missing, n_observed, ToothClass, and Age (Age can be missing in some specimens; drop those for primary model)
+    model_df = df.dropna(subset=['n_missing', 'n_observed', 'ToothClass', 'Age_c'])
 
-    # Ensure required columns exist
-    required = ['MissingCount', 'SocketCount', 'Genus', 'ToothClass', 'Age_std', 'SexMale', 'AgeUncertainty', 'Region']
-    missing_cols = [c for c in required if c not in df.columns]
-    if missing_cols:
-        warnings.warn(f"Input dataframe is missing required columns for modeling: {missing_cols}. Returning None.", UserWarning)
-        return None
+    # If SexF is missing for some rows, allow them (statsmodels will handle NaN by dropping rows); alternatively we could impute.
+    # Build formula. Use C(ToothClass) to treat tooth class as categorical.
+    formula = 'prop_missing ~ IsHuman + C(ToothClass) + Age_c + Age_c2 + SexF'
 
-    # Drop rows with missing required data
-    df = df.dropna(subset=required)
-    if df.empty:
-        warnings.warn("No complete cases remain after dropping rows with missing required variables. Returning None.", UserWarning)
-        return None
+    # Fit binomial GLM using proportion as endog and weights = n_observed for binomial trials
+    # Note: statsmodels will interpret the dependent variable as a proportion and the 'weights' argument as number of trials
+    fit = smf.glm(formula=formula,
+                  data=model_df,
+                  family=sm.families.Binomial(),
+                  weights=model_df['n_observed']).fit()
 
-    # Ensure numeric types for counts
-    df['SocketCount'] = pd.to_numeric(df['SocketCount'], errors='coerce')
-    df['MissingCount'] = pd.to_numeric(df['MissingCount'], errors='coerce')
+    # Return the fitted results object. The caller can inspect fit.summary() or fit.params etc.
+    return fit
 
-    # Drop any rows that became NA after coercion
-    df = df.dropna(subset=['SocketCount', 'MissingCount'])
-    if df.empty:
-        warnings.warn("No valid rows remain after coercing counts to numeric types. Returning None.", UserWarning)
-        return None
 
-    # Ensure integer counts and positive socket counts
-    try:
-        df['SocketCount'] = df['SocketCount'].astype(int)
-        df['MissingCount'] = df['MissingCount'].astype(int)
-    except Exception:
-        # If casting to int fails for some reason, coerce safely
-        df['SocketCount'] = df['SocketCount'].round().astype(int)
-        df['MissingCount'] = df['MissingCount'].round().astype(int)
-
-    df = df[(df['SocketCount'] > 0) & (df['MissingCount'] >= 0)]
-    if df.empty:
-        warnings.warn("No rows with valid count data (SocketCount>0 and MissingCount>=0) remain for modeling. Returning None.", UserWarning)
-        return None
-
-    # Recompute PropMissing to ensure consistency
-    df['PropMissing'] = df['MissingCount'] / df['SocketCount']
-
-    # Ensure categorical variables are strings and trimmed; this avoids category dtypes with zero levels
-    for col in ['Genus', 'ToothClass', 'Region']:
-        df[col] = df[col].where(df[col].notna(), pd.NA)
-        notna_mask = df[col].notna()
-        if notna_mask.any():
-            df.loc[notna_mask, col] = df.loc[notna_mask, col].astype(str).str.strip()
-        df[col] = df[col].replace({'': pd.NA, 'nan': pd.NA, 'None': pd.NA})
-
-    # Check that categorical variables have at least one non-missing level
-    for col in ['Genus', 'ToothClass', 'Region']:
-        levels = df[col].dropna().unique()
-        if len(levels) == 0:
-            warnings.warn(f"Categorical column '{col}' has no non-missing levels; cannot fit model. Returning None.", UserWarning)
-            return None
-
-    # Build formula: proportion ~ categorical genus + standardized age + sex + tooth class + age uncertainty + region
-    formula = 'PropMissing ~ C(Genus) + Age_std + SexMale + C(ToothClass) + AgeUncertainty + C(Region)'
-
-    # Define the GLM with binomial family.
-    glm_model = smf.glm(formula=formula, data=df, family=sm.families.Binomial())
-
-    # Fit using frequency weights = number of sockets per observation (trials)
-    # Some statsmodels versions accept freq_weights, others accept weights.
-    try:
-        results = glm_model.fit(freq_weights=df['SocketCount'], disp=False)
-    except TypeError:
-        results = glm_model.fit(weights=df['SocketCount'], disp=False)
-
-    return results

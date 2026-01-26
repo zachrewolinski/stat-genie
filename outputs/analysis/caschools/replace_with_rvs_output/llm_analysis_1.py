@@ -12,96 +12,83 @@ df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/anal
 
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Transform the raw district-level dataframe for modeling.
-
-    Produces the following new columns used in the model:
-      - StudentTeacherRatio: students / teachers (FTE)
-      - AvgScore: mean of 'read' and 'math'
-      - ComputerPerStudent: computer / students
-
-    Keeps relevant control columns and drops rows with missing or invalid values in key columns.
-    """
+    # Work on a copy
     df = df.copy()
 
-    # Ensure numeric columns are present and coerce to numeric where appropriate
-    numeric_cols = ['students', 'teachers', 'read', 'math', 'expenditure', 'income', 'english', 'lunch', 'computer', 'calworks']
-    for col in numeric_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
+    # Ensure numeric columns are numeric
+    numeric_cols = ['students', 'teachers', 'computer', 'expenditure', 'income', 'calworks', 'lunch', 'english', 'read', 'math']
+    for c in numeric_cols:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors='coerce')
 
-    # Drop rows missing the core outcome or exposure variables
+    # Drop rows missing core variables needed for analysis
     df = df.dropna(subset=['students', 'teachers', 'read', 'math'])
 
-    # Remove rows with non-positive teachers or students to avoid invalid ratios
+    # Remove rows with non-positive teachers to avoid division by zero
     df = df[df['teachers'] > 0]
-    df = df[df['students'] > 0]
 
-    # Construct Student-Teacher ratio (students per teacher)
-    df['StudentTeacherRatio'] = df['students'] / df['teachers']
+    # Compute student-teacher ratio (students per teacher)
+    df['students_per_teacher'] = df['students'] / df['teachers']
 
-    # Dependent variable: average of reading and math scores
-    df['AvgScore'] = (df['read'] + df['math']) / 2.0
+    # Compute computers per student (handle division by zero defensively)
+    df['computers_per_student'] = df['computer'] / df['students']
 
-    # Computers per student
-    df['ComputerPerStudent'] = df['computer'] / df['students']
+    # Compute the dependent variable: average of reading and math scores
+    df['AvgScore'] = df[['read', 'math']].mean(axis=1)
 
-    # Keep columns needed for modeling; include originals for reference
-    keep_cols = [
-        'StudentTeacherRatio', 'AvgScore', 'expenditure', 'income', 'english',
-        'lunch', 'calworks', 'ComputerPerStudent', 'county', 'grades', 'students', 'teachers'
-    ]
+    # Create a binary indicator for grades span (KK-08 vs KK-06)
+    # If grades is missing, set to 0 (will have been dropped earlier if core vars missing)
+    df['grades_KK08'] = (df['grades'].astype(str) == 'KK-08').astype(int)
 
-    # If any of the control columns are missing in the dataset, drop them from keep list gracefully
-    keep_cols = [c for c in keep_cols if c in df.columns]
+    # Optional: winsorize extreme student-teacher ratios to reduce influence of outliers
+    # Clip at 1st and 99th percentiles
+    if 'students_per_teacher' in df.columns:
+        lower = df['students_per_teacher'].quantile(0.01)
+        upper = df['students_per_teacher'].quantile(0.99)
+        df['students_per_teacher'] = df['students_per_teacher'].clip(lower=lower, upper=upper)
 
-    df = df[keep_cols].copy()
+    # Ensure control columns exist (if missing, create as NaN so downstream code can handle/drop)
+    for col in ['expenditure', 'income', 'lunch', 'english', 'calworks', 'students', 'computers_per_student']:
+        if col not in df.columns:
+            df[col] = np.nan
 
-    # Drop rows with any remaining missing values in the kept columns
-    df = df.dropna()
+    # Final drop: remove any rows missing the dependent or the primary independent variable
+    df = df.dropna(subset=['AvgScore', 'students_per_teacher'])
 
-    # Optional: reset index for downstream analysis
-    df = df.reset_index(drop=True)
-
+    # Return the transformed dataframe containing all columns used in modeling
     return df
 
 
 # ======== MODEL CODE ========
-def model(df: pd.DataFrame) -> Any:
-    """
-    Fit an OLS model estimating the association between StudentTeacherRatio and AvgScore,
-    controlling for district-level covariates and including categorical controls for county and grades.
+def model(df: pd.DataFrame):
+    # Copy to avoid modifying original
+    df = df.copy()
 
-    Returns the fitted results object (statsmodels RegressionResultsWrapper) with robust standard errors.
-    """
-    import statsmodels.formula.api as smf
-
-    # Build formula. Use categorical controls for county and grades if present.
-    formula_parts = [
-        'StudentTeacherRatio',
+    # Columns to include in the regression
+    X_cols = [
+        'students_per_teacher',
         'expenditure',
         'income',
-        'english',
         'lunch',
-        'ComputerPerStudent',
-        'calworks'
+        'english',
+        'computers_per_student',
+        'calworks',
+        'grades_KK08',
+        'students'
     ]
 
-    # Only include the terms that exist in the dataframe
-    formula_terms = [t for t in formula_parts if t in df.columns]
+    # Keep only rows with no missing values on model predictors (or alternatively drop/ impute as needed)
+    df_model = df.dropna(subset=X_cols + ['AvgScore'])
 
-    # Add categorical variables if present
-    if 'county' in df.columns:
-        formula_terms.append('C(county)')
-    if 'grades' in df.columns:
-        formula_terms.append('C(grades)')
+    # Design matrix
+    X = df_model[X_cols].astype(float)
+    X = sm.add_constant(X)
+    y = df_model['AvgScore'].astype(float)
 
-    formula = 'AvgScore ~ ' + ' + '.join(formula_terms)
+    # Fit OLS with heteroskedasticity-robust standard errors (HC3)
+    model_res = sm.OLS(y, X).fit(cov_type='HC3')
 
-    # Fit OLS with robust (HC3) standard errors
-    model_fit = smf.ols(formula=formula, data=df).fit(cov_type='HC3')
-
-    # Return the fitted model object for inspection (summary can be printed by the caller)
-    return model_fit
+    # Return the fitted results object. The caller can inspect model_res.summary(), model_res.params, etc.
+    return model_res
 
 

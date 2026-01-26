@@ -1,0 +1,511 @@
+{
+  "dataset_name": "soccer",
+  "n": 5,
+  "analyses": {
+    "0": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Player skin tone derived from two independent rater scores (5-point scale normalized to 0-1). We create a binary variable that contrasts 'dark' vs 'light' players by keeping only extreme ratings: 'Dark' (average rater score >= 0.75) and 'Light' (average rater score <= 0.25). This is the primary independent variable of interest to test whether darker-skinned players receive more red cards than lighter-skinned players.",
+            "columns": [
+              "SkinAvg",
+              "SkinDark"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Number of red cards received by the player from a given referee across all matches the dyad encountered each other (dyad-level count). We model redCards with games as exposure (offset = log(games)).",
+          "columns": [
+            "redCards",
+            "games",
+            "log_games"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Player age (in years) at season midpoint (used to control for experience/maturity).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "PlayerAge"
+            ]
+          },
+          {
+            "description": "Player physical covariates (height in cm and weight in kg) that may correlate with referees' treatment.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "height",
+              "weight"
+            ]
+          },
+          {
+            "description": "Player behavior proxies: yellow cards per game and goals per game in the player-referee dyad (controls for on-field behavior/aggression/exposure).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "yellowRate",
+              "goalsRate"
+            ]
+          },
+          {
+            "description": "Player position (categorical). Different positions have different exposure to foul situations and referee sanctions; included as categorical fixed effects.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "position"
+            ]
+          },
+          {
+            "description": "League / country where the match is played (categorical). Captures contextual differences in style/refereeing/enforcement.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "leagueCountry"
+            ]
+          },
+          {
+            "description": "Referee-country aggregated implicit bias (IAT) score to control for baseline bias differences across countries.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "meanIAT"
+            ]
+          },
+          {
+            "description": "Referee-country aggregated explicit bias (thermometer) score to control for baseline bias differences across countries.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "meanExp"
+            ]
+          },
+          {
+            "description": "Referee ID for clustered standard errors (we cluster by referee to account for non-independence of dyads judged by the same referee). Also retained in the dataframe for diagnostics.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "refNum"
+            ]
+          },
+          {
+            "description": "Player identifier (kept for potential multi-level diagnostics / grouping).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "playerShort"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform raw dyad-level dataframe into analysis-ready dataframe containing:\n      - SkinAvg: average of rater1 and rater2 (0-1 scale)\n      - SkinDark: binary indicator = 1 for 'Dark' (SkinAvg >= 0.75), 0 for 'Light' (SkinAvg <= 0.25)\n      - Filter to only 'Dark' and 'Light' extremes (drops middle/ambiguous skin tones)\n      - PlayerAge: age in years at season midpoint (2013-01-01 used as reference)\n      - yellowRate, goalsRate: per-game rates for behavior controls\n      - log_games: natural log of games (offset)\n    Returns dataframe with all columns required by the model.\n    \"\"\"\n    # make a copy to avoid modifying input in place\n    df = df.copy()\n\n    # Ensure required columns exist\n    required = ['rater1', 'rater2', 'redCards', 'games', 'birthday', 'yellowCards', 'goals',\n                'position', 'leagueCountry', 'height', 'weight', 'meanIAT', 'meanExp', 'refNum', 'playerShort']\n    missing = [c for c in required if c not in df.columns]\n    if len(missing) > 0:\n        raise ValueError(f\"Missing required columns in input dataframe: {missing}\")\n\n    # Compute average skin rating from two raters (rater values are normalized to 0-1 in dataset description)\n    df['SkinAvg'] = df[['rater1', 'rater2']].mean(axis=1)\n\n    # Define extremes: Light <= 0.25, Dark >= 0.75 (these correspond to bottom and top categories on 5-point scale)\n    def skin_cat(x):\n        if pd.isna(x):\n            return pd.NA\n        if x <= 0.25:\n            return 'Light'\n        if x >= 0.75:\n            return 'Dark'\n        return 'Other'\n\n    df['SkinCat'] = df['SkinAvg'].apply(skin_cat)\n\n    # Filter to only extreme groups (question asks Dark vs Light)\n    df = df[df['SkinCat'].isin(['Dark', 'Light'])].copy()\n\n    # Binary indicator for dark skin (1 = Dark, 0 = Light)\n    df['SkinDark'] = (df['SkinCat'] == 'Dark').astype(int)\n\n    # Clean numeric columns: ensure games is numeric and >=1 (dataset description min=1)\n    df['games'] = pd.to_numeric(df['games'], errors='coerce')\n    # Drop any rows with no games\n    df = df[df['games'].notna() & (df['games'] > 0)].copy()\n\n    # Ensure redCards is numeric\n    df['redCards'] = pd.to_numeric(df['redCards'], errors='coerce').fillna(0).astype(int)\n\n    # Compute per-game rates for behavioral controls (safe division: games >=1)\n    df['yellowRate'] = pd.to_numeric(df.get('yellowCards', pd.Series(np.nan, index=df.index)), errors='coerce') / df['games'].astype(float)\n    df['goalsRate'] = pd.to_numeric(df.get('goals', pd.Series(np.nan, index=df.index)), errors='coerce') / df['games'].astype(float)\n\n    # Compute log offset for exposure\n    df['log_games'] = np.log(df['games'].astype(float))\n\n    # Parse birthday into datetime and compute age at season midpoint (use 2013-01-01 as representative)\n    # birthday format in schema: 'dd.mm.yyyy'\n    df['birthday_parsed'] = pd.to_datetime(df['birthday'], format='%d.%m.%Y', errors='coerce')\n    # If parsing fails for any rows, try generic parsing\n    mask_bad_birth = df['birthday_parsed'].isna() & df['birthday'].notna()\n    if mask_bad_birth.any():\n        df.loc[mask_bad_birth, 'birthday_parsed'] = pd.to_datetime(df.loc[mask_bad_birth, 'birthday'], dayfirst=True, errors='coerce')\n\n    # Age at 2013-01-01 (season midpoint between 2012 and 2013)\n    ref_date = pd.to_datetime('2013-01-01')\n    df['PlayerAge'] = ((ref_date - df['birthday_parsed']).dt.days / 365.25).round(2)\n\n    # Keep only columns necessary for modeling (but preserve some identifiers)\n    keep_cols = ['playerShort', 'SkinAvg', 'SkinCat', 'SkinDark', 'redCards', 'games', 'log_games',\n                 'PlayerAge', 'position', 'leagueCountry', 'height', 'weight', 'yellowRate', 'goalsRate',\n                 'meanIAT', 'meanExp', 'refNum']\n    # Some of these columns may not have existed before (already computed), ensure all present\n    for c in keep_cols:\n        if c not in df.columns:\n            df[c] = pd.NA\n\n    df = df[keep_cols].reset_index(drop=True)\n\n    # Drop rows with missing values in any predictor or outcome that would break model fitting\n    model_required = ['SkinDark', 'redCards', 'games', 'log_games', 'PlayerAge', 'position', 'leagueCountry', 'refNum']\n    df = df.dropna(subset=model_required).copy()\n\n    # Ensure numeric types\n    df['SkinDark'] = df['SkinDark'].astype(int)\n    df['redCards'] = df['redCards'].astype(int)\n    df['games'] = df['games'].astype(float)\n    df['log_games'] = df['log_games'].astype(float)\n    df['PlayerAge'] = pd.to_numeric(df['PlayerAge'], errors='coerce')\n    df['height'] = pd.to_numeric(df['height'], errors='coerce')\n    df['weight'] = pd.to_numeric(df['weight'], errors='coerce')\n    df['yellowRate'] = pd.to_numeric(df['yellowRate'], errors='coerce')\n    df['goalsRate'] = pd.to_numeric(df['goalsRate'], errors='coerce')\n    df['meanIAT'] = pd.to_numeric(df['meanIAT'], errors='coerce')\n    df['meanExp'] = pd.to_numeric(df['meanExp'], errors='coerce')\n    df['refNum'] = pd.to_numeric(df['refNum'], errors='coerce').astype(int)\n\n    # Drop final rows with missing numeric covariates (the model will need them)\n    df = df.dropna(subset=['PlayerAge', 'position', 'leagueCountry', 'meanIAT', 'meanExp'])\n\n    return df",
+      "m_code": "def model(df: pd.DataFrame) -> Any:\n    \"\"\"\n    Fit a generalized linear model for red card counts per dyad with exposure offset = log(games).\n    Steps:\n      1. Fit Poisson GLM with formula including SkinDark and controls.\n      2. Compute dispersion (Pearson chi2 / df_resid). If dispersion > 1.5, refit with Negative Binomial.\n      3. Compute cluster-robust standard errors clustered by referee (refNum).\n      4. Return both the fitted model and the clustered-results object plus diagnostics (dispersion, IRR for SkinDark).\n\n    The function expects the dataframe produced by transform(), containing the columns named in the conceptual variables.\n    \"\"\"\n    import statsmodels.api as sm\n    import statsmodels.formula.api as smf\n    from statsmodels.stats.sandwich_covariance import cov_cluster, cov_hc1\n\n    # Formula: redCards predicted by SkinDark plus controls and categorical fixed effects for position and leagueCountry\n    formula = (\n        'redCards ~ SkinDark + PlayerAge + height + weight + yellowRate + goalsRate + meanIAT + meanExp '\n        '+ C(position) + C(leagueCountry)'\n    )\n\n    # Fit Poisson GLM with offset (exposure = games -> offset = log(games))\n    poisson_model = smf.glm(formula=formula, data=df, family=sm.families.Poisson(), offset=df['log_games']).fit()\n\n    # Compute dispersion: Pearson chi2 / df_resid\n    # resid_pearson is available on GLMResults\n    pearson_chi2 = np.sum(poisson_model.resid_pearson ** 2)\n    dispersion = pearson_chi2 / poisson_model.df_resid if poisson_model.df_resid > 0 else np.nan\n\n    final_model = poisson_model\n    model_family = 'Poisson'\n\n    # If evidence of overdispersion, fit Negative Binomial instead\n    if (not np.isnan(dispersion)) and (dispersion > 1.5):\n        try:\n            nb_model = smf.glm(formula=formula, data=df, family=sm.families.NegativeBinomial(), offset=df['log_games']).fit()\n            final_model = nb_model\n            model_family = 'NegativeBinomial'\n        except Exception as e:\n            # If NB fails, keep Poisson but note it\n            print('NegativeBinomial fit failed; keeping Poisson. Error:', e)\n\n    # Compute cluster-robust standard errors clustered by referee (refNum)\n    # Some statsmodels versions do not provide get_robustcov_results on GLMResults,\n    # so compute clustered covariance manually and expose params and bse.\n    try:\n        # cov_cluster expects (results, groups)\n        cov = cov_cluster(final_model, df['refNum'])\n    except Exception:\n        # fallback to HC1 robust covariance if clustering fails\n        try:\n            cov = cov_hc1(final_model)\n        except Exception:\n            # final fallback: use model's covariance matrix\n            cov = final_model.cov_params()\n\n    params = final_model.params\n    bse = pd.Series(np.sqrt(np.diag(cov)), index=params.index)\n\n    clustered = SimpleNamespace(params=params, bse=bse, cov=cov)\n\n    # Compute incidence rate ratios (IRR) and CIs for key parameter SkinDark using clustered cov results\n    params = clustered.params\n    bse = clustered.bse\n    if 'SkinDark' in params.index:\n        coef = params['SkinDark']\n        se = bse['SkinDark']\n        irr = np.exp(coef)\n        # 95% CI on log scale then transform\n        ci_lower = np.exp(coef - 1.96 * se)\n        ci_upper = np.exp(coef + 1.96 * se)\n    else:\n        irr = np.nan\n        ci_lower = np.nan\n        ci_upper = np.nan\n\n    # Pack results in a dictionary for easy downstream inspection\n    results = {\n        'final_model': final_model,                  # statsmodels GLMResults (Poisson or NB)\n        'clustered_results': clustered,              # object with params and bse based on clustered cov\n        'model_family': model_family,\n        'dispersion': dispersion,\n        'SkinDark_IRR': irr,\n        'SkinDark_IRR_CI': (ci_lower, ci_upper),\n        'formula': formula\n    }\n\n    return results"
+    },
+    "1": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Binary indicator for whether a player is coded as having a dark skin tone (1 = Dark, 0 = Light). Constructed from the average of two independent raters (rater1, rater2). We restrict the analytic sample to players classified as either Dark or Light to directly compare these groups.",
+            "columns": [
+              "IsDark"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Number of red cards a player received from the referee in the player-referee dyad (count outcome). Modelled as a count with an exposure equal to the number of games the dyad played together.",
+          "columns": [
+            "redCards"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Number of games the player and referee encountered each other (used as an exposure/offset in count models).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "games"
+            ]
+          },
+          {
+            "description": "Player position on the field (categorical). Included as a control because different positions have different propensities to receive cards.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "position"
+            ]
+          },
+          {
+            "description": "Player height in centimeters (continuous). Controls for physical characteristics that might correlate with referees' decisions or playing style.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "height"
+            ]
+          },
+          {
+            "description": "Player weight in kilograms (continuous).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "weight"
+            ]
+          },
+          {
+            "description": "Number of goals the player scored in the player-referee dyad (continuous). A proxy for player role/behavior and potential referee attention.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "goals"
+            ]
+          },
+          {
+            "description": "Number of yellow cards the player received from the referee in the dyad (continuous). Adjusts for player aggressiveness/disciplinary tendencies.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "yellowCards"
+            ]
+          },
+          {
+            "description": "Country-level implicit bias score for the referee's country (continuous). Higher = faster white|good, black|bad associations. Controls for country-level bias environment.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "meanIAT"
+            ]
+          },
+          {
+            "description": "Country-level explicit bias score for the referee's country (continuous). Higher = greater warmth toward whites vs blacks. Controls for country-level explicit bias environment.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "meanExp"
+            ]
+          },
+          {
+            "description": "League country where the match occurred (categorical). Controls for league/country fixed effects.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "leagueCountry"
+            ]
+          },
+          {
+            "description": "Referee identifier used for clustering standard errors (one cluster per referee).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "refNum"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform raw dyad-level dataframe into analytic dataframe for testing whether dark-skinned players\n    receive more red cards than light-skinned players.\n\n    Outputs (columns required by later model):\n      - redCards (int): count outcome\n      - games (int): exposure (used as offset)\n      - rater1, rater2 (float): original raters (kept for traceability)\n      - skin_tone_avg (float): average of rater1 and rater2 on 0-1 normalized scale\n      - SkinToneCat (category): 'Light' / 'Mid' / 'Dark'\n      - IsDark (int): 1 if Dark, 0 if Light (we filter to only Light and Dark)\n      - position, height, weight, goals, yellowCards, meanIAT, meanExp, leagueCountry, refNum\n    \"\"\"\n    df = df.copy()\n\n    # Ensure required columns exist\n    required_cols = ['rater1', 'rater2', 'redCards', 'games', 'position', 'height', 'weight',\n                     'goals', 'yellowCards', 'meanIAT', 'meanExp', 'leagueCountry', 'refNum']\n    missing = [c for c in required_cols if c not in df.columns]\n    if missing:\n        raise ValueError(f\"Input dataframe missing required columns: {missing}\")\n\n    # Drop rows with missing core values\n    df = df.dropna(subset=['rater1', 'rater2', 'redCards', 'games', 'position', 'refNum'])\n\n    # Make sure numeric types are correct\n    df['redCards'] = pd.to_numeric(df['redCards'], errors='coerce').fillna(0).astype(int)\n    df['games'] = pd.to_numeric(df['games'], errors='coerce')\n\n    # Remove dyads with non-positive games (games is used as exposure/offset)\n    df = df[df['games'] > 0].copy()\n\n    # Compute average skin tone rating (rater scale is normalized to 1 in source)\n    df['skin_tone_avg'] = (df['rater1'].astype(float) + df['rater2'].astype(float)) / 2.0\n\n    # Create categorical skin tone groups for a focused comparison between 'Light' and 'Dark'\n    # rater normalized to 0..1 corresponding to 5-point original scale; thresholds chosen to pick\n    # the bottom and top categories (>=0.75 approximates 'very dark', <=0.25 approximates 'very light').\n    def tone_cat(x):\n        if pd.isna(x):\n            return pd.NA\n        if x >= 0.75:\n            return 'Dark'\n        elif x <= 0.25:\n            return 'Light'\n        else:\n            return 'Mid'\n\n    df['SkinToneCat'] = df['skin_tone_avg'].apply(tone_cat).astype('category')\n\n    # Binary indicator for main comparison (1 = Dark, 0 = Light). We'll restrict sample to rows that are either Dark or Light.\n    df = df[df['SkinToneCat'].isin(['Dark', 'Light'])].copy()\n    df['IsDark'] = (df['SkinToneCat'] == 'Dark').astype(int)\n\n    # Additional derived variable: any_red (binary) for sensitivity analyses\n    df['any_red'] = (df['redCards'] > 0).astype(int)\n\n    # Ensure categorical variables are typed as category\n    df['position'] = df['position'].astype('category')\n    df['leagueCountry'] = df['leagueCountry'].astype('category')\n\n    # Keep only columns necessary for the modeling to avoid accidental reliance on other columns\n    keep_cols = [\n        'redCards', 'any_red', 'games', 'IsDark', 'skin_tone_avg', 'SkinToneCat',\n        'position', 'height', 'weight', 'goals', 'yellowCards', 'meanIAT', 'meanExp',\n        'leagueCountry', 'refNum'\n    ]\n\n    # Some of these columns may not exist in all data exports (e.g., goals or yellowCards). If missing, create NA columns.\n    for c in keep_cols:\n        if c not in df.columns:\n            df[c] = pd.NA\n\n    df = df[keep_cols].reset_index(drop=True)\n\n    return df",
+      "m_code": "def model(df: pd.DataFrame) -> dict:\n    \"\"\"\n    Fit primary Negative Binomial model of redCards with games as exposure (offset).\n    Provide clustered (by refNum) robust standard errors. Also run sensitivity logistic\n    regression on any_red (binary) with clustered SEs.\n\n    Returns a dictionary containing:\n      - nb_model: fitted GLM negative binomial results (MLE)\n      - nb_model_cluster: negative binomial results with cluster-robust SEs (referee clusters)\n      - logit_model: fitted logistic regression (MLE) on any_red\n      - logit_model_cluster: logistic regression results with cluster-robust SEs\n    \"\"\"\n    import numpy as np\n    import statsmodels.api as sm\n    import statsmodels.formula.api as smf\n\n    # Basic formula: effect of IsDark controlling for position, height, weight, goals, yellowCards,\n    # and country-level bias measures. League country included as categorical fixed effect.\n    formula_base = (\n        'redCards ~ IsDark + C(position) + height + weight + goals + yellowCards + '\n        'meanIAT + meanExp + C(leagueCountry)'\n    )\n\n    # Fit negative binomial GLM with log(games) as offset (exposure)\n    # Note: statsmodels expects the offset argument to be an array (log of exposure).\n    offset = np.log(df['games'].astype(float))\n\n    nb_model = smf.glm(formula=formula_base, data=df,\n                       family=sm.families.NegativeBinomial(),\n                       offset=offset).fit()\n\n    # Obtain cluster-robust covariance (clustered by refNum)\n    try:\n        nb_cluster = nb_model.get_robustcov_results(cov_type='cluster', groups=df['refNum'])\n    except Exception:\n        # Fallback: return the original model if clustering fails\n        nb_cluster = nb_model\n\n    # Sensitivity analysis: logistic regression on whether the player received ANY red card\n    logit_formula = (\n        'any_red ~ IsDark + C(position) + height + weight + goals + yellowCards + '\n        'meanIAT + meanExp + C(leagueCountry)'\n    )\n    # Drop rows with missing any_red\n    df_logit = df.dropna(subset=['any_red'])\n    logit_model = smf.logit(formula=logit_formula, data=df_logit).fit(disp=False)\n    try:\n        logit_cluster = logit_model.get_robustcov_results(cov_type='cluster', groups=df_logit['refNum'])\n    except Exception:\n        logit_cluster = logit_model\n\n    # Return objects (caller can inspect .summary() or coef tables).\n    results = {\n        'nb_model': nb_model,\n        'nb_model_cluster': nb_cluster,\n        'logit_model': logit_model,\n        'logit_model_cluster': logit_cluster\n    }\n\n    return results"
+    },
+    "2": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Binary indicator for player skin tone category derived from two independent raters' skin-tone ratings (5-point scale normalized to [0,1]). Coded as 1 for dark skin (AvgSkin >= 0.75) and 0 for light skin (AvgSkin <= 0.25). Intermediate ratings are excluded so the contrast is between clearly light and clearly dark skin tones.",
+            "columns": [
+              "SkinDark"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Count of red cards the player received from the referee in the player-referee dyad (outcome). This is modeled as a count with exposure equal to the number of games in the dyad.",
+          "columns": [
+            "redCards"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Number of games that the player and referee encountered each other (exposure). Modeled as an offset (log(games)) in the count model so we estimate red-card rate per game.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "games"
+            ]
+          },
+          {
+            "description": "Average continuous skin tone score (mean of rater1 and rater2, normalized 0-1). Included for sensitivity / secondary analyses.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "AvgSkin"
+            ]
+          },
+          {
+            "description": "Player age (years) at approximate mid-season date (used to control for age-related differences in play style / referee treatment).",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "age"
+            ]
+          },
+          {
+            "description": "Player height (cm), a physical covariate that may correlate with playing style or fouls.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "height"
+            ]
+          },
+          {
+            "description": "Player weight (kg), a physical covariate.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "weight"
+            ]
+          },
+          {
+            "description": "Player position on the field (categorical). Included as categorical controls via C(position) in the model because different positions receive different referee sanctions.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "position"
+            ]
+          },
+          {
+            "description": "League country where the match was played (categorical). Controls for league-specific enforcement / style.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "leagueCountry"
+            ]
+          },
+          {
+            "description": "Referee-country mean implicit bias score (IAT): higher values correspond to faster white|good, black|bad associations. Country-level covariate for referees' societal-level implicit bias.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "meanIAT"
+            ]
+          },
+          {
+            "description": "Referee-country mean explicit bias score (racial thermometer): higher values correspond to warmer feelings toward whites vs blacks. Country-level covariate for referees' societal-level explicit bias.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "meanExp"
+            ]
+          },
+          {
+            "description": "Referee unique identifier. Used for clustering standard errors at the referee level (accounts for correlation across dyads with the same referee).",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "refNum"
+            ]
+          },
+          {
+            "description": "Referee country identifier (kept for potential descriptive checks).",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "refCountry"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform original dataset into the analytic dataframe used for modeling.\n\n    Produced columns (exact names used by the model):\n      - redCards: count outcome (numeric)\n      - games: number of games in dyad (numeric, used as offset)\n      - AvgSkin: mean of rater1 and rater2 (continuous 0-1)\n      - SkinDark: binary indicator (1 = dark skin (AvgSkin >= 0.75), 0 = light skin (AvgSkin <= 0.25)). Rows with intermediate AvgSkin are removed.\n      - age: player age in years (numeric)\n      - height, weight: numeric controls\n      - position: categorical control (kept as-is for formula-based categorical handling)\n      - leagueCountry: categorical control\n      - meanIAT, meanExp: country-level bias measures (numeric)\n      - refNum, refCountry: referee identifiers used for clustering / descriptive checks\n    \"\"\"\n    df = df.copy()\n\n    # Ensure required columns exist and drop rows with missing core values\n    required_core = ['rater1', 'rater2', 'redCards', 'games']\n    df = df.dropna(subset=required_core)\n\n    # Compute average skin rating\n    df['AvgSkin'] = (pd.to_numeric(df['rater1'], errors='coerce') + pd.to_numeric(df['rater2'], errors='coerce')) / 2.0\n\n    # Define clear light and clear dark thresholds and create binary SkinDark\n    # Normalized scale assumed (0.0..1.0) with five discrete values; thresholds chosen to select clear light and clear dark\n    df['SkinDark'] = np.where(df['AvgSkin'] >= 0.75, 1,\n                               np.where(df['AvgSkin'] <= 0.25, 0, np.nan))\n\n    # Keep only rows that are clearly light or clearly dark to address measurement noise and create a clean contrast\n    df = df[df['SkinDark'].notna()].copy()\n    df['SkinDark'] = df['SkinDark'].astype(int)\n\n    # Parse birthday and compute age at a reference date (season midpoint ~ 2013-01-01)\n    # birthday format documented as 'dd.mm.yyyy'\n    df['birthday'] = pd.to_datetime(df['birthday'], format='%d.%m.%Y', errors='coerce')\n    reference_date = pd.to_datetime('2013-01-01')\n    df['age'] = ((reference_date - df['birthday']).dt.days / 365.25).astype(float)\n\n    # Ensure numeric types for physical covariates and outcome/exposure\n    df['height'] = pd.to_numeric(df['height'], errors='coerce')\n    df['weight'] = pd.to_numeric(df['weight'], errors='coerce')\n    df['games'] = pd.to_numeric(df['games'], errors='coerce')\n    df['redCards'] = pd.to_numeric(df['redCards'], errors='coerce')\n\n    # Ensure bias measures are numeric\n    df['meanIAT'] = pd.to_numeric(df['meanIAT'], errors='coerce')\n    df['meanExp'] = pd.to_numeric(df['meanExp'], errors='coerce')\n\n    # Keep only rows with the covariates needed for the model\n    keep_cols = ['redCards', 'games', 'AvgSkin', 'SkinDark', 'age', 'height', 'weight',\n                 'position', 'leagueCountry', 'meanIAT', 'meanExp', 'refNum', 'refCountry']\n\n    df = df.dropna(subset=keep_cols)\n\n    # Ensure games > 0 for offset (dataset minimum is 1 according to schema, but double-check)\n    df = df[df['games'] > 0].copy()\n\n    # Return a dataframe with exactly the columns the model code expects\n    return df[keep_cols]",
+      "m_code": "def model(df: pd.DataFrame):\n    \"\"\"\n    Fit a negative binomial GLM for red card counts with an offset for number of games.\n\n    Primary model (tests research question):\n      redCards ~ SkinDark + age + height + weight + C(position) + C(leagueCountry) + meanIAT + meanExp\n      offset = log(games)\n\n    Standard errors are clustered by referee (refNum) to account for correlations across dyads judged by the same referee.\n\n    Returns:\n      - fitted results object from statsmodels (GLMResults)\n    \"\"\"\n    import statsmodels.formula.api as smf\n\n    # Copy dataframe to avoid side-effects\n    df = df.copy()\n\n    # Formula: main independent variable is SkinDark (1 dark, 0 light). Position and leagueCountry treated as categorical.\n    formula = 'redCards ~ SkinDark + age + height + weight + C(position) + C(leagueCountry) + meanIAT + meanExp'\n\n    # Build and fit the negative binomial GLM with log(games) as an offset (exposure)\n    # Note: statsmodels expects the offset to be provided as a numeric array; we give log(games)\n    model = smf.glm(formula=formula,\n                    data=df,\n                    family=sm.families.NegativeBinomial(),\n                    offset=np.log(df['games']))\n\n    # Fit with cluster-robust SEs by refNum (referee)\n    results = model.fit(cov_type='cluster', cov_kwds={'groups': df['refNum']})\n\n    # Print summary for quick inspection; return the results object for programmatic use\n    print(results.summary())\n    return results"
+    },
+    "3": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Player skin tone: binary indicator equal to 1 for players rated in the darker skin-tone category by the photo raters and 0 for players rated in the lighter skin-tone category. This is derived from the mean of two independent raters (rater1 and rater2) and restricted to clear 'Dark' vs 'Light' groups (middle/ambiguous ratings are excluded).",
+            "columns": [
+              "DarkSkin",
+              "SkinScore",
+              "SkinGroup"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Count of red cards the player received from a particular referee in the dyad (outcome). Modeled as a count with exposure equal to the number of games the dyad played together. The column redCards is the raw count; lnGames is the log of the exposure (games) and used as an offset in the count regression.",
+          "columns": [
+            "redCards",
+            "games",
+            "lnGames"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Player age in years measured at the 2012-2013 season reference date (used to adjust for age-related differences in playing style / likelihood of sanctions).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "age_years"
+            ]
+          },
+          {
+            "description": "Player anthropometrics that may correlate with style of play and card risk (height in cm).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "height_cm"
+            ]
+          },
+          {
+            "description": "Player weight in kg (control for physicality).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "weight_kg"
+            ]
+          },
+          {
+            "description": "Referee-country level implicit bias score (mean IAT). Controls for country-level implicit racial bias that may influence refereeing behavior.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "meanIAT"
+            ]
+          },
+          {
+            "description": "Referee-country level explicit bias score (mean explicit thermometer). Controls for country-level explicit racial bias that may influence refereeing behavior.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "meanExp"
+            ]
+          },
+          {
+            "description": "Player position on the field (categorical) to adjust for role-related card risk (e.g., defenders vs forwards).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "position"
+            ]
+          },
+          {
+            "description": "League country (categorical) to adjust for league-level differences in officiating style and competition.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "leagueCountry"
+            ]
+          },
+          {
+            "description": "Referee identifier for clustering standard errors (used to account for non-independence of dyads judged by the same referee). Not included as a fixed effect in the main model but used for clustered robust SEs.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "refNum"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform raw dyad-level dataframe to variables used in the count regression.\n\n    Steps performed:\n    - Drop rows missing essential variables (rater1, rater2, redCards, games, refNum).\n    - Create SkinScore as the mean of rater1 and rater2 (both raters provided on a 5-point scale then normalized to 0-1 in the raw data; the mean therefore ranges 0-1, higher = darker).\n    - Bin SkinScore into three groups (Light, Mid, Dark) using cut points that isolate clearly light and clearly dark ratings. Keep only Light and Dark groups to obtain a clear binary comparison.\n    - Create binary DarkSkin indicator (1 = Dark, 0 = Light).\n    - Parse birthday and compute age at 2012-09-01 (season reference date). Impute median age if birthday parsing fails.\n    - Copy height and weight to explicit column names height_cm and weight_kg.\n    - Create lnGames which is the natural log of games and will be used as an offset in Poisson/Negative Binomial regressions.\n    - Return a dataframe with only the columns required for modeling.\n    \"\"\"\n    df = df.copy()\n\n    # drop rows missing essential fields\n    df = df.dropna(subset=['rater1', 'rater2', 'redCards', 'games', 'refNum'])\n\n    # compute average skin score (rater values already normalized to a 0..1 scale in the raw data)\n    df['SkinScore'] = df[['rater1', 'rater2']].mean(axis=1)\n\n    # categorize into Light / Mid / Dark. Cut thresholds chosen to keep clear Light and Dark groups and exclude middle/ambiguous cases.\n    df['SkinGroup'] = pd.cut(df['SkinScore'], bins=[-0.01, 0.40, 0.60, 1.01], labels=['Light', 'Mid', 'Dark'])\n\n    # Keep only clearly Light or Dark players to make a focused comparison\n    df = df[df['SkinGroup'].isin(['Light', 'Dark'])].copy()\n\n    # binary indicator: Dark = 1, Light = 0\n    df['DarkSkin'] = (df['SkinGroup'] == 'Dark').astype(int)\n\n    # parse birthdays and compute age at season reference date\n    df['birthday'] = pd.to_datetime(df['birthday'], format='%d.%m.%Y', errors='coerce')\n    season_ref = pd.to_datetime('2012-09-01')\n    df['age_years'] = (season_ref - df['birthday']).dt.days / 365.25\n    df['age_years'] = df['age_years'].fillna(df['age_years'].median())\n\n    # explicit column names for anthropometrics\n    df['height_cm'] = df['height']\n    df['weight_kg'] = df['weight']\n\n    # exposure for count models: log of games (games >= 1 in schema, but guard anyway)\n    df['games'] = df['games'].fillna(1)\n    df['games'] = df['games'].replace(0, 1)\n    df['lnGames'] = np.log(df['games'])\n\n    # tidy categorical controls\n    df['position'] = df['position'].fillna('Unknown')\n    df['leagueCountry'] = df['leagueCountry'].fillna('Unknown')\n\n    # keep only the columns needed for modeling\n    cols = [\n        'playerShort', 'refNum', 'refCountry',\n        'redCards', 'games', 'lnGames',\n        'SkinScore', 'SkinGroup', 'DarkSkin',\n        'age_years', 'height_cm', 'weight_kg',\n        'meanIAT', 'meanExp',\n        'position', 'leagueCountry'\n    ]\n\n    # ensure all columns exist (if meanIAT/meanExp missing in some rows, keep them as NA for model - statsmodels will handle or we could impute)\n    for c in cols:\n        if c not in df.columns:\n            df[c] = np.nan\n\n    return df[cols]",
+      "m_code": "def model(df: pd.DataFrame):\n    \"\"\"\n    Fit count regression models to test whether darker-skinned players receive more red cards than lighter-skinned players.\n\n    Modeling strategy:\n    - Primary model: Negative Binomial regression (accounts for overdispersion) with an offset equal to lnGames (exposure).\n    - Secondary / sensitivity model: Poisson regression with the same offset.\n    - Include controls: age_years, height_cm, weight_kg, meanIAT, meanExp, categorical position and leagueCountry.\n    - Use clustered robust standard errors at the referee level (refNum) to account for non-independence of observations judged by the same referee.\n\n    The function returns a dictionary containing both fitted results objects with clustered robust covariances applied.\n    \"\"\"\n    import statsmodels.formula.api as smf\n    # formula: main effect is DarkSkin (1 = dark, 0 = light)\n    formula = (\n        'redCards ~ DarkSkin + age_years + height_cm + weight_kg + meanIAT + meanExp '\n        '+ C(position) + C(leagueCountry)'\n    )\n\n    # Drop rows with missing values in model variables (statsmodels cannot handle NA in predictors). We keep rows with NA in meanIAT/meanExp only if present;\n    model_df = df.dropna(subset=['redCards', 'lnGames', 'DarkSkin', 'age_years', 'height_cm', 'weight_kg', 'position', 'leagueCountry', 'refNum'])\n\n    # Negative Binomial with offset = lnGames\n    nb_model = smf.glm(formula=formula, data=model_df, family=sm.families.NegativeBinomial(), offset=model_df['lnGames']).fit()\n    # Clustered robust SEs by refNum\n    try:\n        nb_clustered = nb_model.get_robustcov_results(cov_type='cluster', groups=model_df['refNum'])\n    except Exception:\n        # fallback to default (non-clustered) if clustering fails\n        nb_clustered = nb_model\n\n    # Poisson sensitivity model\n    pois_model = smf.glm(formula=formula, data=model_df, family=sm.families.Poisson(), offset=model_df['lnGames']).fit()\n    try:\n        pois_clustered = pois_model.get_robustcov_results(cov_type='cluster', groups=model_df['refNum'])\n    except Exception:\n        pois_clustered = pois_model\n\n    # Prepare a simple summary dictionary focusing on the DarkSkin coefficient\n    summary_dict = {\n        'n_obs': int(model_df.shape[0]),\n        'n_referees': int(model_df['refNum'].nunique()),\n        'neg_binom_result': nb_clustered,\n        'poisson_result': pois_clustered\n    }\n\n    return summary_dict"
+    },
+    "4": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Player skin tone coded from photos. We create a binary indicator comparing clearly dark vs clearly light players (SkinDark = 1 for dark, 0 for light). This is the primary independent variable.",
+            "columns": [
+              "SkinDark"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Number of red cards a player received from a particular referee across all matches the dyad encountered each other (count outcome).",
+          "columns": [
+            "redCards"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Exposure: number of games in the player-referee dyad. Modeled as an offset (log of games) to estimate red-card rate per game.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "games",
+              "log_games"
+            ]
+          },
+          {
+            "description": "Continuous camera-based skin tone average (rater1/rater2 mean, 0-1). Included as an additional continuous measure for sensitivity analyses.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "SkinToneAvg"
+            ]
+          },
+          {
+            "description": "Player age in years at reference date (approx. Jan 1, 2013). Controls for experience/age-related differences.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "age"
+            ]
+          },
+          {
+            "description": "Player physical covariates (height in cm and weight in kg). Controls for potential confounds related to player physicality.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "height",
+              "weight"
+            ]
+          },
+          {
+            "description": "Player position on the field (categorical). Included as a categorical control to account for positional differences in foul-prone roles.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "position"
+            ]
+          },
+          {
+            "description": "League (country) in which the match was played (categorical). Controls for league-level officiating patterns.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "leagueCountry"
+            ]
+          },
+          {
+            "description": "Country-level referee implicit bias (mean IAT). Controls for cross-country differences in implicit bias that may moderate red-carding.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "meanIAT"
+            ]
+          },
+          {
+            "description": "Country-level referee explicit bias (mean thermometer). Controls for cross-country differences in explicit bias that may moderate red-carding.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "meanExp"
+            ]
+          },
+          {
+            "description": "Referee identifier (used for clustering standard errors). Not a predictor but required for clustered inference.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "refNum"
+            ]
+          },
+          {
+            "description": "Player identifier (kept for traceability; not used as a fixed effect in the baseline model but retained for further checks).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "playerShort"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform raw dyad-level data into a modeling dataframe.\n\n    Produces the following key columns used in the model:\n    - redCards: original count of red cards (dependent variable)\n    - games: original number of matches (used as exposure)\n    - log_games: natural log of games (offset)\n    - SkinToneAvg: mean of rater1 and rater2 (0-1 normalized)\n    - SkinDark: binary indicator (1 = clearly dark, 0 = clearly light). We define clearly dark as SkinToneAvg >= 0.6 and clearly light as SkinToneAvg <= 0.4 and drop ambiguous middle ratings to create a clean contrast.\n    - age: age (years) at 2013-01-01\n    - height, weight: numeric player physical covariates (filled with medians if missing)\n    - position, leagueCountry, meanIAT, meanExp, refNum, playerShort: kept for modeling and clustering.\n    \"\"\"\n    df = df.copy()\n\n    # Keep rows with required fields\n    req = ['redCards', 'games', 'rater1', 'rater2', 'position', 'leagueCountry', 'refNum', 'playerShort']\n    df = df.dropna(subset=req)\n\n    # Ensure numeric games/redCards if they are strings\n    df['games'] = pd.to_numeric(df.get('games'), errors='coerce')\n    df['redCards'] = pd.to_numeric(df.get('redCards'), errors='coerce')\n\n    # Create average skin tone (0-1) and binary dark/light indicator\n    df['SkinToneAvg'] = df[['rater1', 'rater2']].mean(axis=1)\n\n    # Define clear-cut dark vs light thresholds; exclude ambiguous middle values to focus contrast\n    df['SkinDark'] = np.where(df['SkinToneAvg'] >= 0.6, 1,\n                              np.where(df['SkinToneAvg'] <= 0.4, 0, np.nan))\n    df = df[df['SkinDark'].notnull()].copy()\n\n    # Parse birthday and compute age at reference date (2013-01-01)\n    df['birthday'] = pd.to_datetime(df.get('birthday'), format='%d.%m.%Y', errors='coerce', dayfirst=True)\n    ref_date = pd.to_datetime('2013-01-01')\n    df['age'] = (ref_date - df['birthday']).dt.days / 365.25\n\n    # Ensure numeric covariates\n    df['height'] = pd.to_numeric(df.get('height'), errors='coerce')\n    df['weight'] = pd.to_numeric(df.get('weight'), errors='coerce')\n\n    # Impute height/weight with median if missing (simple, transparent choice)\n    if df['height'].isnull().any():\n        df['height'] = df['height'].fillna(df['height'].median())\n    if df['weight'].isnull().any():\n        df['weight'] = df['weight'].fillna(df['weight'].median())\n\n    # Keep only dyads with at least one game (schema indicates games min = 1, but check defensively)\n    df = df[df['games'] > 0]\n\n    # Create offset variable: log of games (exposure)\n    df['log_games'] = np.log(df['games'])\n\n    # Keep model-relevant columns and drop others to reduce memory\n    keep_cols = [\n        'playerShort', 'refNum', 'leagueCountry', 'position',\n        'games', 'log_games', 'redCards',\n        'SkinToneAvg', 'SkinDark',\n        'age', 'height', 'weight',\n        'meanIAT', 'meanExp'\n    ]\n\n    # Some datasets may not have meanIAT/meanExp for every refCountry record; keep rows even if these are missing\n    for col in keep_cols:\n        if col not in df.columns:\n            df[col] = np.nan\n\n    return df[keep_cols]",
+      "m_code": "def model(df: pd.DataFrame) -> Any:\n    \"\"\"\n    Fit a negative binomial regression for red card counts with games as exposure.\n\n    Model: redCards ~ SkinDark + SkinToneAvg + age + height + weight + meanIAT + meanExp + C(position) + C(leagueCountry)\n    Offset: log_games (so coefficients reflect effects on the red-card rate per game)\n\n    We use a Negative Binomial family to accommodate overdispersion relative to Poisson.\n    Standard errors are clustered at the referee level (refNum) because referee behavior generates within-referee correlation across dyads.\n\n    Returns an object exposing .params (pd.Series), .bse (pd.Series) and .summary() for display.\n    \"\"\"\n    from statsmodels.stats.sandwich_covariance import cov_cluster, cov_hc3\n\n    # Ensure required columns are present\n    needed = ['redCards', 'log_games', 'SkinDark', 'SkinToneAvg', 'age', 'height', 'weight', 'position', 'leagueCountry', 'refNum', 'meanIAT', 'meanExp', 'games', 'playerShort']\n    missing = [c for c in needed if c not in df.columns]\n    if missing:\n        raise ValueError(f'Missing required columns for modeling: {missing}')\n\n    # Drop rows with missing values in predictors used by the formula or essential modeling columns\n    model_df = df.dropna(subset=['redCards', 'log_games', 'SkinDark', 'position', 'leagueCountry'])\n\n    # Formula: include categorical predictors using C() so we do not need to create dummies manually\n    formula = (\n        'redCards ~ SkinDark + SkinToneAvg + age + height + weight + meanIAT + meanExp '\n        '+ C(position) + C(leagueCountry)'\n    )\n\n    # Fit negative binomial GLM with offset = log_games\n    nb_model = smf.glm(formula=formula,\n                       data=model_df,\n                       family=sm.families.NegativeBinomial(),\n                       offset=model_df['log_games'])\n    res = nb_model.fit()\n\n    # Compute clustered robust covariance at referee level (refNum).\n    # Use sandwich covariance utilities: prefer cluster; fall back to HC3; as final fallback use model covariance.\n    try:\n        cluster_groups = model_df['refNum'].values\n        cov_mat = cov_cluster(res, cluster_groups)\n    except Exception:\n        try:\n            cov_mat = cov_hc3(res)\n        except Exception:\n            # Final fallback: use the default covariance from the fitted results\n            try:\n                cov_mat = res.cov_params()\n            except Exception:\n                cov_mat = np.asarray(res.normalized_cov_params) if hasattr(res, 'normalized_cov_params') else np.eye(len(res.params))\n\n    # Ensure cov_mat is ndarray\n    if isinstance(cov_mat, pd.DataFrame):\n        cov_mat = cov_mat.values\n    else:\n        cov_mat = np.asarray(cov_mat)\n\n    # Standard errors from clustered covariance\n    bse_vals = np.sqrt(np.diag(cov_mat))\n    params = pd.Series(res.params, index=res.params.index)\n    bse = pd.Series(bse_vals, index=params.index)\n\n    # Create a lightweight wrapper to mimic the expected interface used downstream\n    class ClusteredResults:\n        def __init__(self, base_res, params: pd.Series, bse: pd.Series, cov: np.ndarray):\n            self._base_res = base_res\n            self.params = params\n            self.bse = bse\n            self.cov = cov\n\n        def summary(self):\n            # Print the original model summary first\n            try:\n                print(self._base_res.summary())\n            except Exception:\n                # If original summary fails for some reason, ignore and continue to print our table\n                pass\n\n            # Then print a concise coefficient table using clustered SEs\n            header = f\"{'coef':>12} {'std err (clust)':>18} {'z':>10} {'P>|z|':>10} {'[0.025':>10} {'0.975]':>10}\"\n            print(\"\\nClustered SE coefficient table:\")\n            print(header)\n            for name, coef in self.params.items():\n                se = self.bse.get(name, np.nan)\n                if pd.isna(se) or se == 0:\n                    z = np.nan\n                    p = np.nan\n                    ci_low = np.nan\n                    ci_upp = np.nan\n                else:\n                    z = coef / se\n                    p = 2 * (1 - _scipy_stats.norm.cdf(abs(z)))\n                    ci_low = coef - 1.96 * se\n                    ci_upp = coef + 1.96 * se\n                print(f\"{name:30s} {coef:12.4f} {se:18.4f} {z:10.3f} {p:10.3g} {ci_low:10.4f} {ci_upp:10.4f}\")\n\n    clustered_res = ClusteredResults(res, params, bse, cov_mat)\n\n    # Print a concise summary and the key coefficient estimate for SkinDark\n    clustered_res.summary()\n\n    # Also compute incidence rate ratio (IRR) and 95% CI for SkinDark for interpretability\n    coef = clustered_res.params.get('SkinDark')\n    se_skin = clustered_res.bse.get('SkinDark')\n    if coef is not None and se_skin is not None and not np.isnan(se_skin):\n        irr = np.exp(coef)\n        ci_lower = np.exp(coef - 1.96 * se_skin)\n        ci_upper = np.exp(coef + 1.96 * se_skin)\n        print(f\"\\nSkinDark IRR = {irr:.3f} (95% CI: {ci_lower:.3f} - {ci_upper:.3f})\")\n\n    return clustered_res"
+    }
+  }
+}

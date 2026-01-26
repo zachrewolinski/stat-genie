@@ -1,211 +1,210 @@
 from typing import Any, Dict
-import numpy as np
 import pandas as pd
+import numpy as np
 import statsmodels.formula.api as smf
+import statsmodels.api as sm
+from scipy.stats import norm
 
 
 def transform(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Transform a raw dataframe into the FINAL dataframe required by the model.
-
-    Required final columns (must be present in the returned dataframe):
-      - 'SizeRatio' (log(SizeFocal / SizeOther))
-      - 'LocationAdvantage' (DistOtherCenter - DistFocalCenter)
-      - 'FocalWin' (0/1 integer outcome)
-      - 'MalesDiff' (MalesFocal - MalesOther)
-      - 'FemalesDiff' (FemalesFocal - FemalesOther)
-
-    This function will attempt to rename common raw feature column names into the
-    required descriptive names. It supports case-insensitive matching of common
-    aliases for each required field. If required columns are still missing after
-    the renaming attempt, a KeyError is raised.
-    """
+    # Make a copy to avoid mutating input
     df = df.copy()
 
-    # Define canonical target column names (must not be changed)
+    # Rename raw feature columns to meaningful names (assumes incoming raw columns are named feature1..feature12)
+    # If the input already uses the target column names, this will simply convert types below.
+    if 'feature1' in df.columns:
+        df['focal_group_id'] = df['feature1'].astype(int)
+    elif 'focal_group_id' in df.columns:
+        df['focal_group_id'] = df['focal_group_id'].astype(int)
+    else:
+        raise KeyError("Input dataframe must contain 'feature1' or 'focal_group_id'")
+
+    if 'feature2' in df.columns:
+        df['other_group_id'] = df['feature2'].astype(int)
+    elif 'other_group_id' in df.columns:
+        df['other_group_id'] = df['other_group_id'].astype(int)
+    else:
+        raise KeyError("Input dataframe must contain 'feature2' or 'other_group_id'")
+
+    if 'feature3' in df.columns:
+        df['dyad_id'] = df['feature3'].astype(int)
+    elif 'dyad_id' in df.columns:
+        df['dyad_id'] = df['dyad_id'].astype(int)
+    else:
+        raise KeyError("Input dataframe must contain 'feature3' or 'dyad_id'")
+
+    if 'feature4' in df.columns:
+        df['focal_won'] = df['feature4'].astype(int)
+    elif 'focal_won' in df.columns:
+        df['focal_won'] = df['focal_won'].astype(int)
+    else:
+        raise KeyError("Input dataframe must contain 'feature4' or 'focal_won'")
+
+    # Distances from each group's home range center
+    if 'feature5' in df.columns:
+        df['focal_dist_from_home'] = pd.to_numeric(df['feature5'], errors='coerce')
+    else:
+        df['focal_dist_from_home'] = pd.to_numeric(df.get('focal_dist_from_home'), errors='coerce')
+
+    if 'feature6' in df.columns:
+        df['other_dist_from_home'] = pd.to_numeric(df['feature6'], errors='coerce')
+    else:
+        df['other_dist_from_home'] = pd.to_numeric(df.get('other_dist_from_home'), errors='coerce')
+
+    # Group sizes (total and by sex)
+    if 'feature7' in df.columns:
+        df['focal_n_total'] = pd.to_numeric(df['feature7'], errors='coerce').astype('Int64')
+    else:
+        df['focal_n_total'] = pd.to_numeric(df.get('focal_n_total'), errors='coerce').astype('Int64')
+
+    if 'feature8' in df.columns:
+        df['other_n_total'] = pd.to_numeric(df['feature8'], errors='coerce').astype('Int64')
+    else:
+        df['other_n_total'] = pd.to_numeric(df.get('other_n_total'), errors='coerce').astype('Int64')
+
+    if 'feature9' in df.columns:
+        df['focal_n_males'] = pd.to_numeric(df['feature9'], errors='coerce').astype('Int64')
+    else:
+        df['focal_n_males'] = pd.to_numeric(df.get('focal_n_males'), errors='coerce').astype('Int64')
+
+    if 'feature10' in df.columns:
+        df['other_n_males'] = pd.to_numeric(df['feature10'], errors='coerce').astype('Int64')
+    else:
+        df['other_n_males'] = pd.to_numeric(df.get('other_n_males'), errors='coerce').astype('Int64')
+
+    if 'feature11' in df.columns:
+        df['focal_n_females'] = pd.to_numeric(df['feature11'], errors='coerce').astype('Int64')
+    else:
+        df['focal_n_females'] = pd.to_numeric(df.get('focal_n_females'), errors='coerce').astype('Int64')
+
+    if 'feature12' in df.columns:
+        df['other_n_females'] = pd.to_numeric(df['feature12'], errors='coerce').astype('Int64')
+    else:
+        df['other_n_females'] = pd.to_numeric(df.get('other_n_females'), errors='coerce').astype('Int64')
+
+    # Drop rows with missing values in key variables
     required_cols = [
-        'FocalID', 'OtherID', 'DyadID', 'FocalWin',
-        'DistFocalCenter', 'DistOtherCenter',
-        'SizeFocal', 'SizeOther',
-        'MalesFocal', 'MalesOther',
-        'FemalesFocal', 'FemalesOther'
+        'focal_group_id', 'other_group_id', 'dyad_id', 'focal_won',
+        'focal_dist_from_home', 'other_dist_from_home',
+        'focal_n_total', 'other_n_total',
+        'focal_n_males', 'other_n_males',
+        'focal_n_females', 'other_n_females'
+    ]
+    df = df.dropna(subset=required_cols)
+
+    # Compute relative size (focal - other) and standardize
+    df['rel_size'] = df['focal_n_total'].astype(float) - df['other_n_total'].astype(float)
+    rel_size_std = df['rel_size'].std(ddof=0)
+    if rel_size_std == 0 or np.isnan(rel_size_std):
+        rel_size_std = 1.0
+    df['rel_size_z'] = (df['rel_size'] - df['rel_size'].mean()) / rel_size_std
+
+    # Compute distance difference: other_dist - focal_dist. Positive => focal closer to its home than other (location advantage)
+    df['dist_diff'] = df['other_dist_from_home'].astype(float) - df['focal_dist_from_home'].astype(float)
+    dist_diff_std = df['dist_diff'].std(ddof=0)
+    if dist_diff_std == 0 or np.isnan(dist_diff_std):
+        dist_diff_std = 1.0
+    df['dist_diff_z'] = (df['dist_diff'] - df['dist_diff'].mean()) / dist_diff_std
+
+    # Sex composition differences, standardized
+    df['males_diff'] = df['focal_n_males'].astype(float) - df['other_n_males'].astype(float)
+    males_diff_std = df['males_diff'].std(ddof=0)
+    if males_diff_std == 0 or np.isnan(males_diff_std):
+        males_diff_std = 1.0
+    df['males_diff_z'] = (df['males_diff'] - df['males_diff'].mean()) / males_diff_std
+
+    df['females_diff'] = df['focal_n_females'].astype(float) - df['other_n_females'].astype(float)
+    females_diff_std = df['females_diff'].std(ddof=0)
+    if females_diff_std == 0 or np.isnan(females_diff_std):
+        females_diff_std = 1.0
+    df['females_diff_z'] = (df['females_diff'] - df['females_diff'].mean()) / females_diff_std
+
+    # Optional categorical contest location label (not required for primary model but useful for exploration)
+    # If focal is meaningfully closer (dist_diff > 50) -> 'FocalHome'; if other closer -> 'OtherHome'; else 'Neutral'
+    df['contest_location'] = df['dist_diff'].apply(lambda x: 'FocalHome' if x > 50 else ('OtherHome' if x < -50 else 'Neutral'))
+
+    # Keep only the columns needed for modeling and interpretation
+    keep_cols = [
+        'focal_group_id', 'other_group_id', 'dyad_id', 'focal_won',
+        'focal_dist_from_home', 'other_dist_from_home',
+        'focal_n_total', 'other_n_total',
+        'focal_n_males', 'other_n_males', 'focal_n_females', 'other_n_females',
+        'rel_size', 'rel_size_z', 'dist_diff', 'dist_diff_z',
+        'males_diff', 'males_diff_z', 'females_diff', 'females_diff_z',
+        'contest_location'
     ]
 
-    # Common aliases (lowercase) mapped to the canonical target names.
-    # This list includes the variants observed in the dataset that raised the error.
-    alias_to_target: Dict[str, str] = {
-        # Identifiers
-        'focal': 'FocalID',
-        'focalid': 'FocalID',
-        'feature1': 'FocalID',
-        'id_focal': 'FocalID',
-        'group_focal': 'FocalID',
+    # Ensure all keep_cols exist (some like raw features may not if input already contained final names)
+    for col in keep_cols:
+        if col not in df.columns:
+            df[col] = pd.NA
 
-        'other': 'OtherID',
-        'otherid': 'OtherID',
-        'feature2': 'OtherID',
-        'id_other': 'OtherID',
-        'group_other': 'OtherID',
-
-        'dyad': 'DyadID',
-        'dyadid': 'DyadID',
-        'feature3': 'DyadID',
-        'pair_id': 'DyadID',
-        'pair': 'DyadID',
-
-        # Outcome
-        'win': 'FocalWin',
-        'focalwin': 'FocalWin',
-        'result': 'FocalWin',
-        'outcome': 'FocalWin',
-        'feature4': 'FocalWin',
-
-        # Distances
-        'dist_focal': 'DistFocalCenter',
-        'distfocalcenter': 'DistFocalCenter',
-        'dist_focal_center': 'DistFocalCenter',
-        'dist_focalcenter': 'DistFocalCenter',
-        'feature5': 'DistFocalCenter',
-
-        'dist_other': 'DistOtherCenter',
-        'distothercenter': 'DistOtherCenter',
-        'dist_other_center': 'DistOtherCenter',
-        'dist_othercenter': 'DistOtherCenter',
-        'feature6': 'DistOtherCenter',
-
-        # Sizes / counts
-        'n_focal': 'SizeFocal',
-        'size_focal': 'SizeFocal',
-        'sizefocal': 'SizeFocal',
-        'n_foc': 'SizeFocal',
-        'n_f': 'SizeFocal',
-        'feature7': 'SizeFocal',
-
-        'n_other': 'SizeOther',
-        'size_other': 'SizeOther',
-        'sizeother': 'SizeOther',
-        'n_oth': 'SizeOther',
-        'n_o': 'SizeOther',
-        'feature8': 'SizeOther',
-
-        # Males
-        'm_focal': 'MalesFocal',
-        'males_focal': 'MalesFocal',
-        'malesfocal': 'MalesFocal',
-        'feature9': 'MalesFocal',
-
-        'm_other': 'MalesOther',
-        'males_other': 'MalesOther',
-        'malesother': 'MalesOther',
-        'feature10': 'MalesOther',
-
-        # Females
-        'f_focal': 'FemalesFocal',
-        'females_focal': 'FemalesFocal',
-        'femalesfocal': 'FemalesFocal',
-        'feature11': 'FemalesFocal',
-
-        'f_other': 'FemalesOther',
-        'females_other': 'FemalesOther',
-        'femalesother': 'FemalesOther',
-        'feature12': 'FemalesOther',
-    }
-
-    # Build rename map by inspecting existing dataframe columns.
-    cols = list(df.columns)
-    rename_map: Dict[str, str] = {}
-    # For each column present, check if it matches any alias (case-insensitive).
-    for col in cols:
-        # If the column already matches one of the required target names, do nothing.
-        if col in required_cols:
-            continue
-        lower = col.lower()
-        if lower in alias_to_target:
-            target = alias_to_target[lower]
-            # Do not overwrite if the target already exists in the dataframe.
-            if target in df.columns:
-                continue
-            # Map this raw column name to the canonical target.
-            rename_map[col] = target
-
-    if rename_map:
-        df = df.rename(columns=rename_map)
-
-    # Verify all necessary raw/descriptive columns are present before proceeding.
-    missing = [c for c in required_cols if c not in df.columns]
-    if missing:
-        raise KeyError(
-            f"transform: missing required input columns after renaming: {missing}. "
-            f"Available columns: {list(df.columns)}"
-        )
-
-    # Drop rows with missing values in any of the required input columns
-    df = df.dropna(subset=required_cols).copy()
-
-    # Ensure binary outcome is integer 0/1
-    # If FocalWin is not numeric, try to coerce; this will raise if values cannot be converted.
-    df['FocalWin'] = pd.to_numeric(df['FocalWin'], errors='raise').astype(int)
-
-    # Compute relative size measures
-    # SizeRatio: log(SizeFocal / SizeOther). Add a tiny constant for numerical safety.
-    df['SizeRatio'] = np.log((df['SizeFocal'].astype(float) + 1e-6) / (df['SizeOther'].astype(float) + 1e-6))
-    # SizeDiff (diagnostic helper - allowed as internal helper)
-    df['SizeDiff'] = df['SizeFocal'] - df['SizeOther']
-
-    # Composition differences (controls)
-    df['MalesDiff'] = df['MalesFocal'] - df['MalesOther']
-    df['FemalesDiff'] = df['FemalesFocal'] - df['FemalesOther']
-
-    # Location advantage: DistOtherCenter - DistFocalCenter
-    df['LocationAdvantage'] = df['DistOtherCenter'] - df['DistFocalCenter']
-
-    # Optional categorical version of contest location for descriptive analyses (helper)
-    df['ContestLocation'] = pd.cut(
-        df['LocationAdvantage'],
-        bins=[-np.inf, -50, 50, np.inf],
-        labels=['OtherHome', 'Neutral', 'FocalHome']
-    )
-
-    # Reset index for cleanliness
-    df = df.reset_index(drop=True)
-
-    # Final check: ensure the final dataframe contains the conceptual variable columns
-    final_required = ['SizeRatio', 'LocationAdvantage', 'FocalWin', 'MalesDiff', 'FemalesDiff', 'DyadID']
-    missing_final = [c for c in final_required if c not in df.columns]
-    if missing_final:
-        raise KeyError(
-            f"transform: missing required final columns: {missing_final}. "
-            f"Available columns: {list(df.columns)}"
-        )
-
+    df = df[keep_cols].reset_index(drop=True)
     return df
 
 
 def model(df: pd.DataFrame) -> Any:
-    """
-    Fit the specified logistic regression model on the transformed dataframe.
+    # Formula: main effects of relative size and location (distance difference) plus their interaction.
+    # Controls: sex-composition differences and group fixed effects for focal and other groups.
+    formula = ('focal_won ~ rel_size_z * dist_diff_z '
+               '+ males_diff_z + females_diff_z '
+               '+ C(focal_group_id) + C(other_group_id)')
 
-    Model formula:
-      FocalWin ~ SizeRatio * LocationAdvantage + MalesDiff + FemalesDiff
+    # Fit logistic regression (binomial logit)
+    logit_model = smf.logit(formula=formula, data=df)
+    fit_res = logit_model.fit(disp=False)
 
-    Cluster-robust standard errors are requested clustered by 'DyadID' when possible.
-    """
-    # Ensure required columns are present
-    required_for_model = ['FocalWin', 'SizeRatio', 'LocationAdvantage', 'MalesDiff', 'FemalesDiff', 'DyadID']
-    missing = [c for c in required_for_model if c not in df.columns]
-    if missing:
-        raise KeyError(f"model: input dataframe is missing required columns: {missing}")
-
-    formula = 'FocalWin ~ SizeRatio * LocationAdvantage + MalesDiff + FemalesDiff'
-
-    # Fit logistic regression
-    model_fit = smf.logit(formula, data=df).fit(disp=False)
-
-    # Try to obtain cluster-robust SEs clustered by DyadID
+    # Obtain cluster-robust standard errors clustered by dyad_id
+    # Some statsmodels results classes do not implement get_robustcov_results.
+    # We compute clustered covariance manually and wrap minimal result info.
     try:
-        results = model_fit.get_robustcov_results(cov_type='cluster', groups=df['DyadID'])
+        # Attempt to compute cluster-robust covariance using statsmodels helper
+        from statsmodels.stats.sandwich_covariance import cov_cluster
+        cov = cov_cluster(fit_res, df['dyad_id'])
     except Exception:
-        # Fallback to default results if clustering fails
-        results = model_fit
+        # Fallback to using the model's covariance (non-robust) if cluster computation fails
+        cov = fit_res.cov_params()
 
-    return results
+    # Build a minimal clustered-results wrapper that exposes params, bse, pvalues, and a simple summary()
+    class ClusteredResults:
+        def __init__(self, params: pd.Series, cov_matrix: np.ndarray):
+            self.params = params
+            self._cov = cov_matrix
+            # Ensure covariance shape matches params
+            try:
+                self.bse = np.sqrt(np.diag(self._cov))
+            except Exception:
+                # fallback: use original bse
+                self.bse = fit_res.bse.values if hasattr(fit_res, 'bse') else np.sqrt(np.abs(params.values))
+            # z-stats and p-values (two-sided)
+            self.z = self.params.values / self.bse
+            self.pvalues = 2.0 * (1.0 - norm.cdf(np.abs(self.z)))
+
+        def cov_params(self) -> np.ndarray:
+            return self._cov
+
+        def summary(self) -> pd.DataFrame:
+            df_tbl = pd.DataFrame({
+                'coef': self.params,
+                'std err': self.bse,
+                'z': self.z,
+                'P>|z|': self.pvalues
+            }, index=self.params.index)
+            return df_tbl
+
+        def __repr__(self) -> str:
+            return self.summary().to_string()
+
+    clustered_res = ClusteredResults(fit_res.params, cov)
+
+    # Print brief summaries (user can inspect full results returned)
+    print('Logit coefficients (default SE):')
+    print(fit_res.summary())
+    print('Cluster-robust results (clustered by dyad_id if available):')
+    print(clustered_res.summary())
+
+    # Return both the fitted model and clustered results for downstream use
+    return {
+        'fit_result': fit_res,
+        'clustered_result': clustered_res
+    }

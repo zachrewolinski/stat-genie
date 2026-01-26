@@ -1,233 +1,160 @@
 def extract_final_answer(model_output):
     """
-    Extracts statistics for the femininity predictors from the provided model_output dict.
-    Expects model_output to be a dict with keys:
-      - 'primary_model' -> statsmodels RegressionResultsWrapper (uses 'masfem_z')
-      - 'sensitivity_mturk_model' -> statsmodels RegressionResultsWrapper (uses 'masfem_mturk_z') or None
-      - 'deaths_model' -> statsmodels RegressionResultsWrapper (uses 'masfem_z' on log fatalities) or None
-
+    Extracts statistics for the 'masfem_z' coefficient from the provided model output dict.
+    Expects model_output to be the dict returned by the modeling function, e.g.:
+      {'neg_binom': <GLMResultsWrapper>, 'ols_log': <RegressionResultsWrapper>}
     Returns a dict with:
-      - "object": dict with extracted numeric stats for each relevant model (estimate, se, t, p, 95% CI, nobs)
-      - "description": brief textual interpretation of those stats in relation to the hypothesis:
-          "More feminine names -> less precaution -> more logged damage" (prediction: positive effect on log_ndam15).
+      - "object": dict with extracted numeric results for each model (or error message)
+      - "description": readable summary interpreting the coefficient(s) relative to the hypothesis
     """
+    import numpy as np
 
-    def _extract(model, varname):
-        """Return stats for varname from a statsmodels fitted model or None if not available."""
-        if model is None:
-            return None
+    def _extract_from_result(res, name):
+        # res: statsmodels results wrapper
+        idx = 'masfem_z'
+        if not hasattr(res, 'params'):
+            return {'error': f'model object for {name} has no .params attribute'}
+        params = res.params
+        if idx not in params.index:
+            return {'error': f"'{idx}' not found in model parameters for {name}"}
+        coef = float(params.loc[idx])
+        # Some results may not have robust bse/pvalues, so guard accesses
+        bse = float(res.bse.loc[idx]) if hasattr(res, 'bse') and idx in res.bse.index else np.nan
+        pval = float(res.pvalues.loc[idx]) if hasattr(res, 'pvalues') and idx in res.pvalues.index else np.nan
+        # confidence interval (two-column DataFrame)
         try:
-            params = model.params
+            ci_row = res.conf_int().loc[idx].values
+            ci_lower, ci_upper = float(ci_row[0]), float(ci_row[1])
         except Exception:
-            return None
-        # params might be a Series with index
-        try:
-            if varname not in params.index:
-                return None
-        except Exception:
-            return None
+            ci_lower, ci_upper = np.nan, np.nan
 
-        # Extract core statistics with safe access
-        try:
-            est = float(params[varname])
-        except Exception:
-            est = None
-        try:
-            se = float(model.bse[varname]) if hasattr(model, "bse") and varname in model.bse.index else None
-        except Exception:
-            se = None
-        try:
-            t = float(model.tvalues[varname]) if hasattr(model, "tvalues") and varname in model.tvalues.index else None
-        except Exception:
-            t = None
-        try:
-            p = float(model.pvalues[varname]) if hasattr(model, "pvalues") and varname in model.pvalues.index else None
-        except Exception:
-            p = None
-
-        # confidence interval extraction (robust HC3 used when fitting)
-        ci_lower = ci_upper = None
-        try:
-            ci = model.conf_int()
-            try:
-                # DataFrame with index
-                row = ci.loc[varname]
-                ci_lower, ci_upper = float(row.iloc[0]), float(row.iloc[1])
-            except Exception:
-                # fallback if conf_int returns ndarray or has no loc
-                try:
-                    idx = list(params.index).index(varname)
-                    row = ci[idx]
-                    ci_lower, ci_upper = float(row[0]), float(row[1])
-                except Exception:
-                    ci_lower = ci_upper = None
-        except Exception:
-            ci_lower = ci_upper = None
-
-        # number of observations
-        try:
-            nobs = int(model.nobs)
-        except Exception:
-            # fallback: infer from model.model.endog
-            try:
-                nobs = int(model.model.endog.shape[0])
-            except Exception:
-                nobs = None
-
-        # Decide whether the point estimate supports the directional hypothesis (positive effect)
-        supports_direction = None
-        if est is not None:
-            supports_direction = (est > 0)
-
-        # Decide whether the result is statistically "significant" at p < 0.05 (if p available)
-        significant = None
-        if p is not None:
-            significant = (p < 0.05)
-
-        return {
-            'variable': varname,
-            'estimate': est,
-            'std_error': se,
-            't_value': t,
-            'p_value': p,
-            'ci_lower_95': ci_lower,
-            'ci_upper_95': ci_upper,
-            'nobs': nobs,
-            # boolean indicators
-            'supports_directional_hypothesis (est>0)': supports_direction,
-            'statistically_significant_at_0.05': significant,
-            # also provide short keys used in textual summaries
-            'dir': supports_direction,
-            'sig': significant
+        out = {
+            'coef': coef,
+            'se': bse,
+            'p_value': pval,
+            'ci_95': [ci_lower, ci_upper],
         }
 
-    # Safely get models from input dict-like object
-    try:
-        primary_model = model_output.get('primary_model')
-    except Exception:
-        primary_model = None
-    try:
-        sens_model = model_output.get('sensitivity_mturk_model')
-    except Exception:
-        sens_model = None
-    try:
-        deaths_model = model_output.get('deaths_model')
-    except Exception:
-        deaths_model = None
+        if name == 'neg_binom':
+            # For count model with log link, exponentiate coefficient to get incidence rate ratio (IRR)
+            out['irr'] = float(np.exp(coef))
+            out['irr_ci_95'] = [float(np.exp(ci_lower)) if not np.isnan(ci_lower) else np.nan,
+                                float(np.exp(ci_upper)) if not np.isnan(ci_upper) else np.nan]
+            # Interpret direction: positive coef -> IRR > 1 -> higher expected counts
+        elif name == 'ols_log':
+            # For OLS on log(alldeaths + 1): exponentiated coef is multiplicative effect on (alldeaths+1)
+            out['multiplicative_effect_on_y_plus1'] = float(np.exp(coef))
+            out['pct_change_on_y_plus1'] = float((np.exp(coef) - 1) * 100.0)
+            out['pct_change_ci_95'] = [
+                float((np.exp(ci_lower) - 1) * 100.0) if not np.isnan(ci_lower) else np.nan,
+                float((np.exp(ci_upper) - 1) * 100.0) if not np.isnan(ci_upper) else np.nan,
+            ]
+        return out
 
-    primary_stats = _extract(primary_model, 'masfem_z')
-    sens_stats = _extract(sens_model, 'masfem_mturk_z')
-    deaths_stats = _extract(deaths_model, 'masfem_z')  # same IV but outcome = log fatalities
+    results_obj = {}
+    summary_parts = []
 
-    # Helper to create display strings safely
-    def _fmt_num(val, fmt):
-        if val is None:
-            return 'NA'
+    # Negative Binomial
+    if 'neg_binom' in model_output and model_output.get('neg_binom') is not None:
         try:
-            return fmt.format(val)
-        except Exception:
-            try:
-                return fmt.format(float(val))
-            except Exception:
-                return 'NA'
-
-    parts = []
-    if primary_stats is not None:
-        primary_display = {
-            'estimate': _fmt_num(primary_stats.get('estimate'), "{:.4f}"),
-            'std_error': _fmt_num(primary_stats.get('std_error'), "{:.4f}"),
-            't_value': _fmt_num(primary_stats.get('t_value'), "{:.2f}"),
-            'p_value': _fmt_num(primary_stats.get('p_value'), "{:.3g}"),
-            'ci_lower_95': _fmt_num(primary_stats.get('ci_lower_95'), "{:.4f}"),
-            'ci_upper_95': _fmt_num(primary_stats.get('ci_upper_95'), "{:.4f}"),
-            'nobs': _fmt_num(primary_stats.get('nobs'), "{}"),
-            'dir': str(primary_stats.get('dir')) if primary_stats.get('dir') is not None else 'NA',
-            'sig': str(primary_stats.get('sig')) if primary_stats.get('sig') is not None else 'NA'
-        }
-        parts.append(
-            "Primary model (DV = log property damage): estimate for masfem_z = {estimate}, SE = {std_error}, "
-            "t = {t_value}, p = {p_value}, 95% CI = [{ci_lower_95}, {ci_upper_95}], n = {nobs}. "
-            "Estimate > 0: {dir}, significant (p<0.05): {sig}.".format(**primary_display)
-        )
+            results_obj['neg_binom'] = _extract_from_result(model_output['neg_binom'], 'neg_binom')
+        except Exception as e:
+            results_obj['neg_binom'] = {'error': f'error extracting neg_binom: {e}'}
+    elif 'neg_binom_error' in model_output:
+        results_obj['neg_binom'] = {'error': model_output['neg_binom_error']}
     else:
-        parts.append("Primary model: masfem_z not available or extraction failed.")
+        results_obj['neg_binom'] = {'error': 'no neg_binom result found'}
 
-    if sens_stats is not None:
-        sens_display = {
-            'estimate': _fmt_num(sens_stats.get('estimate'), "{:.4f}"),
-            'std_error': _fmt_num(sens_stats.get('std_error'), "{:.4f}"),
-            't_value': _fmt_num(sens_stats.get('t_value'), "{:.2f}"),
-            'p_value': _fmt_num(sens_stats.get('p_value'), "{:.3g}"),
-            'ci_lower_95': _fmt_num(sens_stats.get('ci_lower_95'), "{:.4f}"),
-            'ci_upper_95': _fmt_num(sens_stats.get('ci_upper_95'), "{:.4f}"),
-            'nobs': _fmt_num(sens_stats.get('nobs'), "{}"),
-            'dir': str(sens_stats.get('dir')) if sens_stats.get('dir') is not None else 'NA',
-            'sig': str(sens_stats.get('sig')) if sens_stats.get('sig') is not None else 'NA'
-        }
-        parts.append(
-            "Sensitivity (MTurk femininity): estimate for masfem_mturk_z = {estimate}, SE = {std_error}, "
-            "t = {t_value}, p = {p_value}, 95% CI = [{ci_lower_95}, {ci_upper_95}], n = {nobs}. "
-            "Estimate > 0: {dir}, significant (p<0.05): {sig}.".format(**sens_display)
-        )
+    # OLS on log outcome
+    if 'ols_log' in model_output and model_output.get('ols_log') is not None:
+        try:
+            results_obj['ols_log'] = _extract_from_result(model_output['ols_log'], 'ols_log')
+        except Exception as e:
+            results_obj['ols_log'] = {'error': f'error extracting ols_log: {e}'}
+    elif 'ols_error' in model_output:
+        results_obj['ols_log'] = {'error': model_output['ols_error']}
     else:
-        parts.append("Sensitivity (MTurk) model: masfem_mturk_z not available or extraction failed/absent.")
+        results_obj['ols_log'] = {'error': 'no ols_log result found'}
 
-    if deaths_stats is not None:
-        deaths_display = {
-            'estimate': _fmt_num(deaths_stats.get('estimate'), "{:.4f}"),
-            'std_error': _fmt_num(deaths_stats.get('std_error'), "{:.4f}"),
-            't_value': _fmt_num(deaths_stats.get('t_value'), "{:.2f}"),
-            'p_value': _fmt_num(deaths_stats.get('p_value'), "{:.3g}"),
-            'ci_lower_95': _fmt_num(deaths_stats.get('ci_lower_95'), "{:.4f}"),
-            'ci_upper_95': _fmt_num(deaths_stats.get('ci_upper_95'), "{:.4f}"),
-            'nobs': _fmt_num(deaths_stats.get('nobs'), "{}"),
-            'dir': str(deaths_stats.get('dir')) if deaths_stats.get('dir') is not None else 'NA',
-            'sig': str(deaths_stats.get('sig')) if deaths_stats.get('sig') is not None else 'NA'
-        }
-        parts.append(
-            "Deaths model (DV = log fatalities): estimate for masfem_z = {estimate}, SE = {std_error}, "
-            "t = {t_value}, p = {p_value}, 95% CI = [{ci_lower_95}, {ci_upper_95}], n = {nobs}. "
-            "Estimate > 0: {dir}, significant (p<0.05): {sig}.".format(**deaths_display)
-        )
-    else:
-        parts.append("Deaths model: masfem_z on fatalities not available or extraction failed/absent.")
-
-    interpretation = " ".join(parts)
-
-    # Final verdict about hypothesis: require positive estimate AND p<0.05 in primary model to claim support.
-    final_verdict = None
-    if primary_stats is None:
-        final_verdict = "Cannot determine: primary model stats unavailable."
-    else:
-        est = primary_stats.get('estimate')
-        pval = primary_stats.get('p_value')
-        if est is not None and pval is not None:
-            if est > 0 and pval < 0.05:
-                final_verdict = ("Primary model provides statistically significant evidence (p < 0.05) that more "
-                                 "feminine names are associated with higher logged property damage, "
-                                 "which is consistent with the hypothesis (less precaution => more damage).")
-            elif est > 0:
-                final_verdict = ("Primary model estimate is positive (consistent directionally with the hypothesis) "
-                                 "but not statistically significant at p < 0.05.")
-            else:
-                final_verdict = ("Primary model estimate is not positive (or is zero) and therefore does not support the "
-                                 "hypothesized direction.")
+    # Build an English summary interpreting results (if numeric info available)
+    def _interpret_piece(name, piece):
+        if 'error' in piece:
+            return f"{name}: {piece['error']}"
+        coef = piece.get('coef', np.nan)
+        p = piece.get('p_value', np.nan)
+        ci = piece.get('ci_95', [np.nan, np.nan])
+        sign = 'positive' if coef > 0 else ('negative' if coef < 0 else 'null')
+        significance = 'statistically significant' if (not np.isnan(p) and p < 0.05) else 'not statistically significant'
+        if name == 'neg_binom':
+            irr = piece.get('irr', np.nan)
+            irr_ci = piece.get('irr_ci_95', [np.nan, np.nan])
+            return (f"Negative Binomial: masfem_z coef = {coef:.4g}, SE = {piece.get('se', np.nan):.4g}, "
+                    f"95% CI = [{ci[0]:.4g}, {ci[1]:.4g}], p = {p:.4g}. "
+                    f"Direction: {sign}. Exponentiated IRR = {irr:.4g} (95% CI [{irr_ci[0]:.4g}, {irr_ci[1]:.4g}]). "
+                    f"Interpretation: a 1 SD increase in name femininity is associated with a multiplicative change of {irr:.4g} "
+                    f"in expected fatalities. Evidence: {significance}.")
         else:
-            final_verdict = "Primary model: insufficient information to form a statistical verdict."
+            pct = piece.get('pct_change_on_y_plus1', np.nan)
+            pct_ci = piece.get('pct_change_ci_95', [np.nan, np.nan])
+            return (f"OLS on log(y+1): masfem_z coef = {coef:.4g}, SE = {piece.get('se', np.nan):.4g}, "
+                    f"95% CI = [{ci[0]:.4g}, {ci[1]:.4g}], p = {p:.4g}. "
+                    f"Direction: {sign}. This corresponds to an estimated {pct:.3g}% change in (alldeaths + 1) per 1 SD increase "
+                    f"in femininity (95% CI [{pct_ci[0]:.3g}%, {pct_ci[1]:.3g}%]). Evidence: {significance}.")
 
-    # Build result object (keep the numeric dictionaries intact)
-    result_object = {
-        'primary_model_stats': primary_stats,
-        'sensitivity_mturk_stats': sens_stats,
-        'deaths_model_stats': deaths_stats,
-        'final_verdict': final_verdict
-    }
+    summary_parts.append(_interpret_piece('Negative Binomial', results_obj['neg_binom']))
+    summary_parts.append(_interpret_piece('OLS', results_obj['ols_log']))
 
-    description = ("Extracted coefficients, SEs, t-values, p-values, 95% CIs, and sample sizes for the femininity "
-                   "predictors from the primary model (masfem_z), the MTurk-based sensitivity (masfem_mturk_z), "
-                   "and the deaths sensitivity (masfem_z on log fatalities). " + final_verdict + " " + interpretation)
+    # Overall verdict relative to the hypothesis:
+    verdict = "Insufficient model results to form a verdict."
+    try:
+        nb = results_obj.get('neg_binom')
+        if nb and 'error' not in nb:
+            p = nb.get('p_value')
+            coef = nb.get('coef')
+            if (not np.isnan(p)) and (p < 0.05):
+                if coef > 0:
+                    verdict = ("Negative Binomial model shows a statistically significant positive association "
+                               "— results are consistent with the hypothesis that more feminine names are associated "
+                               "with higher fatalities (consistent with fewer precautions).")
+                else:
+                    verdict = ("Negative Binomial model shows a statistically significant negative association "
+                               "— results are inconsistent with the hypothesis.")
+            else:
+                # fall back to OLS if NB not significant
+                ols = results_obj.get('ols_log')
+                if ols and 'error' not in ols:
+                    p2 = ols.get('p_value')
+                    coef2 = ols.get('coef')
+                    if (not np.isnan(p2)) and (p2 < 0.05):
+                        if coef2 > 0:
+                            verdict = ("OLS (log outcome) shows a statistically significant positive association "
+                                       "— results are consistent with the hypothesis.")
+                        else:
+                            verdict = ("OLS (log outcome) shows a statistically significant negative association "
+                                       "— results are inconsistent with the hypothesis.")
+                    else:
+                        verdict = ("Neither model provides statistically significant evidence linking name femininity "
+                                   "to fatalities at the conventional p < 0.05 level.")
+        else:
+            # If NB missing, try OLS
+            ols = results_obj.get('ols_log')
+            if ols and 'error' not in ols:
+                p2 = ols.get('p_value')
+                coef2 = ols.get('coef')
+                if (not np.isnan(p2)) and (p2 < 0.05):
+                    if coef2 > 0:
+                        verdict = ("OLS (log outcome) shows a statistically significant positive association "
+                                   "— results are consistent with the hypothesis.")
+                    else:
+                        verdict = ("OLS (log outcome) shows a statistically significant negative association "
+                                   "— results are inconsistent with the hypothesis.")
+                else:
+                    verdict = ("OLS model does not show statistically significant evidence linking name femininity "
+                               "to fatalities at the conventional p < 0.05 level.")
+    except Exception:
+        # keep default insufficient
+        pass
 
-    return {
-        "object": result_object,
-        "description": description
-    }
+    description = "\n".join(summary_parts) + "\n\nOverall verdict: " + verdict
+
+    return {'object': results_obj, 'description': description}

@@ -35,6 +35,9 @@ from stat_genie.blade_pipeline.additions.perturbations.features import (
 from stat_genie.blade_pipeline.additions.perturbations.data import (
     DataPerturbation,
 )
+from stat_genie.blade_pipeline.additions.perturbations.task import (
+    TaskPerturbation,
+)
 from stat_genie.blade_pipeline.additions.prompt.prompt import PromptGenerator
 from stat_genie.blade_pipeline.baselines.run import SingleRunExperiment
 
@@ -135,11 +138,14 @@ def _update_analysis_with_fixed_code(
 class RunLLMMultiRun(SingleRunExperiment):
     def __init__(self, config: MultiRunConfig, prompt: PromptGenerator,
                  feature_perturbation: FeaturePerturbation,
-                 data_perturbation: DataPerturbation):
-        super().__init__(config, prompt, feature_perturbation, data_perturbation)
+                 data_perturbation: DataPerturbation,
+                 task_perturbation: TaskPerturbation):
+        super().__init__(config, prompt, feature_perturbation, data_perturbation, task_perturbation)
         self.config = config
         self.prompt = prompt
         self.feature_perturbation = feature_perturbation
+        self.data_perturbation = data_perturbation
+        self.task_perturbation = task_perturbation
         
     def __save_results(self, results: MultiRunResults):
         os.makedirs(self.config.output_dir, exist_ok=True)
@@ -304,7 +310,8 @@ class RunLLMMultiRun(SingleRunExperiment):
 
 def multirun_llm(config: MultiRunConfig, prompt: PromptGenerator = None,
                  feature_perturbation: FeaturePerturbation = None,
-                 data_perturbation: DataPerturbation = None):
+                 data_perturbation: DataPerturbation = None,
+                 task_perturbation: TaskPerturbation = None):
     # if no prompt is provided, create a default one
     if prompt is None:
         prompt = PromptGenerator() # no args gives default (BLADE-style prompts)
@@ -314,6 +321,8 @@ def multirun_llm(config: MultiRunConfig, prompt: PromptGenerator = None,
     # if no data perturbation is provided, create a default one
     if data_perturbation is None:
         data_perturbation = DataPerturbation() # no args gives default (no perturbation)
-    runner = RunLLMMultiRun(config, prompt, feature_perturbation, data_perturbation)
+    if task_perturbation is None:
+        task_perturbation = TaskPerturbation() # no args gives default (no perturbation)
+    runner = RunLLMMultiRun(config, prompt, feature_perturbation, data_perturbation, task_perturbation)
     results = asyncio.run(runner.run(config.save_results))
     logger.success("Completed, everything is logged at: " + config.output_dir)

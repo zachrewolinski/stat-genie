@@ -1,108 +1,132 @@
-from typing import Any
+from typing import Dict, FrozenSet, List, Literal, Optional, Set, Tuple, Any
 import numpy as np
 import pandas as pd
+import sklearn
+import scipy
 import statsmodels.api as sm
-import patsy
-
+import statsmodels.formula.api as smf
+import matplotlib.pyplot as plt
+import pickle
+  
 df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/analysis/amtl/add_features_output/amtl.csv')
-
 
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Prepare dataframe for binomial regression of AMTL.
-    Produces columns required by the model:
-      - num_amtl: integer count of missing teeth (as provided)
-      - sockets: integer count of observable sockets (trials)
-      - IsHuman: binary indicator (1 if genus == 'Homo sapiens', else 0)
-      - age_c: age centered on the sample median
-      - prob_male: numeric between 0 and 1 (as provided)
-      - tooth_class: categorical with expected values 'Anterior','Premolar','Posterior'
+    Clean and prepare the dataset for binomial regression of AMTL.
 
-    This function also filters invalid or missing rows that would make binomial modeling invalid
-    (e.g., sockets <= 0 or num_amtl outside [0, sockets]).
+    Produces the following explicit columns used in the model:
+    - num_amtl: integer number of missing teeth (kept from input)
+    - sockets: integer number of observable sockets (kept from input)
+    - amtl_prop: proportion num_amtl / sockets (dependent variable for glm)
+    - genus: cleaned genus string (categorical independent variable)
+    - age_c: centered age (control)
+    - prob_male: probability of male (control)
+    - tooth_class: categorical tooth class (control)
     """
     df = df.copy()
 
-    # Ensure necessary columns exist
-    required_cols = ['num_amtl', 'sockets', 'age', 'prob_male', 'genus', 'tooth_class']
-    missing = [c for c in required_cols if c not in df.columns]
-    if missing:
-        raise ValueError(f"Input dataframe is missing required columns: {missing}")
+    # Required input columns
+    required_cols = ['num_amtl', 'sockets', 'genus', 'age', 'prob_male', 'tooth_class']
+    missing_req = [c for c in required_cols if c not in df.columns]
+    if missing_req:
+        raise ValueError(f"Input dataframe missing required columns: {missing_req}")
 
-    # Convert numeric columns and drop rows with NA in core columns
+    # Drop rows with missing required fields
+    df = df.dropna(subset=required_cols)
+
+    # Ensure numeric/integer types for counts
     df['num_amtl'] = pd.to_numeric(df['num_amtl'], errors='coerce')
     df['sockets'] = pd.to_numeric(df['sockets'], errors='coerce')
-    df['age'] = pd.to_numeric(df['age'], errors='coerce')
-    df['prob_male'] = pd.to_numeric(df['prob_male'], errors='coerce')
 
-    df = df.dropna(subset=['num_amtl', 'sockets', 'age', 'prob_male', 'genus', 'tooth_class'])
-
-    # Remove impossible/invalid rows
+    # Remove rows where sockets is not positive or counts invalid
+    df = df.dropna(subset=['num_amtl', 'sockets'])
     df = df[df['sockets'] > 0]
+
+    # Coerce num_amtl to integer within valid range [0, sockets]
+    df['num_amtl'] = df['num_amtl'].round().astype(int)
     df = df[(df['num_amtl'] >= 0) & (df['num_amtl'] <= df['sockets'])]
 
-    # Convert counts to integer type (safe now after filtering)
-    df['num_amtl'] = df['num_amtl'].astype(int)
-    df['sockets'] = df['sockets'].astype(int)
-
-    # Create binary human indicator
-    # Trim whitespace and standardize genus strings before comparison
+    # Clean genus and tooth_class text
     df['genus'] = df['genus'].astype(str).str.strip()
-    df['IsHuman'] = (df['genus'] == 'Homo sapiens').astype(int)
+    df['tooth_class'] = df['tooth_class'].astype(str).str.strip().str.title()
 
-    # Center age at median (robust to skew)
-    median_age = df['age'].median()
-    df['age_c'] = df['age'] - median_age
+    # Keep only expected tooth classes (safety) and drop others
+    allowed_tooth_classes = {'Anterior', 'Posterior', 'Premolar'}
+    df = df[df['tooth_class'].isin(allowed_tooth_classes)]
 
-    # Ensure prob_male is between 0 and 1; remove rows outside that range as likely data errors
+    # Create proportion and centered age
+    df['amtl_prop'] = df['num_amtl'] / df['sockets']
+    df['age'] = pd.to_numeric(df['age'], errors='coerce')
+    df = df.dropna(subset=['age'])
+    df['age_c'] = df['age'] - df['age'].mean()
+
+    # Ensure prob_male numeric and in [0,1]
+    df['prob_male'] = pd.to_numeric(df['prob_male'], errors='coerce')
+    df = df.dropna(subset=['prob_male'])
     df = df[(df['prob_male'] >= 0.0) & (df['prob_male'] <= 1.0)]
 
-    # Clean tooth_class and make it categorical with expected levels
-    df['tooth_class'] = df['tooth_class'].astype(str).str.strip()
-    allowed = ['Anterior', 'Premolar', 'Posterior']
-    df = df[df['tooth_class'].isin(allowed)]
-    df['tooth_class'] = pd.Categorical(df['tooth_class'], categories=allowed)
+    # Convert categorical columns to category dtype for modeling convenience
+    df['genus'] = df['genus'].astype('category')
+    df['tooth_class'] = df['tooth_class'].astype('category')
 
-    # Final check: at least some variation in IsHuman
-    if df['IsHuman'].nunique() < 2:
-        raise ValueError('No variation in IsHuman after filtering; cannot estimate effect.')
+    # Final check: non-empty
+    if df.shape[0] == 0:
+        raise ValueError('No rows remain after cleaning; check input data and filters.')
 
-    # Keep only the columns required for modeling to make the output clear
-    keep_cols = ['num_amtl', 'sockets', 'IsHuman', 'age_c', 'prob_male', 'tooth_class']
-    df = df[keep_cols]
-
-    return df
+    # Return only columns needed for modeling (plus helpful ones for diagnostics)
+    cols_to_return = ['num_amtl', 'sockets', 'amtl_prop', 'genus', 'age', 'age_c', 'prob_male', 'tooth_class']
+    return df[cols_to_return]
 
 
 # ======== MODEL CODE ========
-def model(df: pd.DataFrame) -> Any:
+def model(df: pd.DataFrame) -> dict:
     """
-    Fit a binomial GLM to test whether modern humans have higher AMTL than non-human primates
+    Fit a binomial (logistic) GLM to test whether genus predicts AMTL rates
     while controlling for age, sex (prob_male), and tooth class.
 
-    Model specification (using counts):
-      response = (num_amtl, sockets - num_amtl)  (successes, failures)
-      predictors = IsHuman + age_c + prob_male + C(tooth_class)
+    The model uses the proportion amtl_prop as the response and uses sockets
+    as frequency weights so that observations with more sockets contribute
+    proportionally more information (equivalent to modeling num_amtl with
+    a binomial denominator).
 
-    Returns the fitted GLMResults object (statsmodels GeneralizedLinearResults).
+    Returns a dictionary with the fitted model object and a table of odds
+    ratios (exponentiated coefficients) with 95% CIs and p-values.
     """
-    # Validate required columns are present
-    required = ['num_amtl', 'sockets', 'IsHuman', 'age_c', 'prob_male', 'tooth_class']
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        raise ValueError(f"Input dataframe is missing required columns for modeling: {missing}")
+    import statsmodels.formula.api as smf
 
-    # Build response as a 2-column array: [successes, failures]
-    successes = np.asarray(df['num_amtl'], dtype=np.float64)
-    failures = np.asarray(df['sockets'] - df['num_amtl'], dtype=np.float64)
-    endog = np.vstack([successes, failures]).T  # shape (nobs, 2)
+    # Make a safe copy
+    df = df.copy()
 
-    # Build design matrix (including intercept) using patsy to ensure proper handling of categorical tooth_class
-    exog = patsy.dmatrix('IsHuman + age_c + prob_male + C(tooth_class)', df, return_type='dataframe')
+    # Formula: proportion ~ genus + controls; genus and tooth_class as categorical
+    formula = 'amtl_prop ~ C(genus) + age_c + prob_male + C(tooth_class)'
 
-    # Fit GLM with Binomial family using count response form (endog with shape (n,2))
-    glm_model = sm.GLM(endog, exog, family=sm.families.Binomial())
-    results = glm_model.fit()
+    # Fit GLM with binomial family. Use freq_weights = number of sockets so that
+    # model treats amtl_prop as successes / trials (more trials -> more info).
+    glm_model = smf.glm(formula=formula,
+                        data=df,
+                        family=sm.families.Binomial(),
+                        freq_weights=df['sockets']).fit()
+
+    # Prepare an odds-ratio table
+    params = glm_model.params
+    conf_int = glm_model.conf_int()
+    pvalues = glm_model.pvalues
+
+    or_table = pd.DataFrame({
+        'term': params.index,
+        'coef': params.values,
+        'OR': np.exp(params.values),
+        'CI_lower': np.exp(conf_int[0].values),
+        'CI_upper': np.exp(conf_int[1].values),
+        'pvalue': pvalues.values
+    }).set_index('term')
+
+    results = {
+        'model_fit': glm_model,
+        'odds_ratios': or_table
+    }
 
     return results
+
+

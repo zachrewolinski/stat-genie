@@ -12,95 +12,114 @@ df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/anal
 
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
-    # Work on a copy to avoid modifying the original
+    """
+    Transform the raw Boston Fed mortgage dataset into the modeling dataframe.
+
+    Steps:
+    - Drop rows with missing values in variables required for the analysis.
+    - Ensure binary indicators are integer typed.
+    - Standardize continuous control variables (z-scores) to help numeric stability and interpretation.
+    - Return a dataframe that contains the dependent variable (accept), independent variable (female),
+      and all control columns listed in the conceptual variables with exact column names.
+    """
     df = df.copy()
 
-    # Columns required for analysis
+    # Columns required for the analysis
     required_cols = [
-        'accept', 'female', 'black', 'mortgage_credit', 'consumer_credit',
-        'PI_ratio', 'loan_to_value', 'bad_history', 'married', 'self_employed',
-        'housing_expense_ratio', 'denied_PMI'
+        'female', 'accept', 'black', 'mortgage_credit', 'consumer_credit', 'bad_history',
+        'PI_ratio', 'loan_to_value', 'housing_expense_ratio', 'self_employed', 'married',
+        'occupation', 'persons'
     ]
 
-    # Ensure required columns exist; if any are missing raise a clear error
-    missing = [c for c in required_cols if c not in df.columns]
-    if len(missing) > 0:
-        raise ValueError(f"Missing required columns for transform: {missing}")
-
-    # Drop rows with missing values in any of the model variables
+    # Drop rows with missing values in any required column
     df = df.dropna(subset=required_cols)
 
-    # Ensure binary columns are integer (0/1)
-    for bcol in ['accept', 'female', 'black', 'bad_history', 'married', 'self_employed', 'denied_PMI']:
-        # Cast to integers; if values aren't 0/1 this will convert truthy values appropriately
-        df[bcol] = df[bcol].astype(int)
+    # Ensure binary variables are integers (0/1)
+    df['female'] = df['female'].astype(int)
+    df['accept'] = df['accept'].astype(int)
+    df['black'] = df['black'].astype(int)
+    df['bad_history'] = df['bad_history'].astype(int)
+    df['self_employed'] = df['self_employed'].astype(int)
+    df['married'] = df['married'].astype(int)
 
-    # Create interaction for moderation test: female * black
-    df['female_black'] = df['female'] * df['black']
+    # Continuous/ordinal variables to standardize (z-score)
+    cont_cols = [
+        'mortgage_credit', 'consumer_credit', 'PI_ratio', 'loan_to_value',
+        'housing_expense_ratio', 'occupation', 'persons'
+    ]
 
-    # Standardize continuous / ordinal numeric controls (z-scores) for easier comparison
-    # Use sample std (ddof=1) via pandas .std()
-    def zscore(series: pd.Series, name: str) -> pd.Series:
-        s = series.astype(float)
-        std = s.std()
-        if std == 0 or np.isnan(std):
-            # If constant or undefined std, return zeros to avoid division by zero
-            return pd.Series(0.0, index=s.index)
-        return (s - s.mean()) / std
+    # Compute population z-score (ddof=0) for each continuous control and store with _z suffix
+    for c in cont_cols:
+        col_mean = df[c].mean()
+        col_std = df[c].std(ddof=0)
+        # If std is zero (unlikely), set z to zero to avoid division by zero
+        if col_std == 0 or np.isnan(col_std):
+            df[c + '_z'] = 0.0
+        else:
+            df[c + '_z'] = (df[c] - col_mean) / col_std
 
-    df['z_mortgage_credit'] = zscore(df['mortgage_credit'], 'mortgage_credit')
-    df['z_consumer_credit'] = zscore(df['consumer_credit'], 'consumer_credit')
-    df['z_PI_ratio'] = zscore(df['PI_ratio'], 'PI_ratio')
-    df['z_loan_to_value'] = zscore(df['loan_to_value'], 'loan_to_value')
-    df['z_housing_expense_ratio'] = zscore(df['housing_expense_ratio'], 'housing_expense_ratio')
+    # Select and return only the columns we will use in the model (exact names)
+    out_cols = [
+        'female', 'accept', 'black', 'mortgage_credit_z', 'consumer_credit_z', 'bad_history',
+        'PI_ratio_z', 'loan_to_value_z', 'housing_expense_ratio_z', 'self_employed', 'married',
+        'occupation_z', 'persons_z'
+    ]
 
-    # Final dataframe contains all original columns plus derived columns used in the model
-    return df
+    return df[out_cols]
 
 
 # ======== MODEL CODE ========
-def model(df: pd.DataFrame):
-    # Ensure the transformed dataframe has the required columns
-    required_model_cols = [
-        'accept', 'female', 'black', 'female_black',
-        'z_mortgage_credit','z_consumer_credit','z_PI_ratio','z_loan_to_value','z_housing_expense_ratio',
-        'bad_history','married','self_employed','denied_PMI'
-    ]
-    missing = [c for c in required_model_cols if c not in df.columns]
-    if len(missing) > 0:
-        raise ValueError(f"Missing columns required for modeling: {missing}")
+def model(df: pd.DataFrame) -> dict:
+    """
+    Fit a logistic regression to estimate the effect of gender (female) on mortgage acceptance
+    while controlling for applicant creditworthiness and other covariates.
 
-    # Define endogenous and exogenous variables
-    endog = df['accept']
+    Model: logit( P(accept=1) ) = beta0 + beta1*female + sum_k gamma_k * control_k
 
-    exog_cols = [
-        'female',            # IV
-        'black',             # race control (and moderator)
-        'female_black',      # interaction to test moderation
-        'z_mortgage_credit',
-        'z_consumer_credit',
-        'z_PI_ratio',
-        'z_loan_to_value',
-        'z_housing_expense_ratio',
-        'bad_history',
-        'married',
-        'self_employed',
-        'denied_PMI'
+    Returns a dictionary with the fitted model object, textual summary, and a DataFrame of
+    odds ratios (OR), 95% CI for OR, and p-values.
+    """
+    df = df.copy()
+
+    # Predictor columns (must match the transform output)
+    X_cols = [
+        'female', 'black', 'mortgage_credit_z', 'consumer_credit_z', 'bad_history',
+        'PI_ratio_z', 'loan_to_value_z', 'housing_expense_ratio_z', 'self_employed', 'married',
+        'occupation_z', 'persons_z'
     ]
 
-    exog = df[exog_cols].astype(float)
-    exog = sm.add_constant(exog, has_constant='add')
+    # Prepare design matrix and response
+    X = df[X_cols]
+    X = sm.add_constant(X, has_constant='add')
+    y = df['accept']
 
-    # Fit a logistic regression (binomial GLM). Use robust (HC1) standard errors.
-    model = sm.GLM(endog, exog, family=sm.families.Binomial())
-    results = model.fit(cov_type='HC1')
-
-    # Print a concise summary for quick inspection; return the full results object
+    # Fit logistic regression (use Logit; fallback to GLM if convergence/separation issues arise)
     try:
-        print(results.summary())
-    except Exception:
-        # summary() sometimes fails for certain result types; ignore printing failure
-        pass
+        fit_res = sm.Logit(y, X).fit(disp=False)
+    except Exception as e:
+        # fallback to GLM (binomial) which sometimes handles separation differently
+        fit_res = sm.GLM(y, X, family=sm.families.Binomial()).fit()
+
+    # Extract parameter estimates, confidence intervals, p-values, and compute odds ratios
+    params = fit_res.params
+    conf = fit_res.conf_int()
+    pvalues = fit_res.pvalues
+
+    odds_ratios = np.exp(params)
+    conf_odds = np.exp(conf)
+
+    odds_df = pd.DataFrame({
+        'OR': odds_ratios,
+        'CI_lower': conf_odds[0],
+        'CI_upper': conf_odds[1],
+        'pvalue': pvalues
+    })
+
+    results = {
+        'model': fit_res,
+        'summary': fit_res.summary().as_text(),
+        'odds_ratios': odds_df
+    }
 
     return results
 

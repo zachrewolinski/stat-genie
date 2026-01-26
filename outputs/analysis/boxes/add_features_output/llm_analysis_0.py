@@ -12,106 +12,99 @@ df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/anal
 
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Transform the raw dataset into the analysis dataframe. Returns a dataframe that contains all columns
-    referenced in the conceptual variables and modeling code.
-
-    Output columns created/kept:
-      - MajorityChoice : binary DV (1 if y==2 (majority), else 0)
-      - age_c, age_c_sq : mean-centered age and squared term
-      - culture_cat : culture as categorical variable (kept as category dtype)
-      - gender_female : female=1, male=0
-      - majority_first : indicator (0/1) whether majority demonstrated first
-      - religiousness_z, calworks_z : z-scored covariates
-      - school : school identifier (kept for clustering)
-    """
+    # Work with a copy
     df = df.copy()
 
-    # Keep only rows with the essentials for the primary analysis
-    df = df.dropna(subset=['y', 'age', 'culture'])
+    # Keep only rows with the core variables present
+    required_cols = ['y', 'age', 'gender', 'culture', 'majority_first', 'religiousness']
+    df = df.dropna(subset=required_cols)
 
-    # Dependent variable: did the child choose the majority option?
+    # Ensure types are correct
+    df['y'] = df['y'].astype(int)  # 1,2,3
+    df['age'] = pd.to_numeric(df['age'], errors='coerce').astype(int)
+    df['gender'] = df['gender'].astype(int)
+    df['culture'] = df['culture'].astype(int)
+    df['majority_first'] = df['majority_first'].astype(int)
+    df['religiousness'] = pd.to_numeric(df['religiousness'], errors='coerce')
+
+    # Standardize (z-score) age for modeling continuous effects and interactions
+    df['Age_z'] = (df['age'] - df['age'].mean()) / df['age'].std(ddof=0)
+    df['Age_z2'] = df['Age_z'] ** 2
+
+    # Define coarse developmental AgeGroup for descriptive analyses and stratification
+    # 4-6: early childhood, 7-9: middle childhood, 10-12: late childhood, 13-14: adolescence
+    bins = [3.5, 6.5, 9.5, 12.5, 14.5]
+    labels = ['Early_4_6', 'Middle_7_9', 'Late_10_12', 'Adolesc_13_14']
+    df['AgeGroup'] = pd.cut(df['age'], bins=bins, labels=labels)
+
+    # Derived dependent/binary outcomes for secondary analyses
+    # SocialUse: did the child use social information (majority or minority) vs choose undemonstrated
+    df['SocialUse'] = df['y'].isin([2, 3]).astype(int)
+    # MajorityChoice: did the child choose the majority option
     df['MajorityChoice'] = (df['y'] == 2).astype(int)
 
-    # Age: center and include quadratic term for nonlinear trajectories
-    df['age_c'] = df['age'] - df['age'].mean()
-    df['age_c_sq'] = df['age_c'] ** 2
+    # Prepare y in 0..J-1 format for statsmodels MNLogit (original y is 1,2,3)
+    df['y0'] = df['y'] - 1
 
-    # Culture: keep as categorical variable (site-level moderator)
-    df['culture_cat'] = df['culture'].astype('category')
+    # Keep only rows that still have no missing values in newly created columns
+    keep_cols = ['y', 'y0', 'age', 'Age_z', 'Age_z2', 'AgeGroup', 'culture', 'gender', 'majority_first', 'religiousness', 'SocialUse', 'MajorityChoice']
+    df = df[keep_cols].dropna()
 
-    # Gender: code female = 1, male = 0 (dataset codes: 1=girl, 2=boy)
-    df['gender_female'] = (df['gender'] == 1).astype(int)
+    # Ensure categorical columns are appropriately typed for downstream modeling (patsy/statsmodels)
+    df['culture'] = df['culture'].astype('category')
+    df['gender'] = df['gender'].astype('category')
+    df['majority_first'] = df['majority_first'].astype('category')
 
-    # majority_first should be 0/1; fill NA with 0 (if appropriate) then cast
-    if 'majority_first' in df.columns:
-        df['majority_first'] = df['majority_first'].fillna(0).astype(int)
-    else:
-        df['majority_first'] = 0
-
-    # Z-score continuous covariates (religiousness and calworks) to aid interpretation
-    if 'religiousness' in df.columns:
-        # avoid division by zero if constant
-        denom = df['religiousness'].std(ddof=0)
-        denom = denom if denom != 0 else 1.0
-        df['religiousness_z'] = (df['religiousness'] - df['religiousness'].mean()) / denom
-    else:
-        df['religiousness_z'] = np.nan
-
-    if 'calworks' in df.columns:
-        denom = df['calworks'].std(ddof=0)
-        denom = denom if denom != 0 else 1.0
-        df['calworks_z'] = (df['calworks'] - df['calworks'].mean()) / denom
-    else:
-        df['calworks_z'] = np.nan
-
-    # Ensure school column exists for clustering; if missing, create a placeholder
-    if 'school' not in df.columns:
-        df['school'] = 'unknown_school'
-
-    # Drop rows with missing values in the predictors/controls we will use in the model
-    required = ['MajorityChoice', 'age_c', 'age_c_sq', 'culture_cat', 'gender_female', 'majority_first', 'religiousness_z', 'calworks_z', 'school']
-    df = df.dropna(subset=required)
-
-    # Return only the columns required for modeling (plus any original columns you want to retain)
-    keep_cols = required
-    return df[keep_cols].reset_index(drop=True)
+    return df
 
 
 # ======== MODEL CODE ========
-def model(df: pd.DataFrame):
+def model(df: pd.DataFrame) -> dict:
     """
-    Fit a logistic regression model predicting choice of the majority option.
+    Fit a multinomial logistic regression predicting choice (y: 1=undemonstrated, 2=majority, 3=minority)
+    from age, culture, and controls, including Age_z x culture interactions to test whether
+    developmental change differs across sites. Also fit two logistic regressions for secondary
+    outcomes: SocialUse (used social info vs not) and MajorityChoice (chose majority vs not).
 
-    Model specification (primary):
-      MajorityChoice ~ age_c + age_c_sq + C(culture_cat) + age_c:C(culture_cat)
-                        + gender_female + majority_first + religiousness_z + calworks_z
-
-    We include age × culture interactions to estimate culture-specific developmental trajectories.
-    We fit a binomial GLM and compute cluster-robust standard errors clustered by school.
-
-    Returns:
-      - A statsmodels results object with cluster-robust covariance if available.
+    Returns a dictionary with fitted statsmodels results objects.
     """
-    import statsmodels.formula.api as smf
+    import patsy
+    import statsmodels.api as sm
 
-    # formula: main effects + culture fixed effects + age x culture interactions + controls
-    formula = (
-        'MajorityChoice ~ age_c + age_c_sq + C(culture_cat) + age_c:C(culture_cat) '
-        '+ gender_female + majority_first + religiousness_z + calworks_z'
-    )
+    # Formula for covariates and interactions (no response variable in the RHS formula for patsy.dmatrix)
+    rhs = 'Age_z + Age_z2 + C(culture) + gender + majority_first + religiousness + Age_z:C(culture)'
 
-    # Fit binomial GLM
-    glm_binom = smf.glm(formula=formula, data=df, family=sm.families.Binomial()).fit()
+    # Build design matrix; patsy will add an intercept column by default
+    X = patsy.dmatrix(rhs, data=df, return_type='dataframe')
 
-    # Compute cluster-robust SEs by school (if possible). If clustering fails, fall back to original results.
-    try:
-        results = glm_binom.get_robustcov_results(cov_type='cluster', groups=df['school'])
-    except Exception:
-        # Some environments / statsmodels versions may not support get_robustcov_results on GLMResults
-        # In that case return the original GLM fit object.
-        results = glm_binom
+    # Endog for multinomial must be integer-coded 0..(J-1)
+    y = df['y0'].astype(int)
 
-    return results
+    # Multinomial logistic regression (reference category will be the first integer class, here 0 -> original y==1)
+    mnlogit_model = sm.MNLogit(y, X)
+    mnlogit_res = mnlogit_model.fit(method='newton', maxiter=100, disp=False)
+
+    # Secondary binary logistic regressions using the same design matrix X
+    # (1) SocialUse: used social information (majority or minority) vs chose undemonstrated
+    logit_social = sm.Logit(df['SocialUse'], X)
+    logit_social_res = logit_social.fit(disp=False)
+
+    # (2) MajorityChoice: chose majority vs not
+    logit_majority = sm.Logit(df['MajorityChoice'], X)
+    logit_majority_res = logit_majority.fit(disp=False)
+
+    # Return results; callers can inspect .summary() or params / conf_int() for inference
+    return {
+        'mnlogit_result': mnlogit_res,
+        'social_logit_result': logit_social_res,
+        'majority_logit_result': logit_majority_res
+    }
+
+# Example usage (not executed here):
+# df_trans = transform(raw_df)
+# results = model(df_trans)
+# print(results['mnlogit_result'].summary())
+# print(results['social_logit_result'].summary())
+# print(results['majority_logit_result'].summary())
 
 

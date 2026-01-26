@@ -1,221 +1,299 @@
 def extract_final_answer(model_output):
     """
-    Extracts age-by-site interaction results from a fitted statsmodels GLMResultsWrapper.
+    Extracts age-related effects (linear and quadratic) from the two fitted models
+    in model_output and returns numeric summaries plus a short interpretation.
 
-    Returns a dict with:
-      - "object": structured results including per-site age slopes (coefficient, SE, z, p, OR, 95% CI),
-                  an overall Wald test of the Age_c x Site interaction, and the main Age_c coefficient.
-      - "description": short interpretive text about what the numbers mean.
+    Returns a dict with keys:
+      - "object": nested dict with extracted statistics for Age_c and Age_c2 for
+                  both models (DemonstratedChosen and MajorityChosen).
+      - "description": brief interpretation in plain language.
 
-    This function does not require scipy; it uses math.erfc for normal tail p-values and
-    relies on model_output having the usual statsmodels attributes (params, bse, cov_params, conf_int,
-    model.data.frame, wald_test).
+    The function is defensive: it will try to use the cluster-robust result if present,
+    and fall back to the fitted model otherwise. If a model is missing or a term is
+    missing, that is reported.
     """
     import numpy as np
-    import math
-    import pandas as pd
 
-    def safe_exp(x):
-        """Exponentiate x, returning inf for very large positive x (instead of raising OverflowError)."""
+    out = {"object": {}, "description": ""}
+
+    def get_result_obj(model_part):
+        # Prefer cluster-robust result if available, otherwise fitted model
+        if not isinstance(model_part, dict):
+            return None
+        return model_part.get("cluster_robust_model") or model_part.get("fitted_model")
+
+    def _get_name_list(res_obj):
+        # Try likely attributes that list parameter names
+        if res_obj is None:
+            return None
+        if hasattr(res_obj, "param_names"):
+            try:
+                return list(res_obj.param_names)
+            except Exception:
+                pass
+        if hasattr(res_obj, "model") and hasattr(res_obj.model, "exog_names"):
+            try:
+                return list(res_obj.model.exog_names)
+            except Exception:
+                pass
+        # some objects may have k_vars/k_constant, but without names we can't map
+        return None
+
+    def _fetch_attr_by_term(res_obj, attr_name, term):
+        """
+        Attempts to fetch a single value for 'term' from attribute attr_name of res_obj.
+        Handles pandas Series/DataFrame, dicts, numpy arrays (if names available), and callables.
+        Returns (value_or_none, raw_attr_obj_or_none)
+        """
+        if res_obj is None:
+            return None, None
+        attr = getattr(res_obj, attr_name, None)
+        if attr is None:
+            return None, None
+        # If callable (like conf_int), try calling it (no args)
         try:
-            return math.exp(x)
-        except OverflowError:
-            return float('inf') if x > 0 else 0.0
-
-    res = model_output  # statsmodels GLMResultsWrapper
-
-    # Basic extracted items
-    params = res.params  # pandas Series
-    bse = res.bse
-    pvals = res.pvalues
-    conf = res.conf_int()  # DataFrame with 0 and 1 columns
-    cov = res.cov_params()  # DataFrame (covariance matrix)
-
-    # Helper for two-sided normal p-value from z
-    def z_pval(z):
-        try:
-            return math.erfc(abs(z) / math.sqrt(2.0))
+            maybe = attr() if callable(attr) else attr
         except Exception:
-            return float('nan')
+            # If calling fails, fall back to attribute object itself
+            maybe = attr
 
-    # Check that Age_c main term exists
-    if 'Age_c' not in params.index:
-        raise ValueError("Model does not contain term 'Age_c' in parameters. Check formula/model.")
-
-    beta_age = float(params['Age_c'])
-    se_age = float(bse['Age_c'])
-    z_age = beta_age / se_age if se_age > 0 else float('nan')
-    p_age = z_pval(z_age)
-    ci_age = (beta_age - 1.96 * se_age, beta_age + 1.96 * se_age)
-    or_age = safe_exp(beta_age)
-    or_age_ci = (safe_exp(ci_age[0]), safe_exp(ci_age[1]))
-
-    # Identify interaction terms like 'Age_c:C(Site)[T.<level>]' (naming used by patsy/statsmodels)
-    interaction_prefix = 'Age_c:C(Site)'
-    interaction_terms = [name for name in params.index if name.startswith(interaction_prefix)]
-    # Identify site main-effect dummies: 'C(Site)[T.<level>]'
-    site_dummy_prefix = 'C(Site)'
-    site_dummy_terms = [name for name in params.index if name.startswith(site_dummy_prefix) and ':' not in name]
-
-    # Attempt to get site levels from the original DataFrame if available
-    site_levels = None
-    try:
-        df = res.model.data.frame
-        if 'Site' in df.columns:
-            # Preserve the observed order of levels as they appear in the data (unique)
-            site_levels = list(pd.Categorical(df['Site']).categories)
-    except Exception:
-        site_levels = None
-
-    # If we couldn't get site levels from data.frame, infer from parameter names
-    if site_levels is None:
-        inferred = []
-        # From site dummies
-        for name in site_dummy_terms:
-            # name looks like "C(Site)[T.<level>]"
-            if name.startswith('C(Site)[T.'):
-                level = name.split('C(Site)[T.')[1].rstrip(']')
-                inferred.append(level)
-        # Add reference level (the one not present among dummies) unknown order; we can only produce slopes
-        # for reference (no interaction term) plus for those with interaction terms. We'll infer levels from interactions too.
-        for name in interaction_terms:
-            # name looks like "Age_c:C(Site)[T.<level>]"
-            if 'C(Site)[T.' in name:
-                level = name.split('C(Site)[T.')[1].rstrip(']')
-                if level not in inferred:
-                    inferred.append(level)
-        # If we got any inferred levels, treat them as non-reference; reference unknown - create placeholder
-        site_levels = inferred.copy()
-        # We cannot reliably know the actual reference label if it was not encoded in params; label it as "<reference>"
-        # and include it as a level for which the slope is just the main Age_c.
-        if len(site_levels) == 0:
-            site_levels = ['<reference>']
-        else:
-            # Insert a placeholder reference at start (since statsmodels omits one level)
-            site_levels = ['<reference>'] + site_levels
-
-    # For each site level compute slope = beta_Age + beta_interaction (if exists for that level),
-    # standard error using covariance matrix (delta method), z, p, OR, CI.
-    site_results = {}
-    # Build a map from interaction term name to its coefficient index
-    param_index = list(params.index)
-    k_params = len(param_index)
-
-    for lvl in site_levels:
-        if lvl == '<reference>':
-            inter_name = None
-        else:
-            inter_name = f'Age_c:C(Site)[T.{lvl}]'
-            if inter_name not in params.index:
-                # Interaction might be named with slightly different formatting; try alternative
-                # e.g., older statsmodels might use 'C(Site)[T.<lvl>]:Age_c' order
-                alt = f'C(Site)[T.{lvl}]:Age_c'
-                if alt in params.index:
-                    inter_name = alt
-                else:
-                    inter_name = None
-
-        if inter_name is None:
-            slope_beta = beta_age
-            # variance is var(beta_age)
-            try:
-                var_slope = cov.loc['Age_c', 'Age_c'] if 'Age_c' in cov.index else (se_age ** 2)
-            except Exception:
-                var_slope = se_age ** 2
-        else:
-            slope_beta = beta_age + float(params[inter_name])
-            # var = var(beta_age) + var(beta_inter) + 2*cov(beta_age, beta_inter)
-            try:
-                v_a = cov.loc['Age_c', 'Age_c']
-                v_b = cov.loc[inter_name, inter_name]
-                cov_ab = cov.loc['Age_c', inter_name]
-                var_slope = v_a + v_b + 2.0 * cov_ab
-            except Exception:
-                # Fallback to NaN if covariance elements not found
-                var_slope = float('nan')
-
-        se_slope = math.sqrt(var_slope) if (isinstance(var_slope, (int, float)) and var_slope >= 0) else float('nan')
-        z_slope = slope_beta / se_slope if se_slope > 0 else float('nan')
-        p_slope = z_pval(z_slope)
-        ci_low = slope_beta - 1.96 * se_slope if not math.isnan(se_slope) else float('nan')
-        ci_high = slope_beta + 1.96 * se_slope if not math.isnan(se_slope) else float('nan')
-        or_slope = safe_exp(slope_beta)
-        or_ci = (safe_exp(ci_low), safe_exp(ci_high))
-
-        site_results[lvl] = {
-            'slope_coef': float(slope_beta),
-            'slope_se': float(se_slope),
-            'slope_z': float(z_slope),
-            'slope_p': float(p_slope),
-            'slope_95ci': (float(ci_low), float(ci_high)),
-            'odds_ratio_per_year': float(or_slope),
-            'odds_ratio_95ci': (float(or_ci[0]), float(or_ci[1])),
-            'interaction_term_used': inter_name
-        }
-
-    # Overall Wald test for joint significance of all Age_c:C(Site) interaction terms.
-    # Build restriction matrix R such that R * params = 0 tests the interactions = 0.
-    # We'll identify indices of interaction parameters in params.index.
-    interaction_indices = [
-        param_index.index(name)
-        for name in params.index
-        if name.startswith(interaction_prefix) or (':Age_c' in name and 'C(Site)' in name)
-    ]
-    interaction_test = None
-    if len(interaction_indices) == 0:
-        interaction_test = {
-            'message': 'No Age_c x Site interaction terms found in the model parameters; cannot perform joint test.'
-        }
-    else:
-        # Build R matrix: each row selects one interaction coefficient
-        m = len(interaction_indices)
-        R = np.zeros((m, k_params))
-        for i, idx in enumerate(interaction_indices):
-            R[i, idx] = 1.0
+        # If it's a pandas-like object with .loc, prefer label-based extraction
         try:
-            wt = res.wald_test(R)
-            # Extract statistic and pvalue robustly
-            stat_arr = np.atleast_1d(getattr(wt, 'statistic', np.array([np.nan])))
-            stat = float(stat_arr.ravel()[0]) if stat_arr.size > 0 else float('nan')
-            pval_wald = None
-            if hasattr(wt, 'pvalue'):
+            if hasattr(maybe, "loc"):
                 try:
-                    pval_wald = float(wt.pvalue)
+                    val = maybe.loc[term]
+                    # If val is a Series (e.g., conf_int row), return it as-is
+                    return val if not getattr(val, "__len__", lambda: None) is None and np.shape(val) == () else val, maybe
                 except Exception:
-                    # wt.pvalue might be array-like
-                    try:
-                        pval_wald = float(np.atleast_1d(wt.pvalue)[0])
-                    except Exception:
-                        pval_wald = None
-            df = int(m)
-            interaction_test = {'chi2': stat, 'df': df, 'p_value': pval_wald}
-        except Exception as e:
-            interaction_test = {'message': f'Wald test failed: {e}'}
+                    pass
+        except Exception:
+            pass
 
-    # Pack a compact object result
-    output_object = {
-        'main_Age_c': {
-            'coef': float(beta_age),
-            'se': float(se_age),
-            'z': float(z_age),
-            'p': float(p_age),
-            '95ci': (float(ci_age[0]), float(ci_age[1])),
-            'odds_ratio_per_year': float(or_age),
-            'odds_ratio_95ci': (float(or_age_ci[0]), float(or_age_ci[1]))
-        },
-        'site_slopes': site_results,
-        'interaction_test': interaction_test,
-        # also include raw parameter table for reference (subset)
-        'params_table': {name: float(params[name]) for name in params.index},
-        'pvalues': {name: float(pvals[name]) for name in pvals.index}
+        # If it's a dict-like, try key access
+        try:
+            if isinstance(maybe, dict):
+                if term in maybe:
+                    return maybe[term], maybe
+        except Exception:
+            pass
+
+        # If it's list/tuple/ndarray, try mapping term -> index using names
+        try:
+            if isinstance(maybe, (list, tuple, np.ndarray)):
+                names = _get_name_list(res_obj)
+                if names and term in names:
+                    idx = names.index(term)
+                    val = maybe[idx]
+                    return val, maybe
+        except Exception:
+            pass
+
+        # If nothing matched, return None
+        return None, maybe
+
+    def summarize_term(res_obj, term):
+        # Try to extract coef, se, pvalue, conf_int; fallback if attributes absent.
+        if res_obj is None:
+            return {"error": "no model object"}
+        # coef
+        coef_raw, _ = _fetch_attr_by_term(res_obj, "params", term)
+        if coef_raw is None:
+            return {"error": f"term '{term}' not in model params"}
+        try:
+            coef = float(coef_raw)
+        except Exception:
+            # If coef_raw is array-like, try first element
+            try:
+                coef = float(np.asarray(coef_raw).item())
+            except Exception:
+                return {"error": f"could not coerce coefficient for term '{term}' to float"}
+        # bse
+        bse_raw, _ = _fetch_attr_by_term(res_obj, "bse", term)
+        bse = None
+        if bse_raw is not None:
+            try:
+                bse = float(bse_raw)
+            except Exception:
+                try:
+                    bse = float(np.asarray(bse_raw).item())
+                except Exception:
+                    bse = None
+        # pvalue
+        pval_raw, _ = _fetch_attr_by_term(res_obj, "pvalues", term)
+        pval = None
+        if pval_raw is not None:
+            try:
+                pval = float(pval_raw)
+            except Exception:
+                try:
+                    pval = float(np.asarray(pval_raw).item())
+                except Exception:
+                    pval = None
+        # conf_int
+        lower = upper = None
+        ci_obj = None
+        # try conf_int attribute/method
+        ci_raw, ci_obj = _fetch_attr_by_term(res_obj, "conf_int", term)
+        # conf_int often returns a 2-column array/DF row; handle accordingly
+        if ci_raw is not None:
+            try:
+                arr = np.asarray(ci_raw)
+                if arr.size == 2:
+                    lower = float(arr[0])
+                    upper = float(arr[1])
+                else:
+                    # If ci_raw is a row with two columns but with shape (2,) or (1,2)
+                    if arr.ndim == 1 and arr.size >= 2:
+                        lower = float(arr[0])
+                        upper = float(arr[1])
+            except Exception:
+                # fall through to try other extraction below
+                ci_raw = None
+        if ci_raw is None:
+            # As fallback: if bse available, approximate CI using Normal approx
+            if bse is not None:
+                lower = coef - 1.96 * bse
+                upper = coef + 1.96 * bse
+            else:
+                lower = upper = None
+        # odds ratios
+        try:
+            or_coef = float(np.exp(coef)) if coef is not None else None
+            or_lower = float(np.exp(lower)) if lower is not None else None
+            or_upper = float(np.exp(upper)) if upper is not None else None
+        except Exception:
+            or_coef = or_lower = or_upper = None
+
+        return {
+            "coef": coef,
+            "std_err": bse,
+            "p_value": pval,
+            "ci95": [lower, upper],
+            "odds_ratio": or_coef,
+            "odds_ratio_ci95": [or_lower, or_upper],
+            "significant_p_lt_0.05": (pval is not None and pval < 0.05)
+        }
+
+    # 1) DemonstratedChosen model
+    dem_part = model_output.get("demonstrated_model")
+    dem_res = get_result_obj(dem_part)
+    dem_age_c = summarize_term(dem_res, "Age_c")
+    dem_age_c2 = summarize_term(dem_res, "Age_c2")
+    out["object"]["DemonstratedChosen"] = {
+        "Age_c": dem_age_c,
+        "Age_c2": dem_age_c2
     }
 
-    # Description: brief interpretation guidance
-    description_lines = []
-    description_lines.append("For each Site, 'slope_coef' is the logistic regression coefficient for Age_c (change in log-odds per year).")
-    description_lines.append("Positive slope_coef => increasing reliance on the majority with age; negative => decreasing reliance.")
-    description_lines.append("Odds ratio interprets the multiplicative change in odds of choosing majority per 1-year increase in age.")
-    description_lines.append("The 'interaction_test' gives a joint Wald test for whether the Age_c x Site interaction terms are all zero (i.e., whether age slopes differ across sites).")
-    description = " ".join(description_lines)
+    # 2) MajorityChosen model
+    maj_part = model_output.get("majoritypref_model")
+    if isinstance(maj_part, dict) and maj_part.get("error"):
+        out["object"]["MajorityChosen"] = {"error": maj_part.get("error"), "n_demonstrated": maj_part.get("n")}
+    else:
+        maj_res = get_result_obj(maj_part)
+        maj_age_c = summarize_term(maj_res, "Age_c")
+        maj_age_c2 = summarize_term(maj_res, "Age_c2")
+        # also include sample size if present
+        n_dem = None
+        if isinstance(maj_part, dict):
+            n_dem = maj_part.get("n_demonstrated") or maj_part.get("n")
+        out["object"]["MajorityChosen"] = {
+            "Age_c": maj_age_c,
+            "Age_c2": maj_age_c2,
+            "n_demonstrated": n_dem
+        }
 
-    return {"object": output_object, "description": description}
+    # Build a concise description/interpretation based on extracted stats
+    desc_lines = []
+    # Interpreting DemonstratedChosen
+    dac = out["object"]["DemonstratedChosen"]
+    # Check if both terms produced errors
+    a1 = dac.get("Age_c")
+    a2 = dac.get("Age_c2")
+    if (isinstance(a1, dict) and a1.get("error")) and (isinstance(a2, dict) and a2.get("error")):
+        desc_lines.append("DemonstratedChosen: model or age terms not available.")
+    else:
+        if isinstance(a1, dict) and a1.get("error"):
+            desc_lines.append("DemonstratedChosen: Age_c not available in model.")
+        elif isinstance(a2, dict) and a2.get("error"):
+            desc_lines.append("DemonstratedChosen: Age_c2 not available in model.")
+        else:
+            # Both present (or at least one usable)
+            sig1 = isinstance(a1, dict) and a1.get("significant_p_lt_0.05", False)
+            sig2 = isinstance(a2, dict) and a2.get("significant_p_lt_0.05", False)
+            if not sig1 and not sig2:
+                desc_lines.append(
+                    "DemonstratedChosen: No evidence that age (linear or quadratic) predicts children's reliance on social information "
+                    "(both Age_c and Age_c2 have p >= 0.05 or missing p-values)."
+                )
+            else:
+                parts = []
+                if sig1:
+                    coef = a1.get("coef")
+                    pval = a1.get("p_value")
+                    dir1 = "higher" if coef > 0 else "lower"
+                    coef_str = f"{coef:.3f}" if coef is not None else "NA"
+                    pstr = f"{pval:.3f}" if pval is not None else "NA"
+                    parts.append(f"linear age effect: older children are {dir1} in odds (coef={coef_str}, p={pstr})")
+                if sig2:
+                    coef2 = a2.get("coef")
+                    pval2 = a2.get("p_value")
+                    coef2_str = f"{coef2:.3f}" if coef2 is not None else "NA"
+                    p2str = f"{pval2:.3f}" if pval2 is not None else "NA"
+                    quad_dir = "U-shaped (higher at age extremes)" if coef2 > 0 else "inverted-U (higher near the mean age)"
+                    parts.append(f"quadratic age effect: {quad_dir} (coef={coef2_str}, p={p2str})")
+                desc_lines.append("DemonstratedChosen: " + "; ".join(parts))
+
+    # Interpreting MajorityChosen
+    mobj = out["object"]["MajorityChosen"]
+    if isinstance(mobj, dict) and mobj.get("error"):
+        desc_lines.append(f"MajorityChosen: {mobj.get('error')} (n_demonstrated={mobj.get('n')})")
+    else:
+        a1 = mobj.get("Age_c")
+        a2 = mobj.get("Age_c2")
+        if (isinstance(a1, dict) and a1.get("error")) and (isinstance(a2, dict) and a2.get("error")):
+            desc_lines.append("MajorityChosen: model or age terms not available.")
+        else:
+            if isinstance(a1, dict) and a1.get("error"):
+                desc_lines.append("MajorityChosen: Age_c not available in model.")
+            elif isinstance(a2, dict) and a2.get("error"):
+                desc_lines.append("MajorityChosen: Age_c2 not available in model.")
+            else:
+                sig_lin = isinstance(a1, dict) and a1.get("significant_p_lt_0.05", False)
+                sig_quad = isinstance(a2, dict) and a2.get("significant_p_lt_0.05", False)
+                if not sig_lin and not sig_quad:
+                    desc_lines.append(
+                        "MajorityChosen: No evidence that age (linear or quadratic) predicts majority preference (both Age_c and Age_c2 non-significant or missing p-values)."
+                    )
+                else:
+                    parts = []
+                    if sig_lin:
+                        coef = a1.get("coef")
+                        pval = a1.get("p_value")
+                        dir1 = "increase" if coef > 0 else "decrease"
+                        coef_str = f"{coef:.3f}" if coef is not None else "NA"
+                        pstr = f"{pval:.3f}" if pval is not None else "NA"
+                        parts.append(f"linear effect: {dir1} in odds per year (coef={coef_str}, p={pstr})")
+                    if sig_quad:
+                        coef2 = a2.get("coef")
+                        pval2 = a2.get("p_value")
+                        coef2_str = f"{coef2:.3f}" if coef2 is not None else "NA"
+                        p2str = f"{pval2:.3f}" if pval2 is not None else "NA"
+                        if coef2 is not None and coef2 > 0:
+                            quad_interp = ("a convex (U-shaped) relation: preference is lower near the mean age and higher at younger "
+                                           "and older ages (coef={:.3f}, p={:.3f})").format(coef2, pval2 if pval2 is not None else float('nan'))
+                        else:
+                            quad_interp = ("a concave (inverted-U) relation: preference peaks near the mean age and is lower at younger "
+                                           "and older ages (coef={:.3f}, p={:.3f})").format(coef2 if coef2 is not None else float('nan'),
+                                                                                          pval2 if pval2 is not None else float('nan'))
+                        parts.append("quadratic effect: " + quad_interp)
+                    n_demonstrated = mobj.get("n_demonstrated")
+                    parts_joined = "; ".join(parts)
+                    parts_joined += (f" (n_demonstrated={n_demonstrated})" if n_demonstrated is not None else "")
+                    desc_lines.append("MajorityChosen: " + parts_joined)
+
+    out["description"] = " ".join(desc_lines)
+    return out
+
+# Example usage:
+# final = extract_final_answer(model_output)
+# print(final["description"])

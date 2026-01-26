@@ -1,0 +1,404 @@
+{
+  "dataset_name": "affairs",
+  "n": 5,
+  "analyses": {
+    "0": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Indicator for whether there are children in the marriage (1 = yes, 0 = no). Primary independent variable of interest: do children reduce extramarital affairs?",
+            "columns": [
+              "children_binary"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Number of extramarital affairs in the past year (numeric count variable, 0 = none, up to 12).",
+          "columns": [
+            "affairs"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Gender of respondent, coded as male indicator (1 = male, 0 = female). Treated as a potential moderator of the children -> affairs effect.",
+            "is_moderator": true,
+            "moderator_on": "children_binary",
+            "columns": [
+              "gender_male"
+            ]
+          },
+          {
+            "description": "Interaction term children_binary * gender_male (derived moderator interaction).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "children_gender"
+            ]
+          },
+          {
+            "description": "Age in years (numeric, coded in the dataset using age bins as numeric midpoints).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "age"
+            ]
+          },
+          {
+            "description": "Number of years married (numeric).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "yearsmarried"
+            ]
+          },
+          {
+            "description": "Self-reported religiousness (1 = anti, 2 = not at all, 3 = slightly, 4 = somewhat, 5 = very).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "religiousness"
+            ]
+          },
+          {
+            "description": "Education (numeric coding; higher = more education).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "education"
+            ]
+          },
+          {
+            "description": "Occupation code (numeric Hollingshead classification).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "occupation"
+            ]
+          },
+          {
+            "description": "Self-rating of marriage happiness (1 = very unhappy ... 5 = very happy).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "rating"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Prepare the dataset for analysis. Returns a dataframe with the exact columns used in the model:\n    - affairs (keeps original numeric counts)\n    - children_binary (1=yes, 0=no)\n    - gender_male (1=male, 0=female)\n    - children_gender (interaction children_binary * gender_male)\n    - age, yearsmarried, religiousness, education, occupation, rating (controls)\n\n    Drops rows with missing values in any of these columns.\n    \"\"\"\n    df = df.copy()\n\n    # Ensure affairs numeric\n    if 'affairs' not in df.columns:\n        raise KeyError(\"Input dataframe must contain 'affairs' column\")\n    df['affairs'] = pd.to_numeric(df['affairs'], errors='coerce')\n\n    # Map children to binary 1/0. Accept several spellings/cases.\n    if 'children' not in df.columns:\n        raise KeyError(\"Input dataframe must contain 'children' column\")\n    df['children_str'] = df['children'].astype(str).str.strip().str.lower()\n    df['children_binary'] = df['children_str'].map({\n        'yes': 1,\n        'y': 1,\n        '1': 1,\n        'true': 1,\n        'no': 0,\n        'n': 0,\n        '0': 0,\n        'false': 0\n    })\n\n    # If mapping produced NaNs (unexpected values), try mapping categories directly\n    if df['children_binary'].isna().any():\n        # attempt a fallback: treat anything that contains 'y' as yes, 'n' as no\n        df.loc[df['children_binary'].isna(), 'children_binary'] = (\n            df.loc[df['children_binary'].isna(), 'children_str'].str.contains('y', na=False).astype(float)\n        )\n\n    # Gender -> male indicator\n    if 'gender' not in df.columns:\n        raise KeyError(\"Input dataframe must contain 'gender' column\")\n    df['gender_str'] = df['gender'].astype(str).str.strip().str.lower()\n    df['gender_male'] = df['gender_str'].map({'male': 1, 'm': 1, 'man': 1})\n    df.loc[df['gender_male'].isna(), 'gender_male'] = (~df['gender_str'].isin(['male', 'm', 'man']) & df['gender_str'].notna()).astype(int)\n    # The fallback above will code non-identified values (including 'female') as 0; ensure female -> 0\n    df.loc[df['gender_str'].isin(['female', 'f', 'woman']), 'gender_male'] = 0\n\n    # Ensure numeric controls exist and coerce to numeric\n    numeric_controls = ['age', 'yearsmarried', 'religiousness', 'education', 'occupation', 'rating']\n    for col in numeric_controls:\n        if col not in df.columns:\n            raise KeyError(f\"Input dataframe must contain '{col}' column\")\n        df[col] = pd.to_numeric(df[col], errors='coerce')\n\n    # Derived moderator interaction\n    df['children_gender'] = df['children_binary'] * df['gender_male']\n\n    # Keep only rows with non-missing values in the variables we'll use\n    required_cols = [\n        'affairs', 'children_binary', 'gender_male', 'children_gender'\n    ] + numeric_controls\n    df = df.dropna(subset=required_cols)\n\n    # Reset index for cleanliness\n    df = df.reset_index(drop=True)\n\n    # Final dataframe includes only the columns used in modeling (keeps original affairs)\n    final_cols = ['affairs', 'children_binary', 'gender_male', 'children_gender'] + numeric_controls\n    return df[final_cols]",
+      "m_code": "def model(df: pd.DataFrame) -> dict:\n    \"\"\"\n    Run a set of models to estimate the association between having children and extramarital affairs,\n    controlling for demographic and marriage-related covariates. Returns a dictionary of fitted model objects:\n      - 'negative_binomial': Negative binomial regression (appropriate for over-dispersed counts)\n      - 'ols_robust': OLS regression with robust (HC3) standard errors as a baseline\n      - 'zero_inflated_poisson': Zero-inflated Poisson (attempted; may be None if estimation fails)\n\n    Model specification (primary):\n      affairs ~ children_binary + gender_male + children_gender + age + yearsmarried + religiousness + education + occupation + rating\n\n    Interpret the coefficient on children_binary as the association of having children with the expected count of affairs\n    (NB: for NB/Poisson coefficients are in log-count space; exponentiate to get multiplicative effect).\n    \"\"\"\n    import statsmodels.api as sm\n    from statsmodels.tools.sm_exceptions import ConvergenceWarning\n    import warnings\n\n    # Import count models; these imports may fail on very old statsmodels versions, handle gracefully\n    try:\n        from statsmodels.discrete.discrete_model import NegativeBinomial\n    except Exception:\n        NegativeBinomial = None\n    try:\n        from statsmodels.discrete.count_model import ZeroInflatedPoisson\n    except Exception:\n        ZeroInflatedPoisson = None\n\n    # Prepare X and y\n    X_cols = ['children_binary', 'gender_male', 'children_gender', 'age', 'yearsmarried', 'religiousness', 'education', 'occupation', 'rating']\n    X = df[X_cols]\n    X = sm.add_constant(X)\n    y = df['affairs']\n\n    results = {}\n\n    # 1) Negative Binomial (preferred for over-dispersed counts)\n    if NegativeBinomial is not None:\n        try:\n            nb_mod = NegativeBinomial(y, X)\n            with warnings.catch_warnings():\n                warnings.simplefilter('ignore', ConvergenceWarning)\n                nb_res = nb_mod.fit(disp=False)\n            results['negative_binomial'] = nb_res\n        except Exception as e:\n            results['negative_binomial'] = f'failed: {e}'\n    else:\n        results['negative_binomial'] = 'NegativeBinomial not available in this statsmodels installation'\n\n    # 2) OLS with robust standard errors (baseline linear approximation)\n    try:\n        ols_mod = sm.OLS(y, X)\n        ols_res = ols_mod.fit(cov_type='HC3')\n        results['ols_robust'] = ols_res\n    except Exception as e:\n        results['ols_robust'] = f'failed: {e}'\n\n    # 3) Zero-inflated Poisson as an alternative (some respondents have zero affairs -> extra zeros)\n    if ZeroInflatedPoisson is not None:\n        try:\n            # Use same exog for count and inflation parts, but inflation could be more parsimonious\n            zip_mod = ZeroInflatedPoisson(endog=y, exog=X, exog_infl=X[['children_binary', 'gender_male', 'age']])\n            with warnings.catch_warnings():\n                warnings.simplefilter('ignore', ConvergenceWarning)\n                zip_res = zip_mod.fit(disp=False)\n            results['zero_inflated_poisson'] = zip_res\n        except Exception as e:\n            results['zero_inflated_poisson'] = f'failed: {e}'\n    else:\n        results['zero_inflated_poisson'] = 'ZeroInflatedPoisson not available in this statsmodels installation'\n\n    # Provide a small helper summary (text) for quick inspection: coefficient on children_binary\n    try:\n        def coef_summary(res, name):\n            if isinstance(res, str):\n                return res\n            try:\n                coef = res.params.get('children_binary')\n                se = res.bse.get('children_binary')\n                pval = res.pvalues.get('children_binary')\n                return {'coef': float(coef), 'se': float(se), 'pval': float(pval)}\n            except Exception:\n                return 'could not extract children_binary coeff'\n\n        results['summary_children_binary'] = {\n            'negative_binomial': coef_summary(results.get('negative_binomial'), 'negative_binomial'),\n            'ols_robust': coef_summary(results.get('ols_robust'), 'ols_robust'),\n            'zero_inflated_poisson': coef_summary(results.get('zero_inflated_poisson'), 'zero_inflated_poisson')\n        }\n    except Exception:\n        results['summary_children_binary'] = 'failed to build summary'\n\n    return results"
+    },
+    "1": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Presence of children in the marriage (binary). Primary independent variable: 1 = there are children in the marriage, 0 = no children.",
+            "columns": [
+              "children_bin"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Reported frequency of extramarital affairs in the past year (numeric/count, coded in the original data where 0 = none, 1 = once, 2 = twice, 3 = three times, 7 = 4-10 times, 12 = monthly/weekly/daily). We use the original numeric code as the dependent variable.",
+          "columns": [
+            "affairs"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Respondent gender (female = 1, male = 0). Included as a control; also specified as a moderator to allow testing if the effect of children differs by gender.",
+            "is_moderator": true,
+            "moderator_on": "children_bin",
+            "columns": [
+              "female"
+            ]
+          },
+          {
+            "description": "Respondent age in years (numeric coding present in the dataset).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "age"
+            ]
+          },
+          {
+            "description": "Number of years married (numeric).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "yearsmarried"
+            ]
+          },
+          {
+            "description": "Self-reported religiousness (1-5 scale).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "religiousness"
+            ]
+          },
+          {
+            "description": "Education level (numeric coding of years/degree).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "education"
+            ]
+          },
+          {
+            "description": "Occupation score (Hollingshead classification numeric).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "occupation"
+            ]
+          },
+          {
+            "description": "Self-rating of marriage happiness (1-5).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "rating"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw Fair Affairs dataset into the analytic dataframe.\n\n    Produces the following columns required by the models:\n      - affairs: numeric dependent variable (keeps original coding)\n      - children_bin: 1 if 'children' == 'yes', 0 if 'children' == 'no'\n      - female: 1 if gender == 'female', 0 if gender == 'male'\n      - age, yearsmarried, religiousness, education, occupation, rating: numeric controls\n\n    Drops rows with missing values in any of the variables used in the model.\n    \"\"\"\n    df = df.copy()\n\n    # Map children and gender to binary indicators (explicit column names used in models)\n    df['children_bin'] = df['children'].map({'yes': 1, 'no': 0})\n    df['female'] = df['gender'].map({'female': 1, 'male': 0})\n\n    # Ensure numeric columns are numeric; coerce non-numeric to NaN so we can drop them\n    num_cols = ['affairs', 'age', 'yearsmarried', 'religiousness', 'education', 'occupation', 'rating']\n    for col in num_cols:\n        df[col] = pd.to_numeric(df[col], errors='coerce')\n\n    # Drop rows missing any of the required variables\n    required = ['affairs', 'children_bin', 'female'] + num_cols[1:]\n    df = df.dropna(subset=required)\n\n    # Keep only the columns needed for analysis (clean final dataframe)\n    final_cols = ['affairs', 'children_bin', 'female', 'age', 'yearsmarried', 'religiousness', 'education', 'occupation', 'rating']\n    df = df[final_cols].reset_index(drop=True)\n\n    return df",
+      "m_code": "def model(df: pd.DataFrame) -> dict:\n    \"\"\"\n    Fit two complementary models to assess whether having children decreases engagement in extramarital affairs:\n      1) OLS regression with robust (HC3) standard errors for a simple, interpretable linear estimate.\n      2) Zero-Inflated Negative Binomial (ZINB) count model to account for overdispersion and excess zeros in the 'affairs' outcome.\n\n    Returns a dictionary with model result objects and a short summary (marginal effect for children in the ZINB model).\n    \"\"\"\n    results = {}\n    df = df.copy()\n\n    # Prepare design matrices\n    covariates = ['children_bin', 'female', 'age', 'yearsmarried', 'religiousness', 'education', 'occupation', 'rating']\n    X = df[covariates]\n    X = sm.add_constant(X)\n    y = df['affairs']\n\n    # 1) OLS with robust standard errors\n    ols_model = sm.OLS(y, X)\n    ols_res = ols_model.fit(cov_type='HC3')\n    results['ols_result'] = ols_res\n\n    # 2) Zero-Inflated Negative Binomial (ZINB)\n    # Use same regressors for count and inflation parts as a baseline specification.\n    try:\n        from statsmodels.discrete.count_model import ZeroInflatedNegativeBinomialP\n    except Exception as e:\n        # If import fails, raise with informative message\n        raise\n\n    zinb_mod = ZeroInflatedNegativeBinomialP(endog=y, exog=X, exog_infl=X, inflation='logit')\n\n    # Fit the ZINB model. Try Newton first, fall back to BFGS if necessary.\n    try:\n        zinb_res = zinb_mod.fit(method='newton', maxiter=100, disp=False)\n    except Exception:\n        zinb_res = zinb_mod.fit(method='bfgs', maxiter=200, disp=False)\n\n    results['zinb_result'] = zinb_res\n\n    # Compute average marginal effect of children (dE[affairs]/d(children_bin)) from ZINB if available\n    try:\n        # get_margeff sometimes requires specific options; use overall marginal effect and treat children_bin as dummy\n        me = zinb_res.get_margeff(at='overall', method='dydx', dummy=True)\n        # Extract marginal effect row for children_bin if present\n        me_summary = me.summary_frame()\n        if 'children_bin' in me_summary.index:\n            results['zinb_margeff_children'] = me_summary.loc['children_bin'].to_dict()\n        else:\n            # If indexing different, attempt to find by variable order\n            results['zinb_margeff_children'] = me_summary.iloc[0].to_dict()\n    except Exception:\n        # If marginal effects computation fails, provide coefficient and basic IRR approximation (exp(coef)) for the count part\n        try:\n            coef_name = 'children_bin'\n            # In ZINB params, the first len(X.columns) are count model params; locate children_bin coefficient\n            params = zinb_res.params\n            if coef_name in params.index:\n                coef = params.loc[coef_name]\n                irr = float(np.exp(coef))\n                results['zinb_children_coef'] = float(coef)\n                results['zinb_children_irr_approx'] = irr\n            else:\n                results['zinb_children_coef'] = None\n        except Exception:\n            results['zinb_children_coef'] = None\n\n    # Return both fitted models and computed summaries. Callers can inspect .summary() on the returned result objects.\n    return results"
+    },
+    "2": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Indicator for whether there are children in the marriage (primary independent variable). Binary: 1 = children present, 0 = no children.",
+            "columns": [
+              "has_children"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Number of extramarital affairs reported in the past year (count variable, includes zeros). This is the outcome we want to explain.",
+          "columns": [
+            "affairs"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Gender indicator: 1 = female, 0 = male. Controls for gender differences in reported affairs.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "female"
+            ]
+          },
+          {
+            "description": "Age in years (numeric). Controls for life-cycle effects.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "age"
+            ]
+          },
+          {
+            "description": "Number of years married (numeric). Controls for marriage duration.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "yearsmarried"
+            ]
+          },
+          {
+            "description": "Religiousness (numeric ordinal 1-5). Controls for moral/religious constraints on affairs.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "religiousness"
+            ]
+          },
+          {
+            "description": "Education (numeric, years / code). Controls for socioeconomic/education differences.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "education"
+            ]
+          },
+          {
+            "description": "Occupation code (numeric). Controls for occupational status.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "occupation"
+            ]
+          },
+          {
+            "description": "Self-rating of marriage happiness (rating) (numeric 1-5). Controls for marital satisfaction which is predictive of affairs.",
+            "is_moderator": false,
+            "moderator_on": "",
+            "columns": [
+              "rating"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Transform the raw Fair (1978) dataset into an analysis-ready dataframe.\n\n    Produces the following columns used in modeling:\n      - affairs: numeric count of extramarital affairs (keeps original numeric values)\n      - has_children: binary indicator (1 if 'children' == 'yes', 0 if 'no')\n      - female: binary indicator for gender (1 if female, 0 if male)\n      - age, yearsmarried, religiousness, education, occupation, rating: numeric controls\n\n    Drops rows with missing values in any of the above columns.\n    \"\"\"\n    df = df.copy()\n\n    # Normalize string fields and create binary indicators\n    if 'children' in df.columns:\n        df['children'] = df['children'].astype(str).str.strip().str.lower()\n        df['has_children'] = df['children'].map({'yes': 1, 'no': 0})\n    else:\n        df['has_children'] = np.nan\n\n    if 'gender' in df.columns:\n        df['gender'] = df['gender'].astype(str).str.strip().str.lower()\n        df['female'] = df['gender'].map({'female': 1, 'male': 0})\n    else:\n        df['female'] = np.nan\n\n    # Ensure numeric columns are numeric (coerce errors to NaN)\n    numeric_cols = ['affairs', 'age', 'yearsmarried', 'religiousness', 'education', 'occupation', 'rating']\n    for c in numeric_cols:\n        if c in df.columns:\n            df[c] = pd.to_numeric(df[c], errors='coerce')\n\n    # Required columns for modeling\n    required = ['affairs', 'has_children', 'female', 'age', 'yearsmarried', 'religiousness', 'education', 'occupation', 'rating']\n\n    # Drop rows with missing values in any required columns\n    df = df.dropna(subset=required).reset_index(drop=True)\n\n    # Keep only the columns needed for modeling (cleaner output)\n    final_cols = ['affairs', 'has_children', 'female', 'age', 'yearsmarried', 'religiousness', 'education', 'occupation', 'rating']\n    df = df[final_cols]\n\n    return df",
+      "m_code": "def model(df: pd.DataFrame) -> dict:\n    \"\"\"\n    Fit several models to estimate the association between having children and reported extramarital affairs.\n\n    Models fit:\n      1) Negative binomial regression (accounts for overdispersion in count data) using GLM negative binomial family\n      2) Zero-inflated negative binomial (accounts for excess zeros) if available\n      3) OLS with robust (HC3) standard errors for a simple comparison\n\n    Also computes group means and a Welch t-test between parents and non-parents as a descriptive check.\n\n    Returns a dict with fitted model result objects and descriptive statistics.\n    \"\"\"\n    from scipy import stats\n\n    # Try to import ZeroInflatedNegativeBinomialP if available; if not, we'll record an error for that model.\n    try:\n        from statsmodels.discrete.count_model import ZeroInflatedNegativeBinomialP\n        _has_zinb = True\n    except Exception:\n        ZeroInflatedNegativeBinomialP = None  # type: ignore\n        _has_zinb = False\n\n    # Columns used in modeling\n    model_cols = ['affairs', 'has_children', 'female', 'age', 'yearsmarried', 'religiousness', 'education', 'occupation', 'rating']\n    df_model = df[model_cols].dropna().copy()\n\n    y = df_model['affairs']\n    X = df_model[['has_children', 'female', 'age', 'yearsmarried', 'religiousness', 'education', 'occupation', 'rating']]\n    X = sm.add_constant(X, has_constant='add')\n\n    results = {}\n\n    # 1) Negative Binomial via GLM (uses the NegativeBinomial family)\n    try:\n        nb_model = sm.GLM(y, X, family=sm.families.NegativeBinomial())\n        nb_res = nb_model.fit()\n        results['negative_binomial'] = nb_res\n    except Exception as e:\n        results['negative_binomial_error'] = str(e)\n\n    # 2) Zero-inflated Negative Binomial (logit inflation); use a small inflation model (intercept + has_children + female)\n    try:\n        if _has_zinb and ZeroInflatedNegativeBinomialP is not None:\n            exog_infl = sm.add_constant(df_model[['has_children', 'female']], has_constant='add')\n            zinb_model = ZeroInflatedNegativeBinomialP(endog=y, exog=X, exog_infl=exog_infl, inflation='logit')\n            zinb_res = zinb_model.fit(disp=False, maxiter=200)\n            results['zero_inflated_negative_binomial'] = zinb_res\n        else:\n            results['zero_inflated_negative_binomial_error'] = 'ZeroInflatedNegativeBinomialP not available in this statsmodels installation.'\n    except Exception as e:\n        results['zero_inflated_negative_binomial_error'] = str(e)\n\n    # 3) OLS with robust standard errors (HC3) as a simple baseline\n    try:\n        ols_model = sm.OLS(y, X)\n        ols_res_raw = ols_model.fit()\n        # Attach HC3 robust covariance results\n        ols_res = ols_res_raw.get_robustcov_results(cov_type='HC3')\n        results['ols_robust'] = ols_res\n    except Exception as e:\n        results['ols_robust_error'] = str(e)\n\n    # Descriptive: group means and Welch t-test\n    try:\n        group_stats = df_model.groupby('has_children')['affairs'].agg(['mean', 'std', 'count']).to_dict()\n        g1 = df_model[df_model['has_children'] == 1]['affairs']\n        g0 = df_model[df_model['has_children'] == 0]['affairs']\n        ttest = stats.ttest_ind(g1, g0, equal_var=False, nan_policy='omit')\n        results['group_stats'] = group_stats\n        results['welch_ttest'] = {\n            'statistic': float(ttest.statistic) if ttest.statistic is not None else None,\n            'pvalue': float(ttest.pvalue) if ttest.pvalue is not None else None\n        }\n    except Exception as e:\n        results['group_stats_error'] = str(e)\n\n    # Return fitted results and descriptive checks\n    return results"
+    },
+    "3": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Indicator for whether there are children in the marriage (binary). Independent variable of interest: 1 = at least one child, 0 = no children.",
+            "columns": [
+              "Children"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Number/frequency of extramarital sexual affairs in the past year (count-like outcome; original scale: 0 = none, up to 12 = frequent).",
+          "columns": [
+            "affairs"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Indicator for female gender (1=female, 0=male). Controls for gender differences in affair rates.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "IsFemale"
+            ]
+          },
+          {
+            "description": "Centered age (years). Controls for age-related differences in affair rates. (Column is mean-centered to ease interpretation.)",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "age_c"
+            ]
+          },
+          {
+            "description": "Centered years married. Controls for marriage duration effects; centered to improve interpretability.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "yearsmarried_c"
+            ]
+          },
+          {
+            "description": "Self-reported religiousness (numeric 1-5). Controls for religiosity which may reduce extramarital behavior.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "religiousness"
+            ]
+          },
+          {
+            "description": "Education (years-like numeric code in dataset). Controls for socioeconomic/education related differences.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "education"
+            ]
+          },
+          {
+            "description": "Occupation code (Hollingshead). Controls for occupation-related socioeconomic status.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "occupation"
+            ]
+          },
+          {
+            "description": "Self-rated marriage quality (rating 1-5). Controls for marital satisfaction which plausibly affects affairs.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "rating"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Clean and prepare the Fair (1978) affairs dataset for modeling.\n\n    Produces the following columns used in the model:\n      - affairs: dependent variable (numeric count/frequency)\n      - Children: binary indicator (1 if children in marriage, 0 otherwise)\n      - IsFemale: binary gender indicator (1 female, 0 male)\n      - age_c: age mean-centered\n      - yearsmarried_c: years married mean-centered\n      - religiousness, education, occupation, rating: numeric controls\n\n    Drops rows with missing values in any of the above variables.\n    \"\"\"\n    df = df.copy()\n\n    # Basic required columns\n    required_cols = ['affairs', 'children', 'gender', 'age', 'yearsmarried',\n                     'religiousness', 'education', 'occupation', 'rating']\n\n    # Ensure required columns exist\n    missing = [c for c in required_cols if c not in df.columns]\n    if missing:\n        raise ValueError(f\"Missing required columns in input dataframe: {missing}\")\n\n    # Drop rows where the key outcome or the key IV is missing\n    df = df.dropna(subset=['affairs', 'children'])\n\n    # Map children to binary (1=yes, 0=no). Accepts variants in capitalization.\n    df['Children'] = df['children'].astype(str).str.strip().str.lower().map({'yes': 1, 'no': 0})\n\n    # Map gender to binary female indicator (1=female, 0=male). If other levels, will become NaN and dropped.\n    df['IsFemale'] = df['gender'].astype(str).str.strip().str.lower().map({'female': 1, 'male': 0})\n\n    # Ensure numeric columns are numeric; coerce errors to NaN so they get dropped below\n    numeric_cols = ['affairs', 'age', 'yearsmarried', 'religiousness', 'education', 'occupation', 'rating']\n    for col in numeric_cols:\n        df[col] = pd.to_numeric(df[col], errors='coerce')\n\n    # Drop rows with any missing values in the variables we will use\n    use_cols = ['affairs', 'Children', 'IsFemale', 'age', 'yearsmarried', 'religiousness', 'education', 'occupation', 'rating']\n    df = df.dropna(subset=use_cols)\n\n    # Mean-center continuous predictors to help interpretation\n    df['age_c'] = df['age'] - df['age'].mean()\n    df['yearsmarried_c'] = df['yearsmarried'] - df['yearsmarried'].mean()\n\n    # Keep only the columns needed for modeling (and return original 'affairs' as DV)\n    out_cols = ['affairs', 'Children', 'IsFemale', 'age_c', 'yearsmarried_c', 'religiousness', 'education', 'occupation', 'rating']\n    return df[out_cols]",
+      "m_code": "def model(df: pd.DataFrame):\n    \"\"\"\n    Fit a Negative Binomial GLM to estimate the effect of having children on number/frequency\n    of extramarital affairs, controlling for demographic and marriage-related covariates.\n\n    Returns a dictionary with:\n      - 'nb': fitted Negative Binomial GLM results (statsmodels results instance)\n      - 'nb_robust': same NB results but with robust (HC3) covariance matrix applied\n      - 'poisson': Poisson GLM fitted results (for sensitivity / comparison)\n\n    Interpretation: The coefficient on 'Children' is the log multiplicative effect on expected\n    affair counts. A negative coefficient supports the hypothesis that having children decreases\n    engagement in extramarital affairs.\n    \"\"\"\n    import statsmodels.api as sm\n\n    # Make a defensive copy\n    df = df.copy()\n\n    # Ensure the DV and IV exist in dataframe\n    required = ['affairs', 'Children', 'IsFemale', 'age_c', 'yearsmarried_c', 'religiousness', 'education', 'occupation', 'rating']\n    missing = [c for c in required if c not in df.columns]\n    if missing:\n        raise ValueError(f\"Missing columns required for modeling: {missing}\")\n\n    # Define outcome and predictors\n    y = df['affairs']\n    X = df[['Children', 'IsFemale', 'age_c', 'yearsmarried_c', 'religiousness', 'education', 'occupation', 'rating']]\n    X = sm.add_constant(X, has_constant='add')\n\n    # Fit Negative Binomial GLM (handles overdispersion better than Poisson)\n    nb_model = sm.GLM(y, X, family=sm.families.NegativeBinomial())\n    nb_res = nb_model.fit()\n\n    # Robust covariance (HC3) for inference\n    try:\n        nb_res_robust = nb_res.get_robustcov_results(cov_type='HC3')\n    except Exception:\n        # fallback: if robust results not available, return the original\n        nb_res_robust = nb_res\n\n    # Fit Poisson for comparison / sensitivity\n    pois_model = sm.GLM(y, X, family=sm.families.Poisson())\n    pois_res = pois_model.fit()\n\n    # Print a short summary (optional) and return results\n    print(\"Negative Binomial coefficient for Children:\", nb_res.params.get('Children'))\n    print(nb_res.summary())\n\n    return {\n        'nb': nb_res,\n        'nb_robust': nb_res_robust,\n        'poisson': pois_res\n    }"
+    },
+    "4": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Binary indicator for whether there are children in the marriage (1 = yes, 0 = no). Primary independent variable to test whether having children is associated with fewer extramarital affairs.",
+            "columns": [
+              "Children"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Count of extramarital sexual encounters in the past year (as coded in the original dataset). This is the dependent variable; a nonnegative integer; modeled with count regression (Poisson / Negative Binomial).",
+          "columns": [
+            "affairs"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Respondent gender coded as male = 1, female = 0. Included as a control and tested as a moderator to allow the effect of children to differ by gender.",
+            "is_moderator": true,
+            "moderator_on": "Children",
+            "columns": [
+              "Gender_Male"
+            ]
+          },
+          {
+            "description": "Respondent age in years (coded in the dataset as midpoints of age bins). Control for life-stage effects that may influence affairs.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "Age"
+            ]
+          },
+          {
+            "description": "Number of years married. Controls for marriage duration which may affect propensity for affairs.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "YearsMarried"
+            ]
+          },
+          {
+            "description": "Self-reported religiousness (1..5). Controls for religiosity which plausibly reduces extramarital behaviour.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "Religiousness"
+            ]
+          },
+          {
+            "description": "Education level (years / coded as in dataset). Control for socioeconomic / background influences.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "Education"
+            ]
+          },
+          {
+            "description": "Occupation code (Hollingshead classification, numeric). Control for occupational status differences.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "Occupation"
+            ]
+          },
+          {
+            "description": "Self-rating of marriage happiness (1..5). Controls for marital satisfaction which is strongly related to extramarital activity.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "Rating"
+            ]
+          }
+        ]
+      },
+      "transform_code": "def transform(df: pd.DataFrame) -> pd.DataFrame:\n    \"\"\"\n    Clean and prepare the Fair affairs dataset for count-regression modeling.\n\n    Final dataframe columns (and exact names used in the model):\n      - affairs: dependent count variable (int)\n      - Children: binary 0/1 (1 = yes)\n      - Gender_Male: binary 0/1 (1 = male)\n      - Age, YearsMarried, Religiousness, Education, Occupation, Rating: numeric controls\n    \"\"\"\n    df = df.copy()\n\n    # Columns required for analysis\n    required = [\n        'affairs', 'children', 'gender', 'age', 'yearsmarried',\n        'religiousness', 'education', 'occupation', 'rating'\n    ]\n\n    # Keep only relevant columns (if some are missing this will raise KeyError)\n    missing = [c for c in required if c not in df.columns]\n    if len(missing) > 0:\n        raise KeyError(f\"Input dataframe is missing required columns: {missing}\")\n\n    df = df[required]\n\n    # Drop rows with missing values in the core variables\n    df = df.dropna(subset=required)\n\n    # Map binary variables to 0/1\n    df['Children'] = df['children'].map({\n        'yes': 1,\n        'no': 0,\n        'Yes': 1,\n        'No': 0,\n        1: 1,\n        0: 0\n    })\n\n    df['Gender_Male'] = df['gender'].map({\n        'male': 1,\n        'female': 0,\n        'Male': 1,\n        'Female': 0\n    })\n\n    # Convert numeric columns to numeric dtype (coerce bad values to NaN)\n    numeric_cols = ['affairs', 'age', 'yearsmarried', 'religiousness', 'education', 'occupation', 'rating']\n    for c in numeric_cols:\n        df[c] = pd.to_numeric(df[c], errors='coerce')\n\n    # Drop any rows where mapping or numeric coercion failed\n    df = df.dropna(subset=['Children', 'Gender_Male'] + numeric_cols)\n\n    # Cast affairs to integer (it is a count variable). Keep as int for modeling.\n    df['affairs'] = df['affairs'].astype(int)\n\n    # Rename some columns for consistent naming in model\n    df = df.rename(columns={\n        'age': 'Age',\n        'yearsmarried': 'YearsMarried',\n        'religiousness': 'Religiousness',\n        'education': 'Education',\n        'occupation': 'Occupation',\n        'rating': 'Rating'\n    })\n\n    # Keep and return only the columns needed for modeling, in a fixed order\n    final_cols = [\n        'affairs', 'Children', 'Gender_Male', 'Age', 'YearsMarried',\n        'Religiousness', 'Education', 'Occupation', 'Rating'\n    ]\n    df = df[final_cols].reset_index(drop=True)\n\n    return df",
+      "m_code": "def model(df: pd.DataFrame) -> dict:\n    \"\"\"\n    Fit count regression models to estimate the association between having children and number\n    of extramarital affairs, controlling for covariates and testing for gender moderation.\n\n    Procedure:\n      1. Fit Poisson GLM (log link).\n      2. Compute Pearson-based dispersion statistic to assess overdispersion.\n      3. Fit Negative Binomial GLM if overdispersion is present (and report both models).\n\n    Returns a dictionary containing fitted model objects and diagnostics.\n    \"\"\"\n    import statsmodels.api as sm\n    import statsmodels.formula.api as smf\n    import numpy as np\n\n    # Ensure required columns are present\n    required = ['affairs', 'Children', 'Gender_Male', 'Age', 'YearsMarried',\n                'Religiousness', 'Education', 'Occupation', 'Rating']\n    missing = [c for c in required if c not in df.columns]\n    if len(missing) > 0:\n        raise KeyError(f\"Transformed dataframe is missing required columns: {missing}\")\n\n    # Formula includes interaction to test whether effect of Children differs by gender\n    formula = 'affairs ~ Children * Gender_Male + Age + YearsMarried + Religiousness + Education + Occupation + Rating'\n\n    # Fit Poisson model\n    poisson_model = smf.glm(formula=formula, data=df, family=sm.families.Poisson()).fit()\n\n    # Compute Pearson chi-square dispersion statistic for Poisson\n    mu = poisson_model.predict(df)\n    y = df['affairs']\n    # Avoid division by zero for any predicted mu that are zero\n    eps = 1e-8\n    pearson_chi2 = (((y - mu) ** 2) / (mu + eps)).sum()\n    dispersion = pearson_chi2 / poisson_model.df_resid\n\n    # Fit Negative Binomial model (addresses overdispersion). Always fit for comparison.\n    # statsmodels' NegativeBinomial family estimates a variance function with an extra parameter.\n    nb_model = smf.glm(formula=formula, data=df, family=sm.families.NegativeBinomial()).fit()\n\n    # Prepare a concise summary dictionary\n    results = {\n        'poisson_model': poisson_model,\n        'nb_model': nb_model,\n        'poisson_dispersion_pearson_chi2_div_df': dispersion,\n        'formula': formula,\n        'n_obs': int(df.shape[0])\n    }\n\n    # Print short diagnostics for users running this function interactively\n    print('Observations:', results['n_obs'])\n    print('Poisson dispersion (Pearson chi2 / df):', round(dispersion, 3))\n    print('\\n--- Poisson model summary ---')\n    print(poisson_model.summary())\n    print('\\n--- Negative Binomial model summary ---')\n    print(nb_model.summary())\n\n    return results"
+    }
+  }
+}

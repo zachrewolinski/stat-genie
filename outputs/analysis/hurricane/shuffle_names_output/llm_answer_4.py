@@ -1,86 +1,147 @@
 def extract_final_answer(model_output):
+    """
+    Extracts statistics relevant to the effect of hurricane name femininity (name_fem_z)
+    on log_deaths from a fitted statsmodels OLS RegressionResultsWrapper.
+
+    Returns a dictionary with:
+      - "object": a dict of extracted numeric results (coefficients, SEs, p-values,
+                  95% CIs, and simple slopes of name_fem_z at saffir_cat_z = -1, 0, +1).
+      - "description": a human-readable interpretation of those statistics in the
+                       context of the research question.
+    """
     import numpy as np
-    import pandas as pd
+    from scipy import stats
 
     res = model_output
 
-    # Handle explicit fallback/no-data case set by the modeling function
-    if getattr(res, "_no_observations_fallback", False):
-        return {
-            "object": None,
-            "description": "No observations with non-missing ndam15 were available; an intercept-only fallback model was fit. No coefficient for name femininity is available."
+    # Verify attributes
+    if not hasattr(res, "params"):
+        raise ValueError("model_output does not look like a fitted statsmodels result (missing .params)")
+
+    params = res.params
+    pvalues = res.pvalues
+    ci = res.conf_int()
+    cov = res.cov_params()
+    df_resid = float(res.df_resid)  # residual degrees of freedom
+
+    def _get_term(name):
+        """Helper to safely fetch term info; returns dict or None if missing."""
+        if name in params.index:
+            coef = float(params[name])
+            se = float(res.bse[name])
+            p = float(pvalues[name])
+            ci_lo, ci_hi = float(ci.loc[name, 0]), float(ci.loc[name, 1])
+            return {"coef": coef, "se": se, "p": p, "ci": (ci_lo, ci_hi)}
+        return None
+
+    # Main effect term
+    name_term = _get_term("name_fem_z")
+    if name_term is None:
+        raise KeyError("Term 'name_fem_z' not found in model parameters.")
+
+    # Interaction term (handle possible ordering)
+    interaction_name = None
+    for candidate in ("name_fem_z:saffir_cat_z", "saffir_cat_z:name_fem_z"):
+        if candidate in params.index:
+            interaction_name = candidate
+            break
+    interaction_term = _get_term(interaction_name) if interaction_name is not None else None
+
+    # Compute simple slopes of name_fem_z at saffir_cat_z = -1, 0, +1 (standardized units)
+    simple_slopes = {}
+    t_crit = stats.t.ppf(1 - 0.025, df_resid)  # two-sided 95% critical t
+
+    # Covariance elements needed if interaction exists
+    if interaction_term is not None:
+        cov_nn = float(cov.loc["name_fem_z", "name_fem_z"])
+        cov_ii = float(cov.loc[interaction_name, interaction_name])
+        cov_ni = float(cov.loc["name_fem_z", interaction_name])
+    else:
+        cov_nn = float(cov.loc["name_fem_z", "name_fem_z"])
+        cov_ii = None
+        cov_ni = None
+
+    for s in (-1.0, 0.0, 1.0):
+        slope = name_term["coef"] + (interaction_term["coef"] if interaction_term is not None else 0.0) * s
+        # variance of linear combination: Var(b_name + s*b_int) = Var(b_name) + s^2 Var(b_int) + 2*s Cov(b_name,b_int)
+        if interaction_term is not None:
+            var = cov_nn + (s ** 2) * cov_ii + 2 * s * cov_ni
+        else:
+            var = cov_nn
+        se = float(np.sqrt(var)) if var >= 0 else float(np.nan)
+        tstat = slope / se if se and not np.isnan(se) else float("nan")
+        p_two = float(2 * (1 - stats.t.cdf(abs(tstat), df_resid))) if not np.isnan(tstat) else float("nan")
+        ci_lo = slope - t_crit * se
+        ci_hi = slope + t_crit * se
+
+        simple_slopes[s] = {
+            "saffir_cat_z": s,
+            "slope": float(slope),
+            "se": float(se),
+            "t": float(tstat),
+            "p": float(p_two),
+            "95%CI": (float(ci_lo), float(ci_hi)),
         }
 
-    # Try to extract parameter estimates
-    try:
-        params = res.params
-        pvalues = res.pvalues
-        bse = res.bse
-        conf = res.conf_int()  # DataFrame with columns [0,1]
-    except Exception as e:
-        return {
-            "object": None,
-            "description": f"Could not extract results from model_output: {e}"
-        }
+    # Prepare return object
+    result_object = {
+        "name_term": name_term,
+        "interaction_term": interaction_term,
+        "simple_slopes": simple_slopes,
+        "df_resid": float(df_resid),
+    }
 
-    results = {}
+    # Prepare human-readable description
+    # Summarize main effect and interaction
+    def fmt_term(t):
+        return f"coef={t['coef']:.4f}, se={t['se']:.4f}, p={t['p']:.4f}, 95%CI=({t['ci'][0]:.4f}, {t['ci'][1]:.4f})"
+
     desc_lines = []
-
-    for var in ["name_c", "is_female_name"]:
-        if var in params.index:
-            coef = float(params[var])
-            se = float(bse[var]) if var in bse.index else None
-            pval = float(pvalues[var]) if var in pvalues.index else None
-            ci_low, ci_high = float(conf.loc[var, 0]), float(conf.loc[var, 1])
-            irr = float(np.exp(coef))
-            irr_ci_low, irr_ci_high = float(np.exp(ci_low)), float(np.exp(ci_high))
-
-            results[var] = {
-                "coef": coef,
-                "std_err": se,
-                "p_value": pval,
-                "ci_95_lower": ci_low,
-                "ci_95_upper": ci_high,
-                "incidence_rate_ratio": irr,
-                "irr_95_lower": irr_ci_low,
-                "irr_95_upper": irr_ci_high
-            }
-
-            # Interpretation line for this variable
-            if irr < 1:
-                direction = ("higher femininity is associated with fewer expected deaths "
-                             f"(IRR={irr:.3f} < 1)")
-            elif irr > 1:
-                direction = ("higher femininity is associated with more expected deaths "
-                             f"(IRR={irr:.3f} > 1)")
-            else:
-                direction = "no multiplicative change in expected deaths (IRR ≈ 1)."
-
+    desc_lines.append("Extracted statistics for the effect of name femininity (name_fem_z) on log_deaths.")
+    desc_lines.append(f"Main effect (name_fem_z): {fmt_term(name_term)}.")
+    if interaction_term is not None:
+        desc_lines.append(f"Interaction (name_fem_z x saffir_cat_z): {fmt_term(interaction_term)}.")
+        desc_lines.append(
+            "Simple slopes (effect of a 1 SD increase in name femininity on log_deaths) "
+            "are provided at saffir_cat_z = -1, 0, +1 (approx. 1 SD below mean, mean, 1 SD above mean)."
+        )
+        for s in (-1.0, 0.0, 1.0):
+            ss = simple_slopes[s]
+            sig = "p<0.05" if ss["p"] < 0.05 else f"p={ss['p']:.3f}"
             desc_lines.append(
-                f"{var}: coef={coef:.4f}, SE={se:.4f}, p={pval:.4g}, 95% CI [{ci_low:.4f}, {ci_high:.4f}]. "
-                f"IRR={irr:.4f}, 95% CI [{irr_ci_low:.4f}, {irr_ci_high:.4f}]. Interpretation: {direction}."
+                f"  saffir_cat_z={s:+.0f}: slope={ss['slope']:.4f}, se={ss['se']:.4f}, {sig}, 95%CI=({ss['95%CI'][0]:.4f}, {ss['95%CI'][1]:.4f})"
             )
+    else:
+        desc_lines.append("No interaction term between name_fem_z and saffir_cat_z was found in the model.")
+        ss = simple_slopes[0.0]
+        sig = "p<0.05" if ss["p"] < 0.05 else f"p={ss['p']:.3f}"
+        desc_lines.append(
+            f"Estimated main effect (constant across Saffir categories): slope={ss['slope']:.4f}, se={ss['se']:.4f}, {sig}, 95%CI=({ss['95%CI'][0]:.4f}, {ss['95%CI'][1]:.4f})"
+        )
 
-    if not results:
-        return {
-            "object": None,
-            "description": "Neither 'name_c' nor 'is_female_name' are present in the fitted model; nothing to extract."
-        }
+    # Final interpretation sentence relating to hypothesis:
+    # Positive slope => more feminine names associated with higher log_deaths (i.e., fewer precautions)
+    slope0 = simple_slopes[0.0]["slope"]
+    p0 = simple_slopes[0.0]["p"]
+    if np.isfinite(slope0):
+        if p0 < 0.05:
+            if slope0 > 0:
+                desc_lines.append(
+                    "Interpretation: There is a statistically significant positive association between name femininity and log_deaths (at saffir_cat_z=0), "
+                    "meaning more feminine names are associated with higher fatalities (consistent with the hypothesis that feminine names lead to fewer precautions)."
+                )
+            else:
+                desc_lines.append(
+                    "Interpretation: There is a statistically significant negative association between name femininity and log_deaths (at saffir_cat_z=0), "
+                    "meaning more feminine names are associated with lower fatalities (contrary to the hypothesis)."
+                )
+        else:
+            desc_lines.append(
+                "Interpretation: The association between name femininity and log_deaths is not statistically significant at conventional levels (p>=0.05)."
+            )
+    else:
+        desc_lines.append("Interpretation: Could not compute a reliable slope (SE/variance issue).")
 
-    # Produce a brief overall interpretation focused on the primary variable (name_c if present)
-    primary = "name_c" if "name_c" in results else "is_female_name"
-    primary_res = results[primary]
-    p = primary_res["p_value"]
-    significance = "statistically significant" if p is not None and p < 0.05 else "not statistically significant (at alpha=0.05)"
-    overall_interpretation = (
-        f"Primary result ({primary}): a one-unit increase in {primary} multiplies expected hurricane deaths by "
-        f"{primary_res['incidence_rate_ratio']:.3f} (95% CI {primary_res['irr_95_lower']:.3f}–{primary_res['irr_95_upper']:.3f}); "
-        f"p = {p:.4g}, {significance}. "
-        "In context: IRR < 1 would support the hypothesis that more feminine names are perceived as less threatening (fewer deaths); "
-        "IRR > 1 would indicate the opposite. This is an association from an observational regression controlling for listed covariates, "
-        "not by itself proof of causation."
-    )
+    description = " ".join(desc_lines)
 
-    description = "\n".join(desc_lines) + "\n\n" + overall_interpretation
-
-    return {"object": results, "description": description}
+    return {"object": result_object, "description": description}

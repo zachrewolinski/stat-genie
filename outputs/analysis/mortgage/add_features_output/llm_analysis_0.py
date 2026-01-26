@@ -13,111 +13,126 @@ df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/anal
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Transform the raw Boston Fed mortgage dataset for modeling the effect of gender on mortgage acceptance.
+    Transform the raw Boston Fed mortgage dataset into a dataframe ready for modeling.
 
-    Outputs a dataframe with the following relevant columns (names used by the model):
-      - accept (DV, binary)
-      - female (IV, binary)
-      - black (control & moderator, binary)
-      - mortgage_credit_z, consumer_credit_z, PI_ratio_z, loan_to_value_z (standardized continuous controls)
+    Produces/keeps the following columns (used in the model):
+      - accept (int: 1 accepted, 0 denied)
+      - female (int: 1 female, 0 male)
+      - black (int: 1 Black, 0 otherwise)
+      - mortgage_credit_z, consumer_credit_z, PI_ratio_z, loan_to_value_z, housing_expense_ratio_z (standardized continuous controls)
       - bad_history, married, self_employed (binary controls)
 
-    Rows with missing values on any variables required for the model are dropped.
+    The function drops rows with missing values in any of these columns.
     """
-    df = df.copy()
-
-    # Ensure key columns exist
+    # Select columns needed for analysis
     required_cols = [
         'accept', 'female', 'black', 'mortgage_credit', 'consumer_credit',
-        'PI_ratio', 'loan_to_value', 'bad_history', 'married', 'self_employed'
+        'PI_ratio', 'loan_to_value', 'housing_expense_ratio',
+        'bad_history', 'married', 'self_employed'
     ]
 
+    # Keep only required columns (if some not present, raise an informative error)
     missing = [c for c in required_cols if c not in df.columns]
     if len(missing) > 0:
-        raise KeyError(f"Required columns missing from dataframe: {missing}")
+        raise ValueError(f"Input dataframe is missing required columns: {missing}")
 
-    # Keep only rows with non-missing values in required columns
+    # Make a working copy to avoid changing the caller's dataframe
+    df = df.copy()
+
+    # Convert binary columns to integer (safe coercion)
+    for bcol in ['accept', 'female', 'black', 'bad_history', 'married', 'self_employed']:
+        df[bcol] = pd.to_numeric(df[bcol], errors='coerce').astype('Int64')
+
+    # Convert continuous columns to numeric
+    for ccol in ['mortgage_credit', 'consumer_credit', 'PI_ratio', 'loan_to_value', 'housing_expense_ratio']:
+        df[ccol] = pd.to_numeric(df[ccol], errors='coerce')
+
+    # Drop rows with missing values in any variable we plan to use
     df = df.dropna(subset=required_cols)
 
-    # Ensure binary columns are numeric integers (0/1)
-    for bin_col in ['accept', 'female', 'black', 'bad_history', 'married', 'self_employed']:
-        # coerce to numeric then to 0/1 where possible
-        df[bin_col] = pd.to_numeric(df[bin_col], errors='coerce')
-        # After numeric coercion drop rows with NaN
-    df = df.dropna(subset=['accept', 'female', 'black', 'bad_history', 'married', 'self_employed'])
+    # Now coerce binary columns to plain int (0/1)
+    for bcol in ['accept', 'female', 'black', 'bad_history', 'married', 'self_employed']:
+        df[bcol] = df[bcol].astype(int)
 
-    df['accept'] = df['accept'].astype(int)
-    df['female'] = df['female'].astype(int)
-    df['black'] = df['black'].astype(int)
-    df['bad_history'] = df['bad_history'].astype(int)
-    df['married'] = df['married'].astype(int)
-    df['self_employed'] = df['self_employed'].astype(int)
+    # Standardize continuous controls (z-score). Use population std (ddof=0) to match many modeling conventions.
+    cont_cols = ['mortgage_credit', 'consumer_credit', 'PI_ratio', 'loan_to_value', 'housing_expense_ratio']
+    for ccol in cont_cols:
+        mean = df[ccol].mean()
+        std = df[ccol].std(ddof=0)
+        # If std is zero (unlikely), produce zeros to avoid division by zero
+        if std == 0 or np.isnan(std):
+            df[ccol + '_z'] = 0.0
+        else:
+            df[ccol + '_z'] = (df[ccol] - mean) / std
 
-    # Standardize continuous / ordinal covariates for more stable estimation
-    cont_vars = ['mortgage_credit', 'consumer_credit', 'PI_ratio', 'loan_to_value']
-    for col in cont_vars:
-        df[col] = pd.to_numeric(df[col], errors='coerce')
-    df = df.dropna(subset=cont_vars)
-
-    # Compute z-scores (sample std, ddof=1) and store new columns with exact names used in model
-    df['mortgage_credit_z'] = (df['mortgage_credit'] - df['mortgage_credit'].mean()) / (df['mortgage_credit'].std(ddof=1) if df['mortgage_credit'].std(ddof=1) != 0 else 1)
-    df['consumer_credit_z'] = (df['consumer_credit'] - df['consumer_credit'].mean()) / (df['consumer_credit'].std(ddof=1) if df['consumer_credit'].std(ddof=1) != 0 else 1)
-    df['PI_ratio_z'] = (df['PI_ratio'] - df['PI_ratio'].mean()) / (df['PI_ratio'].std(ddof=1) if df['PI_ratio'].std(ddof=1) != 0 else 1)
-    df['loan_to_value_z'] = (df['loan_to_value'] - df['loan_to_value'].mean()) / (df['loan_to_value'].std(ddof=1) if df['loan_to_value'].std(ddof=1) != 0 else 1)
-
-    # Keep only columns necessary for modeling + originals for reference
-    model_cols = [
-        'accept', 'female', 'black',
-        'mortgage_credit_z', 'consumer_credit_z', 'PI_ratio_z', 'loan_to_value_z',
+    # Retain only the final columns used in the model to make modeling function straightforward
+    final_cols = [
+        'accept', 'female', 'black', 'mortgage_credit_z', 'consumer_credit_z',
+        'PI_ratio_z', 'loan_to_value_z', 'housing_expense_ratio_z',
         'bad_history', 'married', 'self_employed'
     ]
+    df = df[final_cols].reset_index(drop=True)
 
-    # Final drop of any remaining missing values in model columns
-    df = df.dropna(subset=model_cols)
-
-    # Return the dataframe containing all columns (including model_cols). The model function will use these columns.
     return df
 
+
 # ======== MODEL CODE ========
-def model(df: pd.DataFrame) -> Any:
+def model(df: pd.DataFrame) -> dict:
     """
-    Fit a logistic regression (GLM with binomial family) predicting mortgage acceptance.
+    Fit a logistic regression predicting loan acceptance from applicant gender
+    controlling for key financial and demographic covariates.
 
-    Model formula includes the main effect of female, main effect of black, their interaction,
-    and a set of controls for creditworthiness and loan risk. The function returns the fitted model results object.
+    Returns a dictionary with:
+      - 'model': fitted statsmodels Logit results object
+      - 'summary': the model summary (string)
+      - 'odds_ratio': DataFrame with coef, odds_ratio, 95% CI, and p-values
 
-    Formula used:
-      accept ~ female + black + female:black
-               + mortgage_credit_z + consumer_credit_z + PI_ratio_z + loan_to_value_z
-               + bad_history + married + self_employed
+    Model specification:
+      accept ~ female + black + bad_history + married + self_employed
+               + mortgage_credit_z + consumer_credit_z + PI_ratio_z + loan_to_value_z + housing_expense_ratio_z
 
-    Interpretation: coefficient on 'female' is the log-odds difference in acceptance for female vs male
-    among non-Black applicants (because we include female:black interaction). The interaction term
-    tests whether the gender effect differs for Black applicants.
+    Robustness: uses default Logit fit. Users may request clustered or robust SEs separately.
     """
-    import statsmodels.formula.api as smf
-    import statsmodels.api as sm
-
     # Ensure required columns are present
-    required = [
-        'accept', 'female', 'black',
-        'mortgage_credit_z', 'consumer_credit_z', 'PI_ratio_z', 'loan_to_value_z',
-        'bad_history', 'married', 'self_employed'
+    model_cols = [
+        'female', 'black', 'bad_history', 'married', 'self_employed',
+        'mortgage_credit_z', 'consumer_credit_z', 'PI_ratio_z', 'loan_to_value_z', 'housing_expense_ratio_z'
     ]
-    missing = [c for c in required if c not in df.columns]
+    missing = [c for c in model_cols + ['accept'] if c not in df.columns]
     if len(missing) > 0:
-        raise KeyError(f"Missing columns required for modeling: {missing}")
+        raise ValueError(f"Transformed dataframe is missing required columns for modeling: {missing}")
 
-    formula = (
-        'accept ~ female + black + female:black '
-        '+ mortgage_credit_z + consumer_credit_z + PI_ratio_z + loan_to_value_z '
-        '+ bad_history + married + self_employed'
-    )
+    # Prepare X and y
+    X = df[model_cols].astype(float)
+    X = sm.add_constant(X)
+    y = df['accept'].astype(int)
 
-    # Fit GLM (logistic regression)
-    model = smf.glm(formula=formula, data=df, family=sm.families.Binomial())
-    results = model.fit()
+    # Fit logistic regression (maximum likelihood)
+    logit_model = sm.Logit(y, X)
+    try:
+        res = logit_model.fit(disp=False)
+    except Exception as e:
+        # If convergence fails, try a GLM Binomial (more stable) as a fallback
+        glm_model = sm.GLM(y, X, family=sm.families.Binomial())
+        res = glm_model.fit()
 
-    # Return the fitted results object for downstream inspection (summary(), params, conf_int(), etc.)
+    # Compute odds ratios and 95% confidence intervals
+    params = res.params
+    conf = res.conf_int()
+    or_df = pd.DataFrame({
+        'coef': params,
+        'odds_ratio': np.exp(params),
+        'ci_lower': np.exp(conf[0]),
+        'ci_upper': np.exp(conf[1]),
+        'pvalue': res.pvalues
+    })
+
+    results = {
+        'model': res,
+        'summary': res.summary().as_text(),
+        'odds_ratio': or_df
+    }
+
     return results
+
 

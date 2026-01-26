@@ -1,154 +1,193 @@
-from typing import Dict, FrozenSet, List, Literal, Optional, Set, Tuple, Any
+from typing import Any, Dict, FrozenSet, List, Literal, Optional, Set, Tuple, Any
 import numpy as np
 import pandas as pd
 import sklearn
 import scipy
+import scipy.stats as stats
 import statsmodels.api as sm
 import statsmodels.formula.api as smf
 import matplotlib.pyplot as plt
 import pickle
-  
+
 df = pd.read_csv('/accounts/grad/zachrewolinski/research/stat-genie/outputs/analysis/mortgage/replace_with_rvs_output/mortgage.csv')
 
 # ======== TRANSFORM CODE ========
 def transform(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Prepare data for modeling the effect of gender on mortgage acceptance.
-
-    Steps:
-    - Make a copy of the input dataframe to avoid side effects.
-    - Ensure binary columns are numeric (0/1) and the dependent 'accept' is numeric.
-    - Create standardized (z-scored) versions of continuous controls to aid model convergence and interpretability.
-    - Drop rows with missing values in any columns used in the model.
-
-    Returns a dataframe containing all columns listed in the conceptual variables.
+    Transform the raw Boston mortgage dataset into the modeling dataframe.
+    Produces standardized continuous controls and an interaction term for gender x race.
+    Returns a dataframe containing at minimum the columns referenced in the model:
+      - accept (DV)
+      - female (IV)
+      - black, female_black (moderator / interaction)
+      - PI_ratio_z, loan_to_value_z, mortgage_credit_z, consumer_credit_z,
+        housing_expense_ratio_z (standardized continuous controls)
+      - bad_history, married, self_employed, denied_PMI (binary controls)
     """
+    # Work on a copy
     df = df.copy()
 
-    # Ensure dependent and main independent variable exist and are numeric
-    if 'accept' not in df.columns:
-        raise KeyError("Input dataframe must contain 'accept' column as the dependent variable.")
-    if 'female' not in df.columns:
-        raise KeyError("Input dataframe must contain 'female' column as the primary independent variable.")
-
-    # Convert to numeric if necessary
-    df['accept'] = pd.to_numeric(df['accept'], errors='coerce')
-    df['female'] = pd.to_numeric(df['female'], errors='coerce')
-
-    # Binary controls: ensure numeric
-    binary_cols = ['black', 'bad_history', 'married', 'self_employed', 'denied_PMI']
-    for c in binary_cols:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors='coerce')
-        else:
-            # If a binary control is missing from the dataset, create a column of NA so dropna will remove rows
-            df[c] = np.nan
-
-    # Continuous controls to standardize (if missing create NA column)
-    cont_cols = ['mortgage_credit', 'consumer_credit', 'PI_ratio', 'loan_to_value', 'housing_expense_ratio']
-    for c in cont_cols:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors='coerce')
-        else:
-            df[c] = np.nan
-
-    # Create z-scored versions for continuous controls; guard against zero std
-    for c in cont_cols:
-        zname = 'z_' + c
-        if df[c].dropna().shape[0] == 0:
-            df[zname] = np.nan
-        else:
-            mean = df[c].mean()
-            std = df[c].std()
-            if std == 0 or np.isnan(std):
-                # if zero variance, subtract mean only (results in zeros or NaN)
-                df[zname] = df[c] - mean
-            else:
-                df[zname] = (df[c] - mean) / std
-
-    # Select only the columns that will be used in the model
-    model_cols = [
-        'accept',
-        'female',
-        'black',
-        'bad_history',
-        'married',
-        'self_employed',
-        'denied_PMI',
-        'z_mortgage_credit',
-        'z_consumer_credit',
-        'z_PI_ratio',
-        'z_loan_to_value',
-        'z_housing_expense_ratio'
+    # Ensure required columns exist
+    required_cols = [
+        'accept', 'female', 'black', 'PI_ratio', 'loan_to_value',
+        'mortgage_credit', 'consumer_credit', 'bad_history', 'married',
+        'self_employed', 'housing_expense_ratio', 'denied_PMI'
     ]
 
-    # If any expected z_ columns were not created above because the original column was missing, ensure they exist
-    for col in model_cols:
-        if col not in df.columns:
-            df[col] = np.nan
+    missing = [c for c in required_cols if c not in df.columns]
+    if len(missing) > 0:
+        raise ValueError(f"Missing required columns for transformation: {missing}")
 
-    # Drop rows with missing values in any model column (listwise deletion)
-    df_model = df[model_cols].dropna(axis=0, how='any').copy()
+    # Drop rows with missing values in any variable we will use in the model
+    df = df.dropna(subset=required_cols + ['accept'])
 
-    # Ensure dtypes are numeric and integers for binary indicators
-    df_model['accept'] = df_model['accept'].astype(int)
-    df_model['female'] = df_model['female'].astype(int)
-    for b in ['black', 'bad_history', 'married', 'self_employed', 'denied_PMI']:
-        df_model[b] = df_model[b].astype(int)
+    # Ensure binary indicators are integers (0/1)
+    for col in ['accept', 'female', 'black', 'bad_history', 'married', 'self_employed', 'denied_PMI']:
+        # coerce to numeric then to int
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+    df = df.dropna(subset=['accept', 'female', 'black', 'bad_history', 'married', 'self_employed', 'denied_PMI'])
+    df['accept'] = df['accept'].astype(int)
+    df['female'] = df['female'].astype(int)
+    df['black'] = df['black'].astype(int)
+    df['bad_history'] = df['bad_history'].astype(int)
+    df['married'] = df['married'].astype(int)
+    df['self_employed'] = df['self_employed'].astype(int)
+    df['denied_PMI'] = df['denied_PMI'].astype(int)
 
-    # Return the prepared dataframe
-    return df_model
+    # Standardize continuous predictors (z-score). Use population std (ddof=0) for stability.
+    cont_cols = ['PI_ratio', 'loan_to_value', 'mortgage_credit', 'consumer_credit', 'housing_expense_ratio']
+    for c in cont_cols:
+        df[c] = pd.to_numeric(df[c], errors='coerce')
+    df = df.dropna(subset=cont_cols)
+
+    for c in cont_cols:
+        mean = df[c].mean()
+        std = df[c].std(ddof=0)
+        if std == 0 or pd.isna(std):
+            # If no variation, set z to 0
+            df[c + '_z'] = 0.0
+        else:
+            df[c + '_z'] = (df[c] - mean) / std
+
+    # Interaction term between female and black (to test whether gender effect differs by race)
+    df['female_black'] = df['female'] * df['black']
+
+    # Keep only columns needed for the model and return
+    keep_cols = [
+        'accept', 'female', 'black', 'female_black',
+        'PI_ratio_z', 'loan_to_value_z', 'mortgage_credit_z', 'consumer_credit_z', 'housing_expense_ratio_z',
+        'bad_history', 'married', 'self_employed', 'denied_PMI'
+    ]
+
+    # If any of the standardized columns are missing (shouldn't be), raise an error
+    for kc in keep_cols:
+        if kc not in df.columns:
+            raise ValueError(f"Expected transformed column {kc} is missing")
+
+    return df[keep_cols]
 
 
 # ======== MODEL CODE ========
-def model(df: pd.DataFrame):
+def model(df: pd.DataFrame) -> dict:
     """
-    Fit a logistic regression (binary outcome) predicting acceptance of a mortgage application.
+    Fit a logistic regression (logit) predicting loan acceptance (accept) from applicant gender
+    and controls. Uses a gender x race interaction to test moderation by race.
 
-    Model: logit( P(accept=1) ) = alpha + beta_female * female + gamma' * controls
-
-    Controls included (as prepared by transform): black, bad_history, married, self_employed, denied_PMI,
-    z_mortgage_credit, z_consumer_credit, z_PI_ratio, z_loan_to_value, z_housing_expense_ratio.
-
-    Returns the fitted statsmodels result object (LogitResults).
+    Returns a dictionary containing the fitted model (robust covariance), a table of odds ratios
+    with 95% confidence intervals and p-values, and the raw robust results object.
     """
-    # Required columns
-    X_cols = [
-        'female',
-        'black',
+    # predictors to include in the model
+    predictors = [
+        'female',            # main effect of gender (IV)
+        'black',             # main effect of race
+        'female_black',      # interaction term (gender x race)
+        'PI_ratio_z',
+        'loan_to_value_z',
+        'mortgage_credit_z',
+        'consumer_credit_z',
+        'housing_expense_ratio_z',
         'bad_history',
         'married',
         'self_employed',
-        'denied_PMI',
-        'z_mortgage_credit',
-        'z_consumer_credit',
-        'z_PI_ratio',
-        'z_loan_to_value',
-        'z_housing_expense_ratio'
+        'denied_PMI'
     ]
-    y_col = 'accept'
 
-    # Ensure required columns exist
-    missing = [c for c in X_cols + [y_col] if c not in df.columns]
-    if missing:
-        raise KeyError(f"Dataframe is missing required columns for modeling: {missing}")
+    # Verify predictors exist
+    missing = [p for p in predictors if p not in df.columns]
+    if len(missing) > 0:
+        raise ValueError(f"Missing predictors in dataframe: {missing}")
 
-    X = df[X_cols].astype(float)
-    y = df[y_col].astype(int)
-
-    # Add intercept
+    # Define X and y
+    X = df[predictors].astype(float)
     X = sm.add_constant(X, has_constant='add')
+    y = df['accept'].astype(float)
 
-    # Fit logistic regression (use robust method by default). Suppress convergence output.
-    model = sm.Logit(y, X)
+    # Fit logistic regression using statsmodels Logit
+    logit_mod = sm.Logit(y, X)
+    # Fit without printing iteration info
     try:
-        results = model.fit(disp=False)
-    except Exception as e:
-        # If default fit fails, try a stronger optimizer
-        results = model.fit(method='bfgs', disp=False)
+        result = logit_mod.fit(disp=False)
+    except Exception:
+        # If the default fit fails (e.g., perfect separation), try GLM binomial
+        result = sm.GLM(y, X, family=sm.families.Binomial()).fit()
 
-    # Optionally compute average marginal effect of 'female'
-    # (user can call results.get_margeff() externally if needed). We return the fitted results object.
+    # Compute robust (HC3) covariance matrix and robust inference manually
+    # Use sandwich covariance estimator for HC3
+    try:
+        cov_robust = sm.stats.sandwich_covariance.cov_hc3(result)
+    except Exception:
+        # As a fallback, try using the generic cov_params with robust option if available
+        try:
+            cov_robust = result.cov_params_default
+        except Exception:
+            # Final fallback: use model-based covariance
+            cov_robust = result.cov_params()
+
+    params = result.params
+    se_robust = np.sqrt(np.diag(cov_robust))
+    # Handle potential zero standard errors gracefully
+    se_robust = pd.Series(se_robust, index=params.index)
+
+    # z-statistics and p-values using normal approximation
+    z_stats = params / se_robust
+    pvalues = 2 * (1 - stats.norm.cdf(np.abs(z_stats)))
+
+    # 95% CI (normal approximation)
+    z_crit = stats.norm.ppf(0.975)
+    ci_lower = params - z_crit * se_robust
+    ci_upper = params + z_crit * se_robust
+
+    # Build a minimal robust results-like object with the attributes used downstream
+    class RobustResults:
+        def __init__(self, params: pd.Series, pvalues: pd.Series, ci_lower: pd.Series, ci_upper: pd.Series, cov: np.ndarray, se: pd.Series, z: pd.Series):
+            self.params = params
+            self.pvalues = pvalues
+            self._ci = pd.DataFrame({0: ci_lower, 1: ci_upper})
+            self.cov = cov
+            self.se = se
+            self.z = z
+
+        def conf_int(self):
+            return self._ci
+
+    robust_res = RobustResults(params=params, pvalues=pvalues, ci_lower=ci_lower, ci_upper=ci_upper, cov=cov_robust, se=se_robust, z=z_stats)
+
+    # Compute odds ratios and 95% CI using robust estimates
+    or_series = np.exp(robust_res.params)
+    ci_lower_exp = np.exp(robust_res.conf_int()[0])
+    ci_upper_exp = np.exp(robust_res.conf_int()[1])
+
+    or_table = pd.DataFrame({
+        'OR': or_series,
+        'CI_lower_95': ci_lower_exp,
+        'CI_upper_95': ci_upper_exp,
+        'p_value': robust_res.pvalues
+    })
+
+    # Return results
+    results = {
+        'robust_result': robust_res,
+        'odds_ratios_table': or_table,
+        'model_predictors': ['const'] + predictors
+    }
     return results
-
-
