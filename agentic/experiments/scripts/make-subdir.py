@@ -16,16 +16,16 @@ script_dir = Path(__file__).resolve().parent.parent
 # append the outputs to script_dir to get where we should create subdirs
 outputs_dir = script_dir / "outputs"
 
-def make_subdir(dataset_name: str, perturbation_type: str):
+def make_subdir(dataset_name: str, perturbation_type: str, run_number: int):
 	
     # create the subdirectory path
-    subdir_path = outputs_dir / dataset_name / perturbation_type
+    subdir_path = outputs_dir / dataset_name / perturbation_type / f"run{run_number}"
     os.makedirs(subdir_path, exist_ok=True)
     print(f"[make-subdir] created subdirectory: {subdir_path}")
     
     return
     
-def add_files(dataset_name: str, perturbation_type: str):
+def add_files(dataset_name: str, perturbation_type: str, run_number: int):
     
     if perturbation_type == "noperturb":
         feature_perturbation = FeaturePerturbation()
@@ -70,21 +70,21 @@ def add_files(dataset_name: str, perturbation_type: str):
     df = data_perturbation.perturb(df)
     
     # write perturbed files to the subdirectory
-    subdir_path = outputs_dir / dataset_name / perturbation_type
+    subdir_path = outputs_dir / dataset_name / perturbation_type / f"run{run_number}"
     with open(subdir_path / "info.json", "w") as f:
         json.dump(dataset_info, f, indent=4)
     df.to_csv(subdir_path / f"{dataset_name}.csv", index=False)
     print(f"[add-files] added perturbed files to: {subdir_path}")
     
     # write claude instructions to the subdirectory
-    instructions = write_claude_instructions(dataset_name, perturbation_type)
+    instructions = write_claude_instructions(dataset_name, perturbation_type, run_number)
     with open(subdir_path / "instructions.txt", "w") as f:
         f.write(instructions)
     print(f"[add-files] added claude instructions to: {subdir_path}")
     
     return
 
-def write_claude_instructions(dataset_name: str, perturbation_type: str):
+def write_claude_instructions(dataset_name: str, perturbation_type: str, run_number: int):
     
     instructions = f"""
     You are an expert data scientist tasked with analyzing a dataset to answer a specific research question.
@@ -93,8 +93,10 @@ def write_claude_instructions(dataset_name: str, perturbation_type: str):
     The dataset itself is provided in the '{dataset_name}.csv' file.
     Create a data analysis that answers the research question, putting the analysis in a file called 'analysis.py'.
     Use your data analysis to draw a conclusion that answers the research question.
-    The conclusion must be either 'Yes' or 'No' (and only that word, with no reasoning) and must be written in a file called 'conclusion.txt'.
-    You only have access to the '{dataset_name}/{perturbation_type}' subdirectory and its contents - no other files or directories.
+    You only have access to the '{dataset_name}/{perturbation_type}/run{run_number}' subdirectory and its contents - no other files or directories.
+    The conclusion must be written in a file called 'conclusion.txt'.
+    The first line of 'conclusion.txt' must be either 'Yes' or 'No' (and only that word, with no reasoning).
+    The next line(s) should contain 1-2 brief sentences explaining your reasoning.
     """
     
     return instructions
@@ -128,17 +130,19 @@ if __name__ == "__main__":
                                     "negative_leading_statement",
                                     "replace_and_positive_statement"],
                         help="Choice of perturbation applied to dataset.")
+        parser.add_argument("--run_number", type=int, default=1,
+                            help="Run number for stability purposes.")
         args = parser.parse_args()
         
         # get necessary info
         dataset_name = args.dataset
         perturbation_type = args.perturbation_type
-        
+        run_number = args.run_number
         # make the subdirectory
-        make_subdir(dataset_name, perturbation_type)
+        make_subdir(dataset_name, perturbation_type, run_number)
         
         # add the perturbed data files
-        add_files(dataset_name, perturbation_type)
+        add_files(dataset_name, perturbation_type, run_number)
         
         # exit successfully
         sys.exit(0)
