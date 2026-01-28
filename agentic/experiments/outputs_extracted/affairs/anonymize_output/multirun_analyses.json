@@ -1,0 +1,52 @@
+{
+  "dataset_name": "affairs",
+  "n": 2,
+  "analyses": {
+    "0": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Binary indicator for presence of children in the marriage (yes/no). Used to split the sample into two groups (with children vs without children) to compare affair rates.",
+            "columns": [
+              "feature6"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Reported frequency of extramarital sexual intercourse during the past year (numeric coding, 0 = none, other numeric codes for number/frequency). Treated as the outcome variable comparing means between groups.",
+          "columns": [
+            "feature2"
+          ]
+        },
+        "controls": []
+      },
+      "transform_code": "import csv\n\n# Load the dataset\ndata = []\nwith open('affairs.csv', 'r') as f:\n    reader = csv.DictReader(f)\n    for row in reader:\n        data.append(row)\n\n# Split data by presence of children\nwith_children = [float(row['feature2']) for row in data if row['feature6'] == 'yes']\nwithout_children = [float(row['feature2']) for row in data if row['feature6'] == 'no']\n\n# Counts used later\nwith_children_count = sum(1 for row in data if row['feature6'] == 'yes')\nwithout_children_count = sum(1 for row in data if row['feature6'] == 'no')",
+      "m_code": "import math\n\n# Basic summary statistics functions\n\ndef mean(values):\n    return sum(values) / len(values)\n\ndef std_dev(values):\n    m = mean(values)\n    variance = sum((x - m) ** 2 for x in values) / (len(values) - 1)\n    return math.sqrt(variance)\n\n# Compute group summaries\nmean_with = mean(with_children)\nmean_without = mean(without_children)\nstd_with = std_dev(with_children)\nstd_without = std_dev(without_children)\n\n# Counts of any affair (>0)\nhad_affair_with = sum(1 for x in with_children if x > 0)\nno_affair_with = sum(1 for x in with_children if x == 0)\nhad_affair_without = sum(1 for x in without_children if x > 0)\nno_affair_without = sum(1 for x in without_children if x == 0)\n\n# Independent samples t-test (pooled variance)\n\nn1 = len(with_children)\nn2 = len(without_children)\npooled_var = ((n1 - 1) * std_with**2 + (n2 - 1) * std_without**2) / (n1 + n2 - 2)\npooled_std = math.sqrt(pooled_var)\n\nt_stat = (mean_with - mean_without) / (pooled_std * math.sqrt(1/n1 + 1/n2))\ndf = n1 + n2 - 2\n\n# Effect size (Cohen's d)\ncohens_d = (mean_with - mean_without) / pooled_std\n\n# Chi-square test for proportion having any affair\ntotal = n1 + n2\nrow1_total = n1\nrow2_total = n2\ncol1_total = had_affair_with + had_affair_without\ncol2_total = no_affair_with + no_affair_without\n\nexp_11 = (row1_total * col1_total) / total\nexp_12 = (row1_total * col2_total) / total\nexp_21 = (row2_total * col1_total) / total\nexp_22 = (row2_total * col2_total) / total\n\nchi2 = (((had_affair_with - exp_11)**2 / exp_11) +\n        ((no_affair_with - exp_12)**2 / exp_12) +\n        ((had_affair_without - exp_21)**2 / exp_21) +\n        ((no_affair_without - exp_22)**2 / exp_22))\n\n# Approximate p-value assessment is done via t-stat thresholds and chi2 critical value\n"
+    },
+    "1": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Indicator for whether there are children in the marriage (binary factor: 'yes'/'no'). Used to form groups children_yes and children_no.",
+            "columns": [
+              "feature6",
+              "children_yes",
+              "children_no"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Extramarital affair engagement measured as reported frequency in the past year (numeric coding where 0 = none, 1 = once, 2 = twice, 3 = 3 times, 7 = 4-10 times, 12 = monthly/weekly/daily variants). The analysis also derives group-level lists of these values (children_yes_affairs, children_no_affairs) and a binary affair occurrence (frequency > 0) when constructing contingency tables.",
+          "columns": [
+            "feature2",
+            "children_yes_affairs",
+            "children_no_affairs"
+          ]
+        },
+        "controls": []
+      },
+      "transform_code": "with open('affairs.csv', 'r') as f:\n    reader = csv.DictReader(f)\n    data = list(reader)\n\n# Partition rows by children status and extract affair frequency as numeric\nchildren_yes = []\nchildren_no = []\nchildren_yes_affairs = []\nchildren_no_affairs = []\n\nfor row in data:\n    affair_freq = float(row['feature2'])\n    if row['feature6'] == 'yes':\n        children_yes.append(row)\n        children_yes_affairs.append(affair_freq)\n    else:\n        children_no.append(row)\n        children_no_affairs.append(affair_freq)\n\n# Derived summary statistics functions used on the transformed lists\ndef mean(values):\n    return sum(values) / len(values) if values else 0\n\ndef median(values):\n    sorted_values = sorted(values)\n    n = len(sorted_values)\n    if n == 0:\n        return 0\n    if n % 2 == 0:\n        return (sorted_values[n//2 - 1] + sorted_values[n//2]) / 2\n    else:\n        return sorted_values[n//2]\n\ndef std_dev(values):\n    if len(values) < 2:\n        return 0\n    m = mean(values)\n    variance = sum((x - m) ** 2 for x in values) / (len(values) - 1)\n    return math.sqrt(variance)\n\n# Binary counts of whether an individual had any affair (frequency > 0)\ncount_affairs_with_children = sum(1 for x in children_yes_affairs if x > 0)\ncount_affairs_without_children = sum(1 for x in children_no_affairs if x > 0)",
+      "m_code": "# Build contingency table values\na = len(children_yes_affairs) - count_affairs_with_children  # children=yes, affair=no\nb = count_affairs_with_children                               # children=yes, affair=yes\nc = len(children_no_affairs) - count_affairs_without_children # children=no, affair=no\nd = count_affairs_without_children                            # children=no, affair=yes\n\n# Chi-square statistic for 2x2 table\nn = a + b + c + d\nexpected_a = (a + b) * (a + c) / n\nexpected_b = (a + b) * (b + d) / n\nexpected_c = (c + d) * (a + c) / n\nexpected_d = (c + d) * (b + d) / n\n\nchi2 = ((a - expected_a)**2 / expected_a +\n        (b - expected_b)**2 / expected_b +\n        (c - expected_c)**2 / expected_c +\n        (d - expected_d)**2 / expected_d)\n\n# Two-sample t-test on affair frequency between groups\ndef t_test(group1, group2):\n    n1 = len(group1)\n    n2 = len(group2)\n    m1 = mean(group1)\n    m2 = mean(group2)\n\n    var1 = sum((x - m1)**2 for x in group1) / (n1 - 1) if n1 > 1 else 0\n    var2 = sum((x - m2)**2 for x in group2) / (n2 - 1) if n2 > 1 else 0\n\n    pooled_se = math.sqrt(var1/n1 + var2/n2)\n    if pooled_se == 0:\n        return 0, False\n\n    t_stat = (m1 - m2) / pooled_se\n    critical_t = 1.96\n    significant = abs(t_stat) > critical_t\n\n    return t_stat, significant\n\n# Run tests\ncritical_value = 3.841  # chi-square critical for df=1 at p=0.05\n# chi2 computed above; compare chi2 > critical_value\n\nt_stat, t_significant = t_test(children_yes_affairs, children_no_affairs)\n\n# Decision logic in script uses chi2 and t_stat significance to conclude whether differences are significant"
+    }
+  }
+}
