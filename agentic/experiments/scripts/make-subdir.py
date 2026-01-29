@@ -38,7 +38,6 @@ def add_files(dataset_name: str, perturbation_type: str, run_number: int):
     elif perturbation_type == "shuffle_names":
         feature_perturbation = FeaturePerturbation(
             shuffle_names=True,
-            shuffle_names_seed=args.shuffle_names_seed
         )
         data_perturbation = DataPerturbation()
         task_perturbation = TaskPerturbation()
@@ -76,15 +75,15 @@ def add_files(dataset_name: str, perturbation_type: str, run_number: int):
     df.to_csv(subdir_path / f"{dataset_name}.csv", index=False)
     print(f"[add-files] added perturbed files to: {subdir_path}")
     
-    # write claude instructions to the subdirectory
-    instructions = write_claude_instructions(dataset_name, perturbation_type, run_number)
+    # write instructions to the subdirectory
+    instructions = write_agent_instructions(dataset_name, perturbation_type, run_number)
     with open(subdir_path / "instructions.txt", "w") as f:
         f.write(instructions)
-    print(f"[add-files] added claude instructions to: {subdir_path}")
+    print(f"[add-files] added agent instructions to: {subdir_path}")
     
     return
 
-def write_claude_instructions(dataset_name: str, perturbation_type: str, run_number: int):
+def write_agent_instructions(dataset_name: str, perturbation_type: str, run_number: int):
     
     instructions = f"""
     You are an expert data scientist tasked with analyzing a dataset to answer a specific research question.
@@ -92,6 +91,9 @@ def write_claude_instructions(dataset_name: str, perturbation_type: str, run_num
     Use the metadata from 'info.json' to understand the dataset structure and context.
     The dataset itself is provided in the '{dataset_name}.csv' file.
     Create a data analysis that answers the research question, putting the analysis in a file called 'analysis.py'.
+    You are allowed to import standard data science libraries to help with your analysis.
+    When executing Python scripts, ALWAYS use the command `poetry run python <filename.py>`. Never use `python` or `python3` directly.
+    The numpy, pandas, scikit-learn, and statsmodels packages are all pre-installed in this `poetry` environment and guaranteed to work.
     Use your data analysis to draw a conclusion that answers the research question.
     You only have access to the '{dataset_name}/{perturbation_type}/run{run_number}' subdirectory and its contents - no other files or directories.
     The conclusion must be written in a file called 'conclusion.txt'.
