@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Per-run extractor for Claude Code outputs.
+Per-run extractor for coding-agent outputs.
 
 Given a run directory containing `analysis.py`, `info.json`, and `conclusion.txt`,
 this script uses the same LLM infrastructure as the BLADE pipeline to produce:
 
-- `extracted_analysis.json`: extracted `cvars`/`transform_code`/`m_code`
+- `extracted_analysis.json`: extracted `cvars` plus full `analysis_code` (analysis.py contents)
 - `extracted_final_conclusion.txt`: JSON like BLADE `final_conclusion_{i}.txt`
 
 """
@@ -17,9 +17,84 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from stat_genie.blade_pipeline.llms.config import llm
+
+
+def _get_allowed_columns_from_info(info: Dict[str, Any]) -> Set[str]:
+    """Return the set of canonical column names from info.json (data_desc.fields[].column)."""
+    allowed: Set[str] = set()
+    data_desc = info.get("data_desc") or {}
+    fields = data_desc.get("fields") or []
+    for f in fields:
+        if isinstance(f, dict) and "column" in f:
+            allowed.add(str(f["column"]))
+    return allowed
+
+
+def _filter_cvars_to_info_json_schema(cvars: Dict[str, Any], info: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Filter cvars so every "columns" list contains only names from info.json (data_desc.fields[].column).
+    Removes or maps derived variable names from analysis.py to the canonical schema.
+    Raises ValueError if a required field (e.g. dv.columns) becomes empty after filtering.
+    """
+    allowed = _get_allowed_columns_from_info(info)
+    if not allowed:
+        raise ValueError(
+            "info.json has no data_desc.fields with 'column'; cannot filter cvars."
+        )
+
+    def filter_columns(columns: Any) -> List[str]:
+        if not isinstance(columns, list):
+            return []
+        return [c for c in columns if isinstance(c, str) and c in allowed]
+
+    out: Dict[str, Any] = {}
+
+    # ivs: list of {description, columns}
+    ivs_raw = cvars.get("ivs")
+    if isinstance(ivs_raw, list):
+        out["ivs"] = []
+        for item in ivs_raw:
+            if not isinstance(item, dict):
+                out["ivs"].append(item)
+                continue
+            filtered = dict(item)
+            cols = filter_columns(item.get("columns"))
+            filtered["columns"] = cols
+            out["ivs"].append(filtered)
+    else:
+        out["ivs"] = ivs_raw if ivs_raw is not None else []
+
+    # dv: single object {description, columns}
+    dv_raw = cvars.get("dv")
+    if isinstance(dv_raw, dict):
+        out["dv"] = dict(dv_raw)
+        out["dv"]["columns"] = filter_columns(dv_raw.get("columns"))
+        if not out["dv"]["columns"]:
+            raise ValueError(
+                "After filtering to info.json schema, dv.columns is empty; "
+                "the dependent variable must refer to at least one column from info.json."
+            )
+    else:
+        out["dv"] = dv_raw
+
+    # controls: list of {description, is_moderator, moderator_on, columns}
+    controls_raw = cvars.get("controls")
+    if isinstance(controls_raw, list):
+        out["controls"] = []
+        for item in controls_raw:
+            if not isinstance(item, dict):
+                out["controls"].append(item)
+                continue
+            filtered = dict(item)
+            filtered["columns"] = filter_columns(item.get("columns"))
+            out["controls"].append(filtered)
+    else:
+        out["controls"] = controls_raw if controls_raw is not None else []
+
+    return out
 
 
 def _strip_code_fences(text: str) -> str:
@@ -62,7 +137,7 @@ def _infer_dataset_name_from_run_dir(run_dir: Path) -> Optional[str]:
 
 def _parse_claude_conclusion_txt(raw: str) -> Tuple[Optional[str], str]:
     """
-    Parse the Claude Code "Yes/No + short justification" convention.
+    Parse the coding agent's "Yes/No + short justification" convention.
     """
     lines = [ln.strip() for ln in raw.splitlines() if ln.strip() != ""]
     if not lines:
@@ -109,17 +184,17 @@ def _llm_extract_analysis_entry(
     raw_conclusion_txt: str,
 ) -> Dict[str, Any]:
     """
-    Return a dict with keys: cvars, transform_code, m_code.
+    Return a dict with keys: cvars, analysis_code.
+    cvars come from the LLM; analysis_code is the full analysis.py file content.
     """
     assistant = llm(provider=llm_provider, model=llm_model, use_cache=use_cache)
 
     system_prompt = (
         "You are a careful data-science assistant. Read the analysis script and return a structured "
-        "summary of variables and modeling choices.\n\n"
+        "summary of the variables used (IVs, DV, controls).\n\n"
         "Return valid JSON only (no markdown, no extra text)."
     )
 
-    # Keep the schema tightly aligned with BLADE multirun_analyses.json.
     user_prompt = f"""
 Research question:
 {research_question}
@@ -127,33 +202,39 @@ Research question:
 Dataset metadata (info.json):
 {json.dumps(info_json, indent=2)}
 
-Claude Code run produced this analysis script (analysis.py):
+The data scientist produced this analysis script (analysis.py):
 <analysis.py>
 {analysis_code}
 </analysis.py>
 
-Claude Code run produced this conclusion (conclusion.txt):
+The data scientist produced this conclusion (conclusion.txt):
 <conclusion.txt>
 {raw_conclusion_txt}
 </conclusion.txt>
 
-Extract the following fields and return JSON ONLY with this exact top-level schema:
+Extract the following field and return JSON ONLY with this exact top-level schema:
 {{
   "cvars": {{
     "ivs": [{{"description": "...", "columns": ["..."]}}],
     "dv": {{"description": "...", "columns": ["..."]}},
     "controls": [{{"description": "...", "is_moderator": false, "moderator_on": null, "columns": ["..."]}}]
-  }},
-  "transform_code": "...",
-  "m_code": "..."
+  }}
 }}
 
+Definitions (use these to classify variables from the research question and analysis):
+- IV (independent variable): the predictor(s) or treatment(s) the research question asks about; the "X" whose effect on the outcome is of interest.
+- DV (dependent variable): the outcome or response the research question asks about; the "Y" that is predicted or explained.
+- Controls: covariates included to hold constant (e.g. demographics, confounders); not the main IV(s) or DV.
+
 Constraints:
-- "columns" must match names used in analysis.py exactly (e.g. "children_yes", "feature6").
-- Use info.json + analysis.py usage patterns to decide DV vs IV(s) vs controls.
+- "columns" MUST contain ONLY column names that appear in info.json (data_desc.fields[].column).
+  Do NOT use derived variable names from analysis.py (e.g. dummy columns, renamed columns, or
+  computed columns). For each variable used in the analysis, identify the underlying canonical
+  column name from info.json and use that. If analysis.py uses a derived name (e.g. "children_yes"
+  from feature6), map it back to the info.json column (e.g. "feature6").
+- Use the research question and info.json + analysis.py usage to assign each variable to IV(s), DV, or controls.
 - If there are no controls, return [].
 - If moderator info is unclear, set is_moderator=false and moderator_on=null.
-- transform_code / m_code should be best-effort code excerpts (strings), not lists.
 """
 
     result = assistant.generate(
@@ -173,20 +254,21 @@ Constraints:
             f"JSON error: {e}\n\nRaw response:\n{clean}"
         ) from e
 
-    # Minimal structural validation (single-pass; no auto-fix loop).
     if not isinstance(parsed, dict):
         raise ValueError("LLM analysis extraction must return a JSON object at top-level.")
-    for k in ("cvars", "transform_code", "m_code"):
-        if k not in parsed:
-            raise ValueError(f"LLM analysis extraction missing required key: {k}")
-    cvars = parsed.get("cvars")
+    if "cvars" not in parsed:
+        raise ValueError("LLM analysis extraction missing required key: cvars")
+    cvars = parsed["cvars"]
     if not isinstance(cvars, dict):
         raise ValueError("LLM analysis extraction 'cvars' must be an object.")
     for k in ("ivs", "dv", "controls"):
         if k not in cvars:
             raise ValueError(f"LLM analysis extraction 'cvars' missing required key: {k}")
 
-    return parsed
+    return {
+        "cvars": cvars,
+        "analysis_code": analysis_code,
+    }
 
 
 def _llm_normalize_conclusion(
@@ -215,7 +297,7 @@ def _llm_normalize_conclusion(
 Research question:
 {research_question}
 
-Raw Claude Code conclusion.txt:
+Raw conclusion (conclusion.txt):
 {raw_conclusion_txt}
 
 Parsed from conclusion.txt (may be empty/unknown):
@@ -288,6 +370,7 @@ def extract_single_run(
         analysis_code=analysis_code,
         raw_conclusion_txt=raw_conclusion_txt,
     )
+    extracted["cvars"] = _filter_cvars_to_info_json_schema(extracted["cvars"], info)
 
     normalized_conclusion = _llm_normalize_conclusion(
         llm_provider=llm_provider,
@@ -303,7 +386,7 @@ def extract_single_run(
         "dataset_name": dataset_name,
         "run_dir": str(run_dir),
         "research_question": research_question,
-        "extracted_analysis": extracted,  # contains cvars/transform_code/m_code
+        "extracted_analysis": extracted,  # contains cvars and analysis_code (full analysis.py)
         "extraction_metadata": {
             "llm_provider": llm_provider,
             "llm_model": llm_model,
@@ -325,11 +408,11 @@ def extract_single_run(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Extract BLADE-like fields from a single Claude Code run directory.")
+    parser = argparse.ArgumentParser(description="Extract BLADE-like fields from a single coding-agent run directory.")
     parser.add_argument(
         "--run-dir",
         required=True,
-        help="Path to a Claude Code run directory (contains analysis.py, info.json, conclusion.txt).",
+        help="Path to a coding-agent run directory (contains analysis.py, info.json, conclusion.txt).",
     )
     parser.add_argument("--llm-provider", default="openai", help="LLM provider (e.g. openai, anthropic).")
     parser.add_argument("--llm-model", default="gpt-5-mini", help="LLM model name (as in config/llm_config.yml).")

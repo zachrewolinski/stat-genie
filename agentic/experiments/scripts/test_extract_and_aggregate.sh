@@ -11,13 +11,14 @@
 
 set -euo pipefail
 
-REPO_ROOT="/accounts/campus/austin.zane/stat-genie"
-cd "$REPO_ROOT"
+# Run from agentic/experiments (parent of scripts/) so paths match analysis.sh
+EXPERIMENTS_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$EXPERIMENTS_DIR"
 
 # Test target
 DATASET="affairs"
 PERTURBATION="anonymize"
-INPUT_DIR="agentic/experiments/outputs/${DATASET}/${PERTURBATION}"
+INPUT_DIR="outputs/${DATASET}/${PERTURBATION}"
 
 # LLM config used for extraction (must exist in config/llm_config.yml)
 LLM_PROVIDER="openai"
@@ -29,7 +30,7 @@ echo "[1/2] Extracting per-run artifacts from: ${INPUT_DIR}"
 for RUN_DIR in "${INPUT_DIR}"/run*; do
   if [ -d "${RUN_DIR}" ]; then
     echo "  - extracting: ${RUN_DIR}"
-    poetry run python agentic/experiments/scripts/extract_single_run.py \
+    poetry run python scripts/extract_single_run.py \
       --run-dir "${RUN_DIR}" \
       --llm-provider "${LLM_PROVIDER}" \
       --llm-model "${LLM_MODEL}"
@@ -39,11 +40,11 @@ done
 echo
 echo "[2/2] Aggregating into a BLADE-style output directory"
 
-poetry run python agentic/experiments/scripts/aggregate_runs_to_blade_dir.py \
+poetry run python scripts/aggregate_runs_to_blade_dir.py \
   --input-dir "${INPUT_DIR}" \
   --overwrite
 
 echo
 echo "Done. Aggregated outputs:"
-echo "  agentic/experiments/outputs_extracted/${DATASET}/${PERTURBATION}_output/"
+echo "  ${EXPERIMENTS_DIR}/outputs_extracted/${DATASET}/${PERTURBATION}_output/"
 

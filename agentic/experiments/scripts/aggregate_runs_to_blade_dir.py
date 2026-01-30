@@ -11,7 +11,7 @@ Each run directory must already contain outputs from extract_single_run.py:
   - extracted_final_conclusion.txt
 
 This script creates a BLADE-style directory containing:
-  - multirun_analyses.json   (dataset_name, n, analyses{"0":{cvars,transform_code,m_code}, ...})
+  - multirun_analyses.json   (dataset_name, n, analyses{"0":{cvars,analysis_code}, ...})
   - final_conclusion_0.txt, final_conclusion_1.txt, ...
 
 The resulting directory is compatible with the existing BLADE judge code as a
@@ -69,13 +69,12 @@ def _extract_analysis_entry(extracted_analysis_json: Dict[str, Any]) -> Dict[str
     entry = extracted_analysis_json["extracted_analysis"]
     if not isinstance(entry, dict):
         raise ValueError("'extracted_analysis' must be an object.")
-    for k in ("cvars", "transform_code", "m_code"):
+    for k in ("cvars", "analysis_code"):
         if k not in entry:
             raise ValueError(f"'extracted_analysis' missing required key '{k}'.")
     return {
         "cvars": entry["cvars"],
-        "transform_code": entry["transform_code"],
-        "m_code": entry["m_code"],
+        "analysis_code": entry["analysis_code"],
     }
 
 
