@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-
+# Run codex analysis, then extract+aggregate.
 
 set -euo pipefail
 
@@ -13,4 +13,4 @@ sbatch --wait scripts/analysis-runner.sh
 echo "[codex] extract + aggregate"
 ./scripts/run_extract_and_aggregate_all.sh "$@"
 
-echo "done → ${EXPERIMENTS_DIR}/outputs_extracted/"
+echo "done -> ${EXPERIMENTS_DIR}/outputs_extracted/"

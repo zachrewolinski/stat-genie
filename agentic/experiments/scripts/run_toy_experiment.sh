@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Run toy analysis (toy.sh), then extract + aggregate via run_extract_and_aggregate_toy.sh.
+# Run toy analysis, then extract+aggregate.
 
 set -euo pipefail
 

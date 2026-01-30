@@ -1,8 +1,6 @@
 #!/bin/bash
 #
-# create toy/run1/, copy in instructions and data, then run codex there.
-# outputs (analysis.py, conclusion.txt, etc.) go into toy/run1/.
-# this is done so that we don't have to change the code to run the analysis on a single run.
+# Create toy/run1/, copy in instructions and data, run codex there. Outputs go into toy/run1/.
 
 set -euo pipefail
 

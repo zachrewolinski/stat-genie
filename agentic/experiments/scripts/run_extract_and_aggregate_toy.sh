@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 #
-# Extract from toy/run1/ (and any toy/run*), then aggregate into toy_extracted/.
-# Requires analysis.py, info.json, conclusion.txt in each toy/run<N>/ (from scripts/toy.sh).
-# Always re-extracts and overwrites toy_extracted/.
+# Extract from toy/run*, aggregate into toy_extracted/. Overwrites by default.
 
 set -euo pipefail
 
