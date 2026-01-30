@@ -4,7 +4,7 @@
 # into outputs_extracted/<dataset>/<perturbation>_output/.
 # Requires analysis.py, info.json, conclusion.txt in each run dir.
 #
-# Skips runs that already have extracted_analysis.json (saves API calls).
+# Skips runs that already have extracted_analysis.json.
 # Use --overwrite to re-extract and re-aggregate everything.
 
 set -euo pipefail
