@@ -1,0 +1,62 @@
+{
+  "dataset_name": "amtl",
+  "run_dir": "agentic/experiments/outputs/amtl/anonymize/run2",
+  "research_question": "Do modern humans (Homo sapiens) have higher frequencies of antemortem tooth loss (AMTL) compared to non-human primate genera (Pan, Pongo, Papio), after accounting for the effects of age, sex, and tooth class?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Specimen genus indicator: whether the specimen is a modern human (Homo sapiens) versus non-human primates (Pan, Pongo, Papio). This is the primary predictor of interest.",
+          "columns": [
+            "feature8"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Ante-mortem tooth loss (AMTL) frequency for the scored tooth class, measured as the proportion of missing teeth (missing / observable sockets).",
+        "columns": [
+          "feature3",
+          "feature4"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Tooth class (Anterior, Posterior, Premolar); included as a categorical control to account for differences in AMTL by tooth type.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature1"
+          ]
+        },
+        {
+          "description": "Estimated age at death; included as a continuous control.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature5"
+          ]
+        },
+        {
+          "description": "Estimated sex of the specimen; included as a control.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature7"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import json\nimport numpy as np\nimport pandas as pd\nimport statsmodels.api as sm\nimport statsmodels.formula.api as smf\n\n\ndef main():\n    df = pd.read_csv(\"amtl.csv\")\n    df = df.rename(\n        columns={\n            \"feature1\": \"tooth_class\",\n            \"feature2\": \"specimen_id\",\n            \"feature3\": \"missing\",\n            \"feature4\": \"total\",\n            \"feature5\": \"age\",\n            \"feature6\": \"age_uncert\",\n            \"feature7\": \"sex\",\n            \"feature8\": \"genus\",\n            \"feature9\": \"region\",\n        }\n    )\n\n    # Keep only relevant columns and valid rows\n    df = df[[\"tooth_class\", \"missing\", \"total\", \"age\", \"sex\", \"genus\"]].copy()\n    df = df.dropna()\n    df = df[df[\"total\"] > 0]\n\n    df[\"is_human\"] = (df[\"genus\"] == \"Homo sapiens\").astype(int)\n    df[\"prop_missing\"] = df[\"missing\"] / df[\"total\"]\n\n    # Binomial GLM with total teeth as trial weights\n    model = smf.glm(\n        \"prop_missing ~ is_human + age + sex + C(tooth_class)\",\n        data=df,\n        family=sm.families.Binomial(),\n        freq_weights=df[\"total\"],\n    ).fit()\n\n    coef = model.params[\"is_human\"]\n    pval = model.pvalues[\"is_human\"]\n    odds_ratio = float(np.exp(coef))\n\n    # Marginal predictions at mean age/sex, averaged across tooth classes\n    mean_age = df[\"age\"].mean()\n    mean_sex = df[\"sex\"].mean()\n    tc_weights = df[\"tooth_class\"].value_counts(normalize=True)\n\n    def marginal_pred(is_human):\n        rows = []\n        weights = []\n        for tc, w in tc_weights.items():\n            rows.append({\"is_human\": is_human, \"age\": mean_age, \"sex\": mean_sex, \"tooth_class\": tc})\n            weights.append(w)\n        pred = model.predict(pd.DataFrame(rows))\n        return float(np.sum(pred * np.array(weights)))\n\n    pred_human = marginal_pred(1)\n    pred_nonhuman = marginal_pred(0)\n    diff = pred_human - pred_nonhuman\n\n    results = {\n        \"n_rows\": int(len(df)),\n        \"coef_is_human\": float(coef),\n        \"p_value_is_human\": float(pval),\n        \"odds_ratio_is_human\": odds_ratio,\n        \"pred_human\": pred_human,\n        \"pred_nonhuman\": pred_nonhuman,\n        \"pred_diff_human_minus_nonhuman\": diff,\n    }\n\n    print(json.dumps(results, indent=2))\n\n\nif __name__ == \"__main__\":\n    main()\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "openai",
+    "llm_model": "gpt-5-mini",
+    "use_cache": false,
+    "timestamp_utc": "2026-01-30T03:27:33.667085+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/amtl/anonymize/run2/analysis.py",
+      "info_json": "agentic/experiments/outputs/amtl/anonymize/run2/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/amtl/anonymize/run2/conclusion.txt"
+    }
+  }
+}

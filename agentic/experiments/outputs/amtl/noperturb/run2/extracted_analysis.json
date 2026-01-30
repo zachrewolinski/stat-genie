@@ -1,0 +1,62 @@
+{
+  "dataset_name": "amtl",
+  "run_dir": "agentic/experiments/outputs/amtl/noperturb/run2",
+  "research_question": "Do modern humans (Homo sapiens) have higher frequencies of antemortem tooth loss (AMTL) compared to non-human primate genera (Pan, Pongo, Papio), after accounting for the effects of age, sex, and tooth class?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Genus, with primary comparison of modern humans (Homo sapiens) versus non-human primate genera (Pan, Pongo, Papio). (Analysis used a derived binary indicator for Homo sapiens vs others.)",
+          "columns": [
+            "genus"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Antemortem tooth loss (AMTL) measured as counts of missing teeth out of the number of observable tooth sockets (modeled as a binomial outcome: successes = num_amtl, trials = sockets).",
+        "columns": [
+          "num_amtl",
+          "sockets"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Estimated age at death (used as a continuous covariate).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "age"
+          ]
+        },
+        {
+          "description": "Estimated sex of specimen expressed as probability of being male (used to adjust for sex effects).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "prob_male"
+          ]
+        },
+        {
+          "description": "Tooth class (categorical: Anterior, Posterior, Premolar) to account for differences among tooth types.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "tooth_class"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\n\n# Load data\nDATA_PATH = \"amtl.csv\"\ndf = pd.read_csv(DATA_PATH)\n\n# Prepare variables\n# Binary indicator for modern humans vs non-human primates\n\ndf[\"human\"] = (df[\"genus\"] == \"Homo sapiens\").astype(int)\n\n# Fit binomial regression: counts of AMTL out of sockets\n# Use a two-column endogenous array: [successes, failures]\nendog = np.column_stack([df[\"num_amtl\"], df[\"sockets\"] - df[\"num_amtl\"]])\n\n# Design matrix with categorical tooth_class\nexog = pd.get_dummies(\n    df[[\"human\", \"age\", \"prob_male\", \"tooth_class\"]],\n    columns=[\"tooth_class\"],\n    drop_first=True,\n)\nexog = sm.add_constant(exog, has_constant=\"add\")\n\nmodel = sm.GLM(endog, exog, family=sm.families.Binomial())\nres = model.fit()\n\n# Extract effect for humans\ncoef = res.params.get(\"human\", np.nan)\npval = res.pvalues.get(\"human\", np.nan)\n\n# Compute odds ratio\nodds_ratio = float(np.exp(coef)) if np.isfinite(coef) else np.nan\n\n# Compute marginal predicted AMTL rate for human vs non-human\n# Use mean age and prob_male, and average across tooth classes weighted by their frequency\nmean_age = df[\"age\"].mean()\nmean_prob_male = df[\"prob_male\"].mean()\n\n# Weight by tooth_class distribution\nclass_weights = df[\"tooth_class\"].value_counts(normalize=True)\n\npreds = {}\nfor human in [0, 1]:\n    # Build a small prediction dataframe for each tooth class\n    pred_rows = []\n    for tc, w in class_weights.items():\n        pred_rows.append({\n            \"human\": human,\n            \"age\": mean_age,\n            \"prob_male\": mean_prob_male,\n            \"tooth_class\": tc,\n            \"weight\": w,\n        })\n    pred_df = pd.DataFrame(pred_rows)\n    pred_exog = pd.get_dummies(\n        pred_df[[\"human\", \"age\", \"prob_male\", \"tooth_class\"]],\n        columns=[\"tooth_class\"],\n        drop_first=True,\n    )\n    # Align columns with training exog\n    pred_exog = pred_exog.reindex(columns=exog.columns, fill_value=0)\n    pred_df[\"pred\"] = res.predict(pred_exog)\n    preds[human] = float((pred_df[\"pred\"] * pred_df[\"weight\"]).sum())\n\n# Decide conclusion\n# \"Yes\" if humans have higher AMTL odds (positive coef) and statistically significant\nalpha = 0.05\nanswer_yes = bool(np.isfinite(coef) and coef > 0 and pval < alpha)\n\n# Write conclusion\nconclusion_lines = []\nconclusion_lines.append(\"Yes\" if answer_yes else \"No\")\n\nif answer_yes:\n    reasoning = (\n        f\"Controlling for age, sex probability, and tooth class, the human indicator has a positive \"\n        f\"effect (odds ratio {odds_ratio:.2f}, p={pval:.3g}). \"\n        f\"The model predicts a higher AMTL rate for humans (~{preds[1]:.3f}) than non-humans (~{preds[0]:.3f}).\"\n    )\nelse:\n    if np.isfinite(coef):\n        direction = \"positive\" if coef > 0 else \"negative\"\n        reasoning = (\n            f\"After controlling for age, sex probability, and tooth class, the human effect is {direction} \"\n            f\"(odds ratio {odds_ratio:.2f}, p={pval:.3g}), which does not support higher AMTL in humans. \"\n            f\"Predicted AMTL rates are ~{preds[1]:.3f} for humans and ~{preds[0]:.3f} for non-humans.\"\n        )\n    else:\n        reasoning = \"The model did not estimate a reliable human effect after controlling for covariates.\"\n\nconclusion_lines.append(reasoning)\n\nwith open(\"conclusion.txt\", \"w\") as f:\n    f.write(\"\\n\".join(conclusion_lines) + \"\\n\")\n\n# Save a brief text report for inspection\nwith open(\"analysis_report.txt\", \"w\") as f:\n    f.write(res.summary().as_text())\n    f.write(\"\\n\\n\")\n    f.write(f\"Human odds ratio: {odds_ratio:.4f}\\n\")\n    f.write(f\"Human p-value: {pval:.6g}\\n\")\n    f.write(f\"Predicted AMTL rate (non-human): {preds[0]:.6f}\\n\")\n    f.write(f\"Predicted AMTL rate (human): {preds[1]:.6f}\\n\")\n\nprint(res.summary())\nprint(\"Human odds ratio:\", odds_ratio)\nprint(\"Human p-value:\", pval)\nprint(\"Predicted AMTL rate (non-human):\", preds[0])\nprint(\"Predicted AMTL rate (human):\", preds[1])\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "openai",
+    "llm_model": "gpt-5-mini",
+    "use_cache": false,
+    "timestamp_utc": "2026-01-30T03:29:37.092591+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/amtl/noperturb/run2/analysis.py",
+      "info_json": "agentic/experiments/outputs/amtl/noperturb/run2/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/amtl/noperturb/run2/conclusion.txt"
+    }
+  }
+}

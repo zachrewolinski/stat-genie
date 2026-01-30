@@ -1,0 +1,62 @@
+{
+  "dataset_name": "amtl",
+  "run_dir": "agentic/experiments/outputs/amtl/shuffle_names/run2",
+  "research_question": "Do modern humans (Homo sapiens) have higher frequencies of antemortem tooth loss (AMTL) compared to non-human primate genera (Pan, Pongo, Papio), after accounting for the effects of age, sex, and tooth class?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Specimen genus (categorical: Homo sapiens, Pan, Pongo, Papio). This is the main predictor of interest — whether humans differ in AMTL frequency from non-human primate genera.",
+          "columns": [
+            "tooth_class"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Antemortem tooth loss (AMTL) measured as the number of missing teeth out of the number of observable sockets; modeled as a binomial outcome (missing vs. present).",
+        "columns": [
+          "genus",
+          "age"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Estimated age of the specimen at death, included as a covariate/control.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "pop"
+          ]
+        },
+        {
+          "description": "Estimate of specimen sex (sex probability/estimate), included as a covariate/control.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "stdev_age"
+          ]
+        },
+        {
+          "description": "Tooth class (categorical: Anterior, Posterior, Premolar) of the socket, included as a covariate/control.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "sockets"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.formula.api as smf\nimport statsmodels.api as sm\nfrom patsy import dmatrices, build_design_matrices\n\n# Load data\nraw = pd.read_csv('amtl.csv')\n\n# Rename columns based on metadata inspection\n# sockets -> tooth class; prob_male -> specimen id; genus -> num missing;\n# age -> num observable sockets; pop -> age at death; num_amtl -> age sd;\n# stdev_age -> prob male; tooth_class -> genus; specimen -> population\nrename_map = {\n    'sockets': 'tooth_class',\n    'prob_male': 'specimen_id',\n    'genus': 'num_missing',\n    'age': 'num_sockets',\n    'pop': 'age_at_death',\n    'num_amtl': 'age_sd',\n    'stdev_age': 'prob_male',\n    'tooth_class': 'genus',\n    'specimen': 'population',\n}\n\ndf = raw.rename(columns=rename_map)\n\n# Basic sanity checks and cleaning\ndf = df[df['num_sockets'] > 0].copy()\ndf = df[df['num_missing'] >= 0].copy()\ndf = df[df['num_missing'] <= df['num_sockets']].copy()\ndf = df.dropna(subset=['num_missing', 'num_sockets', 'age_at_death', 'prob_male', 'genus', 'tooth_class']).copy()\ndf['num_fail'] = df['num_sockets'] - df['num_missing']\n\n# Fit binomial GLM: missing teeth out of observable sockets\n# Predictors: genus, age_at_death, prob_male, tooth_class\nformula = 'num_missing + num_fail ~ C(genus) + age_at_death + prob_male + C(tooth_class)'\ny, X = dmatrices(formula, data=df, return_type='dataframe')\ndesign_info = X.design_info\nmodel = sm.GLM(y, X, family=sm.families.Binomial())\nresult = model.fit()\n\nprint(result.summary())\n\n# Marginal predicted AMTL rate by genus holding other covariates at observed values\nmean_rates = {}\nfor g in df['genus'].unique():\n    tmp = df.copy()\n    tmp['genus'] = g\n    X_new = build_design_matrices([design_info], tmp, return_type='dataframe')[0]\n    pred = result.predict(X_new)\n    mean_rates[g] = float(np.mean(pred))\n\nmean_rates = dict(sorted(mean_rates.items(), key=lambda x: x[0]))\nprint('\\nMean predicted AMTL proportion by genus (marginal over covariates):')\nfor g, v in mean_rates.items():\n    print(f'  {g}: {v:.4f}')\n\n# Pairwise differences vs Homo sapiens\nhomo_rate = mean_rates.get('Homo sapiens')\nif homo_rate is not None:\n    print('\\nDifferences in mean predicted AMTL proportion (Homo sapiens - other):')\n    for g, v in mean_rates.items():\n        if g == 'Homo sapiens':\n            continue\n        print(f'  Homo sapiens - {g}: {homo_rate - v:.4f}')\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "openai",
+    "llm_model": "gpt-5-mini",
+    "use_cache": false,
+    "timestamp_utc": "2026-01-30T03:34:11.127515+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/amtl/shuffle_names/run2/analysis.py",
+      "info_json": "agentic/experiments/outputs/amtl/shuffle_names/run2/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/amtl/shuffle_names/run2/conclusion.txt"
+    }
+  }
+}
