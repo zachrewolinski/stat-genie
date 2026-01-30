@@ -16,6 +16,28 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from stat_genie.blade_pipeline.llms.config import llm
 
 
+def _repo_root(start: Path) -> Optional[Path]:
+    p = start.resolve()
+    for _ in range(30):
+        if (p / ".git").exists():
+            return p
+        if p.parent == p:
+            return None
+        p = p.parent
+    return None
+
+
+def _path_relative_to_repo(path: Path, anchor: Optional[Path] = None) -> str:
+    root = _repo_root(anchor or path)
+    if root is None:
+        return str(path)
+    path = path.resolve()
+    try:
+        return str(path.relative_to(root))
+    except ValueError:
+        return str(path)
+
+
 def _get_allowed_columns_from_info(info: Dict[str, Any]) -> Set[str]:
     # data_desc.fields[].column
     allowed: Set[str] = set()
@@ -351,9 +373,10 @@ def extract_single_run(
         raw_conclusion_txt=raw_conclusion_txt,
     )
 
+    _anchor = Path(__file__).resolve().parent
     payload = {
         "dataset_name": dataset_name,
-        "run_dir": str(run_dir),
+        "run_dir": _path_relative_to_repo(run_dir, _anchor),
         "research_question": research_question,
         "extracted_analysis": extracted,
         "extraction_metadata": {
@@ -362,9 +385,9 @@ def extract_single_run(
             "use_cache": use_cache,
             "timestamp_utc": datetime.now(timezone.utc).isoformat(),
             "inputs": {
-                "analysis_py": str(paths.analysis_py),
-                "info_json": str(paths.info_json),
-                "conclusion_txt": str(paths.conclusion_txt),
+                "analysis_py": _path_relative_to_repo(paths.analysis_py, _anchor),
+                "info_json": _path_relative_to_repo(paths.info_json, _anchor),
+                "conclusion_txt": _path_relative_to_repo(paths.conclusion_txt, _anchor),
             },
         },
     }

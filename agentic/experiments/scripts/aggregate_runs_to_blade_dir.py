@@ -18,6 +18,28 @@ from typing import Any, Dict, List, Optional, Tuple
 RUN_DIR_RE = re.compile(r"^run(\d+)$", re.IGNORECASE)
 
 
+def _repo_root(start: Path) -> Optional[Path]:
+    p = start.resolve()
+    for _ in range(30):
+        if (p / ".git").exists():
+            return p
+        if p.parent == p:
+            return None
+        p = p.parent
+    return None
+
+
+def _path_relative_to_repo(path: Path, anchor: Optional[Path] = None) -> str:
+    root = _repo_root(anchor or path)
+    if root is None:
+        return str(path)
+    path = path.resolve()
+    try:
+        return str(path.relative_to(root))
+    except ValueError:
+        return str(path)
+
+
 def _read_json(path: Path) -> Dict[str, Any]:
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
@@ -144,9 +166,10 @@ def aggregate_runs(
     for i, conc in conclusions.items():
         (output_dir / f"final_conclusion_{i}.txt").write_text(conc.strip() + "\n", encoding="utf-8")
 
+    _anchor = Path(__file__).resolve().parent
     provenance = {
-        "input_dir": str(input_dir),
-        "output_dir": str(output_dir),
+        "input_dir": _path_relative_to_repo(input_dir, _anchor),
+        "output_dir": _path_relative_to_repo(output_dir, _anchor),
         "dataset_guess": dataset_guess,
         "perturbation_guess": perturbation_guess,
         "dataset_name_used": dataset_name,
@@ -155,9 +178,9 @@ def aggregate_runs(
             {
                 "analysis_index": idx,
                 "run_number": run_number,
-                "run_dir": str(run_path),
-                "extracted_analysis_json": str(run_path / "extracted_analysis.json"),
-                "extracted_final_conclusion_txt": str(run_path / "extracted_final_conclusion.txt"),
+                "run_dir": _path_relative_to_repo(run_path, _anchor),
+                "extracted_analysis_json": _path_relative_to_repo(run_path / "extracted_analysis.json", _anchor),
+                "extracted_final_conclusion_txt": _path_relative_to_repo(run_path / "extracted_final_conclusion.txt", _anchor),
             }
             for idx, (run_number, run_path) in enumerate(runs)
         ],
