@@ -1,13 +1,7 @@
 #!/usr/bin/env python3
 """
-Per-run extractor for coding-agent outputs.
-
-Given a run directory containing `analysis.py`, `info.json`, and `conclusion.txt`,
-this script uses the same LLM infrastructure as the BLADE pipeline to produce:
-
-- `extracted_analysis.json`: extracted `cvars` plus full `analysis_code` (analysis.py contents)
-- `extracted_final_conclusion.txt`: JSON like BLADE `final_conclusion_{i}.txt`
-
+Extract cvars + analysis_code from a single run dir (analysis.py, info.json, conclusion.txt)
+and write extracted_analysis.json + extracted_final_conclusion.txt in BLADE-compatible form.
 """
 
 from __future__ import annotations
@@ -23,7 +17,7 @@ from stat_genie.blade_pipeline.llms.config import llm
 
 
 def _get_allowed_columns_from_info(info: Dict[str, Any]) -> Set[str]:
-    """Return the set of canonical column names from info.json (data_desc.fields[].column)."""
+    # data_desc.fields[].column
     allowed: Set[str] = set()
     data_desc = info.get("data_desc") or {}
     fields = data_desc.get("fields") or []
@@ -34,11 +28,7 @@ def _get_allowed_columns_from_info(info: Dict[str, Any]) -> Set[str]:
 
 
 def _filter_cvars_to_info_json_schema(cvars: Dict[str, Any], info: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Filter cvars so every "columns" list contains only names from info.json (data_desc.fields[].column).
-    Removes or maps derived variable names from analysis.py to the canonical schema.
-    Raises ValueError if a required field (e.g. dv.columns) becomes empty after filtering.
-    """
+    """Restrict cvars.columns to info.json column names only; raise if dv.columns ends up empty."""
     allowed = _get_allowed_columns_from_info(info)
     if not allowed:
         raise ValueError(
@@ -52,7 +42,6 @@ def _filter_cvars_to_info_json_schema(cvars: Dict[str, Any], info: Dict[str, Any
 
     out: Dict[str, Any] = {}
 
-    # ivs: list of {description, columns}
     ivs_raw = cvars.get("ivs")
     if isinstance(ivs_raw, list):
         out["ivs"] = []
@@ -67,7 +56,6 @@ def _filter_cvars_to_info_json_schema(cvars: Dict[str, Any], info: Dict[str, Any
     else:
         out["ivs"] = ivs_raw if ivs_raw is not None else []
 
-    # dv: single object {description, columns}
     dv_raw = cvars.get("dv")
     if isinstance(dv_raw, dict):
         out["dv"] = dict(dv_raw)
@@ -80,7 +68,6 @@ def _filter_cvars_to_info_json_schema(cvars: Dict[str, Any], info: Dict[str, Any
     else:
         out["dv"] = dv_raw
 
-    # controls: list of {description, is_moderator, moderator_on, columns}
     controls_raw = cvars.get("controls")
     if isinstance(controls_raw, list):
         out["controls"] = []
@@ -99,7 +86,6 @@ def _filter_cvars_to_info_json_schema(cvars: Dict[str, Any], info: Dict[str, Any
 
 def _strip_code_fences(text: str) -> str:
     t = text.strip()
-    # Common cases: ```json ... ``` / ``` ... ```
     if t.startswith("```"):
         t = t.replace("```json", "").replace("```JSON", "").replace("```", "").strip()
     return t
@@ -123,12 +109,18 @@ def _get_research_question(info: Dict[str, Any]) -> str:
     return ""
 
 
+def _get_dataset_name_from_info(info: Dict[str, Any]) -> Optional[str]:
+    # Dataset name from info.json data_path (parent dir of the CSV)
+    path_str = info.get("data_path")
+    if not isinstance(path_str, str) or not path_str.strip():
+        return None
+    return Path(path_str).parent.name or None
+
+
 def _infer_dataset_name_from_run_dir(run_dir: Path) -> Optional[str]:
-    # Prefer a single CSV name like affairs.csv (but do not read it).
     csvs = sorted([p for p in run_dir.iterdir() if p.is_file() and p.suffix == ".csv"])
     if len(csvs) == 1:
         return csvs[0].stem
-    # If multiple, pick the one that isn't obviously auxiliary.
     for p in csvs:
         if p.name.lower() not in {"data.csv", "dataset.csv"}:
             return p.stem
@@ -136,9 +128,7 @@ def _infer_dataset_name_from_run_dir(run_dir: Path) -> Optional[str]:
 
 
 def _parse_claude_conclusion_txt(raw: str) -> Tuple[Optional[str], str]:
-    """
-    Parse the coding agent's "Yes/No + short justification" convention.
-    """
+    """Parse Yes/No + justification from conclusion.txt."""
     lines = [ln.strip() for ln in raw.splitlines() if ln.strip() != ""]
     if not lines:
         return None, ""
@@ -147,7 +137,6 @@ def _parse_claude_conclusion_txt(raw: str) -> Tuple[Optional[str], str]:
         answer = "Yes" if first == "yes" else "No"
         justification = " ".join(lines[1:]).strip()
         return answer, justification
-    # Fall back: no explicit yes/no line
     return None, " ".join(lines).strip()
 
 
@@ -183,10 +172,6 @@ def _llm_extract_analysis_entry(
     analysis_code: str,
     raw_conclusion_txt: str,
 ) -> Dict[str, Any]:
-    """
-    Return a dict with keys: cvars, analysis_code.
-    cvars come from the LLM; analysis_code is the full analysis.py file content.
-    """
     assistant = llm(provider=llm_provider, model=llm_model, use_cache=use_cache)
 
     system_prompt = (
@@ -249,21 +234,16 @@ Constraints:
     try:
         parsed = json.loads(clean)
     except json.JSONDecodeError as e:
-        raise ValueError(
-            "LLM analysis extraction did not return valid JSON. "
-            f"JSON error: {e}\n\nRaw response:\n{clean}"
-        ) from e
+        raise ValueError(f"Extraction response was not valid JSON: {e}\n\n{clean}") from e
 
-    if not isinstance(parsed, dict):
-        raise ValueError("LLM analysis extraction must return a JSON object at top-level.")
-    if "cvars" not in parsed:
-        raise ValueError("LLM analysis extraction missing required key: cvars")
+    if not isinstance(parsed, dict) or "cvars" not in parsed:
+        raise ValueError("Extraction response must be a JSON object with key 'cvars'.")
     cvars = parsed["cvars"]
     if not isinstance(cvars, dict):
-        raise ValueError("LLM analysis extraction 'cvars' must be an object.")
+        raise ValueError("cvars must be an object.")
     for k in ("ivs", "dv", "controls"):
         if k not in cvars:
-            raise ValueError(f"LLM analysis extraction 'cvars' missing required key: {k}")
+            raise ValueError(f"cvars missing key: {k}")
 
     return {
         "cvars": cvars,
@@ -281,10 +261,6 @@ def _llm_normalize_conclusion(
     parsed_justification: str,
     raw_conclusion_txt: str,
 ) -> str:
-    """
-    Returns a JSON string like: {"answer": "...", "justification": "..."}
-    matching BLADE final_conclusion_{i}.txt style.
-    """
     assistant = llm(provider=llm_provider, model=llm_model, use_cache=use_cache)
 
     system_prompt = (
@@ -292,7 +268,6 @@ def _llm_normalize_conclusion(
         "Return valid JSON only (no markdown, no extra text)."
     )
 
-    # Even if we can parse a clean Yes/No, use the LLM to rewrite a tight, consistent justification.
     user_prompt = f"""
 Research question:
 {research_question}
@@ -328,17 +303,11 @@ Rules:
     try:
         obj = json.loads(clean)
     except json.JSONDecodeError as e:
-        raise ValueError(
-            "LLM conclusion normalization did not return valid JSON. "
-            f"JSON error: {e}\n\nRaw response:\n{clean}"
-        ) from e
+        raise ValueError(f"Conclusion normalization response was not valid JSON: {e}\n\n{clean}") from e
 
     if not isinstance(obj, dict) or "answer" not in obj or "justification" not in obj:
-        raise ValueError(
-            f"LLM conclusion normalization must return keys 'answer' and 'justification'. Got: {obj}"
-        )
+        raise ValueError(f"Response must have 'answer' and 'justification'. Got: {list(obj.keys()) if isinstance(obj, dict) else type(obj)}")
 
-    # Re-serialize to canonical JSON (pretty, like existing BLADE files).
     return json.dumps(obj, indent=2, ensure_ascii=False)
 
 
@@ -358,7 +327,7 @@ def extract_single_run(
     research_question = _get_research_question(info)
     raw_conclusion_txt = _read_text(paths.conclusion_txt)
 
-    dataset_name = _infer_dataset_name_from_run_dir(run_dir)
+    dataset_name = _get_dataset_name_from_info(info) or _infer_dataset_name_from_run_dir(run_dir)
     parsed_answer, parsed_justification = _parse_claude_conclusion_txt(raw_conclusion_txt)
 
     extracted = _llm_extract_analysis_entry(
@@ -386,7 +355,7 @@ def extract_single_run(
         "dataset_name": dataset_name,
         "run_dir": str(run_dir),
         "research_question": research_question,
-        "extracted_analysis": extracted,  # contains cvars and analysis_code (full analysis.py)
+        "extracted_analysis": extracted,
         "extraction_metadata": {
             "llm_provider": llm_provider,
             "llm_model": llm_model,
@@ -445,7 +414,6 @@ def main() -> int:
         else run_dir / "extracted_final_conclusion.txt"
     )
 
-    # Keep default outputs inside the run directory.
     if not str(out_analysis_json).startswith(str(run_dir)) and args.out_analysis_json is None:
         raise ValueError("Default output path must be inside the run directory.")
     if not str(out_conclusion_json).startswith(str(run_dir)) and args.out_conclusion_json is None:
@@ -460,8 +428,8 @@ def main() -> int:
         out_conclusion_json_txt=out_conclusion_json,
     )
 
-    print(f"Wrote: {out_analysis_json}")
-    print(f"Wrote: {out_conclusion_json}")
+    print(out_analysis_json)
+    print(out_conclusion_json)
     return 0
 
 

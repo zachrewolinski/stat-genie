@@ -1,21 +1,8 @@
 #!/usr/bin/env python3
 """
-Aggregate per-run Claude Code extractions into a single BLADE-style output dir.
-
-Expected input layout:
-  agentic/experiments/outputs/<dataset>/<perturbation>/run1/
-  agentic/experiments/outputs/<dataset>/<perturbation>/run2/
-
-Each run directory must already contain outputs from extract_single_run.py:
-  - extracted_analysis.json
-  - extracted_final_conclusion.txt
-
-This script creates a BLADE-style directory containing:
-  - multirun_analyses.json   (dataset_name, n, analyses{"0":{cvars,analysis_code}, ...})
-  - final_conclusion_0.txt, final_conclusion_1.txt, ...
-
-The resulting directory is compatible with the existing BLADE judge code as a
-single `analysis_results_path`.
+Collect run dirs (each with extracted_analysis.json + extracted_final_conclusion.txt)
+into one BLADE-style dir: multirun_analyses.json, final_conclusion_0.txt, etc.
+Usable as a single analysis_results_path for the BLADE judge.
 """
 
 from __future__ import annotations
@@ -41,7 +28,7 @@ def _read_text(path: Path) -> str:
 
 
 def _infer_dataset_and_perturbation(input_dir: Path) -> Tuple[Optional[str], Optional[str]]:
-    # Expected: .../outputs/<dataset>/<perturbation>
+    # .../outputs/<dataset>/<perturbation>
     perturbation = input_dir.name if input_dir.name else None
     dataset = input_dir.parent.name if input_dir.parent and input_dir.parent.name else None
     return dataset, perturbation
@@ -61,9 +48,6 @@ def _discover_run_dirs(input_dir: Path) -> List[Tuple[int, Path]]:
 
 
 def _extract_analysis_entry(extracted_analysis_json: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Convert extract_single_run.py payload to a single BLADE analysis entry.
-    """
     if "extracted_analysis" not in extracted_analysis_json:
         raise ValueError("Expected key 'extracted_analysis' in extracted_analysis.json payload.")
     entry = extracted_analysis_json["extracted_analysis"]
@@ -135,7 +119,6 @@ def aggregate_runs(
                 )
 
         conc_text = _read_text(extracted_conclusion_path).strip()
-        # BLADE final_conclusion_{i}.txt is a JSON object string. Validate and keep as-is.
         try:
             json.loads(conc_text)
         except json.JSONDecodeError as e:
@@ -154,18 +137,13 @@ def aggregate_runs(
         "n": len(analyses),
         "analyses": analyses,
     }
-
-    # Write multirun_analyses.json
     (output_dir / "multirun_analyses.json").write_text(
         json.dumps(multirun, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
-
-    # Write final_conclusion_{i}.txt files
     for i, conc in conclusions.items():
         (output_dir / f"final_conclusion_{i}.txt").write_text(conc.strip() + "\n", encoding="utf-8")
 
-    # Provenance mapping (helps trace back to original run dirs).
     provenance = {
         "input_dir": str(input_dir),
         "output_dir": str(output_dir),
@@ -190,9 +168,7 @@ def aggregate_runs(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Aggregate Claude Code per-run extractions into a BLADE-style multirun output directory."
-    )
+    parser = argparse.ArgumentParser(description="Aggregate per-run extractions into a BLADE-style multirun dir.")
     parser.add_argument(
         "--input-dir",
         required=True,
@@ -206,12 +182,8 @@ def main() -> int:
             "Default: agentic/experiments/outputs_extracted/<dataset>/<perturbation>_output"
         ),
     )
-    parser.add_argument("--overwrite", action="store_true", help="Allow writing into an existing output directory.")
-    parser.add_argument(
-        "--no-require-extracted",
-        action="store_true",
-        help="If set, do not require extracted_* files to exist (not recommended).",
-    )
+    parser.add_argument("--overwrite", action="store_true", help="Overwrite existing output dir.")
+    parser.add_argument("--no-require-extracted", action="store_true", help="Don't require extracted_* in each run dir.")
 
     args = parser.parse_args()
     input_dir = Path(args.input_dir).expanduser().resolve()
@@ -232,9 +204,7 @@ def main() -> int:
         require_extracted=not bool(args.no_require_extracted),
     )
 
-    print(f"Wrote: {output_dir / 'multirun_analyses.json'}")
-    print(f"Wrote: {output_dir / 'source_runs.json'}")
-    print(f"Wrote conclusions: final_conclusion_*.txt in {output_dir}")
+    print(output_dir)
     return 0
 
 

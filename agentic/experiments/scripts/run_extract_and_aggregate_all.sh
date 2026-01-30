@@ -1,25 +1,28 @@
 #!/usr/bin/env bash
 #
-# Run per-run extraction for every run in every dataset/perturbation under
-# agentic/experiments/outputs/, then aggregate each (dataset, perturbation)
-# into agentic/experiments/outputs_extracted/<dataset>/<perturbation>_output/.
+# Extract every run under outputs/<dataset>/<perturbation>/, then aggregate
+# into outputs_extracted/<dataset>/<perturbation>_output/.
+# Requires analysis.py, info.json, conclusion.txt in each run dir.
 #
-# Prerequisites: analysis.py, info.json, conclusion.txt in each run directory.
-#
-# Usage: run from anywhere (script cds to agentic/experiments internally).
-#   chmod +x agentic/experiments/scripts/run_extract_and_aggregate_all.sh
-#   ./agentic/experiments/scripts/run_extract_and_aggregate_all.sh
-# Or from agentic/experiments: ./scripts/run_extract_and_aggregate_all.sh
+# Skips runs that already have extracted_analysis.json (saves API calls).
+# Use --overwrite to re-extract and re-aggregate everything.
 
 set -euo pipefail
 
-# Run from agentic/experiments (parent of scripts/) so paths match analysis.sh / analysis-runner.sh
 EXPERIMENTS_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 OUTPUTS_ROOT="outputs"
 EXTRACTED_ROOT="outputs_extracted"
 
 LLM_PROVIDER="openai"
 LLM_MODEL="gpt-5-mini"
+
+OVERWRITE=""
+for arg in "$@"; do
+  if [[ "$arg" == "--overwrite" ]]; then
+    OVERWRITE=1
+    break
+  fi
+done
 
 cd "$EXPERIMENTS_DIR"
 
@@ -38,17 +41,21 @@ for dataset_dir in "${OUTPUTS_ROOT}"/*/; do
     [[ "$run_count" -gt 0 ]] || continue
 
     echo
-    echo "[${dataset}/${perturbation}] Extracting ${run_count} run(s)..."
+    echo "[${dataset}/${perturbation}] ${run_count} run(s)"
     for run_dir in "${pert_dir}"run*; do
       [[ -d "$run_dir" ]] || continue
-      echo "  - ${run_dir}"
-      poetry run python scripts/extract_single_run.py \
-        --run-dir "$run_dir" \
-        --llm-provider "$LLM_PROVIDER" \
-        --llm-model "$LLM_MODEL"
+      if [[ -n "$OVERWRITE" ]] || [[ ! -f "${run_dir}/extracted_analysis.json" ]]; then
+        echo "  - ${run_dir}"
+        poetry run python scripts/extract_single_run.py \
+          --run-dir "$run_dir" \
+          --llm-provider "$LLM_PROVIDER" \
+          --llm-model "$LLM_MODEL"
+      else
+        echo "  - ${run_dir} (skip)"
+      fi
     done
 
-    echo "[${dataset}/${perturbation}] Aggregating..."
+    echo "[${dataset}/${perturbation}] aggregate"
     poetry run python scripts/aggregate_runs_to_blade_dir.py \
       --input-dir "$pert_dir" \
       --overwrite
@@ -56,4 +63,4 @@ for dataset_dir in "${OUTPUTS_ROOT}"/*/; do
 done
 
 echo
-echo "Done. Aggregated outputs under: ${EXPERIMENTS_DIR}/${EXTRACTED_ROOT}/"
+echo "done → ${EXPERIMENTS_DIR}/${EXTRACTED_ROOT}/"
