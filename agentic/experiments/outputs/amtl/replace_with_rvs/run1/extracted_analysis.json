@@ -1,0 +1,62 @@
+{
+  "dataset_name": "amtl",
+  "run_dir": "agentic/experiments/outputs/amtl/replace_with_rvs/run1",
+  "research_question": "Do modern humans (Homo sapiens) have higher frequencies of antemortem tooth loss (AMTL) compared to non-human primate genera (Pan, Pongo, Papio), after accounting for the effects of age, sex, and tooth class?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Specimen genus used to indicate modern humans (Homo sapiens) versus non-human primate genera (Pan, Pongo, Papio); this is the primary predictor of interest (analysis derived a human indicator from this column).",
+          "columns": [
+            "genus"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Antemortem tooth loss (AMTL) operationalized as the count of missing teeth out of observable sockets (modeled as a binomial/proportion).",
+        "columns": [
+          "num_amtl",
+          "sockets"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Estimated age of the specimen at death, included as a continuous covariate to control for age effects on AMTL.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "age"
+          ]
+        },
+        {
+          "description": "Estimated probability the specimen is male (sex estimate), included as a covariate to control for sex differences.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "prob_male"
+          ]
+        },
+        {
+          "description": "Tooth class (Anterior, Posterior, or Premolar), included as a categorical covariate to control for differences in AMTL by tooth type.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "tooth_class"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import numpy as np\nimport pandas as pd\nimport statsmodels.api as sm\nimport statsmodels.formula.api as smf\n\n\ndef main():\n    df = pd.read_csv(\"amtl.csv\")\n\n    # Basic cleaning: keep rows with valid counts and covariates\n    df = df.copy()\n    df = df[df[\"sockets\"].notna() & df[\"num_amtl\"].notna()]\n    df = df[df[\"sockets\"] > 0]\n    df = df[df[\"num_amtl\"] >= 0]\n    df = df[df[\"num_amtl\"] <= df[\"sockets\"]]\n    df = df[df[\"age\"].notna() & df[\"prob_male\"].notna() & df[\"tooth_class\"].notna() & df[\"genus\"].notna()]\n\n    # Create human indicator\n    df[\"human\"] = (df[\"genus\"] == \"Homo sapiens\").astype(int)\n\n    # AMTL rate for binomial regression\n    df[\"amtl_rate\"] = df[\"num_amtl\"] / df[\"sockets\"]\n\n    # Model with controls for age, sex (prob_male), and tooth class\n    formula = \"amtl_rate ~ human + age + prob_male + C(tooth_class)\"\n    model = smf.glm(\n        formula=formula,\n        data=df,\n        family=sm.families.Binomial(),\n        var_weights=df[\"sockets\"],\n    )\n    result = model.fit()\n\n    # Extract human coefficient\n    coef = result.params.get(\"human\", np.nan)\n    pval = result.pvalues.get(\"human\", np.nan)\n\n    # Determine conclusion\n    if np.isfinite(coef) and np.isfinite(pval) and (coef > 0) and (pval < 0.05):\n        answer = \"Yes\"\n        reason = (\n            \"After adjusting for age, sex, and tooth class, the human indicator has a positive and statistically \"\n            \"significant association with AMTL frequency.\"\n        )\n    else:\n        answer = \"No\"\n        reason = (\n            \"After adjusting for age, sex, and tooth class, the evidence does not show a significantly higher AMTL \"\n            \"frequency for humans compared with non-human primates.\"\n        )\n\n    with open(\"conclusion.txt\", \"w\") as f:\n        f.write(answer + \"\\n\")\n        f.write(reason + \"\\n\")\n\n\nif __name__ == \"__main__\":\n    main()\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "openai",
+    "llm_model": "gpt-5-mini",
+    "use_cache": false,
+    "timestamp_utc": "2026-01-30T03:32:11.437119+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/amtl/replace_with_rvs/run1/analysis.py",
+      "info_json": "agentic/experiments/outputs/amtl/replace_with_rvs/run1/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/amtl/replace_with_rvs/run1/conclusion.txt"
+    }
+  }
+}

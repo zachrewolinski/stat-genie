@@ -1,0 +1,62 @@
+{
+  "dataset_name": "amtl",
+  "run_dir": "agentic/experiments/outputs/amtl/noperturb/run1",
+  "research_question": "Do modern humans (Homo sapiens) have higher frequencies of antemortem tooth loss (AMTL) compared to non-human primate genera (Pan, Pongo, Papio), after accounting for the effects of age, sex, and tooth class?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Specimen genus (primary predictor): compares Homo sapiens to non-human primate genera (Pan, Pongo, Papio) to test whether humans have different AMTL frequencies.",
+          "columns": [
+            "genus"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Antemortem tooth loss (AMTL) measured as the count of missing teeth out of the number of observable sockets; modeled as successes/trials in a binomial regression.",
+        "columns": [
+          "num_amtl",
+          "sockets"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Estimated age at death (included to adjust for the effect of age on AMTL).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "age"
+          ]
+        },
+        {
+          "description": "Estimated probability of being male (used as the sex covariate to adjust for sex differences in AMTL).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "prob_male"
+          ]
+        },
+        {
+          "description": "Tooth class (Anterior, Posterior, Premolar) included to control for differences in AMTL by tooth type.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "tooth_class"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\nimport statsmodels.formula.api as smf\n\n# Load data\npath = \"amtl.csv\"\ndf = pd.read_csv(path)\n\n# Basic cleaning: drop rows with missing key fields\nkey_cols = [\"num_amtl\", \"sockets\", \"age\", \"prob_male\", \"tooth_class\", \"genus\"]\ndf = df.dropna(subset=key_cols).copy()\n\n# Ensure numeric types\nfor col in [\"num_amtl\", \"sockets\", \"age\", \"prob_male\"]:\n    df[col] = pd.to_numeric(df[col], errors=\"coerce\")\n\n# Drop any rows with nonpositive sockets or invalid counts\nmask_valid = (df[\"sockets\"] > 0) & (df[\"num_amtl\"] >= 0) & (df[\"num_amtl\"] <= df[\"sockets\"])\ndf = df.loc[mask_valid].copy()\n\n# Categorical variables\nfor col in [\"tooth_class\", \"genus\"]:\n    df[col] = df[col].astype(\"category\")\n\n# Relevel genus so Homo sapiens is reference\nif \"Homo sapiens\" in df[\"genus\"].cat.categories:\n    df[\"genus\"] = df[\"genus\"].cat.reorder_categories(\n        [\"Homo sapiens\"] + [c for c in df[\"genus\"].cat.categories if c != \"Homo sapiens\"],\n        ordered=False,\n    )\n\n# Fit binomial GLM with counts\nformula = \"num_amtl + I(sockets - num_amtl) ~ age + prob_male + C(tooth_class) + C(genus)\"\nresult = smf.glm(formula=formula, data=df, family=sm.families.Binomial()).fit()\n\n# Compute adjusted predicted AMTL rate by genus by averaging predictions over observed covariates\n# Keep age, prob_male, tooth_class as observed; set genus to each value\nadj_rates = {}\nfor genus in df[\"genus\"].cat.categories:\n    df_tmp = df.copy()\n    df_tmp[\"genus\"] = genus\n    pred = result.predict(df_tmp)\n    adj_rates[genus] = pred.mean()\n\n# Extract coefficients and p-values for genus effects\ncoef_table = result.summary2().tables[1]\n\nprint(\"N rows used:\", len(df))\nprint(\"Adjusted mean AMTL rate by genus (model-based):\")\nfor g, r in adj_rates.items():\n    print(f\"  {g}: {r:.4f}\")\n\nprint(\"\\nGenus coefficients (relative to Homo sapiens):\")\nfor idx in coef_table.index:\n    if \"C(genus)\" in idx:\n        coef = coef_table.loc[idx, \"Coef.\"]\n        pval = coef_table.loc[idx, \"P>|z|\"]\n        print(f\"  {idx}: coef={coef:.4f}, p={pval:.4g}\")\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "openai",
+    "llm_model": "gpt-5-mini",
+    "use_cache": false,
+    "timestamp_utc": "2026-01-30T03:29:08.873292+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/amtl/noperturb/run1/analysis.py",
+      "info_json": "agentic/experiments/outputs/amtl/noperturb/run1/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/amtl/noperturb/run1/conclusion.txt"
+    }
+  }
+}
