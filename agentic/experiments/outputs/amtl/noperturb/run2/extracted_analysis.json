@@ -1,0 +1,62 @@
+{
+  "dataset_name": "amtl",
+  "run_dir": "agentic/experiments/outputs/amtl/noperturb/run2",
+  "research_question": "Do modern humans (Homo sapiens) have higher frequencies of antemortem tooth loss (AMTL) compared to non-human primate genera (Pan, Pongo, Papio), after accounting for the effects of age, sex, and tooth class?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Indicator comparing modern humans (Homo sapiens) to non-human primate genera (Pan, Pongo, Papio) — the predictor of interest in the research question (analysis used a derived is_human from this column).",
+          "columns": [
+            "genus"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Antemortem tooth loss (AMTL) outcome represented as counts of missing teeth out of the number of observable sockets (modeled as a binomial: num_amtl successes and sockets - num_amtl failures).",
+        "columns": [
+          "num_amtl",
+          "sockets"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Estimated age of specimen at death; included to account for age-related variation in AMTL.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "age"
+          ]
+        },
+        {
+          "description": "Estimate of specimen sex (probability of being male); included to control for sex differences in AMTL.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "prob_male"
+          ]
+        },
+        {
+          "description": "Tooth class (Anterior, Posterior, or Premolar); included to control for differences in AMTL by tooth type.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "tooth_class"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\n\n\ndef main():\n    df = pd.read_csv(\"amtl.csv\")\n\n    # Basic cleaning\n    needed = [\"num_amtl\", \"sockets\", \"age\", \"prob_male\", \"tooth_class\", \"genus\"]\n    df = df.dropna(subset=needed).copy()\n\n    # Binary indicator for humans vs non-human primates\n    df[\"is_human\"] = (df[\"genus\"] == \"Homo sapiens\").astype(int)\n\n    # One-hot encode tooth class (drop first as reference)\n    tooth_dummies = pd.get_dummies(df[\"tooth_class\"], prefix=\"tooth\", drop_first=True)\n\n    X = pd.concat(\n        [\n            pd.Series(1.0, index=df.index, name=\"intercept\"),\n            df[[\"age\", \"prob_male\", \"is_human\"]],\n            tooth_dummies,\n        ],\n        axis=1,\n    )\n\n    endog = np.column_stack([df[\"num_amtl\"], df[\"sockets\"] - df[\"num_amtl\"]])\n\n    model = sm.GLM(endog, X, family=sm.families.Binomial())\n    res = model.fit()\n\n    coef = res.params[\"is_human\"]\n    pval = res.pvalues[\"is_human\"]\n    ci_low, ci_high = res.conf_int().loc[\"is_human\"].tolist()\n\n    odds_ratio = float(np.exp(coef))\n    ci_or_low = float(np.exp(ci_low))\n    ci_or_high = float(np.exp(ci_high))\n\n    print(res.summary())\n    print(\"\\nHuman effect (is_human):\")\n    print(f\"coef={coef:.4f}, p={pval:.4g}\")\n    print(f\"odds_ratio={odds_ratio:.3f} (95% CI {ci_or_low:.3f}, {ci_or_high:.3f})\")\n\n\nif __name__ == \"__main__\":\n    main()\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "openai",
+    "llm_model": "gpt-5-mini",
+    "use_cache": false,
+    "timestamp_utc": "2026-01-31T01:21:00.198794+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/amtl/noperturb/run2/analysis.py",
+      "info_json": "agentic/experiments/outputs/amtl/noperturb/run2/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/amtl/noperturb/run2/conclusion.txt"
+    }
+  }
+}

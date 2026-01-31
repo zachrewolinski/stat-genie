@@ -18,7 +18,7 @@ def run_pairwise_eval():
     parser.add_argument("--llm-provider", default="openai", help="LLM provider")
     parser.add_argument("--llm-model", default="gpt-5-mini", help="LLM model")
     parser.add_argument("--analysis-base-dir", type=str, default=None,
-                       help="Base directory for analysis outputs (default: outputs_extracted/analysis)")
+                       help="Base directory for analysis outputs (default: outputs_extracted)")
     args = parser.parse_args()
     
     dataset_name = args.dataset
@@ -33,14 +33,14 @@ def run_pairwise_eval():
         if not base_dir.is_absolute():
             base_dir = project_root / base_dir
     else:
-        base_dir = project_root / "outputs_extracted" / "analysis"
+        base_dir = project_root / "outputs_extracted"
     
     # perturbations = ["add_features", "anonymize", "noperturb",
     #                  "replace_with_rvs", "shuffle_names",
     #                  "positive_leading_statement",
     #                  "negative_leading_statement",
     #                  "replace_and_positive_statement"]
-    perturbations = ["noperturb"]
+    perturbations = ["noperturb", "replace_with_rvs"]
     
     analysis_result_paths = [
         str(base_dir / dataset_name / f"{perturbation}_output")
@@ -62,7 +62,7 @@ def run_pairwise_eval():
     else:
         run_id = f"timestamp_{timestamp}"
     
-    output_dir = project_root / "outputs_extracted" / "pairwise_eval" / dataset_name / run_id
+    output_dir = project_root / "outputs_extracted" / dataset_name / run_id
     output_dir.mkdir(parents=True, exist_ok=True)
     
     analysis_result_paths_relative = [

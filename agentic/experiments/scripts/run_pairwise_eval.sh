@@ -15,11 +15,15 @@ mkdir -p out
 
 # cd to project root
 if [ -n "$SLURM_SUBMIT_DIR" ]; then
-    cd "$SLURM_SUBMIT_DIR" || exit 1
+    echo "Changing directory to project root from SLURM_SUBMIT_DIR: $SLURM_SUBMIT_DIR"
+    cd "$SLURM_SUBMIT_DIR/../.." || exit 1
 else
     SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-    cd "$SCRIPT_DIR/.." || exit 1
+    echo "Changing directory to project root from script dir: $SCRIPT_DIR"
+    cd "$SCRIPT_DIR/../.." || exit 1
 fi
+
+echo "Current directory: $(pwd)"
 
 if ! command -v poetry &> /dev/null; then
     echo "Error: poetry not found"
@@ -45,10 +49,10 @@ if [ -z "$OPENAI_API_KEY" ]; then
 fi
 
 DATASET="$1"
-NUM_MULTIRUNS=1
+NUM_MULTIRUNS=3
 LLM_PROVIDER="openai"
 LLM_MODEL="gpt-5-mini"
-ANALYSIS_BASE_DIR="outputs/analysis"
+ANALYSIS_BASE_DIR="outputs_extracted"
 echo "Job ID: ${SLURM_JOB_ID}"
 
 START_TIME=$(date +%s)
@@ -61,7 +65,7 @@ ARGS=(
 if [ -n "$ANALYSIS_BASE_DIR" ]; then
     ARGS+=(--analysis-base-dir "$ANALYSIS_BASE_DIR")
 fi
-poetry run python scripts/run_pairwise_eval.py "${ARGS[@]}"
+poetry run python agentic/experiments/scripts/run_pairwise_eval.py "${ARGS[@]}"
 EXIT_CODE=$?
 END_TIME=$(date +%s)
 
