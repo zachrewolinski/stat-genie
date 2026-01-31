@@ -1,28 +1,24 @@
-#!/usr/bin/env bash
+#!/bin/bash
 #
 # Extract from toy/run*, aggregate into toy_extracted/. Overwrites by default.
 
 set -euo pipefail
 
-EXPERIMENTS_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-TOY_DIR="${EXPERIMENTS_DIR}/toy"
-TOY_EXTRACTED="${EXPERIMENTS_DIR}/toy_extracted"
+TOY_DIR="toy"
+TOY_EXTRACTED="toy_extracted"
 
 LLM_PROVIDER="openai"
 LLM_MODEL="gpt-5-mini"
 
-cd "$EXPERIMENTS_DIR"
+echo "working directory:"
+pwd
 
-echo
 echo "[toy] extract"
-for run_dir in "${TOY_DIR}"/run*; do
-  [[ -d "$run_dir" ]] || continue
-  echo "  - ${run_dir}"
-  poetry run python scripts/extract_single_run.py \
-    --run-dir "$run_dir" \
+
+poetry run python scripts/extract_single_run.py \
+    --run-dir "toy/run1" \
     --llm-provider "$LLM_PROVIDER" \
     --llm-model "$LLM_MODEL"
-done
 
 echo "[toy] aggregate"
 poetry run python scripts/aggregate_runs_to_blade_dir.py \

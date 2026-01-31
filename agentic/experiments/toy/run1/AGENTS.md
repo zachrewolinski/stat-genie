@@ -8,7 +8,7 @@
     When executing Python scripts, ALWAYS use the command `poetry run python <filename.py>`. Never use `python` or `python3` directly.
     The numpy, pandas, scikit-learn, and statsmodels packages are all pre-installed in this `poetry` environment and guaranteed to work.
     Use your data analysis to draw a conclusion that answers the research question.
-    You only have access to the 'toy' subdirectory and its contents - no other files or directories.
+    You only have access to the 'toy/run1' subdirectory and its contents - no other files or directories.
     The conclusion must be written in a file called 'conclusion.txt'.
     The first line of 'conclusion.txt' must be either 'Yes' or 'No' (and only that word, with no reasoning).
     The next line(s) should contain 1-2 brief sentences explaining your reasoning.
