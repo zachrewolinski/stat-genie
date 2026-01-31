@@ -63,7 +63,7 @@ export OPENAI_API_KEY="sk-..."
 
 ### Azure OpenAI with Entra ID Authentication
 
-For Azure OpenAI with Entra ID (Azure AD) authentication:
+For Codex CLI + Azure OpenAI using Entra ID (Azure AD), the recommended path is the setup script under `agentic/experiments/scripts/`.
 
 **Prerequisites:**
 
@@ -77,31 +77,40 @@ pip install azure-identity
 # 3. Ensure you have "Cognitive Services OpenAI User" role on your Azure OpenAI resource
 ```
 
-**Setup:**
+**Recommended setup (Codex CLI):**
 
-1. Configure your Azure settings by editing `agentic/experiments/scripts/setup-azure-codex.sh` or set environment variables:
+1. Export your Azure settings (deployment is the Azure *deployment* name, not model name):
 
 ```bash
 export AZURE_RESOURCE_NAME="myopenai"         # e.g., "myopenai"
 export AZURE_DEPLOYMENT_NAME="gpt-5.2-codex"  # e.g., "gpt-5.2-codex"
+# Optional overrides:
+# export AZURE_API_VERSION="2025-04-01-preview"
+# export AZURE_WIRE_API="responses"
 ```
 
-2. Run the setup script (creates `~/.codex/config.toml` and gets initial token):
+2. Source the setup script (creates `~/.codex/config.toml` and exports a token into your shell):
 
 ```bash
 cd agentic/experiments
-bash scripts/setup-azure-codex.sh
+source scripts/setup-azure-codex.sh
 ```
 
-3. For subsequent runs, refresh the token (tokens expire after ~1 hour):
+3. Sanity check the Codex CLI profile:
+
+```bash
+npx codex --profile azure "Say hello from Azure"
+```
+
+4. For subsequent runs, refresh the token (tokens expire after ~1 hour):
 
 ```bash
 source scripts/refresh-azure-token.sh
 ```
 
-**Manual Configuration:**
+**Manual configuration (if you don’t want the script):**
 
-If you prefer to configure manually, create `~/.codex/config.toml`:
+Create `~/.codex/config.toml`:
 
 ```toml
 model_provider = "azure"
@@ -119,12 +128,12 @@ model_provider = "azure"
 model = "your-deployment-name"
 ```
 
-Then get a token and export it:
+Then get a token and export it (Azure CLI login required):
 
 ```bash
 export AZURE_OPENAI_API_KEY="$(python3 -c '
-from azure.identity import DefaultAzureCredential
-cred = DefaultAzureCredential()
+from azure.identity import AzureCliCredential
+cred = AzureCliCredential()
 print(cred.get_token("https://cognitiveservices.azure.com/.default").token)
 ')"
 ```

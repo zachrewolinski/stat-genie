@@ -19,18 +19,17 @@ if ! python3 -c "import azure.identity" 2>/dev/null; then
 fi
 
 AZURE_OPENAI_API_KEY=$(python3 << 'PYTHON'
-from azure.identity import DefaultAzureCredential
+from azure.identity import AzureCliCredential
+import sys
 
 scope = "https://cognitiveservices.azure.com/.default"
 
 try:
-    cred = DefaultAzureCredential(
-        exclude_managed_identity_credential=True,
-    )
+    cred = AzureCliCredential()
     token = cred.get_token(scope).token
+    print("USING_AZURE_CREDENTIAL:AzureCliCredential", file=sys.stderr)
     print(token)
 except Exception as e:
-    import sys
     print(f"Error getting token: {e}", file=sys.stderr)
 PYTHON
 )
