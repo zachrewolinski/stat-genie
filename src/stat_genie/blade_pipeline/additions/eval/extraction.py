@@ -110,16 +110,22 @@ def format_features(multirun_analyses: dict, num_runs: int,
         contr_vars = deepcopy(multirun_analyses['analyses'][str(i)]['cvars']['controls'])
         response_vars = deepcopy(multirun_analyses['analyses'][str(i)]['cvars']['dv'])
 
-        # get any lines from the transform code that represent transformations
+        # get any lines from the code that represent transformations
         # of the independent or control variables
-        transform_code = multirun_analyses['analyses'][str(i)]['transform_code']
+        # check if 'transform_code' is a key in the analysis dict
+        if 'transform_code' in multirun_analyses['analyses'][str(i)]:
+            code = multirun_analyses['analyses'][str(i)]['transform_code']
+        elif 'analysis_code' in multirun_analyses['analyses'][str(i)]:
+            code = multirun_analyses['analyses'][str(i)]['analysis_code']
+        else:
+            raise ValueError("No transform_code or analysis_code found in analysis dict.")
         
         # for each variable in ind_vars, check if it is transformed
         # in the transform_code by using an LLM assistant
         for dict_idx, var in enumerate(ind_vars):
             transform_responses = get_feature_transforms(llm_provider,
                                                          llm_model,
-                                                         transform_code,
+                                                         code,
                                                          var['columns'],
                                                          var['description'])
             ind_vars[dict_idx]['transform_code'] = \
@@ -132,7 +138,7 @@ def format_features(multirun_analyses: dict, num_runs: int,
         for dict_idx, var in enumerate(contr_vars):
             transform_responses = get_feature_transforms(llm_provider,
                                                          llm_model,
-                                                         transform_code,
+                                                         code,
                                                          var['columns'],
                                                          var['description'])
             contr_vars[dict_idx]['transform_code'] = \
@@ -145,9 +151,9 @@ def format_features(multirun_analyses: dict, num_runs: int,
         # in the transform_code by using an LLM assistant
         transform_responses = get_feature_transforms(llm_provider,
                                                      llm_model,
-                                                transform_code,
-                                                response_vars['columns'],
-                                                response_vars['description'])
+                                                     code,
+                                                     response_vars['columns'],
+                                                     response_vars['description'])
         response_vars['transform_code'] = [response.text[0].content \
             for response in transform_responses]
 
@@ -177,12 +183,18 @@ def format_model_info(multirun_analyses: dict, num_runs: int,
     def process_single_run(i):
         
         # get the model code
-        model_code = multirun_analyses['analyses'][str(i)]['m_code']
+        # check if dictionary has 'm_code' key
+        if 'm_code' in multirun_analyses['analyses'][str(i)]:
+            code = multirun_analyses['analyses'][str(i)]['m_code']
+        elif 'analysis_code' in multirun_analyses['analyses'][str(i)]:
+            code = multirun_analyses['analyses'][str(i)]['analysis_code']
+        else:
+            raise ValueError("No m_code or analysis_code found in analysis dict.")
         
         # get the model information using an LLM assistant
         model_information = get_model_information(llm_provider,
                                                   llm_model,
-                                                  model_code)
+                                                  code)
         
         return i, model_information
     
