@@ -14,11 +14,12 @@
 #   - Python azure-identity package (pip install azure-identity)
 #   - Cognitive Services OpenAI User role on your Azure OpenAI resource
 
-set -euo pipefail
-
 # ============================================================================
 # CONFIGURATION - Update these values for your Azure setup
 # ============================================================================
+
+AZURE_RESOURCE_NAME="fxdata-eastus2"
+AZURE_DEPLOYMENT_NAME="gpt-5.2-codex"
 
 # Your Azure OpenAI resource name (the part before .openai.azure.com)
 AZURE_RESOURCE_NAME="${AZURE_RESOURCE_NAME:-your-resource-name}"
@@ -74,33 +75,38 @@ EOF
 # ============================================================================
 
 refresh_token() {
-    echo "Refreshing Azure Entra ID token..."
+    echo "Refreshing Azure Entra ID token (via Azure CLI user)..."
     
-    # Check if azure-identity is installed
+    # Check if azure-identity is installed (non-fatal in local use)
     if ! python3 -c "import azure.identity" 2>/dev/null; then
-        echo "Error: azure-identity not installed. Run: pip install azure-identity"
-        return 1
+        echo "Warning: azure-identity not installed. Run: pip install azure-identity"
+        return 0
     fi
-    
-    # Get token using DefaultAzureCredential (uses az login, managed identity, etc.)
+
+    # Get token using AzureCliCredential so we *only* use the
+    # az login user identity, avoiding DefaultAzureCredential
+    # picking up any other env/service-principal credentials.
     local token
     token=$(python3 << 'PYTHON'
-from azure.identity import DefaultAzureCredential
+from azure.identity import AzureCliCredential
+import sys
+
+scope = "https://cognitiveservices.azure.com/.default"
 
 try:
-    cred = DefaultAzureCredential()
-    token = cred.get_token("https://cognitiveservices.azure.com/.default").token
+    cred = AzureCliCredential()
+    token = cred.get_token(scope).token
+    print("USING_AZURE_CREDENTIAL:AzureCliCredential", file=sys.stderr)
     print(token)
 except Exception as e:
-    import sys
     print(f"Error getting token: {e}", file=sys.stderr)
-    sys.exit(1)
+    # Do not propagate a non-zero exit code; keep this best-effort for local use.
 PYTHON
 )
     
     if [[ -z "$token" ]]; then
-        echo "Error: Failed to get token"
-        return 1
+        echo "Warning: Failed to get token"
+        return 0
     fi
     
     export AZURE_OPENAI_API_KEY="$token"
@@ -148,5 +154,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     main
 else
     # Script is being sourced - just refresh the token
-    refresh_token
+    # Ensure a refresh failure doesn't kill the current shell/tmux session
+    # due to 'set -e' at the top of this script.
+    refresh_token || true
 fi
