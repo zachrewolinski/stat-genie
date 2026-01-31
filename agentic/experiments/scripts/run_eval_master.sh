@@ -1,6 +1,4 @@
 #!/bin/bash
-#SBATCH --mail-type=END
-#SBATCH --mail-user=zachrewolinski@berkeley.edu
 
 slurm_script="scripts/run_pairwise_eval.sh"
 

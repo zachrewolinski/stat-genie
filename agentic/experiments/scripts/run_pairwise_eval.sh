@@ -3,10 +3,6 @@
 #SBATCH -o ./out/pairwise_eval_%j.log  
 #SBATCH -e ./out/pairwise_eval_%j.err
 #
-#SBATCH --mail-user=zachrewolinski@berkeley.edu
-#SBATCH --mail-type=FAIL,TIME_LIMIT
-#
-#SBATCH -p yugroup
 #SBATCH --cpus-per-task=30
 #SBATCH --mem=64G
 #SBATCH --ntasks=1
