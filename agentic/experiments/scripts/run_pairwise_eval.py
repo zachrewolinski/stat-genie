@@ -35,12 +35,11 @@ def run_pairwise_eval():
     else:
         base_dir = project_root / "outputs_extracted"
     
-    # perturbations = ["add_features", "anonymize", "noperturb",
-    #                  "replace_with_rvs", "shuffle_names",
-    #                  "positive_leading_statement",
-    #                  "negative_leading_statement",
-    #                  "replace_and_positive_statement"]
-    perturbations = ["noperturb", "replace_with_rvs"]
+    perturbations = ["add_features", "anonymize", "noperturb",
+                     "replace_with_rvs", "shuffle_names",
+                     "positive_leading_statement",
+                     "negative_leading_statement",
+                     "replace_and_positive_statement"]
     
     analysis_result_paths = [
         str(base_dir / dataset_name / f"{perturbation}_output")

@@ -2,16 +2,13 @@
 # Run from agentic/experiments/ (or sbatch from there so job cwd is experiments/).
 
 # list all blade datasets
-# datasets=("affairs" "amtl" "boxes" "caschools" "crofoot" "fish" "hurricane" "mortgage" "panda_nuts" "reading" "soccer" "teachingratings")
-datasets=("amtl")
+datasets=("affairs" "amtl" "boxes" "caschools" "crofoot" "hurricane" "mortgage" "panda_nuts" "reading" "soccer" "teachingratings")
 
 # list all perturbation types
-# perturbations=("noperturb" "anonymize" "shuffle_names" "add_features" "replace_with_rvs" "positive_leading_statement" "negative_leading_statement" "replace_and_positive_statement")
-# perturbations=("noperturb" "anonymize" "replace_with_rvs" "positive_leading_statement")
-perturbations=("noperturb" "replace_with_rvs")
+perturbations=("noperturb" "anonymize" "shuffle_names" "add_features" "replace_with_rvs" "positive_leading_statement" "negative_leading_statement" "replace_and_positive_statement")
 
 # number of runs per dataset-perturbation pair
-num_runs=3
+num_runs=5
 
 # analysis script name
 analysis_script="scripts/analysis.sh"

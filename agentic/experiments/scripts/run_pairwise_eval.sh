@@ -49,7 +49,7 @@ if [ -z "$OPENAI_API_KEY" ]; then
 fi
 
 DATASET="$1"
-NUM_MULTIRUNS=3
+NUM_MULTIRUNS=5
 LLM_PROVIDER="openai"
 LLM_MODEL="gpt-5-mini"
 ANALYSIS_BASE_DIR="outputs_extracted"
