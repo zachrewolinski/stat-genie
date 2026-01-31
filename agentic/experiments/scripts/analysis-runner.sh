@@ -1,4 +1,5 @@
 #!/bin/bash
+# Run from agentic/experiments/ (or sbatch from there so job cwd is experiments/).
 
 # list all blade datasets
 # datasets=("affairs" "amtl" "boxes" "caschools" "crofoot" "fish" "hurricane" "mortgage" "panda_nuts" "reading" "soccer" "teachingratings")

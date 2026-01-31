@@ -1,4 +1,5 @@
 #!/bin/bash
+# Run from agentic/experiments/ (job cwd must be experiments/).
 
 # the first three inputs are dataset name, perturbation type, and run number.
 dataset_name="$1"
@@ -35,6 +36,6 @@ fi
 # if the agent name is codex, do the following
 if [ "$agent_name" == "codex" ]; then
     # run codex to generate an answer to the research question
-    poetry run npx codex exec "Follow the instructions given in 'instructions.txt'" --dangerously-bypass-approvals-and-sandbox
+    poetry run npx codex exec "Follow the instructions given in 'instructions.txt'" --sandbox workspace-write
 fi
 

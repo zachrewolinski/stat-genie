@@ -2,14 +2,11 @@
 #
 # Extract every run under outputs/<dataset>/<perturbation>/, then aggregate
 # into outputs_extracted/<dataset>/<perturbation>_output/.
-# Requires analysis.py, info.json, conclusion.txt in each run dir.
-#
-# Skips runs that already have extracted_analysis.json.
-# Use --overwrite to re-extract and re-aggregate everything.
+# Run from agentic/experiments/. Requires analysis.py, info.json, conclusion.txt in each run dir.
+# Skips runs that already have extracted_analysis.json. Use --overwrite to re-extract.
 
 set -euo pipefail
 
-EXPERIMENTS_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 OUTPUTS_ROOT="outputs"
 EXTRACTED_ROOT="outputs_extracted"
 
@@ -23,8 +20,6 @@ for arg in "$@"; do
     break
   fi
 done
-
-cd "$EXPERIMENTS_DIR"
 
 for dataset_dir in "${OUTPUTS_ROOT}"/*/; do
   [[ -d "$dataset_dir" ]] || continue
@@ -63,4 +58,4 @@ for dataset_dir in "${OUTPUTS_ROOT}"/*/; do
 done
 
 echo
-echo "done → ${EXPERIMENTS_DIR}/${EXTRACTED_ROOT}/"
+echo "done -> ${EXTRACTED_ROOT}/"
