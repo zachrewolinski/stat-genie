@@ -36,6 +36,13 @@ refresh_azure_token_if_needed
 for dataset in "${datasets[@]}"; do
     for perturbation in "${perturbations[@]}"; do
         for run_number in $(seq 1 $num_runs); do
+            # Check if this experiment already has output (conclusion.txt indicates completion)
+            output_dir="outputs/$dataset/$perturbation/run$run_number"
+            if [ -f "$output_dir/conclusion.txt" ]; then
+                echo "[analysis-runner] Skipping (already completed): $dataset, $perturbation, run $run_number"
+                continue
+            fi
+            
             # Refresh token if needed (checks if stale)
             refresh_azure_token_if_needed
             
