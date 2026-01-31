@@ -381,8 +381,21 @@ The `agentic/experiments/` directory contains scripts for running agentic (Codex
 
 ### Run Codex Analysis Pipeline
 
+**Local execution (no SLURM):**
+
 ```bash
-# From agentic/experiments/
+cd agentic/experiments
+
+# For Azure OpenAI: login first (tokens auto-refresh during long runs)
+az login
+
+bash scripts/run_codex_experiments_local.sh
+```
+
+**SLURM cluster submission:**
+
+```bash
+cd agentic/experiments
 bash scripts/run_codex_experiments.sh
 ```
 
@@ -390,6 +403,8 @@ This runs:
 1. Analysis generation with Codex agent
 2. Extraction and aggregation
 3. Pairwise evaluation
+
+The local scripts automatically refresh Azure tokens every 30 minutes to prevent expiration during long runs.
 
 ### Run Single Agentic Analysis
 
@@ -418,20 +433,29 @@ bash scripts/analysis.sh caschools noperturb 1 codex
 
 ---
 
-## SLURM Usage
+## Running on HPC Clusters (SLURM)
 
-For HPC clusters with SLURM:
+The shell scripts support both local execution and SLURM job submission.
+
+**Local execution (no SLURM):**
 
 ```bash
-# Submit single analysis job
+# Run directly with bash
+bash experiments/scripts/run_analysis.sh caschools
+bash experiments/scripts/run_analysis_master.sh
+bash experiments/scripts/run_eval_master.sh
+```
+
+**SLURM cluster submission:**
+
+```bash
+# Submit as SLURM jobs (requires SLURM environment)
 sbatch experiments/scripts/run_analysis.sh caschools
-
-# Submit all dataset jobs
 sbatch experiments/scripts/run_analysis_master.sh
-
-# Submit evaluation jobs
 sbatch experiments/scripts/run_eval_master.sh
 ```
+
+Note: `sbatch` is only available on HPC clusters with SLURM installed. Use `bash` for local machines.
 
 ---
 
