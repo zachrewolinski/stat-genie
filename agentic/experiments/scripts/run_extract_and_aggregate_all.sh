@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 #
 # Extract every run under outputs/<dataset>/<perturbation>/, then aggregate
 # into outputs_extracted/<dataset>/<perturbation>_output/.

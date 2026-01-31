@@ -6,14 +6,14 @@
     "cvars": {
       "ivs": [
         {
-          "description": "Specimen genus (primary predictor): compares Homo sapiens to non-human primate genera (Pan, Pongo, Papio) to test whether humans have different AMTL frequencies.",
+          "description": "Specimen genus — the primary predictor of interest comparing Homo sapiens versus non-human primate genera (analysis used a human indicator derived from this column).",
           "columns": [
             "genus"
           ]
         }
       ],
       "dv": {
-        "description": "Antemortem tooth loss (AMTL) measured as the count of missing teeth out of the number of observable sockets; modeled as successes/trials in a binomial regression.",
+        "description": "Antemortem tooth loss (AMTL). Measured as the count of missing teeth of a given tooth class (num_amtl); the number of observable sockets (sockets) is used as the denominator in the binomial model (AMTL rate = num_amtl / sockets).",
         "columns": [
           "num_amtl",
           "sockets"
@@ -21,7 +21,7 @@
       },
       "controls": [
         {
-          "description": "Estimated age at death (included to adjust for the effect of age on AMTL).",
+          "description": "Estimated age at death included as a continuous covariate to control for age effects on AMTL.",
           "is_moderator": false,
           "moderator_on": null,
           "columns": [
@@ -29,7 +29,7 @@
           ]
         },
         {
-          "description": "Estimated probability of being male (used as the sex covariate to adjust for sex differences in AMTL).",
+          "description": "Estimate of sex (probability of being male) included as a covariate to control for sex differences in AMTL.",
           "is_moderator": false,
           "moderator_on": null,
           "columns": [
@@ -37,7 +37,7 @@
           ]
         },
         {
-          "description": "Tooth class (Anterior, Posterior, Premolar) included to control for differences in AMTL by tooth type.",
+          "description": "Tooth class (Anterior, Posterior, Premolar) included as a categorical covariate to control for differences in AMTL by tooth type.",
           "is_moderator": false,
           "moderator_on": null,
           "columns": [
@@ -46,13 +46,13 @@
         }
       ]
     },
-    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\nimport statsmodels.formula.api as smf\n\n# Load data\npath = \"amtl.csv\"\ndf = pd.read_csv(path)\n\n# Basic cleaning: drop rows with missing key fields\nkey_cols = [\"num_amtl\", \"sockets\", \"age\", \"prob_male\", \"tooth_class\", \"genus\"]\ndf = df.dropna(subset=key_cols).copy()\n\n# Ensure numeric types\nfor col in [\"num_amtl\", \"sockets\", \"age\", \"prob_male\"]:\n    df[col] = pd.to_numeric(df[col], errors=\"coerce\")\n\n# Drop any rows with nonpositive sockets or invalid counts\nmask_valid = (df[\"sockets\"] > 0) & (df[\"num_amtl\"] >= 0) & (df[\"num_amtl\"] <= df[\"sockets\"])\ndf = df.loc[mask_valid].copy()\n\n# Categorical variables\nfor col in [\"tooth_class\", \"genus\"]:\n    df[col] = df[col].astype(\"category\")\n\n# Relevel genus so Homo sapiens is reference\nif \"Homo sapiens\" in df[\"genus\"].cat.categories:\n    df[\"genus\"] = df[\"genus\"].cat.reorder_categories(\n        [\"Homo sapiens\"] + [c for c in df[\"genus\"].cat.categories if c != \"Homo sapiens\"],\n        ordered=False,\n    )\n\n# Fit binomial GLM with counts\nformula = \"num_amtl + I(sockets - num_amtl) ~ age + prob_male + C(tooth_class) + C(genus)\"\nresult = smf.glm(formula=formula, data=df, family=sm.families.Binomial()).fit()\n\n# Compute adjusted predicted AMTL rate by genus by averaging predictions over observed covariates\n# Keep age, prob_male, tooth_class as observed; set genus to each value\nadj_rates = {}\nfor genus in df[\"genus\"].cat.categories:\n    df_tmp = df.copy()\n    df_tmp[\"genus\"] = genus\n    pred = result.predict(df_tmp)\n    adj_rates[genus] = pred.mean()\n\n# Extract coefficients and p-values for genus effects\ncoef_table = result.summary2().tables[1]\n\nprint(\"N rows used:\", len(df))\nprint(\"Adjusted mean AMTL rate by genus (model-based):\")\nfor g, r in adj_rates.items():\n    print(f\"  {g}: {r:.4f}\")\n\nprint(\"\\nGenus coefficients (relative to Homo sapiens):\")\nfor idx in coef_table.index:\n    if \"C(genus)\" in idx:\n        coef = coef_table.loc[idx, \"Coef.\"]\n        pval = coef_table.loc[idx, \"P>|z|\"]\n        print(f\"  {idx}: coef={coef:.4f}, p={pval:.4g}\")\n"
+    "analysis_code": "import numpy as np\nimport pandas as pd\nimport statsmodels.api as sm\nimport statsmodels.formula.api as smf\n\n# Load data\n_df = pd.read_csv(\"amtl.csv\")\n\n# Basic cleaning: drop rows with missing required fields\nrequired_cols = [\"num_amtl\", \"sockets\", \"age\", \"prob_male\", \"tooth_class\", \"genus\"]\ndf = _df.dropna(subset=required_cols).copy()\n\n# Ensure valid counts\n# Keep rows where sockets > 0 and num_amtl between 0 and sockets\nmask = (df[\"sockets\"] > 0) & (df[\"num_amtl\"] >= 0) & (df[\"num_amtl\"] <= df[\"sockets\"])\ndf = df.loc[mask].copy()\n\n# Binary indicator for modern humans\n# Note: genus values include \"Homo sapiens\"\ndf[\"is_human\"] = (df[\"genus\"] == \"Homo sapiens\").astype(int)\n\n# Prepare endog for binomial GLM (successes, failures)\ndf[\"failures\"] = df[\"sockets\"] - df[\"num_amtl\"]\n\n# Fit binomial regression controlling for age, sex estimate, and tooth class\n# Use categorical tooth_class\nformula = \"num_amtl + failures ~ is_human + age + prob_male + C(tooth_class)\"\nmodel = smf.glm(formula=formula, data=df, family=sm.families.Binomial()).fit()\n\n# Extract key results for is_human\ncoef = model.params.get(\"is_human\", float(\"nan\"))\nse = model.bse.get(\"is_human\", float(\"nan\"))\npval = model.pvalues.get(\"is_human\", float(\"nan\"))\n\n# Convert coefficient to odds ratio for interpretability\nor_human = float(np.exp(coef)) if np.isfinite(coef) else float(\"nan\")\n\nprint(\"Rows used:\", len(df))\nprint(\"Is_human coefficient (log-odds):\", coef)\nprint(\"SE:\", se)\nprint(\"p-value:\", pval)\nprint(\"Odds ratio (human vs non-human):\", or_human)\n\n# Also compute predicted AMTL rate at mean covariates for human vs non-human\nmean_age = df[\"age\"].mean()\nmean_prob_male = df[\"prob_male\"].mean()\n# choose most common tooth_class for representative comparison\nmode_tooth_class = df[\"tooth_class\"].mode().iloc[0]\n\npred_df = pd.DataFrame({\n    \"is_human\": [0, 1],\n    \"age\": [mean_age, mean_age],\n    \"prob_male\": [mean_prob_male, mean_prob_male],\n    \"tooth_class\": [mode_tooth_class, mode_tooth_class],\n    \"num_amtl\": [1, 1],  # placeholder; not used for prediction with formula-based model\n    \"failures\": [1, 1],\n})\n\npred = model.predict(pred_df)\nprint(\"Predicted AMTL rate at mean covariates (non-human, human):\", pred.tolist())\n"
   },
   "extraction_metadata": {
     "llm_provider": "openai",
     "llm_model": "gpt-5-mini",
     "use_cache": false,
-    "timestamp_utc": "2026-01-30T03:29:08.873292+00:00",
+    "timestamp_utc": "2026-01-31T00:31:48.181224+00:00",
     "inputs": {
       "analysis_py": "agentic/experiments/outputs/amtl/noperturb/run1/analysis.py",
       "info_json": "agentic/experiments/outputs/amtl/noperturb/run1/info.json",
