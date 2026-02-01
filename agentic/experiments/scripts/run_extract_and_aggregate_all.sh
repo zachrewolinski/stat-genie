@@ -10,8 +10,8 @@ set -euo pipefail
 OUTPUTS_ROOT="outputs"
 EXTRACTED_ROOT="outputs_extracted"
 
-LLM_PROVIDER="openai"
-LLM_MODEL="gpt-5-mini"
+LLM_PROVIDER="${LLM_PROVIDER:-openai}"
+LLM_MODEL="${LLM_MODEL:-gpt-5-mini}"
 
 OVERWRITE=""
 for arg in "$@"; do

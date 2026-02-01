@@ -46,8 +46,8 @@ fi
 
 DATASET="$1"
 NUM_MULTIRUNS=5
-LLM_PROVIDER="openai"
-LLM_MODEL="gpt-5-mini"
+LLM_PROVIDER="${LLM_PROVIDER:-openai}"
+LLM_MODEL="${LLM_MODEL:-gpt-5-mini}"
 ANALYSIS_BASE_DIR="outputs_extracted"
 echo "Job ID: ${SLURM_JOB_ID}"
 

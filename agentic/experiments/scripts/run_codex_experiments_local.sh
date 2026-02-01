@@ -16,19 +16,26 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Source the token refresh helper
 source "$SCRIPT_DIR/token-refresh-helper.sh"
 
+# LLM config for extract/aggregate and pairwise eval (Azure OpenAI fxdata-eastus2)
+export LLM_CONFIG_PATH="$(cd "$SCRIPT_DIR/../../.." && pwd)/config/llm_config.yml"
+export LLM_PROVIDER="azureopenai"
+#export LLM_MODEL="gpt-5.1-fxdata-eastus2"
+export LLM_MODEL="gpt-5-mini-fxdata-eastus2"
+
+
 # Initial token refresh for Azure
 refresh_azure_token_if_needed
 
 echo "[codex] analysis"
 bash "$SCRIPT_DIR/analysis-runner-local.sh"
 
-echo "[gpt-5-mini] extract + aggregate"
+echo "[${LLM_MODEL}] extract + aggregate"
 refresh_azure_token_if_needed  # Refresh before extraction in case token expired
 bash "$SCRIPT_DIR/run_extract_and_aggregate_all.sh"
 
 echo "done -> outputs_extracted/"
 
-echo "[gpt-5-mini] pairwise judge"
+echo "[${LLM_MODEL}] pairwise judge"
 refresh_azure_token_if_needed  # Refresh before eval in case token expired
 bash "$SCRIPT_DIR/run_eval_master_local.sh"
 
