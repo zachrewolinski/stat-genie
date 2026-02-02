@@ -1,5 +1,6 @@
 import os
 import json
+import time
 import pandas as pd
 from typing import Optional
 from joblib import Parallel, delayed
@@ -107,6 +108,9 @@ def evaluate(
     
                 
     # give everything to parallelized judge
+    is_azure = llm_provider.lower() in {"azureopenai", "azureoai", "azure"}
+    delay_seconds = float(os.getenv("PAIRWISE_EVAL_DELAY_SECONDS", "1" if is_azure else "0"))
+    n_jobs = int(os.getenv("PAIRWISE_EVAL_N_JOBS", "1" if is_azure else "-1"))
     index_pairs = [
         (i, j)
         for i in range(num_multiruns)
@@ -114,6 +118,8 @@ def evaluate(
     ]
     def _run_pairwise(pair: tuple[int, int]):
         i, j = pair
+        if delay_seconds > 0:
+            time.sleep(delay_seconds)
         return (
             pair,
             run_judge_evaluation_pairwise(
@@ -131,7 +137,7 @@ def evaluate(
                 use_cache=use_cache,
             ),
         )
-    pairwise_results = Parallel(n_jobs=-1)(
+    pairwise_results = Parallel(n_jobs=n_jobs)(
         delayed(_run_pairwise)(pair) for pair in index_pairs
     )
     pairwise_similarities = dict(pairwise_results)

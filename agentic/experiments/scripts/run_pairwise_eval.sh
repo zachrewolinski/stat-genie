@@ -16,7 +16,7 @@ if [ -n "$SLURM_SUBMIT_DIR" ]; then
 else
     SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
     echo "Changing directory to project root from script dir: $SCRIPT_DIR"
-    cd "$SCRIPT_DIR/../.." || exit 1
+    cd "$SCRIPT_DIR/../../.." || exit 1
 fi
 
 echo "Current directory: $(pwd)"
@@ -37,11 +37,6 @@ if [ -f ".env" ]; then
     # shellcheck source=/dev/null
     source ".env"
     set +o allexport
-fi
-
-if [ -z "$OPENAI_API_KEY" ]; then
-    echo "Error: OPENAI_API_KEY not set"
-    exit 1
 fi
 
 DATASET="$1"

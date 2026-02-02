@@ -26,5 +26,6 @@ for dataset in "${datasets[@]}"; do
     refresh_azure_token_if_needed
     
     echo "Running eval for dataset: $dataset"
-    bash $eval_script $dataset
+    LLM_PROVIDER=azureopenai LLM_MODEL=gpt-5-mini-fxdata-eastus2 \
+        bash $eval_script $dataset
 done
