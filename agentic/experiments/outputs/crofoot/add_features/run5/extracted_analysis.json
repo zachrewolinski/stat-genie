@@ -1,0 +1,44 @@
+{
+  "dataset_name": "crofoot",
+  "run_dir": "agentic/experiments/outputs/crofoot/add_features/run5",
+  "research_question": "Do relative group size and contest location influence the probability of a capuchin monkey group winning an intergroup contest?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Relative group size (operationalized in the analysis as the difference or ratio between focal and other group size); underlying columns: number of individuals in focal and other groups.",
+          "columns": [
+            "n_focal",
+            "n_other"
+          ]
+        },
+        {
+          "description": "Contest location advantage (operationalized in the analysis as the difference in distance from each group's home-range center); underlying columns: distance of focal and other groups from their home-range centers.",
+          "columns": [
+            "dist_focal",
+            "dist_other"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Outcome of the intergroup contest: whether the focal group won (binary: 1 = focal won, 0 = other won).",
+        "columns": [
+          "win"
+        ]
+      },
+      "controls": []
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\nfrom pathlib import Path\n\nDATA_PATH = Path(__file__).resolve().parent / \"crofoot.csv\"\n\ndef main():\n    df = pd.read_csv(DATA_PATH)\n\n    # Construct variables for analysis\n    df = df.copy()\n    df[\"rel_size\"] = df[\"n_focal\"] - df[\"n_other\"]\n    df[\"rel_size_ratio\"] = df[\"n_focal\"] / df[\"n_other\"]\n    # Location advantage: negative means closer to focal center than other\n    df[\"rel_dist\"] = df[\"dist_focal\"] - df[\"dist_other\"]\n\n    # Logistic regression: win ~ rel_size + rel_dist\n    X = df[[\"rel_size\", \"rel_dist\"]]\n    X = sm.add_constant(X)\n    y = df[\"win\"]\n\n    model = sm.Logit(y, X)\n    result = model.fit(disp=False)\n\n    # Alternate model using ratio (as a robustness check)\n    X2 = df[[\"rel_size_ratio\", \"rel_dist\"]]\n    X2 = sm.add_constant(X2)\n    model2 = sm.Logit(y, X2)\n    result2 = model2.fit(disp=False)\n\n    # Simple descriptive stats\n    win_rate = df[\"win\"].mean()\n    win_by_size = df.groupby(pd.cut(df[\"rel_size\"], bins=[-np.inf, -1, 0, 1, np.inf]))[\"win\"].mean()\n\n    print(\"N:\", len(df))\n    print(\"Overall win rate:\", win_rate)\n    print(\"Win rate by rel_size bins (<=-2, -1 to 0, 0 to 1, >=2):\")\n    print(win_by_size)\n    print(\"\\nLogit (rel_size + rel_dist):\")\n    print(result.summary())\n    print(\"\\nLogit (rel_size_ratio + rel_dist):\")\n    print(result2.summary())\n\n    # Save key results for conclusion\n    key = pd.DataFrame({\n        \"coef\": result.params,\n        \"pval\": result.pvalues,\n        \"odds_ratio\": np.exp(result.params),\n    })\n    key.to_csv(Path(__file__).resolve().parent / \"analysis_results.csv\")\n\nif __name__ == \"__main__\":\n    main()\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T18:35:48.552129+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/crofoot/add_features/run5/analysis.py",
+      "info_json": "agentic/experiments/outputs/crofoot/add_features/run5/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/crofoot/add_features/run5/conclusion.txt"
+    }
+  }
+}

@@ -1,0 +1,93 @@
+{
+  "dataset_name": "affairs",
+  "run_dir": "agentic/experiments/outputs/affairs/noperturb/run1",
+  "research_question": "Does having children decrease (if at all) the engagement in extramarital affairs?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Presence of children in the marriage (main predictor of interest). Categorical factor indicating whether there are children in the marriage.",
+          "columns": [
+            "children"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Frequency of extramarital sexual intercourse during the past year (outcome). Numeric count coded as: 0 = none, 1 = once, 2 = twice, 3 = 3 times, 7 = 4–10 times, 12 = monthly/weekly/daily aggregated. (The analysis also derived a binary indicator for any affair from this variable.)",
+        "columns": [
+          "affairs"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Number of years married (numeric coding of duration married).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "yearsmarried"
+          ]
+        },
+        {
+          "description": "Respondent age in years (coded categories: 17.5 = under 20, 22 = 20–24, etc.).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "age"
+          ]
+        },
+        {
+          "description": "Self-reported religiousness (numeric scale 1–5: 1 = anti, 2 = not at all, 3 = slightly, 4 = somewhat, 5 = very).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "religiousness"
+          ]
+        },
+        {
+          "description": "Education level (numeric coding of highest education: e.g., 9 = grade school, 12 = high school graduate, 16 = college graduate, up to 20 = advanced degree).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "education"
+          ]
+        },
+        {
+          "description": "Occupation (numeric coding according to Hollingshead classification, reverse numbering).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "occupation"
+          ]
+        },
+        {
+          "description": "Self-rating of marriage happiness (1 = very unhappy, 2 = somewhat unhappy, 3 = average, 4 = happier than average, 5 = very happy).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "rating"
+          ]
+        },
+        {
+          "description": "Respondent gender (factor: male or female).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "gender"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport statsmodels.api as sm\nimport statsmodels.formula.api as smf\n\n# Load data\npath = \"affairs.csv\"\ndf = pd.read_csv(path)\n\n# Create binary outcome: any affair\n\ndf[\"any_affair\"] = (df[\"affairs\"] > 0).astype(int)\n\n# Summary by children\nsummary = df.groupby(\"children\").agg(\n    n=(\"affairs\", \"size\"),\n    mean_affairs=(\"affairs\", \"mean\"),\n    median_affairs=(\"affairs\", \"median\"),\n    prop_any_affair=(\"any_affair\", \"mean\"),\n)\nprint(\"Summary by children:\\n\", summary, \"\\n\")\n\n# Difference in means (affairs) and proportions (any affair)\nmean_diff = summary.loc[\"yes\", \"mean_affairs\"] - summary.loc[\"no\", \"mean_affairs\"]\nprop_diff = summary.loc[\"yes\", \"prop_any_affair\"] - summary.loc[\"no\", \"prop_any_affair\"]\nprint(f\"Mean affairs difference (yes - no): {mean_diff:.3f}\")\nprint(f\"Prop any affair difference (yes - no): {prop_diff:.3f}\\n\")\n\n# Regression: any affair ~ children + controls\n# Controls: yearsmarried, age, religiousness, education, occupation, rating, gender\n# Use logistic regression\nmodel = smf.logit(\n    \"any_affair ~ C(children) + yearsmarried + age + religiousness + education + occupation + rating + C(gender)\",\n    data=df,\n).fit(disp=False)\nprint(model.summary())\n\n# Extract effect for children yes (reference no)\ncoef = model.params.get(\"C(children)[T.yes]\", float(\"nan\"))\nse = model.bse.get(\"C(children)[T.yes]\", float(\"nan\"))\nprint(f\"\\nLogit coef for children=yes: {coef:.3f} (SE {se:.3f})\")\n\n# Also run OLS on affairs count (even though censored)\nols = smf.ols(\n    \"affairs ~ C(children) + yearsmarried + age + religiousness + education + occupation + rating + C(gender)\",\n    data=df,\n).fit()\nprint(\"\\nOLS on affairs count:\")\nprint(ols.summary())\n\ncoef_ols = ols.params.get(\"C(children)[T.yes]\", float(\"nan\"))\nse_ols = ols.bse.get(\"C(children)[T.yes]\", float(\"nan\"))\nprint(f\"\\nOLS coef for children=yes: {coef_ols:.3f} (SE {se_ols:.3f})\")\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T17:59:41.575953+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/affairs/noperturb/run1/analysis.py",
+      "info_json": "agentic/experiments/outputs/affairs/noperturb/run1/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/affairs/noperturb/run1/conclusion.txt"
+    }
+  }
+}

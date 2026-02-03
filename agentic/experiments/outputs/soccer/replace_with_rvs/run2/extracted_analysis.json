@@ -1,0 +1,46 @@
+{
+  "dataset_name": "soccer",
+  "run_dir": "agentic/experiments/outputs/soccer/replace_with_rvs/run2",
+  "research_question": "Are soccer players with a dark skin tone more likely than those with a light skin tone to receive red cards from referees?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Player skin tone as rated by two independent coders on a 5-point scale (normalized). The analysis averages rater1 and rater2 and dichotomizes into dark vs light to test whether darker-skinned players receive more red cards.",
+          "columns": [
+            "rater1",
+            "rater2"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Number of red cards a player received from a particular referee across all matches the player and referee encountered each other (player-referee dyad).",
+        "columns": [
+          "redCards"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Number of games in the player-referee dyad; used as the exposure in the Poisson model and included as a covariate in the logistic robustness check.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "games"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\nimport statsmodels.formula.api as smf\n\n# Load data\n_df = pd.read_csv(\"soccer.csv\")\n\n# Average skin tone across two raters\n_df[\"skin_avg\"] = (_df[\"rater1\"] + _df[\"rater2\"]) / 2\n\n# Binary classification: light (<0.5) vs dark (>=0.5)\nthreshold = 0.5\n_df[\"dark\"] = (_df[\"skin_avg\"] >= threshold).astype(int)\n\n# Aggregate red-card rate per game by skin tone group\nrate_dark = _df.loc[_df[\"dark\"] == 1, \"redCards\"].sum() / _df.loc[_df[\"dark\"] == 1, \"games\"].sum()\nrate_light = _df.loc[_df[\"dark\"] == 0, \"redCards\"].sum() / _df.loc[_df[\"dark\"] == 0, \"games\"].sum()\n\n# Poisson regression for red cards with exposure (games)\npoisson_model = smf.glm(\n    \"redCards ~ dark\",\n    data=_df,\n    family=sm.families.Poisson(),\n    offset=np.log(_df[\"games\"]),\n)\npoisson_res = poisson_model.fit()\n\nrate_ratio = float(np.exp(poisson_res.params[\"dark\"]))\nrate_ratio_p = float(poisson_res.pvalues[\"dark\"])\n\n# Logistic regression for any red card (robustness check)\n_df[\"any_red\"] = (_df[\"redCards\"] > 0).astype(int)\nlogit_model = smf.glm(\"any_red ~ dark + games\", data=_df, family=sm.families.Binomial())\nlogit_res = logit_model.fit()\nodds_ratio = float(np.exp(logit_res.params[\"dark\"]))\nodds_ratio_p = float(logit_res.pvalues[\"dark\"])\n\nprint(\"Red-card rate per game (dark):\", rate_dark)\nprint(\"Red-card rate per game (light):\", rate_light)\nprint(\"Poisson rate ratio (dark vs light):\", rate_ratio, \"p=\", rate_ratio_p)\nprint(\"Logit odds ratio (any red, dark vs light):\", odds_ratio, \"p=\", odds_ratio_p)\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-02T16:41:57.927000+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/soccer/replace_with_rvs/run2/analysis.py",
+      "info_json": "agentic/experiments/outputs/soccer/replace_with_rvs/run2/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/soccer/replace_with_rvs/run2/conclusion.txt"
+    }
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "dataset_name": "soccer",
+  "run_dir": "agentic/experiments/outputs/soccer/anonymize/run5",
+  "research_question": "Are soccer players with a dark skin tone more likely than those with a light skin tone to receive red cards from referees?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Player skin tone (dichotomized: dark vs light) determined from the mean of two independent raters' 5-point photo ratings (normalized to 0-1).",
+          "columns": [
+            "feature18",
+            "feature19"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Number of red cards the player received from a particular referee (count outcome used in Poisson regression).",
+        "columns": [
+          "feature16"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Number of games in the player-referee dyad (used as the exposure offset in the Poisson model).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature9"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\n\n# Load data\npath = \"soccer.csv\"\ndf = pd.read_csv(path)\n\n# Skin tone average (two raters). Use mean when both available.\ndf[\"skin_avg\"] = df[[\"feature18\", \"feature19\"]].mean(axis=1)\n\n# Define dark vs light using 5-point scale normalized to 0-1\n# Values are {0, 0.25, 0.5, 0.75, 1}. Treat 0.5 as neutral and exclude.\ndf[\"skin_group\"] = np.where(df[\"skin_avg\"] > 0.5, \"dark\",\n                      np.where(df[\"skin_avg\"] < 0.5, \"light\", \"neutral\"))\n\n# Outcomes and exposure\nred = df[\"feature16\"].astype(float)\ngames = df[\"feature9\"].astype(float)\n\n# Filter to light/dark only and positive games\nmask = df[\"skin_group\"].isin([\"light\", \"dark\"]) & (games > 0) & red.notna() & df[\"skin_avg\"].notna()\ndf2 = df.loc[mask].copy()\n\n# Descriptive rates\nrates = df2.groupby(\"skin_group\").apply(lambda g: g[\"feature16\"].sum() / g[\"feature9\"].sum())\n\n# Poisson regression with log(games) offset\n# Response: red cards count; Predictor: dark vs light\nX = (df2[\"skin_group\"] == \"dark\").astype(int)\nX = sm.add_constant(X)\nmodel = sm.GLM(df2[\"feature16\"], X, family=sm.families.Poisson(), offset=np.log(df2[\"feature9\"]))\nresult = model.fit()\n\n# Extract rate ratio for dark vs light\ncoef = result.params[1]\nrr = float(np.exp(coef))\n\n# Two-sided p-value for dark coefficient\np_value = float(result.pvalues[1])\n\n# Save a small summary for reference\nsummary_lines = [\n    f\"dark_rate={rates.get('dark', np.nan):.6f}\",\n    f\"light_rate={rates.get('light', np.nan):.6f}\",\n    f\"rate_ratio_dark_vs_light={rr:.4f}\",\n    f\"p_value={p_value:.6g}\",\n    f\"n_rows={len(df2)}\",\n]\n\nwith open(\"analysis_summary.txt\", \"w\") as f:\n    f.write(\"\\n\".join(summary_lines))\n\nprint(\"\\n\".join(summary_lines))\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-02T16:35:34.669031+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/soccer/anonymize/run5/analysis.py",
+      "info_json": "agentic/experiments/outputs/soccer/anonymize/run5/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/soccer/anonymize/run5/conclusion.txt"
+    }
+  }
+}

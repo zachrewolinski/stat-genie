@@ -1,0 +1,61 @@
+{
+  "dataset_name": "hurricane",
+  "run_dir": "agentic/experiments/outputs/hurricane/replace_with_rvs/run2",
+  "research_question": "Hurricanes with more feminine names are perceived as less threatening and hence lead to fewer precautionary measures by the general public.",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Continuous masculinity–femininity index for historical hurricane names (higher = more feminine) rated by nine independent coders.",
+          "columns": [
+            "masfem"
+          ]
+        },
+        {
+          "description": "Binary indicator of hurricane name gender (0 = male name, 1 = female name).",
+          "columns": [
+            "gender_mf"
+          ]
+        },
+        {
+          "description": "Continuous masculinity–femininity index for hurricane names rated by MTurk participants (alternative femininity measure).",
+          "columns": [
+            "masfem_mturk"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Total number of deaths caused by the hurricane (count outcome); used in analyses both in raw count form and log-transformed.",
+        "columns": [
+          "alldeaths"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Storm intensity and timing covariates commonly used as controls: maximum wind speed at landfall, minimum pressure at landfall, Saffir–Simpson category, normalized property damage (2015 dollars), and year of occurrence.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "wind",
+            "min",
+            "category",
+            "ndam15",
+            "year"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\nimport statsmodels.formula.api as smf\n\n# Load data\ndf = pd.read_csv('hurricane.csv')\n\n# Basic derived variables\ndf['log_deaths'] = np.log(df['alldeaths'])\n\n# Controls commonly used for storm intensity\ncontrols = ['wind', 'min', 'category', 'ndam15', 'year']\n\n# OLS on log deaths\nformula_masfem = 'log_deaths ~ masfem + ' + ' + '.join(controls)\nformula_gender = 'log_deaths ~ gender_mf + ' + ' + '.join(controls)\nformula_mturk = 'log_deaths ~ masfem_mturk + ' + ' + '.join(controls)\n\nols_masfem = smf.ols(formula_masfem, data=df).fit(cov_type='HC3')\nols_gender = smf.ols(formula_gender, data=df).fit(cov_type='HC3')\nols_mturk = smf.ols(formula_mturk, data=df).fit(cov_type='HC3')\n\n# Negative Binomial on count deaths (more appropriate for counts)\n# Add a small constant to ndam15 to avoid issues if any zeros (none expected, but safe)\n# Use log link default\nnb_formula_masfem = 'alldeaths ~ masfem + ' + ' + '.join(controls)\nnb_formula_gender = 'alldeaths ~ gender_mf + ' + ' + '.join(controls)\n\nnb_masfem = smf.glm(nb_formula_masfem, data=df, family=sm.families.NegativeBinomial()).fit()\nnb_gender = smf.glm(nb_formula_gender, data=df, family=sm.families.NegativeBinomial()).fit()\n\n# Collect key results\nresults = {\n    'ols_masfem_coef': ols_masfem.params.get('masfem', np.nan),\n    'ols_masfem_p': ols_masfem.pvalues.get('masfem', np.nan),\n    'ols_gender_coef': ols_gender.params.get('gender_mf', np.nan),\n    'ols_gender_p': ols_gender.pvalues.get('gender_mf', np.nan),\n    'ols_mturk_coef': ols_mturk.params.get('masfem_mturk', np.nan),\n    'ols_mturk_p': ols_mturk.pvalues.get('masfem_mturk', np.nan),\n    'nb_masfem_coef': nb_masfem.params.get('masfem', np.nan),\n    'nb_masfem_p': nb_masfem.pvalues.get('masfem', np.nan),\n    'nb_gender_coef': nb_gender.params.get('gender_mf', np.nan),\n    'nb_gender_p': nb_gender.pvalues.get('gender_mf', np.nan),\n}\n\nprint('Key results (controls: wind, min pressure, category, ndam15, year):')\nfor k, v in results.items():\n    print(f'{k}: {v}')\n\n# Save results to a CSV for quick inspection\npd.DataFrame([results]).to_csv('analysis_results.csv', index=False)\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T18:51:31.876018+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/hurricane/replace_with_rvs/run2/analysis.py",
+      "info_json": "agentic/experiments/outputs/hurricane/replace_with_rvs/run2/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/hurricane/replace_with_rvs/run2/conclusion.txt"
+    }
+  }
+}

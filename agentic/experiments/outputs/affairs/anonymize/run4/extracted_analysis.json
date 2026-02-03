@@ -1,0 +1,93 @@
+{
+  "dataset_name": "affairs",
+  "run_dir": "agentic/experiments/outputs/affairs/anonymize/run4",
+  "research_question": "Does having children decrease (if at all) the engagement in extramarital affairs?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Whether there are children in the marriage (main predictor of interest).",
+          "columns": [
+            "feature6"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Engagement in extramarital affairs measured as frequency of extramarital sexual intercourse in the past year (the analysis uses both the continuous frequency and a derived binary any-affair indicator, but the underlying variable is the reported frequency).",
+        "columns": [
+          "feature2"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Respondent gender.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature3"
+          ]
+        },
+        {
+          "description": "Respondent age (coded in brackets, numeric).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature4"
+          ]
+        },
+        {
+          "description": "Number of years married.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature5"
+          ]
+        },
+        {
+          "description": "Religiosity rating.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature7"
+          ]
+        },
+        {
+          "description": "Level of education.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature8"
+          ]
+        },
+        {
+          "description": "Occupation (Hollingshead classification, reverse numbering).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature9"
+          ]
+        },
+        {
+          "description": "Self rating of the marriage.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature10"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\nimport statsmodels.formula.api as smf\n\n# Load data\nDF_PATH = \"affairs.csv\"\ndf = pd.read_csv(DF_PATH)\n\n# Map key variables\n# feature2: frequency of extramarital intercourse in past year\n# feature6: children in marriage (yes/no)\n\ndf = df.copy()\n\ndf[\"affairs\"] = df[\"feature2\"]\ndf[\"children\"] = df[\"feature6\"].str.lower().str.strip()\n\n# Binary outcome: any affairs\n\ndf[\"any_affair\"] = (df[\"affairs\"] > 0).astype(int)\n\n# Descriptive stats by children\n\ndesc = df.groupby(\"children\").agg(\n    n=(\"affairs\", \"size\"),\n    mean_affairs=(\"affairs\", \"mean\"),\n    median_affairs=(\"affairs\", \"median\"),\n    prop_any_affair=(\"any_affair\", \"mean\"),\n)\n\n# Prepare regression design matrix\n# Controls: gender (feature3), age (feature4), years married (feature5),\n# religiosity (feature7), education (feature8), occupation (feature9),\n# marriage rating (feature10)\n\nmodel_df = df[[\n    \"any_affair\",\n    \"affairs\",\n    \"children\",\n    \"feature3\",\n    \"feature4\",\n    \"feature5\",\n    \"feature7\",\n    \"feature8\",\n    \"feature9\",\n    \"feature10\",\n]].copy()\n\n# Encode categorical variables\nmodel_df = pd.get_dummies(model_df, columns=[\"children\", \"feature3\"], drop_first=True)\n\n# Ensure numeric\nfor col in model_df.columns:\n    model_df[col] = pd.to_numeric(model_df[col], errors=\"ignore\")\n\n# Logistic regression for any affair\nX_logit = model_df.drop(columns=[\"any_affair\", \"affairs\"])\nX_logit = sm.add_constant(X_logit, has_constant=\"add\")\n\ny_logit = model_df[\"any_affair\"]\n\nlogit_result = None\ntry:\n    logit_model = sm.Logit(y_logit, X_logit)\n    logit_result = logit_model.fit(disp=False)\nexcept Exception:\n    # Fallback to GLM binomial if Logit fails to converge\n    glm_model = sm.GLM(y_logit, X_logit, family=sm.families.Binomial())\n    logit_result = glm_model.fit()\n\n# OLS regression for affairs frequency (continuous)\nX_ols = model_df.drop(columns=[\"any_affair\", \"affairs\"])\nX_ols = sm.add_constant(X_ols, has_constant=\"add\")\n\ny_ols = model_df[\"affairs\"]\n\nols_model = sm.OLS(y_ols, X_ols)\nols_result = ols_model.fit(cov_type=\"HC3\")\n\n# Extract children coefficient (children_yes)\nchild_col = [c for c in X_logit.columns if c.startswith(\"children_\")]\nchild_col = child_col[0] if child_col else None\n\nresults_summary = {\n    \"desc\": desc,\n    \"logit_child_coef\": None,\n    \"logit_child_p\": None,\n    \"ols_child_coef\": None,\n    \"ols_child_p\": None,\n}\n\nif child_col:\n    results_summary[\"logit_child_coef\"] = float(logit_result.params.get(child_col, np.nan))\n    results_summary[\"logit_child_p\"] = float(logit_result.pvalues.get(child_col, np.nan))\n    results_summary[\"ols_child_coef\"] = float(ols_result.params.get(child_col, np.nan))\n    results_summary[\"ols_child_p\"] = float(ols_result.pvalues.get(child_col, np.nan))\n\nprint(\"Descriptives by children:\\n\", desc)\nprint(\"\\nLogit child coef, p:\", results_summary[\"logit_child_coef\"], results_summary[\"logit_child_p\"])\nprint(\"OLS child coef, p:\", results_summary[\"ols_child_coef\"], results_summary[\"ols_child_p\"])\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T17:58:02.173528+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/affairs/anonymize/run4/analysis.py",
+      "info_json": "agentic/experiments/outputs/affairs/anonymize/run4/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/affairs/anonymize/run4/conclusion.txt"
+    }
+  }
+}

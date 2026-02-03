@@ -1,0 +1,42 @@
+{
+  "dataset_name": "boxes",
+  "run_dir": "agentic/experiments/outputs/boxes/shuffle_names/run1",
+  "research_question": "Do children’s reliance on social information and preference for majority cues vary across cultures and developmental stages?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Child's developmental stage (age in years); used as a predictor of children's reliance on social information and preference for majority cues",
+          "columns": [
+            "age"
+          ]
+        },
+        {
+          "description": "Study site / cultural context (categorical site ID); used as the cultural predictor and as a factor that interacts with age to test whether developmental patterns differ across sites",
+          "columns": [
+            "y"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Children's choice on the task (majority_first: 1=unchosen option, 2=majority option, 3=minority option). This canonical column was used to derive two outcomes: (a) reliance on social information (choosing any demonstrated option: values 2 or 3) and (b) preference for the majority option (choosing value 2).",
+        "columns": [
+          "majority_first"
+        ]
+      },
+      "controls": []
+    },
+    "analysis_code": "import pandas as pd\nimport statsmodels.formula.api as smf\nfrom scipy import stats\n\n# Load data\nDf = pd.read_csv('boxes.csv')\n\n# Outcomes\nDf['choose_social'] = Df['majority_first'].isin([2, 3]).astype(int)  # any demonstrated option\nDf['choose_majority'] = (Df['majority_first'] == 2).astype(int)      # majority option\n\n# Treat site/culture id as categorical\nDf['y'] = Df['y'].astype(int).astype('category')\n\n# Helper: likelihood-ratio test\n\ndef lr_test(full, reduced):\n    lr = 2 * (full.llf - reduced.llf)\n    df = full.df_model - reduced.df_model\n    p = stats.chi2.sf(lr, df)\n    return lr, df, p\n\n# Models for reliance on social information\nm_social = smf.logit('choose_social ~ age + C(y)', data=Df).fit(disp=False)\nm_social_no_age = smf.logit('choose_social ~ C(y)', data=Df).fit(disp=False)\nm_social_no_y = smf.logit('choose_social ~ age', data=Df).fit(disp=False)\n\n# Models for majority preference\nm_majority = smf.logit('choose_majority ~ age + C(y)', data=Df).fit(disp=False)\nm_majority_no_age = smf.logit('choose_majority ~ C(y)', data=Df).fit(disp=False)\nm_majority_no_y = smf.logit('choose_majority ~ age', data=Df).fit(disp=False)\n\n# Interaction tests (age by site)\nm_social_inter = smf.logit('choose_social ~ age * C(y)', data=Df).fit(disp=False)\nm_majority_inter = smf.logit('choose_majority ~ age * C(y)', data=Df).fit(disp=False)\n\n# Summaries\nprint('Overall reliance on social information:', Df['choose_social'].mean())\nprint('Overall majority preference:', Df['choose_majority'].mean())\n\nprint('Social reliance: age effect LRT', lr_test(m_social, m_social_no_age))\nprint('Social reliance: site effect LRT', lr_test(m_social, m_social_no_y))\nprint('Social reliance: age*site interaction LRT', lr_test(m_social_inter, m_social))\n\nprint('Majority preference: age effect LRT', lr_test(m_majority, m_majority_no_age))\nprint('Majority preference: site effect LRT', lr_test(m_majority, m_majority_no_y))\nprint('Majority preference: age*site interaction LRT', lr_test(m_majority_inter, m_majority))\n\n# Descriptive rates by age group and site\nDf['age_group'] = pd.cut(\n    Df['age'],\n    bins=[3.99, 5.99, 7.99, 9.99, 11.99, 13.99, 14.99],\n    labels=['4-5', '6-7', '8-9', '10-11', '12-13', '14'],\n    right=True,\n)\nsummary = Df.groupby(['y', 'age_group'])[['choose_social', 'choose_majority']].mean()\nprint('\\nRates by site and age group (proportions):')\nprint(summary)\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T18:24:52.661569+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/boxes/shuffle_names/run1/analysis.py",
+      "info_json": "agentic/experiments/outputs/boxes/shuffle_names/run1/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/boxes/shuffle_names/run1/conclusion.txt"
+    }
+  }
+}

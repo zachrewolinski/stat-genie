@@ -1,0 +1,42 @@
+{
+  "dataset_name": "boxes",
+  "run_dir": "agentic/experiments/outputs/boxes/add_features/run5",
+  "research_question": "Do children’s reliance on social information and preference for majority cues vary across cultures and developmental stages?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Child age in years (used as the developmental predictor; centered in the analysis to test age-related effects).",
+          "columns": [
+            "age"
+          ]
+        },
+        {
+          "description": "Study site / culture ID (categorical predictor to test cross-cultural differences and interactions with age).",
+          "columns": [
+            "culture"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Recorded choice outcome in the task (y): 1 = unchosen option, 2 = majority option, 3 = minority option. The analysis derives social reliance (whether y != 1) and majority choice among social responses (y == 2) from this column.",
+        "columns": [
+          "y"
+        ]
+      },
+      "controls": []
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\nimport statsmodels.formula.api as smf\nfrom scipy.stats import chi2\n\n# Load data\n\ndf = pd.read_csv('boxes.csv')\n\n# Keep rows with age for developmental analysis\n\ndf_age = df.dropna(subset=['age']).copy()\n\n# Outcomes\n# y: 1=unchosen, 2=majority, 3=minority\n\ndf_age['social'] = (df_age['y'] != 1).astype(int)\n# among all: majority choice\n\ndf_age['majority'] = (df_age['y'] == 2).astype(int)\n\n# Center age for interpretability\n\ndf_age['age_c'] = df_age['age'] - df_age['age'].mean()\n\n# Descriptives\n\ndef rate(series):\n    return series.mean()\n\n# Overall rates\n\noverall_social = rate(df_age['social'])\noverall_majority = rate(df_age.loc[df_age['social'] == 1, 'majority'])\n\n# By culture\n\nculture_summary = (\n    df_age.groupby('culture')\n    .apply(lambda g: pd.Series({\n        'n': len(g),\n        'social_rate': rate(g['social']),\n        'majority_rate_among_social': rate(g.loc[g['social'] == 1, 'majority'])\n    }))\n    .reset_index()\n)\n\n# By age bins\n\nbins = [0, 14, 17, 25, 40, 100]\nlabels = ['11-14', '15-17', '18-25', '26-40', '41+']\n\n\ndf_age['age_bin'] = pd.cut(df_age['age'], bins=bins, labels=labels, include_lowest=True)\n\nage_summary = (\n    df_age.groupby('age_bin')\n    .apply(lambda g: pd.Series({\n        'n': len(g),\n        'social_rate': rate(g['social']),\n        'majority_rate_among_social': rate(g.loc[g['social'] == 1, 'majority'])\n    }))\n    .reset_index()\n)\n\n# Logistic models: social reliance\n\nmodel_social_full = smf.glm('social ~ age_c * C(culture)', data=df_age, family=sm.families.Binomial()).fit()\nmodel_social_reduced = smf.glm('social ~ age_c + C(culture)', data=df_age, family=sm.families.Binomial()).fit()\nmodel_social_culture = smf.glm('social ~ C(culture)', data=df_age, family=sm.families.Binomial()).fit()\n\n# LRT for age main effect and interaction\n\nlrt_age_social = 2 * (model_social_reduced.llf - model_social_culture.llf)\n\ndf_age_social = model_social_reduced.df_model - model_social_culture.df_model\np_age_social = chi2.sf(lrt_age_social, df_age_social)\n\nlrt_interaction_social = 2 * (model_social_full.llf - model_social_reduced.llf)\n\ndf_interaction_social = model_social_full.df_model - model_social_reduced.df_model\np_interaction_social = chi2.sf(lrt_interaction_social, df_interaction_social)\n\nage_coef_social = model_social_reduced.params['age_c']\n\n# Logistic models: majority preference among social choices\n\nsocial_df = df_age[df_age['social'] == 1].copy()\nmodel_maj_full = smf.glm('majority ~ age_c * C(culture)', data=social_df, family=sm.families.Binomial()).fit()\nmodel_maj_reduced = smf.glm('majority ~ age_c + C(culture)', data=social_df, family=sm.families.Binomial()).fit()\nmodel_maj_culture = smf.glm('majority ~ C(culture)', data=social_df, family=sm.families.Binomial()).fit()\n\nlrt_age_maj = 2 * (model_maj_reduced.llf - model_maj_culture.llf)\n\ndf_age_maj = model_maj_reduced.df_model - model_maj_culture.df_model\np_age_maj = chi2.sf(lrt_age_maj, df_age_maj)\n\nlrt_interaction_maj = 2 * (model_maj_full.llf - model_maj_reduced.llf)\n\ndf_interaction_maj = model_maj_full.df_model - model_maj_reduced.df_model\np_interaction_maj = chi2.sf(lrt_interaction_maj, df_interaction_maj)\n\nage_coef_maj = model_maj_reduced.params['age_c']\n\n# Output\n\nprint('Overall social reliance rate:', round(overall_social, 3))\nprint('Overall majority preference among social:', round(overall_majority, 3))\nprint('\\nBy culture:')\nprint(culture_summary.to_string(index=False))\nprint('\\nBy age bin:')\nprint(age_summary.to_string(index=False))\n\nprint('\\nSocial reliance model: age main effect p-value:', p_age_social)\nprint('Social reliance model: age coef (log-odds per year):', age_coef_social)\nprint('Social reliance model: age x culture interaction p-value:', p_interaction_social)\n\nprint('\\nMajority preference model: age main effect p-value:', p_age_maj)\nprint('Majority preference model: age coef (log-odds per year):', age_coef_maj)\nprint('Majority preference model: age x culture interaction p-value:', p_interaction_maj)\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T18:17:10.494403+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/boxes/add_features/run5/analysis.py",
+      "info_json": "agentic/experiments/outputs/boxes/add_features/run5/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/boxes/add_features/run5/conclusion.txt"
+    }
+  }
+}

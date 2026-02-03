@@ -1,0 +1,160 @@
+{
+  "dataset_name": "panda_nuts",
+  "n": 5,
+  "analyses": {
+    "0": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Age in years at time of observation; included as a predictor of nut-cracking efficiency.",
+            "columns": [
+              "age"
+            ]
+          },
+          {
+            "description": "Individual's sex (categorical: f/m); included as a predictor of nut-cracking efficiency.",
+            "columns": [
+              "sex"
+            ]
+          },
+          {
+            "description": "Received help from another chimpanzee (yes/no); included as a predictor of nut-cracking efficiency.",
+            "columns": [
+              "help"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Number of nuts opened in the session (nuts_opened). Modeled with a log(seconds) offset in a Poisson regression to represent nut-cracking efficiency (rate: nuts per second).",
+          "columns": [
+            "nuts_opened"
+          ]
+        },
+        "controls": []
+      },
+      "analysis_code": "import numpy as np\nimport pandas as pd\nimport statsmodels.api as sm\nimport statsmodels.formula.api as smf\n\n# Load data\n_df = pd.read_csv('panda_nuts.csv')\n\n# Efficiency: nuts opened per second (descriptive)\n_df['efficiency'] = _df['nuts_opened'] / _df['seconds']\n\n# Poisson regression on counts with log(seconds) offset models rate directly\n_df['log_seconds'] = np.log(_df['seconds'])\npoisson_model = smf.glm(\n    'nuts_opened ~ age + C(sex) + C(help)',\n    data=_df,\n    family=sm.families.Poisson(),\n    offset=_df['log_seconds']\n).fit(cov_type='HC0')\n\nprint(poisson_model.summary())\nprint('\\nRobust (HC0) p-values:')\nfor name, pval in zip(poisson_model.model.exog_names, poisson_model.pvalues):\n    print(f\"{name}: {pval:.6f}\")\n\n# Save key results for interpretation\nresults = pd.DataFrame({\n    'term': poisson_model.model.exog_names,\n    'coef': poisson_model.params,\n    'pval': poisson_model.pvalues\n})\nresults.to_csv('analysis_results.csv', index=False)\n"
+    },
+    "1": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Predictor: individual's age in years at time of observation; tested for association with nut-cracking efficiency.",
+            "columns": [
+              "age"
+            ]
+          },
+          {
+            "description": "Predictor: individual's sex (categorical: male/female); tested for association with nut-cracking efficiency.",
+            "columns": [
+              "sex"
+            ]
+          },
+          {
+            "description": "Predictor: whether the individual received help from another chimpanzee (yes/no); tested for association with nut-cracking efficiency.",
+            "columns": [
+              "help"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Outcome: nut-cracking efficiency operationalized as nuts opened per second (derived as nuts_opened / seconds). Source columns are nuts_opened and seconds.",
+          "columns": [
+            "nuts_opened",
+            "seconds"
+          ]
+        },
+        "controls": []
+      },
+      "analysis_code": "import pandas as pd\nimport statsmodels.formula.api as smf\n\n# Load data\n_df = pd.read_csv('panda_nuts.csv')\n\n# Define efficiency as nuts opened per second\n_df['rate'] = _df['nuts_opened'] / _df['seconds']\n\n# Fit OLS with robust (HC3) standard errors\nmodel = smf.ols('rate ~ age + C(sex) + C(help)', data=_df).fit(cov_type='HC3')\n\n# Basic descriptive stats for context\nmeans_by_sex = _df.groupby('sex')['rate'].mean()\nmeans_by_help = _df.groupby('help')['rate'].mean()\n\nprint('Rate (nuts/sec) summary:')\nprint(_df['rate'].describe())\nprint('\\nMean rate by sex:')\nprint(means_by_sex)\nprint('\\nMean rate by help:')\nprint(means_by_help)\nprint('\\nOLS (HC3 robust) results:')\nprint(model.summary())\n"
+    },
+    "2": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Independent variables of interest: age (years), sex (male/female), and whether the individual received help from another chimpanzee; these predictors are used to estimate effects on nut-cracking efficiency.",
+            "columns": [
+              "age",
+              "sex",
+              "help"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Dependent variable: nut-cracking efficiency, measured as nuts opened per second (computed from number of nuts opened and session duration).",
+          "columns": [
+            "nuts_opened",
+            "seconds"
+          ]
+        },
+        "controls": []
+      },
+      "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.formula.api as smf\n\n# Load data\n_df = pd.read_csv('panda_nuts.csv')\n\n# Outcome: nut-cracking efficiency (nuts per second)\n_df['efficiency'] = _df['nuts_opened'] / _df['seconds']\n\n# Encode categorical predictors\n_df['sex'] = _df['sex'].astype('category')\n_df['help'] = _df['help'].astype('category')\n\n# Fit linear model for efficiency\n# Using robust (HC3) standard errors for heteroskedasticity\nmodel = smf.ols('efficiency ~ age + C(sex) + C(help)', data=_df).fit(cov_type='HC3')\n\n# Also fit a log-efficiency model as a sensitivity check\n_df['log_efficiency'] = np.log(_df['efficiency'])\nlog_model = smf.ols('log_efficiency ~ age + C(sex) + C(help)', data=_df).fit(cov_type='HC3')\n\n# Collect key results\nsummary = {\n    'n': int(len(_df)),\n    'efficiency_mean': float(_df['efficiency'].mean()),\n    'efficiency_std': float(_df['efficiency'].std()),\n    'ols_params': model.params.to_dict(),\n    'ols_pvalues': model.pvalues.to_dict(),\n    'ols_rsquared': float(model.rsquared),\n    'log_params': log_model.params.to_dict(),\n    'log_pvalues': log_model.pvalues.to_dict(),\n    'log_rsquared': float(log_model.rsquared),\n}\n\nprint('Linear model (efficiency) with robust SE')\nprint(model.summary())\nprint('\\nLog-efficiency model (robust SE)')\nprint(log_model.summary())\nprint('\\nSummary dict')\nprint(summary)\n"
+    },
+    "3": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Age in years at time of observation; predictor tested for effect on nut-cracking efficiency.",
+            "columns": [
+              "age"
+            ]
+          },
+          {
+            "description": "Individual's sex (categorical); predictor tested for effect on nut-cracking efficiency.",
+            "columns": [
+              "sex"
+            ]
+          },
+          {
+            "description": "Received help from another chimpanzee (yes/no); predictor tested for effect on nut-cracking efficiency.",
+            "columns": [
+              "help"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Nut-cracking efficiency (nuts opened per second), computed as nuts_opened / seconds.",
+          "columns": [
+            "nuts_opened",
+            "seconds"
+          ]
+        },
+        "controls": []
+      },
+      "analysis_code": "import pandas as pd\nimport statsmodels.formula.api as smf\n\n# Load data\n_df = pd.read_csv(\"panda_nuts.csv\")\n\n# Define efficiency as nuts opened per second\n_df[\"efficiency\"] = _df[\"nuts_opened\"] / _df[\"seconds\"]\n\n# Fit linear model with age, sex, and help as predictors\nmodel = smf.ols(\"efficiency ~ age + C(sex) + C(help)\", data=_df).fit()\n\n# Summaries for interpretation\nprint(\"Model summary:\\n\", model.summary())\nprint(\"\\nGroup means (efficiency):\")\nprint(_df.groupby([\"sex\", \"help\"])['efficiency'].mean())\n"
+    },
+    "4": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Age of the individual (years) — tested as a predictor of nut‑cracking efficiency.",
+            "columns": [
+              "age"
+            ]
+          },
+          {
+            "description": "Sex of the individual (female/male) — tested as a categorical predictor of efficiency.",
+            "columns": [
+              "sex"
+            ]
+          },
+          {
+            "description": "Whether the individual received help from another chimpanzee (yes/no) — tested as a categorical predictor of efficiency.",
+            "columns": [
+              "help"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Nut‑cracking efficiency operationalized as nuts opened per second. Modeled via counts of nuts opened with session duration (seconds) as an exposure (offset) and also as the derived rate nuts_opened/seconds.",
+          "columns": [
+            "nuts_opened",
+            "seconds"
+          ]
+        },
+        "controls": []
+      },
+      "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\nimport statsmodels.formula.api as smf\n\n# Load data\n_df = pd.read_csv('panda_nuts.csv')\n\n# Basic cleaning\n_df = _df.copy()\n_df['sex'] = _df['sex'].astype('category')\n_df['help'] = _df['help'].astype('category')\n\n# Efficiency: nuts per second\n_df['rate'] = _df['nuts_opened'] / _df['seconds']\n\nprint('Rows:', len(_df))\nprint(_df[['nuts_opened','seconds','rate']].describe())\n\n# Poisson regression with exposure (seconds) to model counts -> efficiency\n# This estimates effects on the rate of nuts opened per second\nmodel_glm = smf.glm(\n    formula='nuts_opened ~ age + C(sex) + C(help)',\n    data=_df,\n    family=sm.families.Poisson(),\n    offset=np.log(_df['seconds'])\n).fit(cov_type='HC0')\n\nprint('\\nPoisson GLM with log(seconds) offset (robust SE):')\nprint(model_glm.summary())\n\n# Incidence rate ratios\nparams = model_glm.params\nirr = np.exp(params)\nci = model_glm.conf_int()\nci_irr = np.exp(ci)\nprint('\\nIncidence Rate Ratios (IRR) with 95% CI:')\nfor term in irr.index:\n    lo, hi = ci_irr.loc[term]\n    print(f'{term:15s} IRR={irr[term]:.3f}  CI[{lo:.3f}, {hi:.3f}]')\n\n# OLS on rate as a robustness check\nmodel_ols = smf.ols('rate ~ age + C(sex) + C(help)', data=_df).fit(cov_type='HC3')\nprint('\\nOLS on rate (nuts/sec) with robust SE:')\nprint(model_ols.summary())\n"
+    }
+  }
+}

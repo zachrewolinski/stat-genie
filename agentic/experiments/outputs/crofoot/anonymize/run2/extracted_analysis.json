@@ -1,0 +1,44 @@
+{
+  "dataset_name": "crofoot",
+  "run_dir": "agentic/experiments/outputs/crofoot/anonymize/run2",
+  "research_question": "Do relative group size and contest location influence the probability of a capuchin monkey group winning an intergroup contest?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Relative group size (main IV) — operationalized in the analysis as the difference in total group size between the focal and other group; derived from number of individuals in focal group (feature7) and number of individuals in other group (feature8).",
+          "columns": [
+            "feature7",
+            "feature8"
+          ]
+        },
+        {
+          "description": "Contest location (main IV) — operationalized in the analysis as which group is closer to its home-range center (location advantage); derived from distance of focal group from its home-range center (feature5) and distance of other group from its home-range center (feature6).",
+          "columns": [
+            "feature5",
+            "feature6"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Outcome (DV): focal group win (binary) — 1 if focal won contest, 0 if other won (feature4).",
+        "columns": [
+          "feature4"
+        ]
+      },
+      "controls": []
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\n\n# Load data\n_df = pd.read_csv(\"crofoot.csv\")\n\n# Outcome: focal group win (1) vs other win (0)\ny = _df[\"feature4\"].astype(int)\n\n# Relative group size: difference in total group size\nsize_diff = _df[\"feature7\"] - _df[\"feature8\"]\n\n# Contest location: who is closer to its home range center\n# Positive means focal is closer than the other group\nlocation_adv = _df[\"feature6\"] - _df[\"feature5\"]\n\nX = pd.DataFrame({\n    \"size_diff\": size_diff,\n    \"location_adv\": location_adv,\n})\nX = sm.add_constant(X)\n\n# Fit logistic regression\nmodel = sm.Logit(y, X).fit(disp=False)\n\n# Also compute a reduced model with each predictor alone for robustness\nmodel_size = sm.Logit(y, sm.add_constant(pd.DataFrame({\"size_diff\": size_diff}))).fit(disp=False)\nmodel_loc = sm.Logit(y, sm.add_constant(pd.DataFrame({\"location_adv\": location_adv}))).fit(disp=False)\n\nprint(\"Full model coefficients and p-values:\")\nprint(pd.DataFrame({\n    \"coef\": model.params,\n    \"p_value\": model.pvalues\n}))\n\nprint(\"\\nSize-only model p-value:\", model_size.pvalues[\"size_diff\"])\nprint(\"Location-only model p-value:\", model_loc.pvalues[\"location_adv\"])\n\n# Save key results to a small CSV for inspection if needed\nresults = pd.DataFrame({\n    \"term\": model.params.index,\n    \"coef\": model.params.values,\n    \"p_value\": model.pvalues.values,\n})\nresults.to_csv(\"analysis_results.csv\", index=False)\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T18:36:18.473930+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/crofoot/anonymize/run2/analysis.py",
+      "info_json": "agentic/experiments/outputs/crofoot/anonymize/run2/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/crofoot/anonymize/run2/conclusion.txt"
+    }
+  }
+}

@@ -1,0 +1,54 @@
+{
+  "dataset_name": "hurricane",
+  "run_dir": "agentic/experiments/outputs/hurricane/add_features/run1",
+  "research_question": "Hurricanes with more feminine names are perceived as less threatening and hence lead to fewer precautionary measures by the general public.",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Continuous masculinity-femininity score for the hurricane name (ratings averaged across coders; higher = more feminine).",
+          "columns": [
+            "masfem"
+          ]
+        },
+        {
+          "description": "Binary indicator of hurricane name gender (0 = male, 1 = female).",
+          "columns": [
+            "gender_mf"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Total number of deaths caused by the hurricane (used as the outcome; modeled as raw counts in Poisson and as log-transformed in OLS).",
+        "columns": [
+          "alldeaths"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Storm intensity and time controls: maximum wind speed at landfall (wind), minimum pressure at landfall (min), Saffir-Simpson category (category), and year of the hurricane (year).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "wind",
+            "min",
+            "category",
+            "year"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\nimport statsmodels.formula.api as smf\n\n# Load data\n\ndf = pd.read_csv(\"hurricane.csv\")\n\n# Focus on relevant hurricane variables\ncols = [\n    \"masfem\",\n    \"gender_mf\",\n    \"alldeaths\",\n    \"wind\",\n    \"min\",\n    \"category\",\n    \"year\",\n    \"ndam15\",\n    \"elapsedyrs\",\n]\n\nwork = df[cols].copy()\n\n# Basic cleaning\nwork = work.replace([np.inf, -np.inf], np.nan).dropna()\n\n# Outcomes\nwork[\"log_deaths\"] = np.log1p(work[\"alldeaths\"])\n\n# Descriptive: mean deaths by binary gender\nmean_by_gender = work.groupby(\"gender_mf\")[\"alldeaths\"].mean()\nmedian_by_gender = work.groupby(\"gender_mf\")[\"alldeaths\"].median()\n\nprint(\"Rows used:\", len(work))\nprint(\"Mean deaths by gender (0=male,1=female):\")\nprint(mean_by_gender)\nprint(\"Median deaths by gender (0=male,1=female):\")\nprint(median_by_gender)\n\n# OLS on log deaths with controls for intensity and time\nformula_ols = \"log_deaths ~ masfem + wind + min + category + year\"\nols_model = smf.ols(formula_ols, data=work).fit(cov_type=\"HC3\")\nprint(\"\\nOLS (log deaths) summary (HC3):\")\nprint(ols_model.summary())\n\n# Alternate OLS using binary gender\nformula_ols_bin = \"log_deaths ~ gender_mf + wind + min + category + year\"\nols_model_bin = smf.ols(formula_ols_bin, data=work).fit(cov_type=\"HC3\")\nprint(\"\\nOLS (log deaths) with binary gender (HC3):\")\nprint(ols_model_bin.summary())\n\n# Poisson regression on deaths (counts)\n# Use the same controls; add small check for zeros (Poisson handles zeros)\npoisson_formula = \"alldeaths ~ masfem + wind + min + category + year\"\npoisson_model = smf.glm(poisson_formula, data=work, family=sm.families.Poisson()).fit()\nprint(\"\\nPoisson (deaths) summary:\")\nprint(poisson_model.summary())\n\n# Extract key coefficients for quick reference\nresults = {\n    \"ols_masfem_coef\": ols_model.params.get(\"masfem\", np.nan),\n    \"ols_masfem_p\": ols_model.pvalues.get(\"masfem\", np.nan),\n    \"ols_gender_coef\": ols_model_bin.params.get(\"gender_mf\", np.nan),\n    \"ols_gender_p\": ols_model_bin.pvalues.get(\"gender_mf\", np.nan),\n    \"poisson_masfem_coef\": poisson_model.params.get(\"masfem\", np.nan),\n    \"poisson_masfem_p\": poisson_model.pvalues.get(\"masfem\", np.nan),\n}\n\nprint(\"\\nKey coefficients:\")\nfor k, v in results.items():\n    print(f\"{k}: {v}\")\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T18:43:30.543093+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/hurricane/add_features/run1/analysis.py",
+      "info_json": "agentic/experiments/outputs/hurricane/add_features/run1/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/hurricane/add_features/run1/conclusion.txt"
+    }
+  }
+}

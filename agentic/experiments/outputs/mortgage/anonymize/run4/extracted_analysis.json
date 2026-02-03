@@ -1,0 +1,55 @@
+{
+  "dataset_name": "mortgage",
+  "run_dir": "agentic/experiments/outputs/mortgage/anonymize/run4",
+  "research_question": "Does gender affect whether banks approve an individual's mortgage application?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Applicant gender indicator (treatment/predictor): 1 = female, 0 = male.",
+          "columns": [
+            "feature2"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Mortgage application outcome: 1 = accepted, 0 = denied (acceptance indicator).",
+        "columns": [
+          "feature14"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Applicant, credit, employment, and loan characteristics included as covariates to control for creditworthiness and other confounders (all features used in the regression besides the gender IV and the acceptance DV).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature1",
+            "feature3",
+            "feature4",
+            "feature5",
+            "feature6",
+            "feature7",
+            "feature8",
+            "feature9",
+            "feature10",
+            "feature12",
+            "feature13"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\n\n# Load data\n_df = pd.read_csv('mortgage.csv')\n\n# Outcome: 1 if accepted\nif 'feature14' not in _df.columns:\n    raise ValueError('Expected feature14 as acceptance indicator')\n\ny = _df['feature14']\n\n# Exclude the denial indicator to avoid perfect collinearity with acceptance\n# Keep all other features as potential controls\nX = _df.drop(columns=['feature14', 'feature11'], errors='ignore')\n\n# Clean missing/inf values and add intercept\nX = X.replace([np.inf, -np.inf], np.nan)\ndata = pd.concat([y, X], axis=1).dropna()\ny = data['feature14']\nX = data.drop(columns=['feature14'])\nX = sm.add_constant(X, has_constant='add')\n\n# Unadjusted acceptance rates by gender (feature2: 1 female, 0 male)\nrate_by_gender = _df.groupby('feature2')['feature14'].mean().rename('accept_rate')\n\n# Logistic regression controlling for other variables\n# Use try/except to fall back to regularized fit if needed\ntry:\n    model = sm.Logit(y, X).fit(disp=False)\n    result = model\nexcept Exception:\n    model = sm.Logit(y, X)\n    result = model.fit_regularized(disp=False)\n\n# Extract coefficient and p-value for gender (feature2)\ncoef = result.params.get('feature2', np.nan)\n\n# p-values are not available for regularized fit; handle gracefully\npval = None\nif hasattr(result, 'pvalues'):\n    pval = result.pvalues.get('feature2', np.nan)\n\nprint('Unadjusted acceptance rates by gender (feature2: 1 female, 0 male):')\nprint(rate_by_gender)\nprint('\\nLogit coefficient for gender (feature2):', coef)\nif pval is not None:\n    print('P-value for gender (feature2):', pval)\nelse:\n    print('P-value for gender (feature2): unavailable (regularized fit).')\n\n# Save key outputs for downstream use\nsummary = {\n    'accept_rate_male': rate_by_gender.get(0.0, np.nan),\n    'accept_rate_female': rate_by_gender.get(1.0, np.nan),\n    'gender_coef': coef,\n    'gender_pvalue': pval,\n    'n': len(_df),\n}\n\npd.Series(summary).to_csv('analysis_summary.csv')\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T18:56:12.372748+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/mortgage/anonymize/run4/analysis.py",
+      "info_json": "agentic/experiments/outputs/mortgage/anonymize/run4/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/mortgage/anonymize/run4/conclusion.txt"
+    }
+  }
+}

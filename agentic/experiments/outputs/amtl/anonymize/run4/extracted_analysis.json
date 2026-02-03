@@ -1,0 +1,62 @@
+{
+  "dataset_name": "amtl",
+  "run_dir": "agentic/experiments/outputs/amtl/anonymize/run4",
+  "research_question": "Do modern humans (Homo sapiens) have higher frequencies of antemortem tooth loss (AMTL) compared to non-human primate genera (Pan, Pongo, Papio), after accounting for the effects of age, sex, and tooth class?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Specimen genus (categorical: Homo sapiens, Pan, Pongo, Papio) — the primary predictor comparing modern humans to non-human primate genera.",
+          "columns": [
+            "feature8"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Antemortem tooth loss (AMTL) measured as the number of missing teeth out of the number of observable tooth sockets for a given tooth class (modeled as a binomial outcome).",
+        "columns": [
+          "feature3",
+          "feature4"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Estimated age of the specimen at death — included as a numeric covariate to adjust for age-related effects on AMTL.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature5"
+          ]
+        },
+        {
+          "description": "Estimated sex of the specimen — included as a numeric/encoded covariate to adjust for sex differences in AMTL.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature7"
+          ]
+        },
+        {
+          "description": "Tooth class (categorical: Anterior, Posterior, Premolar) — included to account for differences in AMTL by tooth type.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature1"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\nimport patsy\n\n# Load data\npath = \"amtl.csv\"\ndf = pd.read_csv(path)\n\n# Rename columns for clarity\nrename_map = {\n    \"feature1\": \"tooth_class\",\n    \"feature2\": \"specimen_id\",\n    \"feature3\": \"missing\",\n    \"feature4\": \"observable\",\n    \"feature5\": \"age\",\n    \"feature6\": \"age_unc\",\n    \"feature7\": \"sex\",\n    \"feature8\": \"genus\",\n    \"feature9\": \"region\",\n}\ndf = df.rename(columns=rename_map)\n\n# Basic cleaning\nfor col in [\"missing\", \"observable\", \"age\", \"sex\"]:\n    df[col] = pd.to_numeric(df[col], errors=\"coerce\")\n\n# Keep rows with valid counts and covariates\n_df = df.dropna(subset=[\"missing\", \"observable\", \"age\", \"sex\", \"tooth_class\", \"genus\"]).copy()\n_df = _df[_df[\"observable\"] > 0]\n_df[\"non_missing\"] = _df[\"observable\"] - _df[\"missing\"]\n_df = _df[_df[\"non_missing\"] >= 0]\n\n# Ensure categorical dtype\n_df[\"tooth_class\"] = _df[\"tooth_class\"].astype(\"category\")\n_df[\"genus\"] = _df[\"genus\"].astype(\"category\")\n\n# Build design matrix with Homo sapiens as reference\nformula = \"C(genus, Treatment(reference='Homo sapiens')) + age + sex + C(tooth_class)\"\nexog = patsy.dmatrix(formula, _df, return_type=\"dataframe\")\ndesign_info = exog.design_info\n\n# Binomial GLM with successes/failures\nendog = _df[[\"missing\", \"non_missing\"]].astype(float)\nmodel = sm.GLM(endog, exog, family=sm.families.Binomial())\nresult = model.fit()\n\n# Adjusted predicted mean rate per genus (average marginal prediction)\nunique_genera = list(_df[\"genus\"].cat.categories)\nmean_rates = {}\nfor g in unique_genera:\n    temp = _df.copy()\n    temp[\"genus\"] = g\n    exog_g = patsy.build_design_matrices([design_info], temp, return_type=\"dataframe\")[0]\n    preds = result.predict(exog_g)\n    mean_rates[g] = float(np.mean(preds))\n\n# Determine conclusion based on genus coefficients vs Homo sapiens\ncoef = result.params\npvals = result.pvalues\n\ngenus_terms = [c for c in coef.index if c.startswith(\"C(genus\")]\nnegative_and_sig = True\nfor term in genus_terms:\n    if not (coef[term] < 0 and pvals[term] < 0.05):\n        negative_and_sig = False\n        break\n\n# Prepare conclusion\nif negative_and_sig:\n    conclusion = \"Yes\"\nelse:\n    conclusion = \"No\"\n\n# Build brief reasoning\n# Identify adjusted mean rate ordering\nsorted_rates = sorted(mean_rates.items(), key=lambda x: x[1], reverse=True)\nrate_str = \", \".join([f\"{g}: {mean_rates[g]:.3f}\" for g in unique_genera])\n\nreason_lines = []\nif conclusion == \"Yes\":\n    reason_lines.append(\n        \"After adjusting for age, sex, and tooth class, non-human genera show significantly lower AMTL odds than Homo sapiens in the binomial model.\"\n    )\n    reason_lines.append(f\"Adjusted mean predicted AMTL rates (proportions) by genus are {rate_str}.\")\nelse:\n    reason_lines.append(\n        \"After adjusting for age, sex, and tooth class, at least one non-human genus does not have significantly lower AMTL odds than Homo sapiens in the binomial model.\"\n    )\n    reason_lines.append(f\"Adjusted mean predicted AMTL rates (proportions) by genus are {rate_str}.\")\n\nwith open(\"conclusion.txt\", \"w\", encoding=\"utf-8\") as f:\n    f.write(conclusion + \"\\n\")\n    f.write(\" \".join(reason_lines).strip() + \"\\n\")\n\n# Print a concise summary for inspection\nprint(result.summary())\nprint(\"\\nAdjusted mean predicted AMTL rates by genus:\")\nfor g, r in mean_rates.items():\n    print(f\"{g}: {r:.4f}\")\nprint(\"\\nGenus terms (vs Homo sapiens):\")\nfor term in genus_terms:\n    print(f\"{term}: coef={coef[term]:.4f}, p={pvals[term]:.4g}\")\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T18:08:15.805340+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/amtl/anonymize/run4/analysis.py",
+      "info_json": "agentic/experiments/outputs/amtl/anonymize/run4/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/amtl/anonymize/run4/conclusion.txt"
+    }
+  }
+}

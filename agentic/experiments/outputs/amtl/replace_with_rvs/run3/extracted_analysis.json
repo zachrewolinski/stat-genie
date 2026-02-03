@@ -1,0 +1,62 @@
+{
+  "dataset_name": "amtl",
+  "run_dir": "agentic/experiments/outputs/amtl/replace_with_rvs/run3",
+  "research_question": "Do modern humans (Homo sapiens) have higher frequencies of antemortem tooth loss (AMTL) compared to non-human primate genera (Pan, Pongo, Papio), after accounting for the effects of age, sex, and tooth class?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Specimen genus — the primary independent variable comparing Homo sapiens (modern humans) to non-human primate genera (Pan, Pongo, Papio).",
+          "columns": [
+            "genus"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Antemortem tooth loss (AMTL) measured as the number of missing teeth of the given tooth class out of the number of observable sockets; modeled as a binomial outcome (missing vs present).",
+        "columns": [
+          "num_amtl",
+          "sockets"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Estimated age of the specimen at death, included as a covariate to control for age effects on AMTL.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "age"
+          ]
+        },
+        {
+          "description": "Estimated probability the specimen is male (sex estimate), included as a covariate to control for sex differences in AMTL.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "prob_male"
+          ]
+        },
+        {
+          "description": "Tooth class (Anterior, Posterior, Premolar), included as a covariate to control for differences in AMTL by tooth type.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "tooth_class"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\nimport patsy\n\n# Load data\ncsv_path = \"/home/chenwang/stat-genie/agentic/experiments/outputs/amtl/replace_with_rvs/run3/amtl.csv\"\ndf = pd.read_csv(csv_path)\n\n# Basic cleaning: keep rows with required fields\nrequired_cols = [\"num_amtl\", \"sockets\", \"age\", \"prob_male\", \"tooth_class\", \"genus\"]\ndf = df.dropna(subset=required_cols).copy()\n\n# Ensure numeric types\nfor col in [\"num_amtl\", \"sockets\", \"age\", \"prob_male\"]:\n    df[col] = pd.to_numeric(df[col], errors=\"coerce\")\n\ndf = df.dropna(subset=[\"num_amtl\", \"sockets\", \"age\", \"prob_male\"])\n\n# Filter to valid counts\n# sockets must be positive and num_amtl between 0 and sockets\nmask = (df[\"sockets\"] > 0) & (df[\"num_amtl\"] >= 0) & (df[\"num_amtl\"] <= df[\"sockets\"])\ndf = df.loc[mask].copy()\n\n# Create human indicator\n# Homo sapiens in dataset is labeled \"Homo sapiens\"\ndf[\"is_human\"] = (df[\"genus\"] == \"Homo sapiens\").astype(int)\n\n# Fit binomial GLM with logit link using successes/failures\n# Controls: age, sex probability, tooth class\npredictor_formula = \"is_human + age + prob_male + C(tooth_class)\"\ny, X = patsy.dmatrices(f\"num_amtl ~ {predictor_formula}\", data=df, return_type=\"dataframe\")\nendog = np.column_stack([df[\"num_amtl\"].values, (df[\"sockets\"] - df[\"num_amtl\"]).values])\nmodel = sm.GLM(endog, X, family=sm.families.Binomial())\nresult = model.fit()\n\n# Extract human effect\ncoef = result.params.get(\"is_human\", np.nan)\nse = result.bse.get(\"is_human\", np.nan)\npval = result.pvalues.get(\"is_human\", np.nan)\n\n# Odds ratio and 95% CI\nor_est = np.exp(coef)\nci_low = np.exp(coef - 1.96 * se)\nci_high = np.exp(coef + 1.96 * se)\n\nprint(\"Rows used:\", len(df))\nprint(result.summary())\nprint(\"\\nHuman effect (is_human):\")\nprint(f\"  log-odds coef = {coef:.4f}\")\nprint(f\"  OR = {or_est:.4f}\")\nprint(f\"  95% CI OR = [{ci_low:.4f}, {ci_high:.4f}]\")\nprint(f\"  p-value = {pval:.6f}\")\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T18:13:56.254104+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/amtl/replace_with_rvs/run3/analysis.py",
+      "info_json": "agentic/experiments/outputs/amtl/replace_with_rvs/run3/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/amtl/replace_with_rvs/run3/conclusion.txt"
+    }
+  }
+}

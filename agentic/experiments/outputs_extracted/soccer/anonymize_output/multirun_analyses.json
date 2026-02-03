@@ -1,0 +1,148 @@
+{
+  "dataset_name": "soccer",
+  "n": 5,
+  "analyses": {
+    "0": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Player skin tone (treatment/exposure). In the analysis this was constructed as a dark vs light indicator based on the average of two independent rater scores (dark if avg >= 0.6, light if avg <= 0.4; middle values excluded). Underlying measured columns are the two rater skin ratings.",
+            "columns": [
+              "feature18",
+              "feature19"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Count of red cards a player received from a particular referee across all matches the dyad encountered each other (outcome). Modeled as a rate per game using games as an offset.",
+          "columns": [
+            "feature16"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Number of games in the player–referee dyad (used as exposure; included as log(games) offset in the Poisson regression).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "feature9"
+            ]
+          }
+        ]
+      },
+      "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\n\n# Load data\npath = \"soccer.csv\"\ndf = pd.read_csv(path)\n\n# Skin tone: average of two raters\nskin_avg = df[[\"feature18\", \"feature19\"]].mean(axis=1)\n\ndf = df.copy()\ndf[\"skin_avg\"] = skin_avg\n\n# Define light vs dark using clear cutoffs around the midpoint (0.5)\n# Light: <= 0.4, Dark: >= 0.6; exclude middle to reduce ambiguity\nlight_mask = df[\"skin_avg\"] <= 0.4\ndark_mask = df[\"skin_avg\"] >= 0.6\n\nsubset = df[light_mask | dark_mask].copy()\nsubset[\"dark\"] = np.where(subset[\"skin_avg\"] >= 0.6, 1, 0)\n\n# Outcome and exposure\nsubset[\"red_cards\"] = subset[\"feature16\"].astype(float)\nsubset[\"games\"] = subset[\"feature9\"].astype(float)\n\n# Avoid zero exposure (shouldn't happen, but guard)\nsubset = subset[subset[\"games\"] > 0]\n\n# Poisson regression with log(games) offset to model red card rate per game\nX = sm.add_constant(subset[\"dark\"])\nmodel = sm.GLM(\n    subset[\"red_cards\"],\n    X,\n    family=sm.families.Poisson(),\n    offset=np.log(subset[\"games\"]),\n)\nresult = model.fit()\n\n# Rate ratio for dark vs light\nrate_ratio = np.exp(result.params[\"dark\"])\nci = result.conf_int().loc[\"dark\"]\nci_rr = np.exp(ci)\n\n# Compute empirical rates per game for transparency\nrate_light = (subset.loc[subset[\"dark\"] == 0, \"red_cards\"].sum() /\n              subset.loc[subset[\"dark\"] == 0, \"games\"].sum())\nrate_dark = (subset.loc[subset[\"dark\"] == 1, \"red_cards\"].sum() /\n             subset.loc[subset[\"dark\"] == 1, \"games\"].sum())\n\nsummary = {\n    \"n_total\": len(df),\n    \"n_light_dark\": len(subset),\n    \"rate_light\": rate_light,\n    \"rate_dark\": rate_dark,\n    \"rate_ratio\": rate_ratio,\n    \"ci_low\": ci_rr[0],\n    \"ci_high\": ci_rr[1],\n    \"p_value\": result.pvalues[\"dark\"],\n}\n\nprint(summary)\n"
+    },
+    "1": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Player skin tone as coded from profile photos by two independent raters (binary contrast dark vs light based on the mean of the two raters).",
+            "columns": [
+              "feature18",
+              "feature19"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Number of red cards a player received from a particular referee in the player-referee dyad (count outcome).",
+          "columns": [
+            "feature16"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Number of games in the player-referee dyad (used as exposure / offset in the Poisson model).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "feature9"
+            ]
+          }
+        ]
+      },
+      "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\n\n# Load data\ndf = pd.read_csv('soccer.csv')\n\n# Skin tone average (use mean of two raters)\nskin_cols = ['feature18', 'feature19']\n\ndf['skin_avg'] = df[skin_cols].mean(axis=1)\n\n# Keep rows with skin ratings and valid games\ndf = df.dropna(subset=['skin_avg', 'feature9', 'feature16'])\n\n# Define light vs dark\n# Normalized scale likely: 0,0.25,0.5,0.75,1.0\n# Treat <0.5 as light, >0.5 as dark. Exclude exactly 0.5 (neither).\n\ndf = df[(df['skin_avg'] < 0.5) | (df['skin_avg'] > 0.5)].copy()\n\ndf['dark'] = (df['skin_avg'] > 0.5).astype(int)\n\n# Outcomes and exposure\ndf['red_cards'] = df['feature16']\ndf['games'] = df['feature9']\n\n# Aggregate rates\nagg = df.groupby('dark').agg(\n    red_cards=('red_cards', 'sum'),\n    games=('games', 'sum'),\n    dyads=('red_cards', 'size')\n).reset_index()\nagg['rate_per_game'] = agg['red_cards'] / agg['games']\n\n# Poisson regression with log(games) offset\nX = sm.add_constant(df['dark'])\nmodel = sm.GLM(df['red_cards'], X, family=sm.families.Poisson(), offset=np.log(df['games']))\nres = model.fit()\n\ncoef = res.params['dark']\nrr = np.exp(coef)\npval = res.pvalues['dark']\n\n# Save results summary for manual inspection\nwith open('analysis_output.txt', 'w') as f:\n    f.write('Aggregated rates by skin tone (0=light,1=dark)\\n')\n    f.write(agg.to_string(index=False))\n    f.write('\\n\\n')\n    f.write('Poisson regression with offset(log(games))\\n')\n    f.write(res.summary().as_text())\n    f.write('\\n')\n    f.write(f'Rate ratio (dark vs light): {rr:.4f}\\n')\n    f.write(f'p-value: {pval:.6g}\\n')\n"
+    },
+    "2": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Player skin tone as coded by two independent raters (5-point scale normalized to 1); analysis uses the average of feature18 and feature19 to create a binary dark vs light indicator (middle category excluded).",
+            "columns": [
+              "feature18",
+              "feature19"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Count of red cards the player received from a particular referee in the player-referee dyad (used as the outcome in a Poisson model).",
+          "columns": [
+            "feature16"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Number of games in the player-referee dyad (used as exposure offset in the Poisson regression).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "feature9"
+            ]
+          }
+        ]
+      },
+      "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\n\n# Load data\npath = \"soccer.csv\"\ndf = pd.read_csv(path)\n\n# Compute average skin tone from two raters\nskin = df[[\"feature18\", \"feature19\"]].mean(axis=1)\n\n# Define light vs dark; exclude middle category (0.5) for clearer contrast\nlight_mask = skin < 0.5\ndark_mask = skin > 0.5\n\n# Keep rows with clear light or dark\nmask = light_mask | dark_mask\nsub = df.loc[mask].copy()\nsub[\"dark\"] = (skin.loc[mask] > 0.5).astype(int)\n\n# Outcomes\nsub[\"games\"] = sub[\"feature9\"].astype(float)\nsub[\"red_cards\"] = sub[\"feature16\"].astype(float)\n\n# Basic rates\nrate_light = (sub.loc[sub[\"dark\"] == 0, \"red_cards\"].sum() /\n              sub.loc[sub[\"dark\"] == 0, \"games\"].sum())\nrate_dark = (sub.loc[sub[\"dark\"] == 1, \"red_cards\"].sum() /\n             sub.loc[sub[\"dark\"] == 1, \"games\"].sum())\n\n# Poisson regression with exposure offset\nX = sm.add_constant(sub[\"dark\"])\nmodel = sm.GLM(sub[\"red_cards\"], X, family=sm.families.Poisson(),\n               offset=np.log(sub[\"games\"]))\nres = model.fit()\ncoef = res.params[\"dark\"]\npval = res.pvalues[\"dark\"]\nrate_ratio = np.exp(coef)\n\nprint(\"Rows used:\", len(sub))\nprint(\"Total light dyads:\", (sub[\"dark\"] == 0).sum())\nprint(\"Total dark dyads:\", (sub[\"dark\"] == 1).sum())\nprint(\"Red cards per game (light):\", rate_light)\nprint(\"Red cards per game (dark):\", rate_dark)\nprint(\"Rate ratio (dark vs light):\", rate_ratio)\nprint(\"P-value:\", pval)\n"
+    },
+    "3": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Player skin tone as coded from two independent raters' photo ratings (5-point scale normalized). Analysis uses these ratings to classify players into light vs. dark skin tone groups.",
+            "columns": [
+              "feature18",
+              "feature19"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Player red-card outcome measured as number of red cards received (aggregated across dyads) relative to games played — computed from red cards and games in the player-referee dyads (red cards per game).",
+          "columns": [
+            "feature16",
+            "feature9"
+          ]
+        },
+        "controls": []
+      },
+      "analysis_code": "import pandas as pd\nimport numpy as np\n\n# Load data\npath = \"soccer.csv\"\ndf = pd.read_csv(path)\n\n# Compute mean skin tone rating\nskin = df[[\"feature18\", \"feature19\"]].mean(axis=1)\n\n# Assign skin category: light (<=0.25), dark (>=0.75); exclude middle\nconditions = [skin <= 0.25, skin >= 0.75]\nchoices = [\"light\", \"dark\"]\ncat = np.select(conditions, choices, default=\"mid\")\n\ndf = df.assign(skin_mean=skin, skin_cat=cat)\n\n# Use player short name as identifier\nplayer_id = \"feature1\"\n\n# Aggregate to player level\nagg = (\n    df.groupby(player_id)\n    .agg(\n        skin_cat=(\"skin_cat\", \"first\"),\n        skin_mean=(\"skin_mean\", \"first\"),\n        total_red=(\"feature16\", \"sum\"),\n        total_games=(\"feature9\", \"sum\"),\n    )\n    .reset_index()\n)\n\n# Filter to light/dark and players with games\nagg = agg[(agg[\"skin_cat\"].isin([\"light\", \"dark\"])) & (agg[\"total_games\"] > 0)]\n\n# Overall group rates (weighted by games)\nrates = (\n    agg.groupby(\"skin_cat\")[[\"total_red\", \"total_games\"]]\n    .sum()\n    .assign(rate=lambda x: x[\"total_red\"] / x[\"total_games\"])\n)\n\nlight_rate = rates.loc[\"light\", \"rate\"] if \"light\" in rates.index else np.nan\ndark_rate = rates.loc[\"dark\", \"rate\"] if \"dark\" in rates.index else np.nan\nrate_diff = dark_rate - light_rate\n\n# Bootstrap CI over players within each group\nrng = np.random.default_rng(42)\nB = 2000\n\ndef bootstrap_rate(players_df):\n    n = len(players_df)\n    idx = rng.integers(0, n, size=n)\n    sample = players_df.iloc[idx]\n    total_red = sample[\"total_red\"].sum()\n    total_games = sample[\"total_games\"].sum()\n    return total_red / total_games if total_games > 0 else np.nan\n\nlight_players = agg[agg[\"skin_cat\"] == \"light\"].reset_index(drop=True)\ndark_players = agg[agg[\"skin_cat\"] == \"dark\"].reset_index(drop=True)\n\nboot_diffs = []\nfor _ in range(B):\n    lr = bootstrap_rate(light_players)\n    dr = bootstrap_rate(dark_players)\n    boot_diffs.append(dr - lr)\n\nboot_diffs = np.array(boot_diffs)\nci_low, ci_high = np.nanpercentile(boot_diffs, [2.5, 97.5])\n\n# Print summary\nprint(\"Players per group:\")\nprint(agg[\"skin_cat\"].value_counts())\nprint(\"\\nGroup rates (red cards per game):\")\nprint(rates)\nprint(f\"\\nRate difference (dark - light): {rate_diff:.6f}\")\nprint(f\"95% bootstrap CI for difference: [{ci_low:.6f}, {ci_high:.6f}]\")\n"
+    },
+    "4": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Player skin tone (dichotomized: dark vs light) determined from the mean of two independent raters' 5-point photo ratings (normalized to 0-1).",
+            "columns": [
+              "feature18",
+              "feature19"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Number of red cards the player received from a particular referee (count outcome used in Poisson regression).",
+          "columns": [
+            "feature16"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Number of games in the player-referee dyad (used as the exposure offset in the Poisson model).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "feature9"
+            ]
+          }
+        ]
+      },
+      "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\n\n# Load data\npath = \"soccer.csv\"\ndf = pd.read_csv(path)\n\n# Skin tone average (two raters). Use mean when both available.\ndf[\"skin_avg\"] = df[[\"feature18\", \"feature19\"]].mean(axis=1)\n\n# Define dark vs light using 5-point scale normalized to 0-1\n# Values are {0, 0.25, 0.5, 0.75, 1}. Treat 0.5 as neutral and exclude.\ndf[\"skin_group\"] = np.where(df[\"skin_avg\"] > 0.5, \"dark\",\n                      np.where(df[\"skin_avg\"] < 0.5, \"light\", \"neutral\"))\n\n# Outcomes and exposure\nred = df[\"feature16\"].astype(float)\ngames = df[\"feature9\"].astype(float)\n\n# Filter to light/dark only and positive games\nmask = df[\"skin_group\"].isin([\"light\", \"dark\"]) & (games > 0) & red.notna() & df[\"skin_avg\"].notna()\ndf2 = df.loc[mask].copy()\n\n# Descriptive rates\nrates = df2.groupby(\"skin_group\").apply(lambda g: g[\"feature16\"].sum() / g[\"feature9\"].sum())\n\n# Poisson regression with log(games) offset\n# Response: red cards count; Predictor: dark vs light\nX = (df2[\"skin_group\"] == \"dark\").astype(int)\nX = sm.add_constant(X)\nmodel = sm.GLM(df2[\"feature16\"], X, family=sm.families.Poisson(), offset=np.log(df2[\"feature9\"]))\nresult = model.fit()\n\n# Extract rate ratio for dark vs light\ncoef = result.params[1]\nrr = float(np.exp(coef))\n\n# Two-sided p-value for dark coefficient\np_value = float(result.pvalues[1])\n\n# Save a small summary for reference\nsummary_lines = [\n    f\"dark_rate={rates.get('dark', np.nan):.6f}\",\n    f\"light_rate={rates.get('light', np.nan):.6f}\",\n    f\"rate_ratio_dark_vs_light={rr:.4f}\",\n    f\"p_value={p_value:.6g}\",\n    f\"n_rows={len(df2)}\",\n]\n\nwith open(\"analysis_summary.txt\", \"w\") as f:\n    f.write(\"\\n\".join(summary_lines))\n\nprint(\"\\n\".join(summary_lines))\n"
+    }
+  }
+}

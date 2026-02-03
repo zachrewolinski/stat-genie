@@ -1,0 +1,38 @@
+{
+  "dataset_name": "soccer",
+  "run_dir": "agentic/experiments/outputs/soccer/anonymize/run4",
+  "research_question": "Are soccer players with a dark skin tone more likely than those with a light skin tone to receive red cards from referees?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Player skin tone as coded from two independent raters' photo ratings (5-point scale normalized). Analysis uses these ratings to classify players into light vs. dark skin tone groups.",
+          "columns": [
+            "feature18",
+            "feature19"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Player red-card outcome measured as number of red cards received (aggregated across dyads) relative to games played — computed from red cards and games in the player-referee dyads (red cards per game).",
+        "columns": [
+          "feature16",
+          "feature9"
+        ]
+      },
+      "controls": []
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\n\n# Load data\npath = \"soccer.csv\"\ndf = pd.read_csv(path)\n\n# Compute mean skin tone rating\nskin = df[[\"feature18\", \"feature19\"]].mean(axis=1)\n\n# Assign skin category: light (<=0.25), dark (>=0.75); exclude middle\nconditions = [skin <= 0.25, skin >= 0.75]\nchoices = [\"light\", \"dark\"]\ncat = np.select(conditions, choices, default=\"mid\")\n\ndf = df.assign(skin_mean=skin, skin_cat=cat)\n\n# Use player short name as identifier\nplayer_id = \"feature1\"\n\n# Aggregate to player level\nagg = (\n    df.groupby(player_id)\n    .agg(\n        skin_cat=(\"skin_cat\", \"first\"),\n        skin_mean=(\"skin_mean\", \"first\"),\n        total_red=(\"feature16\", \"sum\"),\n        total_games=(\"feature9\", \"sum\"),\n    )\n    .reset_index()\n)\n\n# Filter to light/dark and players with games\nagg = agg[(agg[\"skin_cat\"].isin([\"light\", \"dark\"])) & (agg[\"total_games\"] > 0)]\n\n# Overall group rates (weighted by games)\nrates = (\n    agg.groupby(\"skin_cat\")[[\"total_red\", \"total_games\"]]\n    .sum()\n    .assign(rate=lambda x: x[\"total_red\"] / x[\"total_games\"])\n)\n\nlight_rate = rates.loc[\"light\", \"rate\"] if \"light\" in rates.index else np.nan\ndark_rate = rates.loc[\"dark\", \"rate\"] if \"dark\" in rates.index else np.nan\nrate_diff = dark_rate - light_rate\n\n# Bootstrap CI over players within each group\nrng = np.random.default_rng(42)\nB = 2000\n\ndef bootstrap_rate(players_df):\n    n = len(players_df)\n    idx = rng.integers(0, n, size=n)\n    sample = players_df.iloc[idx]\n    total_red = sample[\"total_red\"].sum()\n    total_games = sample[\"total_games\"].sum()\n    return total_red / total_games if total_games > 0 else np.nan\n\nlight_players = agg[agg[\"skin_cat\"] == \"light\"].reset_index(drop=True)\ndark_players = agg[agg[\"skin_cat\"] == \"dark\"].reset_index(drop=True)\n\nboot_diffs = []\nfor _ in range(B):\n    lr = bootstrap_rate(light_players)\n    dr = bootstrap_rate(dark_players)\n    boot_diffs.append(dr - lr)\n\nboot_diffs = np.array(boot_diffs)\nci_low, ci_high = np.nanpercentile(boot_diffs, [2.5, 97.5])\n\n# Print summary\nprint(\"Players per group:\")\nprint(agg[\"skin_cat\"].value_counts())\nprint(\"\\nGroup rates (red cards per game):\")\nprint(rates)\nprint(f\"\\nRate difference (dark - light): {rate_diff:.6f}\")\nprint(f\"95% bootstrap CI for difference: [{ci_low:.6f}, {ci_high:.6f}]\")\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-02T16:35:17.668490+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/soccer/anonymize/run4/analysis.py",
+      "info_json": "agentic/experiments/outputs/soccer/anonymize/run4/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/soccer/anonymize/run4/conclusion.txt"
+    }
+  }
+}

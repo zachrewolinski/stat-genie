@@ -1,0 +1,49 @@
+{
+  "dataset_name": "panda_nuts",
+  "run_dir": "agentic/experiments/outputs/panda_nuts/anonymize/run5",
+  "research_question": "Do age, sex, and receiving help from another chimpanzee influence the nut-cracking efficiency of western chimpanzees?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Age of the individual (predictor of nut-cracking efficiency)",
+          "columns": [
+            "feature2"
+          ]
+        },
+        {
+          "description": "Sex of the individual (categorical predictor: male vs female)",
+          "columns": [
+            "feature3"
+          ]
+        },
+        {
+          "description": "Whether the individual received help from another chimpanzee (yes/no predictor)",
+          "columns": [
+            "feature7"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Nut-cracking efficiency defined as nuts opened per minute (computed from number of nuts opened and session duration)",
+        "columns": [
+          "feature5",
+          "feature6"
+        ]
+      },
+      "controls": []
+    },
+    "analysis_code": "import pandas as pd\nimport statsmodels.formula.api as smf\nimport numpy as np\n\n# Load data\npath = 'panda_nuts.csv'\ndf = pd.read_csv(path)\n\n# Define nut-cracking efficiency as nuts opened per minute\n# (feature5 = nuts opened, feature6 = duration seconds)\ndf['efficiency_per_min'] = (df['feature5'] / df['feature6']) * 60.0\n\n# Clean any potential infinities (should not exist given min duration > 0)\ndf = df.replace([np.inf, -np.inf], np.nan).dropna(subset=['efficiency_per_min'])\n\n# Rename for clarity\nclean = df.rename(columns={\n    'feature2': 'age',\n    'feature3': 'sex',\n    'feature7': 'help'\n})\n\n# Fit linear model with categorical sex and help\nmodel = smf.ols('efficiency_per_min ~ age + C(sex) + C(help)', data=clean).fit(cov_type='HC3')\n\nprint('N:', len(clean))\nprint(model.summary())\n\n# Extract p-values and coefficients for reporting\nresults = pd.DataFrame({\n    'coef': model.params,\n    'pvalue': model.pvalues\n})\nprint('\\nCoefficients and p-values:')\nprint(results)\n\n# Save key results for potential inspection\nresults.to_csv('analysis_results.csv')\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T19:06:32.267425+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/panda_nuts/anonymize/run5/analysis.py",
+      "info_json": "agentic/experiments/outputs/panda_nuts/anonymize/run5/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/panda_nuts/anonymize/run5/conclusion.txt"
+    }
+  }
+}

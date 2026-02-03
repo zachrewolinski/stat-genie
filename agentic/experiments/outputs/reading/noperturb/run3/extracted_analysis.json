@@ -1,0 +1,48 @@
+{
+  "dataset_name": "reading",
+  "run_dir": "agentic/experiments/outputs/reading/noperturb/run3",
+  "research_question": "Does 'Reader View' --- a modified web page layout --- improves reading speed for individuals with dyslexia?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Treatment indicator for whether the Reader View layout was activated (1) or not (0). This is the main predictor whose effect on reading speed is of interest.",
+          "columns": [
+            "reader_view"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Reading speed measured for each page/participant (used as the outcome; log(speed) is modeled in the analysis).",
+        "columns": [
+          "speed"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Content and presentation covariates included to adjust the estimated effect of reader_view: page identifier (content), number of words on the page, device used, and language of the text.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "page_id",
+            "num_words",
+            "device",
+            "language"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.formula.api as smf\nfrom scipy import stats\n\n# Load data\n_df = pd.read_csv('reading.csv')\n\n# Focus on participants with dyslexia (binary indicator)\n# Use dyslexia_bin if available, otherwise fall back to dyslexia >= 1\nif 'dyslexia_bin' in _df.columns:\n    df = _df[_df['dyslexia_bin'] == 1].copy()\nelse:\n    df = _df[_df['dyslexia'] >= 1].copy()\n\n# Basic cleaning\n# Remove non-positive or missing speeds\nif 'speed' not in df.columns:\n    raise ValueError('speed column not found')\n\ndf = df.replace([np.inf, -np.inf], np.nan)\ndf = df.dropna(subset=['speed', 'reader_view'])\ndf = df[df['speed'] > 0]\n\n# Group stats by reader_view\nsummary = (\n    df.groupby('reader_view')['speed']\n    .agg(['count', 'mean', 'median', 'std'])\n    .rename(index={0: 'NoReaderView', 1: 'ReaderView'})\n)\n\n# Welch t-test on log speed for skewed distribution\nlog_speed = np.log(df['speed'])\nrv = df['reader_view']\nlog_speed_rv = log_speed[rv == 1]\nlog_speed_no = log_speed[rv == 0]\n\nttest_res = stats.ttest_ind(log_speed_rv, log_speed_no, equal_var=False, nan_policy='omit')\n\n# Regression with controls: page_id and num_words (content), device, language\n# Use log(speed) outcome for stability\n# Only include controls if present\ncontrols = []\nfor col in ['page_id', 'num_words', 'device', 'language']:\n    if col in df.columns:\n        controls.append(col)\n\nformula = 'np.log(speed) ~ reader_view'\nif controls:\n    formula += ' + ' + ' + '.join([f'C({c})' if df[c].dtype == 'object' or df[c].dtype.name == 'category' else c for c in controls])\n\nmodel = smf.ols(formula, data=df).fit(cov_type='HC3')\n\n# Collect results\nresults = {\n    'n_dyslexia': int(df.shape[0]),\n    'summary_by_reader_view': summary,\n    'ttest_log_speed_stat': float(ttest_res.statistic) if np.isfinite(ttest_res.statistic) else np.nan,\n    'ttest_log_speed_pvalue': float(ttest_res.pvalue) if np.isfinite(ttest_res.pvalue) else np.nan,\n    'reg_coef_reader_view': float(model.params.get('reader_view', np.nan)),\n    'reg_pvalue_reader_view': float(model.pvalues.get('reader_view', np.nan)),\n    'reg_nobs': int(model.nobs),\n}\n\nprint('Dyslexia subset size:', results['n_dyslexia'])\nprint('\\nSummary by reader_view:')\nprint(summary)\nprint('\\nWelch t-test on log(speed): stat=%.4f p=%.6f' % (results['ttest_log_speed_stat'], results['ttest_log_speed_pvalue']))\nprint('\\nRegression (log speed) coef reader_view=%.4f p=%.6f' % (results['reg_coef_reader_view'], results['reg_pvalue_reader_view']))\n\n# Save key results for downstream use\nresults_df = summary.copy()\nresults_df.to_csv('analysis_summary_by_reader_view.csv')\n\nwith open('analysis_results.txt', 'w') as f:\n    f.write('Dyslexia subset size: %d\\n' % results['n_dyslexia'])\n    f.write('Welch t-test on log(speed): stat=%.6f p=%.8f\\n' % (results['ttest_log_speed_stat'], results['ttest_log_speed_pvalue']))\n    f.write('Regression (log speed) coef reader_view=%.6f p=%.8f\\n' % (results['reg_coef_reader_view'], results['reg_pvalue_reader_view']))\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T19:19:11.167011+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/reading/noperturb/run3/analysis.py",
+      "info_json": "agentic/experiments/outputs/reading/noperturb/run3/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/reading/noperturb/run3/conclusion.txt"
+    }
+  }
+}

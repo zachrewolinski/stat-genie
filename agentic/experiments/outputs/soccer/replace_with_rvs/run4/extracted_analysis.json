@@ -1,0 +1,46 @@
+{
+  "dataset_name": "soccer",
+  "run_dir": "agentic/experiments/outputs/soccer/replace_with_rvs/run4",
+  "research_question": "Are soccer players with a dark skin tone more likely than those with a light skin tone to receive red cards from referees?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Player skin tone (dark vs light). In the analysis this was computed as the mean of two independent raters' 5-point skin ratings (normalized to 0-1) and dichotomized at >=0.5 to indicate 'dark'.",
+          "columns": [
+            "rater1",
+            "rater2"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Count of red cards a player received from a particular referee in the player-referee dyad (outcome).",
+        "columns": [
+          "redCards"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Number of games in the player-referee dyad; used as exposure (offset) in the Poisson regression to account for differing opportunities for red cards.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "games"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\n\n# Load data\nDf = pd.read_csv('soccer.csv')\n\n# Skin tone: average of two raters (0=very light ... 1=very dark)\nskin_mean = Df[['rater1', 'rater2']].mean(axis=1)\n\n# Define dark vs light using the midpoint (>= 0.5 is darker than neutral)\nDf['is_dark'] = (skin_mean >= 0.5).astype(int)\n\n# Aggregate red card rates per game by group\nsummary = (\n    Df.groupby('is_dark')\n      .agg(total_red=('redCards', 'sum'), total_games=('games', 'sum'))\n      .assign(red_per_game=lambda x: x['total_red'] / x['total_games'])\n)\n\n# Poisson regression with exposure (games) as offset\nX = sm.add_constant(Df['is_dark'])\nmodel = sm.GLM(Df['redCards'], X, family=sm.families.Poisson(), offset=np.log(Df['games']))\nres = model.fit(cov_type='HC0')\n\nirr = float(np.exp(res.params['is_dark']))\np_value = float(res.pvalues['is_dark'])\n\nprint('Group rates (red cards per game):')\nprint(summary)\nprint('\\nPoisson regression (offset=log(games))')\nprint(res.summary().tables[1])\nprint(f\"\\nIncidence rate ratio (dark vs light): {irr:.4f}\")\nprint(f\"p-value: {p_value:.4g}\")\n\n# Save key results for conclusion\nsummary.to_csv('group_rates.csv')\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-02T16:42:26.785713+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/soccer/replace_with_rvs/run4/analysis.py",
+      "info_json": "agentic/experiments/outputs/soccer/replace_with_rvs/run4/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/soccer/replace_with_rvs/run4/conclusion.txt"
+    }
+  }
+}

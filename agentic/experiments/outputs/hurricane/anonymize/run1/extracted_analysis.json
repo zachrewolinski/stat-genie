@@ -1,0 +1,83 @@
+{
+  "dataset_name": "hurricane",
+  "run_dir": "agentic/experiments/outputs/hurricane/anonymize/run1",
+  "research_question": "Hurricanes with more feminine names are perceived as less threatening and hence lead to fewer precautionary measures by the general public.",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Continuous masculinity-femininity index: average rating (1=very masculine, 11=very feminine) based on nine independent coders who rated historical hurricane names.",
+          "columns": [
+            "feature4"
+          ]
+        },
+        {
+          "description": "Binary indicator for the hurricane name's gender (0=male, 1=female).",
+          "columns": [
+            "feature6"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Number of deaths caused by the hurricane (analysis used log1p(deaths) to reduce skew).",
+        "columns": [
+          "feature8"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Maximum wind speed of the hurricane at landfall (storm intensity control).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature13"
+          ]
+        },
+        {
+          "description": "Minimum pressure of the hurricane at landfall (storm intensity control).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature5"
+          ]
+        },
+        {
+          "description": "Saffir-Simpson category of the hurricane (storm intensity control).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature7"
+          ]
+        },
+        {
+          "description": "Property damage adjusted to 2015 monetary values (exposure/economic damage control; analysis used log1p(damage_2015)).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature14"
+          ]
+        },
+        {
+          "description": "Year the hurricane occurred (temporal control).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature2"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\n\n# Load data\npath = '/home/chenwang/stat-genie/agentic/experiments/outputs/hurricane/anonymize/run1/hurricane.csv'\ndf = pd.read_csv(path)\n\n# Rename columns for clarity\ncols = {\n    'feature1': 'id',\n    'feature2': 'year',\n    'feature3': 'name',\n    'feature4': 'masfem_index',\n    'feature5': 'min_pressure',\n    'feature6': 'female_binary',\n    'feature7': 'category',\n    'feature8': 'deaths',\n    'feature9': 'damage_2013',\n    'feature10': 'years_elapsed',\n    'feature11': 'source',\n    'feature12': 'mturk_masfem',\n    'feature13': 'max_wind',\n    'feature14': 'damage_2015',\n}\n\ndf = df.rename(columns=cols)\n\n# Outcome: log1p deaths to reduce skew\n# Controls: storm intensity and exposure proxies\nanalysis_df = df.copy()\nanalysis_df['log_deaths'] = np.log1p(analysis_df['deaths'])\nanalysis_df['log_damage_2015'] = np.log1p(analysis_df['damage_2015'])\n\n# Drop rows with missing values in model variables\nmodel_vars = ['log_deaths', 'masfem_index', 'female_binary', 'max_wind', 'min_pressure',\n              'category', 'log_damage_2015', 'year']\nanalysis_df = analysis_df.dropna(subset=model_vars)\n\n# Model 1: continuous masculinity-femininity index\nX1 = analysis_df[['masfem_index', 'max_wind', 'min_pressure', 'category', 'log_damage_2015', 'year']]\nX1 = sm.add_constant(X1)\nmodel1 = sm.OLS(analysis_df['log_deaths'], X1).fit(cov_type='HC3')\n\n# Model 2: binary female indicator\nX2 = analysis_df[['female_binary', 'max_wind', 'min_pressure', 'category', 'log_damage_2015', 'year']]\nX2 = sm.add_constant(X2)\nmodel2 = sm.OLS(analysis_df['log_deaths'], X2).fit(cov_type='HC3')\n\n# Print summaries for inspection\nprint('Model 1 (masfem_index):')\nprint(model1.summary())\nprint('\\nModel 2 (female_binary):')\nprint(model2.summary())\n\n# Simple decision rule for conclusion\nmasfem_coef = model1.params['masfem_index']\nmasfem_p = model1.pvalues['masfem_index']\n\nfemale_coef = model2.params['female_binary']\nfemale_p = model2.pvalues['female_binary']\n\nprint('\\nKey results:')\nprint(f'masfem_index coef={masfem_coef:.4f}, p={masfem_p:.4f}')\nprint(f'female_binary coef={female_coef:.4f}, p={female_p:.4f}')\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T18:44:47.325470+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/hurricane/anonymize/run1/analysis.py",
+      "info_json": "agentic/experiments/outputs/hurricane/anonymize/run1/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/hurricane/anonymize/run1/conclusion.txt"
+    }
+  }
+}

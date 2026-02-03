@@ -1,0 +1,275 @@
+{
+  "dataset_name": "hurricane",
+  "n": 5,
+  "analyses": {
+    "0": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Primary independent variable: crowd-rated masculinity–femininity index of hurricane names (higher = more feminine); used to test whether more feminine names predict outcomes.",
+            "columns": [
+              "masfem"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Dependent variable: total fatalities caused by the hurricane. The analysis models log(1 + alldeaths) as the outcome (natural log transform of the alldeaths column).",
+          "columns": [
+            "alldeaths"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Saffir–Simpson category at landfall (intensity control). Included to hold constant hurricane intensity.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "category"
+            ]
+          },
+          {
+            "description": "Maximum wind speed at landfall (intensity control). Included to hold constant hurricane intensity.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "wind"
+            ]
+          },
+          {
+            "description": "Minimum pressure at landfall (intensity control). Included to hold constant hurricane intensity.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "min"
+            ]
+          },
+          {
+            "description": "Binary indicator of hurricane name gender (0=male, 1=female). Included in one specification as an additional control/check.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "gender_mf"
+            ]
+          }
+        ]
+      },
+      "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\n\n# Load data\n\ndf = pd.read_csv('hurricane.csv')\n\n# Basic prep\n\ndf['log_deaths'] = np.log1p(df['alldeaths'])\n\n# Core controls: intensity metrics available at landfall\ncontrols = ['category', 'wind', 'min']\n\n# Model 1: femininity only\nX1 = sm.add_constant(df[['masfem']])\nmodel1 = sm.OLS(df['log_deaths'], X1).fit(cov_type='HC3')\n\n# Model 2: femininity + controls\nX2 = sm.add_constant(df[['masfem'] + controls])\nmodel2 = sm.OLS(df['log_deaths'], X2).fit(cov_type='HC3')\n\n# Model 3: femininity + controls + gender indicator (redundant but a check)\nX3 = sm.add_constant(df[['masfem', 'gender_mf'] + controls])\nmodel3 = sm.OLS(df['log_deaths'], X3).fit(cov_type='HC3')\n\n# Simple correlation\ncorr = df['masfem'].corr(df['log_deaths'])\n\nprint('N =', len(df))\nprint('Correlation masfem vs log_deaths:', corr)\nprint('\\nModel 1: log_deaths ~ masfem')\nprint(model1.summary())\nprint('\\nModel 2: log_deaths ~ masfem + category + wind + min')\nprint(model2.summary())\nprint('\\nModel 3: log_deaths ~ masfem + gender_mf + category + wind + min')\nprint(model3.summary())\n\n# Key coefficient table\nfor i, m in enumerate([model1, model2, model3], start=1):\n    coef = m.params.get('masfem', np.nan)\n    pval = m.pvalues.get('masfem', np.nan)\n    print(f'Model {i} masfem coef={coef:.4f}, p={pval:.4f}')\n"
+    },
+    "1": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Continuous masculinity-femininity index of the hurricane name (higher = more feminine). This is the main predictor of interest testing whether feminine names affect perceived threat/behavioral response.",
+            "columns": [
+              "masfem"
+            ]
+          },
+          {
+            "description": "Binary indicator of hurricane name gender (0 = male, 1 = female). Included as a robustness alternative operationalization of the name's genderedness.",
+            "columns": [
+              "gender_mf"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Total number of deaths caused by the hurricane (the analysis uses a log(1+deaths) transform of this variable as the outcome to reduce skew).",
+          "columns": [
+            "alldeaths"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Maximum wind speed of the hurricane at landfall (control for storm intensity).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "wind"
+            ]
+          },
+          {
+            "description": "Minimum pressure of the hurricane at landfall (control for storm intensity).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "min"
+            ]
+          },
+          {
+            "description": "Saffir–Simpson category of the hurricane (control for storm severity).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "category"
+            ]
+          },
+          {
+            "description": "Property damage normalized to 2015 dollars (control for overall storm destructiveness/economic impact).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "ndam15"
+            ]
+          },
+          {
+            "description": "Years elapsed since the hurricane (control for era/time effects).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "elapsedyrs"
+            ]
+          }
+        ]
+      },
+      "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\n\n# Load data\n_df = pd.read_csv('hurricane.csv')\n\n# Basic checks\nprint('Rows:', len(_df))\nprint('Columns:', list(_df.columns))\n\n# Outcome: log(1 + deaths) to reduce skew\n_df['log_deaths'] = np.log1p(_df['alldeaths'])\n\n# Simple correlations\ncorr_raw = _df['masfem'].corr(_df['alldeaths'])\ncorr_log = _df['masfem'].corr(_df['log_deaths'])\nprint('Correlation masfem vs deaths:', corr_raw)\nprint('Correlation masfem vs log deaths:', corr_log)\n\n# Regression controlling for storm intensity and era\nfeatures = ['masfem', 'wind', 'min', 'category', 'ndam15', 'elapsedyrs']\nX = sm.add_constant(_df[features])\nmodel = sm.OLS(_df['log_deaths'], X).fit()\nprint(model.summary())\n\n# Also check binary gender for robustness\nfeatures_bin = ['gender_mf', 'wind', 'min', 'category', 'elapsedyrs']\nX2 = sm.add_constant(_df[features_bin])\nmodel2 = sm.OLS(_df['log_deaths'], X2).fit()\nprint(model2.summary())\n\n# Save key results for quick reference\nresults = {\n    'corr_raw': float(corr_raw),\n    'corr_log': float(corr_log),\n    'masfem_coef': float(model.params['masfem']),\n    'masfem_pval': float(model.pvalues['masfem']),\n    'gender_mf_coef': float(model2.params['gender_mf']),\n    'gender_mf_pval': float(model2.pvalues['gender_mf']),\n}\nprint('Key results:', results)\n"
+    },
+    "2": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Masculinity-femininity index of the hurricane name (higher = more feminine). Main predictor of interest representing perceived femininity of storm names.",
+            "columns": [
+              "masfem"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Total number of deaths caused by the hurricane (the analysis used a log1p transform of this variable as the outcome).",
+          "columns": [
+            "alldeaths"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Maximum wind speed of the hurricane at the time of landfall (controls for storm intensity).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "wind"
+            ]
+          },
+          {
+            "description": "Minimum central pressure of the hurricane at landfall (controls for storm intensity/severity).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "min"
+            ]
+          },
+          {
+            "description": "Saffir–Simpson hurricane category at landfall (controls for storm severity).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "category"
+            ]
+          },
+          {
+            "description": "Property damage normalized to 2015 values used as a proxy for exposure/impact (included in some specifications).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "ndam15"
+            ]
+          }
+        ]
+      },
+      "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\nimport statsmodels.formula.api as smf\n\n# Load data\n\ndf = pd.read_csv('hurricane.csv')\n\n# Basic prep\n# Use log1p for deaths to reduce skew, common in hurricane analyses\n# Keep relevant predictors\n\n# Some columns might have missing or non-numeric values; coerce where needed\nfor col in ['masfem', 'wind', 'min', 'category', 'alldeaths', 'ndam15', 'ndam']:\n    if col in df.columns:\n        df[col] = pd.to_numeric(df[col], errors='coerce')\n\n# Drop rows with missing required values\nreq = ['masfem', 'alldeaths', 'wind', 'min', 'category']\nwork = df.dropna(subset=req).copy()\nwork['log_deaths'] = np.log1p(work['alldeaths'])\n\n# Model 1: bivariate association\nm1 = smf.ols('log_deaths ~ masfem', data=work).fit()\n\n# Model 2: control for storm intensity (wind, pressure, category)\nm2 = smf.ols('log_deaths ~ masfem + wind + min + category', data=work).fit()\n\n# Model 3: add damage as proxy for exposure/impact (ndam15) if available\nif 'ndam15' in work.columns:\n    m3 = smf.ols('log_deaths ~ masfem + wind + min + category + ndam15', data=work).fit()\nelse:\n    m3 = None\n\n# Print key results\nprint('N:', len(work))\nprint('\\nModel 1: log_deaths ~ masfem')\nprint(m1.summary().tables[1])\n\nprint('\\nModel 2: + wind + min + category')\nprint(m2.summary().tables[1])\n\nif m3 is not None:\n    print('\\nModel 3: + ndam15')\n    print(m3.summary().tables[1])\n\n# Also compute correlation between masfem and deaths for context\ncorr = work['masfem'].corr(work['alldeaths'])\nprint('\\nCorrelation (masfem, alldeaths):', corr)\n"
+    },
+    "3": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Hurricane name femininity (higher = more feminine) as rated by independent coders — the main predictor of interest",
+            "columns": [
+              "masfem"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Fatalities caused by the hurricane (outcome). The analysis models log(1 + alldeaths).",
+          "columns": [
+            "alldeaths"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Storm severity composite used as a covariate and moderator (constructed from maximum wind speed, minimum landfall pressure, and Saffir–Simpson category)",
+            "is_moderator": true,
+            "moderator_on": "masfem",
+            "columns": [
+              "wind",
+              "min",
+              "category"
+            ]
+          }
+        ]
+      },
+      "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.formula.api as smf\n\n# Load data\n_df = pd.read_csv('hurricane.csv')\n\n# Prepare variables\n_df['log_deaths'] = np.log1p(_df['alldeaths'])\n\n# Severity index using standardized wind (higher is worse), minimum pressure (lower is worse), and category\n_df['min_inv'] = -_df['min']\nfor col in ['wind', 'min_inv', 'category']:\n    _df[f'z_{col}'] = (_df[col] - _df[col].mean()) / _df[col].std(ddof=0)\n\n_df['severity'] = _df[['z_wind', 'z_min_inv', 'z_category']].mean(axis=1)\n\n# Regression with interaction\nmodel = smf.ols('log_deaths ~ masfem + severity + masfem:severity', data=_df).fit(cov_type='HC3')\n\n# Median splits for descriptive comparisons\nmedian_sev = _df['severity'].median()\nmedian_fem = _df['masfem'].median()\n_df['sev_group'] = np.where(_df['severity'] >= median_sev, 'High', 'Low')\n_df['fem_group'] = np.where(_df['masfem'] >= median_fem, 'More_feminine', 'Less_feminine')\n\n# Correlations within groups\ncorr_high = _df.loc[_df['sev_group'] == 'High', ['masfem', 'log_deaths']].corr().iloc[0, 1]\ncorr_low = _df.loc[_df['sev_group'] == 'Low', ['masfem', 'log_deaths']].corr().iloc[0, 1]\n\n# Group means within high severity storms\nhigh_group = _df[_df['sev_group'] == 'High'].groupby('fem_group')['log_deaths'].mean()\nhigh_mean_more_fem = float(high_group.get('More_feminine', np.nan))\nhigh_mean_less_fem = float(high_group.get('Less_feminine', np.nan))\n\n# Summaries\nsummary = {\n    'n': int(len(_df)),\n    'interaction_coef': float(model.params['masfem:severity']),\n    'interaction_p': float(model.pvalues['masfem:severity']),\n    'masfem_coef': float(model.params['masfem']),\n    'masfem_p': float(model.pvalues['masfem']),\n    'severity_coef': float(model.params['severity']),\n    'severity_p': float(model.pvalues['severity']),\n    'corr_high_severity': float(corr_high),\n    'corr_low_severity': float(corr_low),\n    'high_severity_mean_log_deaths_more_feminine': high_mean_more_fem,\n    'high_severity_mean_log_deaths_less_feminine': high_mean_less_fem,\n}\n\nprint('MODEL_SUMMARY_START')\nprint(model.summary())\nprint('MODEL_SUMMARY_END')\nprint('KEY_RESULTS')\nfor k, v in summary.items():\n    print(f'{k}: {v}')\n"
+    },
+    "4": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Continuous masculinity–femininity index for hurricane names rated by nine independent coders (higher = more feminine). Used as the primary predictor for whether feminine names affect outcomes.",
+            "columns": [
+              "masfem"
+            ]
+          },
+          {
+            "description": "Alternative continuous masculinity–femininity index collected via an MTurk survey (higher = more feminine). Used as a robustness check predictor.",
+            "columns": [
+              "masfem_mturk"
+            ]
+          },
+          {
+            "description": "Binary indicator of hurricane name gender (0 = male, 1 = female). Used as an alternative predictor representing name gender.",
+            "columns": [
+              "gender_mf"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Total number of deaths caused by the hurricane (outcome used to assess the downstream consequences of perceived threat / precautionary behavior).",
+          "columns": [
+            "alldeaths"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Maximum wind speed of the hurricane at landfall (control for storm intensity).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "wind"
+            ]
+          },
+          {
+            "description": "Minimum central pressure of the hurricane at landfall (control for storm intensity).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "min"
+            ]
+          },
+          {
+            "description": "Saffir–Simpson category of the hurricane (control for storm severity).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "category"
+            ]
+          },
+          {
+            "description": "Year the hurricane occurred (control for temporal trends and changes over time).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "year"
+            ]
+          }
+        ]
+      },
+      "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\nimport statsmodels.formula.api as smf\n\n# Load data\n_df = pd.read_csv('hurricane.csv')\n\n# Basic checks\nprint('Rows:', len(_df))\nprint('Columns:', list(_df.columns))\n\n# Focus variables\n# Use log1p deaths to reduce skew, common in hurricane fatality modeling\n_df['log_deaths'] = np.log1p(_df['alldeaths'])\n\n# Simple correlation\ncorr = _df['masfem'].corr(_df['alldeaths'])\nprint('Correlation masfem vs alldeaths:', corr)\n\n# OLS with controls for storm intensity and time\nols_vars = ['masfem', 'wind', 'min', 'category', 'year']\nX = sm.add_constant(_df[ols_vars])\nols = sm.OLS(_df['log_deaths'], X).fit()\nprint('\\nOLS log_deaths ~ masfem + controls')\nprint(ols.summary())\n\n# Alternative masculinity rating (mturk)\nols_vars_mturk = ['masfem_mturk', 'wind', 'min', 'category', 'year']\nX2 = sm.add_constant(_df[ols_vars_mturk])\nols2 = sm.OLS(_df['log_deaths'], X2).fit()\nprint('\\nOLS log_deaths ~ masfem_mturk + controls')\nprint(ols2.summary())\n\n# Binary female name indicator\nols_vars_gender = ['gender_mf', 'wind', 'min', 'category', 'year']\nX3 = sm.add_constant(_df[ols_vars_gender])\nols3 = sm.OLS(_df['log_deaths'], X3).fit()\nprint('\\nOLS log_deaths ~ gender_mf + controls')\nprint(ols3.summary())\n\n# Negative binomial for count-like deaths\n# Add a small offset? Not needed for counts; just use NB with same controls\nnb = sm.GLM(\n    _df['alldeaths'],\n    sm.add_constant(_df[ols_vars]),\n    family=sm.families.NegativeBinomial()\n).fit()\nprint('\\nNegative Binomial alldeaths ~ masfem + controls')\nprint(nb.summary())\n\n# Collect key coefficients\nresults = {\n    'corr_masfem_deaths': corr,\n    'ols_masfem_coef': ols.params['masfem'],\n    'ols_masfem_p': ols.pvalues['masfem'],\n    'ols_mturk_coef': ols2.params['masfem_mturk'],\n    'ols_mturk_p': ols2.pvalues['masfem_mturk'],\n    'ols_gender_coef': ols3.params['gender_mf'],\n    'ols_gender_p': ols3.pvalues['gender_mf'],\n    'nb_masfem_coef': nb.params['masfem'],\n    'nb_masfem_p': nb.pvalues['masfem'],\n}\nprint('\\nKey results:', results)\n"
+    }
+  }
+}

@@ -1,0 +1,79 @@
+{
+  "dataset_name": "reading",
+  "run_dir": "agentic/experiments/outputs/reading/replace_and_positive_statement/run5",
+  "research_question": "I strongly believe the answer to the following question to be 'Yes'. Perform an analysis that verifies this. Does 'Reader View' --- a modified web page layout --- improves reading speed for individuals with dyslexia?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Treatment / predictor: whether the Reader View layout was activated (1) or not (0). This is the main independent variable of interest.",
+          "columns": [
+            "reader_view"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Reading speed outcomes. Primary measured column 'speed' (provided reading speed). The analysis also computed a words-per-minute measure (wpm) from 'num_words' and 'adjusted_running_time' and used log-transformed versions of these outcomes in tests; those underlying columns are listed here.",
+        "columns": [
+          "speed",
+          "num_words",
+          "adjusted_running_time"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Number of words on the page. Included as a covariate in the regression (and also used to derive the wpm outcome).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "num_words"
+          ]
+        },
+        {
+          "description": "Page identifier (categorical). Included as a categorical control (C(page_id)) in the regression to adjust for page-level differences.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "page_id"
+          ]
+        },
+        {
+          "description": "Device used by the reader (categorical: smartphone/tablet/desktop). Included as a categorical control (C(device)) in the regression.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "device"
+          ]
+        },
+        {
+          "description": "Age of the reader. Included as a numeric covariate in the regression.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "age"
+          ]
+        },
+        {
+          "description": "Indicator if the trial was a retake (1) or not (0). Included as a control in the regression.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "retake_trial"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import numpy as np\nimport pandas as pd\nimport statsmodels.formula.api as smf\nfrom statsmodels.stats.weightstats import ttest_ind\n\n# Load data\n\ndf = pd.read_csv('reading.csv')\n\n# Reconstruct dyslexia categories by rounding to the nearest integer\n# (metadata says 0=no dyslexia, 1=dyslexia, 2=severe dyslexia)\n# Values appear noisy, so we round and clamp.\ndf['dyslexia_round'] = np.clip(np.rint(df['dyslexia']), 0, 2).astype(int)\n\ndyslexic = df[df['dyslexia_round'] >= 1].copy()\n\n# Derived reading speed (words per minute) from adjusted running time\n# adjusted_running_time is in ms per metadata\n\ndyslexic['wpm'] = dyslexic['num_words'] / dyslexic['adjusted_running_time'] * 60000\n\ndyslexic['log_speed'] = np.log(dyslexic['speed'])\n\ndyslexic['log_wpm'] = np.log(dyslexic['wpm'])\n\n# Group summaries\n\ndef group_stats(series):\n    return pd.Series({\n        'mean': series.mean(),\n        'median': series.median(),\n        'std': series.std(),\n        'n': series.shape[0]\n    })\n\nspeed_stats = dyslexic.groupby('reader_view')['speed'].apply(group_stats)\nwpm_stats = dyslexic.groupby('reader_view')['wpm'].apply(group_stats)\n\n# T-tests (Welch) on log-transformed outcomes\nrv1_speed = dyslexic[dyslexic['reader_view'] == 1]['log_speed']\nrv0_speed = dyslexic[dyslexic['reader_view'] == 0]['log_speed']\n\nrv1_wpm = dyslexic[dyslexic['reader_view'] == 1]['log_wpm']\nrv0_wpm = dyslexic[dyslexic['reader_view'] == 0]['log_wpm']\n\nspeed_t = ttest_ind(rv1_speed, rv0_speed, usevar='unequal')\nwpm_t = ttest_ind(rv1_wpm, rv0_wpm, usevar='unequal')\n\n# Regression with basic controls\n# Use log_speed to reduce skew\nmodel = smf.ols(\n    'log_speed ~ reader_view + num_words + C(page_id) + C(device) + age + retake_trial',\n    data=dyslexic\n).fit()\n\n# Output key results\nprint('Dyslexic sample size:', len(dyslexic))\nprint('\\nSpeed stats (raw speed):')\nprint(speed_stats)\nprint('\\nWPM stats (derived):')\nprint(wpm_stats)\n\nprint('\\nWelch t-test on log(speed): statistic=%.4f, p=%.4f' % (speed_t[0], speed_t[1]))\nprint('Welch t-test on log(wpm): statistic=%.4f, p=%.4f' % (wpm_t[0], wpm_t[1]))\n\nprint('\\nRegression coefficient for reader_view (log_speed):')\nprint('coef=%.6f, p=%.4f' % (model.params['reader_view'], model.pvalues['reader_view']))\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T19:23:21.459774+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/reading/replace_and_positive_statement/run5/analysis.py",
+      "info_json": "agentic/experiments/outputs/reading/replace_and_positive_statement/run5/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/reading/replace_and_positive_statement/run5/conclusion.txt"
+    }
+  }
+}

@@ -1,0 +1,62 @@
+{
+  "dataset_name": "amtl",
+  "run_dir": "agentic/experiments/outputs/amtl/anonymize/run5",
+  "research_question": "Do modern humans (Homo sapiens) have higher frequencies of antemortem tooth loss (AMTL) compared to non-human primate genera (Pan, Pongo, Papio), after accounting for the effects of age, sex, and tooth class?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Indicator for modern human specimens (Homo sapiens) vs non-human primates; main predictor of interest",
+          "columns": [
+            "feature8"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Antemortem tooth loss rate (proportion of teeth missing within the observable sockets for a given tooth class); computed as number missing / number observed",
+        "columns": [
+          "feature3",
+          "feature4"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Estimated age of specimen at death (included as a covariate)",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature5"
+          ]
+        },
+        {
+          "description": "Estimate of sex of specimen (included as a covariate)",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature7"
+          ]
+        },
+        {
+          "description": "Tooth class (anterior, posterior, premolar) to account for tooth-type differences in AMTL",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature1"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import numpy as np\nimport pandas as pd\nimport statsmodels.api as sm\nimport statsmodels.formula.api as smf\n\n\ndef main():\n    df = pd.read_csv(\"amtl.csv\")\n\n    df = df.rename(\n        columns={\n            \"feature1\": \"tooth_class\",\n            \"feature2\": \"specimen_id\",\n            \"feature3\": \"missing\",\n            \"feature4\": \"observed\",\n            \"feature5\": \"age\",\n            \"feature6\": \"age_uncertainty\",\n            \"feature7\": \"sex\",\n            \"feature8\": \"genus\",\n            \"feature9\": \"region\",\n        }\n    )\n\n    df = df.dropna(\n        subset=[\"missing\", \"observed\", \"age\", \"sex\", \"tooth_class\", \"genus\"]\n    ).copy()\n    df = df[df[\"observed\"] > 0].copy()\n    df[\"missing\"] = df[\"missing\"].clip(lower=0)\n    df[\"prop\"] = df[\"missing\"] / df[\"observed\"]\n    df[\"human\"] = (df[\"genus\"] == \"Homo sapiens\").astype(int)\n\n    model = smf.glm(\n        \"prop ~ human + age + sex + C(tooth_class)\",\n        data=df,\n        family=sm.families.Binomial(),\n        freq_weights=df[\"observed\"],\n    ).fit()\n\n    print(model.summary())\n\n    coef = model.params[\"human\"]\n    se = model.bse[\"human\"]\n    pval = model.pvalues[\"human\"]\n    ci_low, ci_high = model.conf_int().loc[\"human\"]\n\n    or_est = float(np.exp(coef))\n    or_low, or_high = float(np.exp(ci_low)), float(np.exp(ci_high))\n\n    print(\n        \"HUMAN_COEF={:.6f} SE={:.6f} p={:.6g}\".format(\n            float(coef), float(se), float(pval)\n        )\n    )\n    print(\"HUMAN_OR={:.6f} OR_CI=({:.6f}, {:.6f})\".format(or_est, or_low, or_high))\n\n\nif __name__ == \"__main__\":\n    main()\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T18:08:27.452142+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/amtl/anonymize/run5/analysis.py",
+      "info_json": "agentic/experiments/outputs/amtl/anonymize/run5/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/amtl/anonymize/run5/conclusion.txt"
+    }
+  }
+}

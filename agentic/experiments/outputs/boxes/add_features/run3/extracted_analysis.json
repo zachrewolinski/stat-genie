@@ -1,0 +1,42 @@
+{
+  "dataset_name": "boxes",
+  "run_dir": "agentic/experiments/outputs/boxes/add_features/run3",
+  "research_question": "Do children’s reliance on social information and preference for majority cues vary across cultures and developmental stages?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Age of each child in years; represents developmental stage and is used as a primary predictor (IV).",
+          "columns": [
+            "age"
+          ]
+        },
+        {
+          "description": "Study site / cultural group identifier (integer ID for culture); represents cultural context and is used as a primary predictor (IV).",
+          "columns": [
+            "culture"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Behavioral choice recorded in column 'y' (1 = unchosen option, 2 = majority option, 3 = minority option). The analysis derived two outcome measures from this column: (a) social reliance (binary: chose a demonstrated option, i.e. y != 1) and (b) majority preference among demonstrated choices (binary: chose the majority, i.e. y == 2).",
+        "columns": [
+          "y"
+        ]
+      },
+      "controls": []
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.formula.api as smf\nfrom scipy import stats\n\n\ndef lr_test(full, reduced):\n    lr_stat = 2 * (full.llf - reduced.llf)\n    df = full.df_model - reduced.df_model\n    p = stats.chi2.sf(lr_stat, df)\n    return lr_stat, df, p\n\n\ndf = pd.read_csv('boxes.csv')\n\n# Keep needed columns\nneeded = ['y', 'age', 'culture']\nsub = df[needed].dropna().copy()\n\n# Binary outcome: relied on social information (chose majority or minority)\nsub['social'] = (sub['y'] != 1).astype(int)\n\n# Model for social reliance\nm_full = smf.logit('social ~ age + C(culture) + age:C(culture)', data=sub).fit(disp=False)\nm_no_int = smf.logit('social ~ age + C(culture)', data=sub).fit(disp=False)\nm_age_only = smf.logit('social ~ age', data=sub).fit(disp=False)\n\nlr_int = lr_test(m_full, m_no_int)\nlr_cult = lr_test(m_no_int, m_age_only)\n\n# Majority preference among those choosing demonstrated options\nsub2 = sub[sub['y'].isin([2, 3])].copy()\nsub2['majority'] = (sub2['y'] == 2).astype(int)\n\nm2_full = smf.logit('majority ~ age + C(culture) + age:C(culture)', data=sub2).fit(disp=False)\nm2_no_int = smf.logit('majority ~ age + C(culture)', data=sub2).fit(disp=False)\nm2_age_only = smf.logit('majority ~ age', data=sub2).fit(disp=False)\n\nlr2_int = lr_test(m2_full, m2_no_int)\nlr2_cult = lr_test(m2_no_int, m2_age_only)\n\n# Descriptive rates\nsocial_rate_by_culture = sub.groupby('culture')['social'].mean().sort_index()\nmajority_rate_by_culture = sub2.groupby('culture')['majority'].mean().sort_index()\n\n# Age trend (simple correlation)\nage_social_corr = sub[['age', 'social']].corr().loc['age', 'social']\nage_majority_corr = sub2[['age', 'majority']].corr().loc['age', 'majority']\n\nprint('Social reliance LR tests:')\nprint('interaction vs no interaction:', lr_int)\nprint('culture effect vs age-only:', lr_cult)\nprint('\\nMajority preference LR tests:')\nprint('interaction vs no interaction:', lr2_int)\nprint('culture effect vs age-only:', lr2_cult)\n\nprint('\\nAge correlations:')\nprint('age vs social:', age_social_corr)\nprint('age vs majority (among demonstrated choices):', age_majority_corr)\n\nprint('\\nSocial rate by culture:')\nprint(social_rate_by_culture)\nprint('\\nMajority rate by culture (among demonstrated choices):')\nprint(majority_rate_by_culture)\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T18:16:41.733481+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/boxes/add_features/run3/analysis.py",
+      "info_json": "agentic/experiments/outputs/boxes/add_features/run3/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/boxes/add_features/run3/conclusion.txt"
+    }
+  }
+}

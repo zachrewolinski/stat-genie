@@ -1,0 +1,62 @@
+{
+  "dataset_name": "amtl",
+  "run_dir": "agentic/experiments/outputs/amtl/replace_with_rvs/run4",
+  "research_question": "Do modern humans (Homo sapiens) have higher frequencies of antemortem tooth loss (AMTL) compared to non-human primate genera (Pan, Pongo, Papio), after accounting for the effects of age, sex, and tooth class?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Specimen genus used to distinguish modern humans from non-human primates (contrast: Homo sapiens vs other genera).",
+          "columns": [
+            "genus"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Antemortem tooth loss (AMTL) modeled as a binomial outcome: number of missing teeth out of observable sockets.",
+        "columns": [
+          "num_amtl",
+          "sockets"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Estimated age of specimen at death (continuous covariate).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "age"
+          ]
+        },
+        {
+          "description": "Estimated sex of specimen expressed as probability of being male (covariate for sex).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "prob_male"
+          ]
+        },
+        {
+          "description": "Tooth class (categorical covariate: Anterior, Posterior, Premolar).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "tooth_class"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\nimport statsmodels.formula.api as smf\n\n# Load data\n_df = pd.read_csv(\"amtl.csv\")\n\n# Keep rows that are valid for a binomial model (successes <= trials)\n# This avoids invalid proportions (>1) when num_amtl exceeds sockets.\n_df = _df[_df[\"num_amtl\"] <= _df[\"sockets\"]].copy()\n\n# Binary indicator for modern humans vs non-human primates\n_df[\"human\"] = (_df[\"genus\"] == \"Homo sapiens\").astype(int)\n\n# Binomial response: successes (AMTL) and failures (non-AMTL sockets)\n_df[\"failures\"] = _df[\"sockets\"] - _df[\"num_amtl\"]\n\n# Fit binomial regression, adjusting for age, sex estimate, and tooth class\nmodel = smf.glm(\n    \"num_amtl + failures ~ human + age + prob_male + C(tooth_class)\",\n    data=_df,\n    family=sm.families.Binomial(),\n)\n\n# Cluster-robust SE by specimen (repeated measures per specimen)\nresult = model.fit(cov_type=\"cluster\", cov_kwds={\"groups\": _df[\"specimen\"]})\n\n# Print key results for inspection\nprint(result.summary())\n\ncoef = result.params[\"human\"]\nse = result.bse[\"human\"]\np = result.pvalues[\"human\"]\n\nor_human = float(np.exp(coef))\nci_low = float(np.exp(coef - 1.96 * se))\nci_high = float(np.exp(coef + 1.96 * se))\n\nprint(\"\\nHuman effect (odds ratio):\", or_human)\nprint(\"95% CI:\", (ci_low, ci_high))\nprint(\"p-value:\", p)\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T18:14:11.420031+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/amtl/replace_with_rvs/run4/analysis.py",
+      "info_json": "agentic/experiments/outputs/amtl/replace_with_rvs/run4/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/amtl/replace_with_rvs/run4/conclusion.txt"
+    }
+  }
+}

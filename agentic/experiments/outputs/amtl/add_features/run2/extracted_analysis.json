@@ -1,0 +1,62 @@
+{
+  "dataset_name": "amtl",
+  "run_dir": "agentic/experiments/outputs/amtl/add_features/run2",
+  "research_question": "Do modern humans (Homo sapiens) have higher frequencies of antemortem tooth loss (AMTL) compared to non-human primate genera (Pan, Pongo, Papio), after accounting for the effects of age, sex, and tooth class?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Primary predictor: whether the specimen is a modern human (Homo sapiens) versus non-human primate genera (Pan, Pongo, Papio). (Analysis used a human indicator derived from this column.)",
+          "columns": [
+            "genus"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Antemortem tooth loss (AMTL) rate modeled as a binomial outcome: number of missing teeth out of observable sockets (numerator = num_amtl, denominator/trials = sockets).",
+        "columns": [
+          "num_amtl",
+          "sockets"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Estimated age of specimen at death (included as a covariate).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "age"
+          ]
+        },
+        {
+          "description": "Estimate of sex expressed as probability of being male (included as a covariate for sex).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "prob_male"
+          ]
+        },
+        {
+          "description": "Tooth class (Anterior, Posterior, Premolar) included as a categorical covariate.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "tooth_class"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\nimport statsmodels.formula.api as smf\n\n# Load data\n_df = pd.read_csv('amtl.csv')\n\n# Keep only relevant columns and drop rows with missing age\ncols = ['num_amtl', 'sockets', 'age', 'prob_male', 'genus', 'tooth_class']\ndf = _df[cols].copy()\ndf = df.dropna(subset=['age'])\n\n# Ensure valid counts\nif (df['num_amtl'] > df['sockets']).any():\n    raise ValueError('num_amtl exceeds sockets in some rows')\n\n# Indicator for modern humans\n\ndf['is_human'] = (df['genus'] == 'Homo sapiens').astype(int)\n\n# Proportion response with binomial GLM; weight by number of trials (sockets)\n\ndf['amtl_rate'] = df['num_amtl'] / df['sockets']\n\nmodel = smf.glm(\n    formula='amtl_rate ~ is_human + age + prob_male + C(tooth_class)',\n    data=df,\n    family=sm.families.Binomial(),\n    var_weights=df['sockets'],\n)\nresult = model.fit()\n\n# Extract effect for humans\ncoef = result.params['is_human']\nse = result.bse['is_human']\npval = result.pvalues['is_human']\n\n# Odds ratio and 95% CI\nor_human = float(np.exp(coef))\nci_low, ci_high = np.exp(coef - 1.96 * se), np.exp(coef + 1.96 * se)\n\n# Adjusted (marginal standardized) AMTL rates for humans vs non-humans\n\ndef adjusted_rate(is_human_value: int) -> float:\n    df_temp = df.copy()\n    df_temp['is_human'] = is_human_value\n    # Predict probability per row, then average\n    preds = result.predict(df_temp)\n    return float(preds.mean())\n\nadj_human = adjusted_rate(1)\nadj_nonhuman = adjusted_rate(0)\n\nprint('Rows used:', len(df))\nprint('GLM summary:')\nprint(result.summary())\nprint('\\nHuman effect (log-odds):', coef)\nprint('p-value:', pval)\nprint('Odds ratio:', or_human)\nprint('95% CI OR:', (float(ci_low), float(ci_high)))\nprint('Adjusted AMTL rate (human):', adj_human)\nprint('Adjusted AMTL rate (non-human):', adj_nonhuman)\nprint('Adjusted difference (human - non-human):', adj_human - adj_nonhuman)\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T18:06:32.077717+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/amtl/add_features/run2/analysis.py",
+      "info_json": "agentic/experiments/outputs/amtl/add_features/run2/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/amtl/add_features/run2/conclusion.txt"
+    }
+  }
+}

@@ -1,0 +1,49 @@
+{
+  "dataset_name": "panda_nuts",
+  "run_dir": "agentic/experiments/outputs/panda_nuts/noperturb/run2",
+  "research_question": "Do age, sex, and receiving help from another chimpanzee influence the nut-cracking efficiency of western chimpanzees?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Age in years at time of observation — predictor of nut-cracking efficiency.",
+          "columns": [
+            "age"
+          ]
+        },
+        {
+          "description": "Sex of the individual (categorical) — predictor of nut-cracking efficiency.",
+          "columns": [
+            "sex"
+          ]
+        },
+        {
+          "description": "Received help from another chimpanzee (yes/no) — predictor of nut-cracking efficiency.",
+          "columns": [
+            "help"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Nut-cracking efficiency measured as nuts opened per second (computed as nuts_opened / seconds).",
+        "columns": [
+          "nuts_opened",
+          "seconds"
+        ]
+      },
+      "controls": []
+    },
+    "analysis_code": "import pandas as pd\nimport statsmodels.formula.api as smf\n\n# Load data\nDATA_PATH = \"panda_nuts.csv\"\n\ndf = pd.read_csv(DATA_PATH)\n\n# Clean / prepare\n# Standardize categorical labels\nfor col in [\"sex\", \"help\", \"hammer\"]:\n    if col in df.columns:\n        df[col] = df[col].astype(str).str.strip()\n\n# Efficiency: nuts opened per second\n# Avoid divide-by-zero (none expected since min seconds 2.5)\n\ndf[\"efficiency\"] = df[\"nuts_opened\"] / df[\"seconds\"]\n\n# Basic model: efficiency ~ age + sex + help\n# Treat sex and help as categorical\nmodel = smf.ols(\"efficiency ~ age + C(sex) + C(help)\", data=df).fit()\n\n# Extract p-values\npvals = model.pvalues\n\n# Determine influence at alpha=0.05\nalpha = 0.05\ninfluential = {\n    \"age\": pvals.get(\"age\", 1.0) < alpha,\n    \"sex\": any(name.startswith(\"C(sex)\") and p < alpha for name, p in pvals.items()),\n    \"help\": any(name.startswith(\"C(help)\") and p < alpha for name, p in pvals.items()),\n}\n\n# Save results for inspection\nsummary_path = \"analysis_summary.txt\"\nwith open(summary_path, \"w\") as f:\n    f.write(model.summary().as_text())\n    f.write(\"\\n\\nP-values:\\n\")\n    for k, v in pvals.items():\n        f.write(f\"{k}: {v}\\n\")\n\n# Construct conclusion\n# If any of the three factors is significant, answer Yes\nanswer = \"Yes\" if any(influential.values()) else \"No\"\n\n# Brief reasoning based on which variables significant\nsig_vars = [k for k, v in influential.items() if v]\nif sig_vars:\n    reason = (\n        \"Regression on nuts-opened-per-second shows statistically significant effects for \"\n        + \", \".join(sig_vars)\n        + \" (p < 0.05), indicating these factors influence efficiency.\"\n    )\nelse:\n    reason = (\n        \"Regression on nuts-opened-per-second finds no statistically significant effects \"\n        \"for age, sex, or help (all p >= 0.05), so there is no evidence these factors influence efficiency.\"\n    )\n\nwith open(\"conclusion.txt\", \"w\") as f:\n    f.write(answer + \"\\n\")\n    f.write(reason + \"\\n\")\n\nprint(\"Model fit complete. Conclusion written to conclusion.txt.\")\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T19:08:24.418024+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/panda_nuts/noperturb/run2/analysis.py",
+      "info_json": "agentic/experiments/outputs/panda_nuts/noperturb/run2/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/panda_nuts/noperturb/run2/conclusion.txt"
+    }
+  }
+}

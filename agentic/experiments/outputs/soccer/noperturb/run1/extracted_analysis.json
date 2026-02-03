@@ -1,0 +1,37 @@
+{
+  "dataset_name": "soccer",
+  "run_dir": "agentic/experiments/outputs/soccer/noperturb/run1",
+  "research_question": "Are soccer players with a dark skin tone more likely than those with a light skin tone to receive red cards from referees?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Player skin tone as rated from profile photos by two independent raters (5-point scale normalized to 1); higher values indicate darker skin. The analysis used the raters' mean as the main predictor.",
+          "columns": [
+            "rater1",
+            "rater2"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Count of red cards a player received from a referee (used as the outcome; in the analysis this was aggregated/summed to the player level and modeled with games as exposure).",
+        "columns": [
+          "redCards"
+        ]
+      },
+      "controls": []
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\nimport statsmodels.formula.api as smf\n\n# Load data\n_df = pd.read_csv('soccer.csv')\n\n# Compute mean skin tone (0=very light, 1=very dark)\n_df['skin_mean'] = _df[['rater1', 'rater2']].mean(axis=1)\n\n# Aggregate to player level to avoid dyad duplication\nplayer = (\n    _df.dropna(subset=['skin_mean'])\n        .groupby('playerShort', as_index=False)\n        .agg(\n            skin_mean=('skin_mean', 'mean'),\n            redCards=('redCards', 'sum'),\n            games=('games', 'sum')\n        )\n)\n\n# Avoid division by zero\nplayer = player[player['games'] > 0].copy()\nplayer['red_rate'] = player['redCards'] / player['games']\n\n# Define light vs dark using midpoint threshold 0.5\nplayer['skin_group'] = np.where(player['skin_mean'] > 0.5, 'dark', 'light_or_mid')\n\nsummary = player.groupby('skin_group').agg(\n    players=('playerShort', 'count'),\n    total_reds=('redCards', 'sum'),\n    total_games=('games', 'sum'),\n    mean_red_rate=('red_rate', 'mean')\n).reset_index()\nsummary['reds_per_game'] = summary['total_reds'] / summary['total_games']\n\nprint('Player-level summary by skin group (threshold 0.5):')\nprint(summary.to_string(index=False))\n\n# Poisson regression: redCards ~ skin_mean with log(games) offset\n# This models red card counts per exposure (games)\nplayer['log_games'] = np.log(player['games'])\n\nmodel = smf.glm('redCards ~ skin_mean', data=player, family=sm.families.Poisson(), offset=player['log_games'])\nresult = model.fit()\n\nprint('\\nPoisson regression (redCards ~ skin_mean, offset log(games))')\nprint(result.summary())\n\ncoef = result.params['skin_mean']\npval = result.pvalues['skin_mean']\n\n# Exponentiated effect for interpretability\nrate_ratio = np.exp(coef)\n\nprint(f\"\\nSkin tone coefficient: {coef:.4f}, rate ratio: {rate_ratio:.3f}, p-value: {pval:.4g}\")\n\n# Save key outputs for conclusion\nwith open('analysis_results.txt', 'w') as f:\n    f.write('Player-level summary by skin group (threshold 0.5):\\n')\n    f.write(summary.to_string(index=False))\n    f.write('\\n\\nPoisson regression (redCards ~ skin_mean, offset log(games))\\n')\n    f.write(result.summary().as_text())\n    f.write(f\"\\n\\nSkin tone coefficient: {coef:.4f}, rate ratio: {rate_ratio:.3f}, p-value: {pval:.4g}\\n\")\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-02T16:37:17.332346+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/soccer/noperturb/run1/analysis.py",
+      "info_json": "agentic/experiments/outputs/soccer/noperturb/run1/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/soccer/noperturb/run1/conclusion.txt"
+    }
+  }
+}

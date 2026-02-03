@@ -1,0 +1,36 @@
+{
+  "dataset_name": "reading",
+  "run_dir": "agentic/experiments/outputs/reading/shuffle_names/run3",
+  "research_question": "Does 'Reader View' --- a modified web page layout --- improves reading speed for individuals with dyslexia?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Reader View activation (treatment indicator: 1 = Reader View on, 0 = Reader View off)",
+          "columns": [
+            "language"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Reading speed measured as the recorded running time on the page (used as reading speed outcome)",
+        "columns": [
+          "running_time"
+        ]
+      },
+      "controls": []
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nfrom statsmodels.stats.weightstats import ttest_ind\n\n# Load data\nDATA_PATH = 'reading.csv'\n\ndf = pd.read_csv(DATA_PATH)\n\n# Map shuffled columns to their semantic meaning (inferred from metadata + data relationships)\n# reader_view indicator (0/1) appears in `language`\ndf['reader_view_flag'] = df['language']\n\n# Dyslexia status is encoded in `device` (0 = no dyslexia, 1/2 = dyslexia/severe)\ndf['dyslexic'] = df['device'] > 0\n\n# Reading speed is stored in `running_time` (matches words/min computed from num_words/adjusted time)\ndf['reading_speed'] = df['running_time']\n\n# Basic sanity checks\nassert set(df['reader_view_flag'].dropna().unique()).issubset({0, 1})\n\n# Filter to individuals with dyslexia\ndys = df[df['dyslexic']].copy()\n\n# Group stats\nstats = dys.groupby('reader_view_flag')['reading_speed'].agg(['count', 'mean', 'median', 'std'])\n\n# Welch t-test on reading speed between reader view on/off\nrv_on = dys.loc[dys['reader_view_flag'] == 1, 'reading_speed'].dropna()\nrv_off = dys.loc[dys['reader_view_flag'] == 0, 'reading_speed'].dropna()\n\n# If either group is empty, skip test\nif len(rv_on) > 1 and len(rv_off) > 1:\n    t_stat, p_value, dfree = ttest_ind(rv_on, rv_off, usevar='unequal')\nelse:\n    t_stat, p_value, dfree = np.nan, np.nan, np.nan\n\n# Effect size (difference in means and percent change vs control)\nmean_on = rv_on.mean()\nmean_off = rv_off.mean()\nmean_diff = mean_on - mean_off\npct_change = mean_diff / mean_off * 100 if mean_off != 0 else np.nan\n\nprint('Dyslexic subgroup reading speed by reader view:')\nprint(stats)\nprint('\\nWelch t-test: t=%.3f, p=%.4g, dof=%.1f' % (t_stat, p_value, dfree))\nprint('Mean on: %.3f, mean off: %.3f, diff: %.3f (%.2f%%)' % (mean_on, mean_off, mean_diff, pct_change))\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-02T16:32:13.648475+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/reading/shuffle_names/run3/analysis.py",
+      "info_json": "agentic/experiments/outputs/reading/shuffle_names/run3/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/reading/shuffle_names/run3/conclusion.txt"
+    }
+  }
+}

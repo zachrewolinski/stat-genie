@@ -1,0 +1,136 @@
+{
+  "dataset_name": "boxes",
+  "n": 5,
+  "analyses": {
+    "0": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Child age in years (developmental stage). Used as a predictor to test developmental changes in reliance on social information and majority preference.",
+            "columns": [
+              "age"
+            ]
+          },
+          {
+            "description": "Site / cultural group ID. Treated as a categorical predictor to test cross-cultural variation and age-by-culture interactions.",
+            "columns": [
+              "culture"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Observed choice recorded in 'y' (1 = undemonstrated/unchosen option, 2 = majority option, 3 = minority option). Analyses derive two outcome variables from this column: (a) social reliance — whether the child chose a demonstrated option (majority or minority) vs the undemonstrated option; (b) majority preference — whether the child chose the majority option vs the minority option (analyzed among those who chose a demonstrated option).",
+          "columns": [
+            "y"
+          ]
+        },
+        "controls": []
+      },
+      "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.formula.api as smf\nfrom scipy import stats\n\n# Load data\n_df = pd.read_csv(\"boxes.csv\")\n\n# Define outcomes\n_df[\"social\"] = (_df[\"y\"] != 1).astype(int)  # 1=chose demonstrated (majority or minority)\n_df[\"majority\"] = (_df[\"y\"] == 2).astype(int)\n\n# Helper for likelihood-ratio test\n\ndef lr_test(model_full, model_reduced):\n    lr_stat = 2 * (model_full.llf - model_reduced.llf)\n    df_diff = model_full.df_model - model_reduced.df_model\n    p_value = stats.chi2.sf(lr_stat, df_diff)\n    return lr_stat, df_diff, p_value\n\nresults = {}\n\n# Social reliance model\nsocial_full = smf.logit(\"social ~ age + C(culture)\", data=_df).fit(disp=0)\nsocial_age_only = smf.logit(\"social ~ age\", data=_df).fit(disp=0)\nsocial_culture_only = smf.logit(\"social ~ C(culture)\", data=_df).fit(disp=0)\n\nresults[\"social_age_lr\"] = lr_test(social_full, social_culture_only)\nresults[\"social_culture_lr\"] = lr_test(social_full, social_age_only)\n\n# Interaction test for developmental differences by culture\nsocial_interaction = smf.logit(\"social ~ age * C(culture)\", data=_df).fit(disp=0)\nresults[\"social_interaction_lr\"] = lr_test(social_interaction, social_full)\n\n# Majority preference among social choosers\n_df_social = _df[_df[\"social\"] == 1].copy()\nmaj_full = smf.logit(\"majority ~ age + C(culture)\", data=_df_social).fit(disp=0)\nmaj_age_only = smf.logit(\"majority ~ age\", data=_df_social).fit(disp=0)\nmaj_culture_only = smf.logit(\"majority ~ C(culture)\", data=_df_social).fit(disp=0)\n\nresults[\"maj_age_lr\"] = lr_test(maj_full, maj_culture_only)\nresults[\"maj_culture_lr\"] = lr_test(maj_full, maj_age_only)\n\nmaj_interaction = smf.logit(\"majority ~ age * C(culture)\", data=_df_social).fit(disp=0)\nresults[\"maj_interaction_lr\"] = lr_test(maj_interaction, maj_full)\n\n# Descriptive summaries\nsocial_by_culture = _df.groupby(\"culture\")[\"social\"].mean()\nmaj_by_culture = _df_social.groupby(\"culture\")[\"majority\"].mean()\n\n# Age bins for descriptive trend\nage_bins = pd.cut(_df[\"age\"], bins=[3,5,8,11,14], labels=[\"4-5\",\"6-8\",\"9-11\",\"12-14\"])\n_df[\"age_bin\"] = age_bins\n_df_social[\"age_bin\"] = pd.cut(_df_social[\"age\"], bins=[3,5,8,11,14], labels=[\"4-5\",\"6-8\",\"9-11\",\"12-14\"])\nsocial_by_age = _df.groupby(\"age_bin\")[\"social\"].mean()\nmaj_by_age = _df_social.groupby(\"age_bin\")[\"majority\"].mean()\n\n# Print key stats\nprint(\"N total:\", len(_df))\nprint(\"N social:\", len(_df_social))\nprint(\"Social reliance LRT age (vs culture-only):\", results[\"social_age_lr\"])\nprint(\"Social reliance LRT culture (vs age-only):\", results[\"social_culture_lr\"])\nprint(\"Social reliance LRT interaction:\", results[\"social_interaction_lr\"])\nprint(\"Majority preference LRT age (vs culture-only):\", results[\"maj_age_lr\"])\nprint(\"Majority preference LRT culture (vs age-only):\", results[\"maj_culture_lr\"])\nprint(\"Majority preference LRT interaction:\", results[\"maj_interaction_lr\"])\n\nprint(\"\\nSocial reliance by culture (mean):\")\nprint(social_by_culture)\nprint(\"\\nMajority preference by culture (mean, social only):\")\nprint(maj_by_culture)\nprint(\"\\nSocial reliance by age bin (mean):\")\nprint(social_by_age)\nprint(\"\\nMajority preference by age bin (mean, social only):\")\nprint(maj_by_age)\n"
+    },
+    "1": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Child age (developmental stage). Used as a predictor to test how reliance on social information and majority preference change with age; models also test an age-by-culture interaction.",
+            "columns": [
+              "age"
+            ]
+          },
+          {
+            "description": "Cultural site (culture ID). Used as a predictor to test cross-cultural variation and in interaction with age.",
+            "columns": [
+              "culture"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Behavioral choice recorded in column 'y' (1 = undemonstrated/unchosen option, 2 = majority option, 3 = minority option). Analyses derive two outcome measures from this column: (a) reliance on social information (binary: chose a demonstrated option, i.e. y in {2,3}) and (b) majority preference among social choices (binary: chose majority option, i.e. y == 2).",
+          "columns": [
+            "y"
+          ]
+        },
+        "controls": []
+      },
+      "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.formula.api as smf\nfrom scipy.stats import chi2\n\n\ndef lrt(full, reduced):\n    lr_stat = 2 * (full.llf - reduced.llf)\n    df = full.df_model - reduced.df_model\n    p = chi2.sf(lr_stat, df)\n    return lr_stat, df, p\n\n\ndef main():\n    df = pd.read_csv('boxes.csv')\n\n    # Define outcomes\n    df['social_choice'] = df['y'].isin([2, 3]).astype(int)  # chose demonstrated option\n    df['majority_choice'] = (df['y'] == 2).astype(int)      # chose majority option\n\n    # Descriptives\n    overall = {\n        'n': len(df),\n        'social_choice_rate': df['social_choice'].mean(),\n        'majority_choice_rate': df['majority_choice'].mean(),\n        'majority_among_social_rate': df.loc[df['social_choice'] == 1, 'majority_choice'].mean(),\n    }\n\n    # Age groups for descriptive summaries\n    bins = [3, 6, 9, 12, 14]\n    labels = ['4-6', '7-9', '10-12', '13-14']\n    df['age_group'] = pd.cut(df['age'], bins=bins, labels=labels)\n\n    desc_age = df.groupby('age_group').agg(\n        n=('y', 'size'),\n        social_choice_rate=('social_choice', 'mean'),\n        majority_choice_rate=('majority_choice', 'mean'),\n    )\n    desc_culture = df.groupby('culture').agg(\n        n=('y', 'size'),\n        social_choice_rate=('social_choice', 'mean'),\n        majority_choice_rate=('majority_choice', 'mean'),\n        majority_among_social_rate=('majority_choice', lambda s: s[df.loc[s.index, 'social_choice'] == 1].mean()),\n    )\n\n    # Modeling: reliance on social info\n    # Reduced model: age + culture\n    # Full model: age * culture\n    m_social_reduced = smf.logit('social_choice ~ age + C(culture)', data=df).fit(disp=0)\n    m_social_full = smf.logit('social_choice ~ age * C(culture)', data=df).fit(disp=0)\n    lrt_social = lrt(m_social_full, m_social_reduced)\n\n    # Modeling: majority preference among those who chose a demonstrated option\n    df_social = df[df['social_choice'] == 1].copy()\n    m_major_reduced = smf.logit('majority_choice ~ age + C(culture)', data=df_social).fit(disp=0)\n    m_major_full = smf.logit('majority_choice ~ age * C(culture)', data=df_social).fit(disp=0)\n    lrt_major = lrt(m_major_full, m_major_reduced)\n\n    # Also test main effects (age, culture) in reduced models\n    # Use likelihood ratio by dropping each term from reduced model\n    m_social_age_only = smf.logit('social_choice ~ age', data=df).fit(disp=0)\n    m_social_cult_only = smf.logit('social_choice ~ C(culture)', data=df).fit(disp=0)\n    lrt_social_culture = lrt(m_social_reduced, m_social_age_only)\n    lrt_social_age = lrt(m_social_reduced, m_social_cult_only)\n\n    m_major_age_only = smf.logit('majority_choice ~ age', data=df_social).fit(disp=0)\n    m_major_cult_only = smf.logit('majority_choice ~ C(culture)', data=df_social).fit(disp=0)\n    lrt_major_culture = lrt(m_major_reduced, m_major_age_only)\n    lrt_major_age = lrt(m_major_reduced, m_major_cult_only)\n\n    print('Overall rates:', overall)\n    print('\\nBy age group:\\n', desc_age)\n    print('\\nBy culture:\\n', desc_culture)\n\n    print('\\nSocial reliance model (social_choice ~ age + culture)')\n    print(m_social_reduced.summary())\n    print('LRT age effect within age+culture model:', lrt_social_age)\n    print('LRT culture effect within age+culture model:', lrt_social_culture)\n    print('LRT interaction (age*culture):', lrt_social)\n\n    print('\\nMajority preference among social choices (majority_choice ~ age + culture)')\n    print(m_major_reduced.summary())\n    print('LRT age effect within age+culture model:', lrt_major_age)\n    print('LRT culture effect within age+culture model:', lrt_major_culture)\n    print('LRT interaction (age*culture):', lrt_major)\n\n\nif __name__ == '__main__':\n    main()\n"
+    },
+    "2": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Cultural site identifier (ID of the study site / society). Used to test cross-cultural differences in children's reliance on social information and preference for majority cues.",
+            "columns": [
+              "culture"
+            ]
+          },
+          {
+            "description": "Child's age in years, used as the developmental-stage predictor (treated continuously and also binned into age groups for some analyses).",
+            "columns": [
+              "age"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Choice outcome: which option the child chose after demonstrations (1 = unchosen/undemonstrated option, 2 = majority option, 3 = minority option).",
+          "columns": [
+            "y"
+          ]
+        },
+        "controls": []
+      },
+      "analysis_code": "import pandas as pd\nimport numpy as np\nfrom statsmodels.stats.contingency_tables import Table\nimport statsmodels.api as sm\nfrom scipy.stats import chi2\n\n# Load data\ndf = pd.read_csv('boxes.csv')\n\n# Basic recodes\ndf['majority_choice'] = (df['y'] == 2).astype(int)\ndf['minority_choice'] = (df['y'] == 3).astype(int)\ndf['unchosen_choice'] = (df['y'] == 1).astype(int)\n\n# Age groups for developmental stages\nage_bins = [3, 6, 9, 12, 14]\nage_labels = ['4-6', '7-9', '10-12', '13-14']\ndf['age_group'] = pd.cut(df['age'], bins=age_bins, labels=age_labels, right=True, include_lowest=True)\n\n# Crosstabs and chi-square tests\ndef chi2_test(ct):\n    table = Table(ct.values)\n    res = table.test_nominal_association()\n    return res.statistic, res.pvalue, res.df\n\nculture_ct = pd.crosstab(df['culture'], df['y'])\nage_ct = pd.crosstab(df['age_group'], df['y'])\n\nculture_chi2, culture_p, culture_df = chi2_test(culture_ct)\nage_chi2, age_p, age_df = chi2_test(age_ct)\n\n# Multinomial logit: y on age + culture + interaction\n# Build design matrix\ny = df['y']\nculture_dummies = pd.get_dummies(df['culture'], prefix='culture', drop_first=True)\nage = df['age']\n# Interaction terms: age * culture dummies\ninteraction = culture_dummies.mul(age, axis=0)\ninteraction.columns = [c + '_x_age' for c in interaction.columns]\nX = pd.concat([age.rename('age'), culture_dummies, interaction], axis=1)\nX = sm.add_constant(X)\n\n# Fit model\nmnlogit = sm.MNLogit(y, X)\ntry:\n    mn_res = mnlogit.fit(method='newton', disp=False, maxiter=200)\n    mn_summary = mn_res.summary()\n    llf = mn_res.llf\n    df_model = mn_res.df_model\nexcept Exception as e:\n    mn_res = None\n    mn_summary = str(e)\n    llf = np.nan\n    df_model = np.nan\n\n# Model without interaction for comparison\nX_no_inter = pd.concat([age.rename('age'), culture_dummies], axis=1)\nX_no_inter = sm.add_constant(X_no_inter)\nmnlogit_no_inter = sm.MNLogit(y, X_no_inter)\ntry:\n    mn_res_no_inter = mnlogit_no_inter.fit(method='newton', disp=False, maxiter=200)\n    llf_no_inter = mn_res_no_inter.llf\n    df_model_no_inter = mn_res_no_inter.df_model\nexcept Exception as e:\n    mn_res_no_inter = None\n    llf_no_inter = np.nan\n    df_model_no_inter = np.nan\n\n# Likelihood ratio test for interaction\nif mn_res is not None and mn_res_no_inter is not None:\n    lr_stat = 2 * (llf - llf_no_inter)\n    lr_df = df_model - df_model_no_inter\nelse:\n    lr_stat = np.nan\n    lr_df = np.nan\n\n# Compute proportions by culture and age group\ndef proportion_table(group_col):\n    ct = pd.crosstab(df[group_col], df['y'], normalize='index')\n    return ct\n\nculture_props = proportion_table('culture')\nage_props = proportion_table('age_group')\n\n# Output results\nprint('Chi-square culture vs choice:')\nprint(f'chi2={culture_chi2:.3f}, df={culture_df}, p={culture_p:.6f}')\nprint('\\nChi-square age group vs choice:')\nprint(f'chi2={age_chi2:.3f}, df={age_df}, p={age_p:.6f}')\n\nprint('\\nMajority-choice proportion by culture:')\nprint(culture_props[2].round(3).to_string())\n\nprint('\\nMajority-choice proportion by age group:')\nprint(age_props[2].round(3).to_string())\n\nif mn_res is not None:\n    print('\\nMultinomial logit with age, culture, and interaction fitted.')\n    print(f'LL(full)={llf:.3f}, df_model(full)={df_model}')\n    print(f'LL(no interaction)={llf_no_inter:.3f}, df_model(no_inter)={df_model_no_inter}')\n    lr_p = chi2.sf(lr_stat, lr_df)\n    print(f'LR stat for interaction={lr_stat:.3f}, df={lr_df}, p={lr_p:.6f}')\nelse:\n    print('\\nMultinomial logit failed:', mn_summary)\n"
+    },
+    "3": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Child age in years (developmental stage). Used as a predictor and interacted with culture to test developmental (age-related) differences.",
+            "columns": [
+              "age"
+            ]
+          },
+          {
+            "description": "Site/culture identifier treated as a categorical predictor and moderator (tested in interaction with age) to examine cross-cultural differences.",
+            "columns": [
+              "culture"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Outcome recorded in column 'y' with values 1=unchosen option, 2=majority option, 3=minority option. Analyses derived two dependent measures from this column: (a) social reliance — whether the child chose a demonstrated option (majority or minority) vs the unchosen option, and (b) majority preference among social choices — whether the child chose the majority option vs the minority option (analyses on the subset of social choices).",
+          "columns": [
+            "y"
+          ]
+        },
+        "controls": []
+      },
+      "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.formula.api as smf\nimport statsmodels.api as sm\nfrom scipy import stats\n\n# Load data\nDATA_PATH = \"boxes.csv\"\ndf = pd.read_csv(DATA_PATH)\n\n# Create indicators\n# Social reliance: chose majority or minority (vs unchosen option)\ndf['social_choice'] = df['y'].isin([2, 3]).astype(int)\n# Majority preference among social choices\nsocial_df = df[df['social_choice'] == 1].copy()\nsocial_df['majority_choice'] = (social_df['y'] == 2).astype(int)\n\n# Treat culture as categorical\n\ndf['culture'] = df['culture'].astype('category')\nsocial_df['culture'] = social_df['culture'].astype('category')\n\n# Logistic regression for social reliance\nmodel_social = smf.logit('social_choice ~ age + C(culture)', data=df).fit(disp=False)\n\n# Logistic regression for majority preference among social choices\nmodel_majority = smf.logit('majority_choice ~ age + C(culture)', data=social_df).fit(disp=False)\n\n# Also test interaction with age for culture (developmental differences by culture)\nmodel_social_int = smf.logit('social_choice ~ age * C(culture)', data=df).fit(disp=False)\nmodel_majority_int = smf.logit('majority_choice ~ age * C(culture)', data=social_df).fit(disp=False)\n\n# Likelihood ratio tests for interaction vs main effects\nlr_social = 2 * (model_social_int.llf - model_social.llf)\nlr_majority = 2 * (model_majority_int.llf - model_majority.llf)\n\ndf_social = model_social_int.df_model - model_social.df_model\ndf_majority = model_majority_int.df_model - model_majority.df_model\n\np_social = stats.chi2.sf(lr_social, df_social)\np_majority = stats.chi2.sf(lr_majority, df_majority)\n\n# Summary stats by culture and age bins for interpretability\nage_bins = pd.cut(df['age'], bins=[3.5, 6, 9, 12, 14.5], labels=['4-6', '7-9', '10-12', '13-14'])\ndf['age_bin'] = age_bins\nsocial_rate_by = df.groupby(['culture', 'age_bin'])['social_choice'].mean().unstack()\nmajority_rate_by = social_df.assign(age_bin=pd.cut(social_df['age'], bins=[3.5, 6, 9, 12, 14.5], labels=['4-6', '7-9', '10-12', '13-14']))\\\n    .groupby(['culture', 'age_bin'])['majority_choice'].mean().unstack()\n\n# Print key results\nprint(\"=== Social reliance (choose majority/minority vs unchosen) ===\")\nprint(model_social.summary())\nprint(\"\\nInteraction LR test (age*culture):\")\nprint(f\"LR stat={lr_social:.3f}, df={df_social}, p={p_social:.4g}\")\n\nprint(\"\\n=== Majority preference among social choices ===\")\nprint(model_majority.summary())\nprint(\"\\nInteraction LR test (age*culture):\")\nprint(f\"LR stat={lr_majority:.3f}, df={df_majority}, p={p_majority:.4g}\")\n\nprint(\"\\n=== Social choice rate by culture and age bin ===\")\nprint(social_rate_by)\nprint(\"\\n=== Majority choice rate by culture and age bin (social choices only) ===\")\nprint(majority_rate_by)\n"
+    },
+    "4": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Child's age in years (developmental stage). Used as a predictor and entered with an interaction with culture to test age-by-culture effects.",
+            "columns": [
+              "age"
+            ]
+          },
+          {
+            "description": "Study site / cultural group (categorical). Used as a predictor (C(culture)) and interacted with age to test cultural differences and age-by-culture interactions.",
+            "columns": [
+              "culture"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Outcome recorded in column y: 1 = unchosen option, 2 = majority option, 3 = minority option. This column was used to derive (a) social_reliance (chose a demonstrated option [majority or minority] vs unchosen) and (b) majority preference among demonstrated choices (majority vs minority).",
+          "columns": [
+            "y"
+          ]
+        },
+        "controls": []
+      },
+      "analysis_code": "import pandas as pd\nimport statsmodels.api as sm\nimport statsmodels.formula.api as smf\n\n# Load data\n_df = pd.read_csv(\"boxes.csv\")\n\n# Derived outcomes\n_df[\"social_reliance\"] = (_df[\"y\"] != 1).astype(int)  # 1 if chose demonstrated option (majority or minority)\n_df[\"majority_choice\"] = (_df[\"y\"] == 2).astype(int)\n_df[\"minority_choice\"] = (_df[\"y\"] == 3).astype(int)\n\n# Restrict to demonstrated choices for majority preference (exclude unchosen option)\n_demo = _df[_df[\"y\"].isin([2, 3])].copy()\n_demo[\"majority_over_minority\"] = (_demo[\"y\"] == 2).astype(int)\n\n# Model 1: reliance on social information vs age and culture (with interaction)\nmodel_social = smf.glm(\n    \"social_reliance ~ age * C(culture)\",\n    data=_df,\n    family=sm.families.Binomial()\n).fit()\n\n# Model 2: majority preference among demonstrated choices vs age and culture (with interaction)\nmodel_majority = smf.glm(\n    \"majority_over_minority ~ age * C(culture)\",\n    data=_demo,\n    family=sm.families.Binomial()\n).fit()\n\n# Summaries\nprint(\"=== Social Reliance Model (Binomial GLM) ===\")\nprint(model_social.summary())\nprint(\"\\n=== Majority Preference Model (Binomial GLM) ===\")\nprint(model_majority.summary())\n\n# Simple descriptive statistics\nsummary = (\n    _df.groupby([\"culture\", \"age\"])[\"y\"]\n    .value_counts(normalize=True)\n    .rename(\"proportion\")\n    .reset_index()\n)\n\nprint(\"\\n=== Proportions by culture and age (y=1 unchosen, y=2 majority, y=3 minority) ===\")\nprint(summary.head(30))\n\n# Aggregate proportions by culture\nculture_summary = (\n    _df.groupby(\"culture\")[\"y\"]\n    .value_counts(normalize=True)\n    .rename(\"proportion\")\n    .reset_index()\n)\nprint(\"\\n=== Proportions by culture ===\")\nprint(culture_summary)\n\n# Aggregate proportions by age\nage_summary = (\n    _df.groupby(\"age\")[\"y\"]\n    .value_counts(normalize=True)\n    .rename(\"proportion\")\n    .reset_index()\n)\nprint(\"\\n=== Proportions by age ===\")\nprint(age_summary)\n"
+    }
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "dataset_name": "boxes",
+  "run_dir": "agentic/experiments/outputs/boxes/replace_with_rvs/run3",
+  "research_question": "Do children’s reliance on social information and preference for majority cues vary across cultures and developmental stages?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Child age (developmental stage) in years — tested as a predictor of social-learning outcomes (age as a continuous independent variable).",
+          "columns": [
+            "age"
+          ]
+        },
+        {
+          "description": "Cultural site ID (categorical culture variable) — tested as a predictor of social-learning outcomes and in interaction with age.",
+          "columns": [
+            "culture"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Choice outcome recorded in column 'y'. This column was used to derive the study DVs: (a) reliance on social information (whether the child chose a demonstrated option: y != 1) and (b) majority preference among demonstrated choices (whether the child chose the majority option: y == 2).",
+        "columns": [
+          "y"
+        ]
+      },
+      "controls": []
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\nimport statsmodels.formula.api as smf\nfrom scipy.stats import chi2\n\n\ndef lr_test(full, reduced):\n    lr = 2 * (full.llf - reduced.llf)\n    df = full.df_model - reduced.df_model\n    p = chi2.sf(lr, df)\n    return lr, df, p\n\n\ndf = pd.read_csv('boxes.csv')\n\n# Outcome 1: reliance on social information (chose demonstrated option)\ndf['social'] = (df['y'] != 1).astype(int)\n\n# Outcome 2: preference for majority cues among those who chose a demonstrated option\n_demo = df[df['y'] != 1].copy()\n_demo['majority'] = (_demo['y'] == 2).astype(int)\n\nresults = {}\n\n# Social reliance models\nm_social_age = smf.glm('social ~ age', data=df, family=sm.families.Binomial()).fit()\nm_social_cult = smf.glm('social ~ C(culture)', data=df, family=sm.families.Binomial()).fit()\nm_social_age_cult = smf.glm('social ~ age + C(culture)', data=df, family=sm.families.Binomial()).fit()\nm_social_inter = smf.glm('social ~ age * C(culture)', data=df, family=sm.families.Binomial()).fit()\n\nresults['social_age_effect'] = lr_test(m_social_age_cult, m_social_cult)\nresults['social_culture_effect'] = lr_test(m_social_age_cult, m_social_age)\nresults['social_interaction'] = lr_test(m_social_inter, m_social_age_cult)\n\n# Majority preference models (among demonstrated)\nm_maj_age = smf.glm('majority ~ age', data=_demo, family=sm.families.Binomial()).fit()\nm_maj_cult = smf.glm('majority ~ C(culture)', data=_demo, family=sm.families.Binomial()).fit()\nm_maj_age_cult = smf.glm('majority ~ age + C(culture)', data=_demo, family=sm.families.Binomial()).fit()\nm_maj_inter = smf.glm('majority ~ age * C(culture)', data=_demo, family=sm.families.Binomial()).fit()\n\nresults['majority_age_effect'] = lr_test(m_maj_age_cult, m_maj_cult)\nresults['majority_culture_effect'] = lr_test(m_maj_age_cult, m_maj_age)\nresults['majority_interaction'] = lr_test(m_maj_inter, m_maj_age_cult)\n\n# Directional age effects from additive models\nage_coef_social = m_social_age_cult.params.get('age', np.nan)\nage_coef_majority = m_maj_age_cult.params.get('age', np.nan)\n\nprint('Sample size:', len(df))\nprint('Demonstrated-choice sample:', len(_demo))\nprint('\\nLikelihood ratio tests (LR, df, p):')\nfor k, v in results.items():\n    print(f'{k}: LR={v[0]:.3f}, df={int(v[1])}, p={v[2]:.4f}')\n\nprint('\\nAge coefficients (additive models):')\nprint(f'social reliance age coef: {age_coef_social:.4f}')\nprint(f'majority preference age coef: {age_coef_majority:.4f}')\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T18:24:08.973345+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/boxes/replace_with_rvs/run3/analysis.py",
+      "info_json": "agentic/experiments/outputs/boxes/replace_with_rvs/run3/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/boxes/replace_with_rvs/run3/conclusion.txt"
+    }
+  }
+}

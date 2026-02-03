@@ -1,0 +1,44 @@
+{
+  "dataset_name": "crofoot",
+  "run_dir": "agentic/experiments/outputs/crofoot/shuffle_names/run3",
+  "research_question": "Do relative group size and contest location influence the probability of a capuchin monkey group winning an intergroup contest?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Relative group size (size_focal - size_other). Computed from the number of individuals in the focal group minus the number in the other group.",
+          "columns": [
+            "f_other",
+            "win"
+          ]
+        },
+        {
+          "description": "Contest location distance advantage (dist_other - dist_focal). Positive values indicate the focal group is closer to its home-range center than the other group.",
+          "columns": [
+            "m_other",
+            "n_focal"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Focal group win (1 if focal won the intergroup contest, 0 if the other group won).",
+        "columns": [
+          "m_focal"
+        ]
+      },
+      "controls": []
+    },
+    "analysis_code": "import json\nimport pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\n\n# Load data\ninfo = json.load(open('info.json', 'r'))\ndf = pd.read_csv('crofoot.csv')\n\n# Map columns using descriptions in info.json\ncol_desc = {f['column']: f['properties']['description'] for f in info['data_desc']['fields']}\n\n# Identify columns by their descriptions\n# Outcome: 1 if focal won contest, 0 if other won\noutcome_col = [c for c, d in col_desc.items() if 'focal won contest' in d][0]\n# Distances to home range centers\nfocal_dist_col = [c for c, d in col_desc.items() if 'Distance in meters of focal group from the center of its home range' in d][0]\nother_dist_col = [c for c, d in col_desc.items() if 'Distance in meters of other group from the center of its home range' in d][0]\n# Group sizes (individual counts)\nfocal_size_col = [c for c, d in col_desc.items() if d == 'Number of individuals in focal group'][0]\nother_size_col = [c for c, d in col_desc.items() if d == 'Number of individuals in other group'][0]\n\n# Build analysis dataframe\nanalysis_df = df[[outcome_col, focal_dist_col, other_dist_col, focal_size_col, other_size_col]].copy()\nanalysis_df.rename(\n    columns={\n        outcome_col: 'win_focal',\n        focal_dist_col: 'dist_focal_center',\n        other_dist_col: 'dist_other_center',\n        focal_size_col: 'size_focal',\n        other_size_col: 'size_other',\n    },\n    inplace=True,\n)\n\n# Relative predictors\nanalysis_df['size_diff'] = analysis_df['size_focal'] - analysis_df['size_other']\nanalysis_df['location_adv'] = analysis_df['dist_other_center'] - analysis_df['dist_focal_center']\n# Positive location_adv => focal is closer to its center than other is to its center\n\n# Standardize predictors for interpretability\nanalysis_df['size_diff_z'] = (analysis_df['size_diff'] - analysis_df['size_diff'].mean()) / analysis_df['size_diff'].std()\nanalysis_df['location_adv_z'] = (analysis_df['location_adv'] - analysis_df['location_adv'].mean()) / analysis_df['location_adv'].std()\n\n# Logistic regression\nX = analysis_df[['size_diff_z', 'location_adv_z']]\nX = sm.add_constant(X)\ny = analysis_df['win_focal']\n\nmodel = sm.GLM(y, X, family=sm.families.Binomial())\nresult = model.fit()\n\n# Compute odds ratios and 95% CI\nparams = result.params\nconf = result.conf_int()\nconf.columns = ['ci_low', 'ci_high']\n\nodds_ratios = np.exp(params)\nconf_or = np.exp(conf)\n\nsummary = pd.DataFrame({\n    'coef': params,\n    'odds_ratio': odds_ratios,\n    'ci_low_or': conf_or['ci_low'],\n    'ci_high_or': conf_or['ci_high'],\n    'p_value': result.pvalues,\n})\n\n# Save outputs for inspection\nsummary.to_csv('analysis_results.csv', index=True)\n\n# Print a compact summary\nprint('Logistic regression on focal win (1=win)')\nprint(summary)\n\n# Simple correlation checks\nprint('\\nCorrelation between predictors and outcome:')\nprint(analysis_df[['win_focal','size_diff','location_adv']].corr())\n\n# Convenience for decision\nprint('\\nMean win rate by size advantage sign:')\nprint(analysis_df.groupby(analysis_df['size_diff']>0)['win_focal'].mean())\nprint('\\nMean win rate by location advantage sign:')\nprint(analysis_df.groupby(analysis_df['location_adv']>0)['win_focal'].mean())\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T18:42:48.243032+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/crofoot/shuffle_names/run3/analysis.py",
+      "info_json": "agentic/experiments/outputs/crofoot/shuffle_names/run3/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/crofoot/shuffle_names/run3/conclusion.txt"
+    }
+  }
+}

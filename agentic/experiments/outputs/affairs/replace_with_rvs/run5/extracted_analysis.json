@@ -1,0 +1,93 @@
+{
+  "dataset_name": "affairs",
+  "run_dir": "agentic/experiments/outputs/affairs/replace_with_rvs/run5",
+  "research_question": "Does having children decrease (if at all) the engagement in extramarital affairs?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Main independent variable: whether there are children in the marriage (treatment/predictor of interest). Coded as factor 'children' (yes/no) in the dataset.",
+          "columns": [
+            "children"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Primary dependent variable: engagement in extramarital affairs measured as the number of times engaged in extramarital sexual intercourse during the past year ('affairs'). Note: the analysis also used a derived binary indicator (any affair) created from this count, but the canonical column is 'affairs'.",
+        "columns": [
+          "affairs"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Respondent age (numeric coding of age groups in years). Included to control for age-related differences in affair behavior.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "age"
+          ]
+        },
+        {
+          "description": "Number of years married (numeric coding). Included to control for marriage duration which may affect affair likelihood.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "yearsmarried"
+          ]
+        },
+        {
+          "description": "Religiousness (numeric scale 1-5). Included as a control for moral/religious influences on extramarital behavior.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "religiousness"
+          ]
+        },
+        {
+          "description": "Education level (numeric coding of highest attained). Included to control for socio-educational differences.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "education"
+          ]
+        },
+        {
+          "description": "Occupation (numeric Hollingshead classification). Included to control for socioeconomic/occupation-related differences.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "occupation"
+          ]
+        },
+        {
+          "description": "Self-rating of marriage quality (numeric 1-5). Included to control for marital satisfaction which may influence affairs.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "rating"
+          ]
+        },
+        {
+          "description": "Gender (factor: male/female). Included as a demographic control in the models.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "gender"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport statsmodels.api as sm\nimport statsmodels.formula.api as smf\nfrom statsmodels.stats.weightstats import ttest_ind\n\n# Load data\n\ndf = pd.read_csv('affairs.csv')\n\n# Binary indicators\n\ndf['children_yes'] = (df['children'] == 'yes').astype(int)\ndf['any_affair'] = (df['affairs'] > 0).astype(int)\n\n# Descriptive stats\n\ngroup_means = df.groupby('children')['affairs'].mean()\ngroup_any = df.groupby('children')['any_affair'].mean()\n\n# Two-sample t-test on affairs count by children\n\naff_yes = df.loc[df['children'] == 'yes', 'affairs']\naff_no = df.loc[df['children'] == 'no', 'affairs']\n\nt_stat, p_val, _ = ttest_ind(aff_yes, aff_no, usevar='unequal')\n\n# Logistic regression for any affair with controls\n\nlogit_model = smf.logit(\n    'any_affair ~ children_yes + age + yearsmarried + religiousness + education + occupation + rating + C(gender)',\n    data=df\n).fit(disp=False)\n\n# Poisson regression for affair counts with controls\n\npoisson_model = smf.glm(\n    'affairs ~ children_yes + age + yearsmarried + religiousness + education + occupation + rating + C(gender)',\n    data=df,\n    family=sm.families.Poisson()\n).fit(cov_type='HC1')\n\n# Collect results\nresults = {\n    'mean_affairs_children_yes': group_means.get('yes'),\n    'mean_affairs_children_no': group_means.get('no'),\n    'share_any_affair_children_yes': group_any.get('yes'),\n    'share_any_affair_children_no': group_any.get('no'),\n    't_stat': float(t_stat),\n    't_p_value': float(p_val),\n    'logit_children_coef': float(logit_model.params['children_yes']),\n    'logit_children_p': float(logit_model.pvalues['children_yes']),\n    'poisson_children_coef': float(poisson_model.params['children_yes']),\n    'poisson_children_p': float(poisson_model.pvalues['children_yes']),\n}\n\nprint('RESULTS')\nfor k, v in results.items():\n    print(f'{k}: {v}')\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T18:04:41.779976+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/affairs/replace_with_rvs/run5/analysis.py",
+      "info_json": "agentic/experiments/outputs/affairs/replace_with_rvs/run5/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/affairs/replace_with_rvs/run5/conclusion.txt"
+    }
+  }
+}

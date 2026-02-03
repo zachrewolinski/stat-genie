@@ -1,0 +1,117 @@
+{
+  "dataset_name": "mortgage",
+  "run_dir": "agentic/experiments/outputs/mortgage/replace_with_rvs/run2",
+  "research_question": "Does gender affect whether banks approve an individual's mortgage application?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Indicator for applicant gender (1 if female, 0 if male); the primary independent variable the research question asks about.",
+          "columns": [
+            "female"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Mortgage application outcome (1 if accepted, 0 if denied).",
+        "columns": [
+          "accept"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Indicator for applicant race (1 if Black, 0 otherwise); included as a covariate to hold constant race.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "black"
+          ]
+        },
+        {
+          "description": "Housing expense as a ratio of total income; a measure of applicant financial burden used as a control for creditworthiness.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "housing_expense_ratio"
+          ]
+        },
+        {
+          "description": "Indicator for self-employment (1 if self-employed, 0 otherwise); included as an applicant characteristic control.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "self_employed"
+          ]
+        },
+        {
+          "description": "Indicator for marital status (1 if married, 0 otherwise); included as an applicant characteristic control.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "married"
+          ]
+        },
+        {
+          "description": "Applicant's mortgage credit score (categorical/numeric); included to control for creditworthiness relevant to loan approval.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "mortgage_credit"
+          ]
+        },
+        {
+          "description": "Applicant's consumer credit score (categorical/numeric); included to control for overall creditworthiness.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "consumer_credit"
+          ]
+        },
+        {
+          "description": "Indicator for history of bad credit (1 if has bad credit history, 0 otherwise); included as a creditworthiness control.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "bad_history"
+          ]
+        },
+        {
+          "description": "Total debt payments to income ratio; included as a measure of debt burden to control for creditworthiness.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "PI_ratio"
+          ]
+        },
+        {
+          "description": "Ratio of loan amount to appraised property value (loan-to-value); included as a loan characteristic control relevant to approval.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "loan_to_value"
+          ]
+        },
+        {
+          "description": "Indicator for denied private mortgage insurance (1 if denied PMI, 0 otherwise); included as a loan/insurance-related control.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "denied_PMI"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport statsmodels.api as sm\n\n# Load data\ndf = pd.read_csv('mortgage.csv')\n\n# Basic cleanup\nif 'Unnamed: 0' in df.columns:\n    df = df.drop(columns=['Unnamed: 0'])\n\n# Outcome: accept (1=accepted, 0=denied)\n# Ensure accept exists; fall back to 1 - deny if needed\nif 'accept' not in df.columns and 'deny' in df.columns:\n    df['accept'] = 1 - df['deny']\n\n# Drop rows with missing key fields\nkey_cols = [\n    'accept', 'female', 'black', 'housing_expense_ratio', 'self_employed', 'married',\n    'mortgage_credit', 'consumer_credit', 'bad_history', 'PI_ratio', 'loan_to_value', 'denied_PMI'\n]\nkey_cols = [c for c in key_cols if c in df.columns]\n\nclean = df.dropna(subset=key_cols).copy()\n\n# Logistic regression controlling for observed creditworthiness factors\nX_cols = [\n    'female', 'black', 'housing_expense_ratio', 'self_employed', 'married',\n    'mortgage_credit', 'consumer_credit', 'bad_history', 'PI_ratio', 'loan_to_value', 'denied_PMI'\n]\nX_cols = [c for c in X_cols if c in clean.columns]\nX = clean[X_cols]\nX = sm.add_constant(X, has_constant='add')\ny = clean['accept']\n\nmodel = sm.Logit(y, X)\nresult = model.fit(disp=False)\n\n# Extract female coefficient and p-value\nfemale_coef = result.params.get('female', float('nan'))\nfemale_p = result.pvalues.get('female', float('nan'))\nfemale_ci = result.conf_int().loc['female'] if 'female' in result.params.index else None\n\nprint('Rows used:', len(clean))\nprint('\\nLogit model results (female effect):')\nprint('female coef:', female_coef)\nprint('female p-value:', female_p)\nif female_ci is not None:\n    print('female 95% CI:', (female_ci[0], female_ci[1]))\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T19:02:00.369069+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/mortgage/replace_with_rvs/run2/analysis.py",
+      "info_json": "agentic/experiments/outputs/mortgage/replace_with_rvs/run2/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/mortgage/replace_with_rvs/run2/conclusion.txt"
+    }
+  }
+}

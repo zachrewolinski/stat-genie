@@ -1,0 +1,46 @@
+{
+  "dataset_name": "soccer",
+  "run_dir": "agentic/experiments/outputs/soccer/noperturb/run4",
+  "research_question": "Are soccer players with a dark skin tone more likely than those with a light skin tone to receive red cards from referees?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Player skin tone as assessed from profile photos: a dark vs light indicator derived from the mean of two independent rater scores (5-point scale normalized).",
+          "columns": [
+            "rater1",
+            "rater2"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Count of red cards a player received from a particular referee across matches in the player-referee dyad.",
+        "columns": [
+          "redCards"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Number of games in the player-referee dyad; used as an exposure (offset) in the Poisson regression to account for differing opportunities for red cards.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "games"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\n\n# Load data\ndf = pd.read_csv('soccer.csv')\n\n# Skin tone: mean of two raters\ndf['skin_mean'] = df[['rater1', 'rater2']].mean(axis=1)\n\n# Keep rows with skin ratings and games > 0\ndf = df[df['skin_mean'].notna() & (df['games'] > 0)].copy()\n\n# Define dark vs light (dark > 0.5 on 0-1 scale)\ndf['dark'] = (df['skin_mean'] > 0.5).astype(int)\n\n# Descriptive rates\ndf['red_per_game'] = df['redCards'] / df['games']\n\nsummary = df.groupby('dark').agg(\n    n=('dark', 'size'),\n    total_games=('games', 'sum'),\n    total_red=('redCards', 'sum'),\n    mean_red_per_game=('red_per_game', 'mean'),\n    any_red_rate=('redCards', lambda x: (x > 0).mean())\n).reset_index()\n\n# Poisson regression with offset for games\n# Model: redCards ~ dark, offset log(games)\nX = sm.add_constant(df['dark'])\noffset = np.log(df['games'])\nmodel = sm.GLM(df['redCards'], X, family=sm.families.Poisson(), offset=offset)\nresult = model.fit(cov_type='HC0')\n\n# Extract effect\ncoef_dark = result.params['dark']\nrr_dark = np.exp(coef_dark)\nci_low, ci_high = np.exp(result.conf_int().loc['dark'])\n\n# Save key outputs for inspection\nprint('Summary by dark:')\nprint(summary)\nprint('\\nPoisson GLM (robust SE)')\nprint(result.summary().as_text())\nprint('\\nRate ratio for dark vs light:', rr_dark)\nprint('95% CI:', (ci_low, ci_high))\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-02T16:38:02.845385+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/soccer/noperturb/run4/analysis.py",
+      "info_json": "agentic/experiments/outputs/soccer/noperturb/run4/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/soccer/noperturb/run4/conclusion.txt"
+    }
+  }
+}

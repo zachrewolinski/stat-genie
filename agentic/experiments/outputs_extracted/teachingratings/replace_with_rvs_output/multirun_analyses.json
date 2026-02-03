@@ -1,0 +1,399 @@
+{
+  "dataset_name": "teachingratings",
+  "n": 5,
+  "analyses": {
+    "0": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "rating of the instructor's physical appearance by a panel of six students, averaged across the six panelists, shifted to have a mean of zero.",
+            "columns": [
+              "beauty"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "course overall teaching evaluation score, on a scale of 1 (very unsatisfactory) to 5 (excellent).",
+          "columns": [
+            "eval"
+          ]
+        },
+        "controls": [
+          {
+            "description": "the professor's age.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "age"
+            ]
+          },
+          {
+            "description": "factor indicating instructor's gender.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "gender"
+            ]
+          },
+          {
+            "description": "factor. Does the instructor belong to a minority (non-Caucasian)?",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "minority"
+            ]
+          },
+          {
+            "description": "factor. Is the instructor a native English speaker?",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "native"
+            ]
+          },
+          {
+            "description": "factor. Is the instructor on tenure track?",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "tenure"
+            ]
+          },
+          {
+            "description": "factor. Is the course an upper or lower division course? (Lower division courses are mainly large freshman and sophomore courses)?",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "division"
+            ]
+          },
+          {
+            "description": "factor. Is the course a single-credit elective (e.g., yoga, aerobics, dance)?",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "credits"
+            ]
+          },
+          {
+            "description": "number of students that participated in the evaluation.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "students"
+            ]
+          }
+        ]
+      },
+      "analysis_code": "import pandas as pd\nimport statsmodels.formula.api as smf\n\n# Load data\n_df = pd.read_csv('teachingratings.csv')\n\n# Basic model: eval on beauty\nmodel_simple = smf.ols('eval ~ beauty', data=_df).fit()\n\n# Control model with key covariates\n# Using common controls from literature: age, gender, minority, native, tenure, division, credits, class size\n# Convert categorical to category type for statsmodels\nfor col in ['gender','minority','native','tenure','division','credits']:\n    _df[col] = _df[col].astype('category')\n\nmodel_controls = smf.ols(\n    'eval ~ beauty + age + C(gender) + C(minority) + C(native) + C(tenure) + C(division) + C(credits) + students',\n    data=_df\n).fit()\n\n# Save key results to a small text block for reference\nwith open('analysis_results.txt','w') as f:\n    f.write('Simple model:\\n')\n    f.write(str(model_simple.summary()) + '\\n')\n    f.write('\\nControlled model:\\n')\n    f.write(str(model_controls.summary()) + '\\n')\n\nprint('Simple model beauty coef:', model_simple.params['beauty'], 'p=', model_simple.pvalues['beauty'])\nprint('Controlled model beauty coef:', model_controls.params['beauty'], 'p=', model_controls.pvalues['beauty'])\n"
+    },
+    "1": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Instructor physical appearance rating (average of six judges, mean-zero standardized); the main predictor of interest representing 'beauty'.",
+            "columns": [
+              "beauty"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Course overall teaching evaluation score (student instructional rating on a 1-5 scale); the outcome measuring teaching productivity.",
+          "columns": [
+            "eval"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Instructor demographics and course characteristics included as covariates: instructor age; number of students who participated in the evaluation; number of students enrolled in the course; instructor gender; minority status; native English speaker status; tenure status; course division (upper/lower); and whether the course is a single-credit elective (credits). These are included to hold constant potential confounders in the relationship between beauty and evaluations.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "age",
+              "students",
+              "allstudents",
+              "gender",
+              "minority",
+              "native",
+              "tenure",
+              "division",
+              "credits"
+            ]
+          }
+        ]
+      },
+      "analysis_code": "import pandas as pd\nimport statsmodels.api as sm\nimport statsmodels.formula.api as smf\n\n# Load data\n_df = pd.read_csv(\"teachingratings.csv\")\n\n# Basic OLS: eval on beauty (bivariate)\nmodel_simple = smf.ols(\"eval ~ beauty\", data=_df).fit()\n\n# Add controls commonly used in the literature\n# Use categorical indicators for factors\nformula_controls = (\n    \"eval ~ beauty + age + students + allstudents + \"\n    \"C(gender) + C(minority) + C(native) + C(tenure) + C(division) + C(credits)\"\n)\nmodel_controls = smf.ols(formula_controls, data=_df).fit()\n\n# Save key results to a small CSV for inspection if needed\nsummary_df = pd.DataFrame(\n    {\n        \"model\": [\"simple\", \"controls\"],\n        \"beauty_coef\": [model_simple.params.get(\"beauty\"), model_controls.params.get(\"beauty\")],\n        \"beauty_pvalue\": [model_simple.pvalues.get(\"beauty\"), model_controls.pvalues.get(\"beauty\")],\n        \"beauty_ci_low\": [model_simple.conf_int().loc[\"beauty\", 0], model_controls.conf_int().loc[\"beauty\", 0]],\n        \"beauty_ci_high\": [model_simple.conf_int().loc[\"beauty\", 1], model_controls.conf_int().loc[\"beauty\", 1]],\n        \"n\": [int(model_simple.nobs), int(model_controls.nobs)],\n        \"r2\": [model_simple.rsquared, model_controls.rsquared],\n    }\n)\nsummary_df.to_csv(\"analysis_results.csv\", index=False)\n\n# Print concise output for human check\nprint(summary_df)\n"
+    },
+    "2": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "rating of the instructor's physical appearance by a panel of six students, averaged across the six panelists, shifted to have a mean of zero (instructor beauty)",
+            "columns": [
+              "beauty"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "course overall teaching evaluation score, on a scale of 1 (very unsatisfactory) to 5 (excellent) (student instructional ratings)",
+          "columns": [
+            "eval"
+          ]
+        },
+        "controls": [
+          {
+            "description": "the professor's age",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "age"
+            ]
+          },
+          {
+            "description": "factor indicating instructor's gender",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "gender"
+            ]
+          },
+          {
+            "description": "factor. Does the instructor belong to a minority (non-Caucasian)?",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "minority"
+            ]
+          },
+          {
+            "description": "factor. Is the course a single-credit elective (e.g., yoga, aerobics, dance)? (credits)",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "credits"
+            ]
+          },
+          {
+            "description": "factor. Is the course an upper or lower division course?",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "division"
+            ]
+          },
+          {
+            "description": "factor. Is the instructor a native English speaker?",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "native"
+            ]
+          },
+          {
+            "description": "factor. Is the instructor on tenure track?",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "tenure"
+            ]
+          },
+          {
+            "description": "number of students that participated in the evaluation",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "students"
+            ]
+          }
+        ]
+      },
+      "analysis_code": "import pandas as pd\nimport statsmodels.formula.api as smf\n\n# Load data\npath = 'teachingratings.csv'\ndf = pd.read_csv(path)\n\n# Basic cleaning: ensure categorical variables treated as category\ncat_cols = ['minority','gender','credits','division','native','tenure']\nfor c in cat_cols:\n    if c in df.columns:\n        df[c] = df[c].astype('category')\n\n# Main model: eval on beauty with controls\nformula = 'eval ~ beauty + age + C(gender) + C(minority) + C(credits) + C(division) + C(native) + C(tenure) + students'\nmodel = smf.ols(formula, data=df).fit(cov_type='HC3')\n\n# Also run a simple bivariate model for reference\nmodel_simple = smf.ols('eval ~ beauty', data=df).fit(cov_type='HC3')\n\n# Save key results for inspection\nresults = {\n    'n': int(model.nobs),\n    'coef_beauty': float(model.params['beauty']),\n    'p_beauty': float(model.pvalues['beauty']),\n    'coef_beauty_simple': float(model_simple.params['beauty']),\n    'p_beauty_simple': float(model_simple.pvalues['beauty']),\n    'r2': float(model.rsquared)\n}\n\n# Write a brief text summary for human check\nwith open('analysis_summary.txt','w') as f:\n    f.write(model.summary().as_text())\n    f.write('\\n\\nSimple model:\\n')\n    f.write(model_simple.summary().as_text())\n    f.write('\\n\\nKey results:\\n')\n    for k,v in results.items():\n        f.write(f'{k}: {v}\\n')\n"
+    },
+    "3": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Instructor physical appearance rating (average beauty score from six judges, shifted to have mean zero) — the main predictor of interest.",
+            "columns": [
+              "beauty"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Course overall teaching evaluation score (student instructional ratings on a 1-5 scale) — the outcome variable.",
+          "columns": [
+            "eval"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Instructor age in years — included as a continuous covariate.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "age"
+            ]
+          },
+          {
+            "description": "Instructor gender (categorical) — control for gender differences.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "gender"
+            ]
+          },
+          {
+            "description": "Instructor minority status (non-Caucasian) — categorical demographic control.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "minority"
+            ]
+          },
+          {
+            "description": "Course credit type (single-credit elective vs more) — categorical course characteristic control.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "credits"
+            ]
+          },
+          {
+            "description": "Course division (lower vs upper) — categorical course-level control.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "division"
+            ]
+          },
+          {
+            "description": "Instructor native English speaker (yes/no) — categorical control for language background.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "native"
+            ]
+          },
+          {
+            "description": "Instructor tenure status (on tenure track yes/no) — categorical professional-status control.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "tenure"
+            ]
+          },
+          {
+            "description": "Number of students who participated in the evaluation — continuous control for sample size of evaluation.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "students"
+            ]
+          },
+          {
+            "description": "Number of students enrolled in the course — continuous control for course size.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "allstudents"
+            ]
+          }
+        ]
+      },
+      "analysis_code": "import pandas as pd\nimport statsmodels.formula.api as smf\n\n# Load data\npath = 'teachingratings.csv'\ndf = pd.read_csv(path)\n\n# Simple bivariate model\nm1 = smf.ols('eval ~ beauty', data=df).fit()\n\n# Model with common controls (categorical variables as factors)\nformula = (\n    'eval ~ beauty + age + C(gender) + C(minority) + C(credits) + '\n    'C(division) + C(native) + C(tenure) + students + allstudents'\n)\nm2 = smf.ols(formula, data=df).fit(cov_type='HC3')\n\n# Summaries for record\nprint('Bivariate model: eval ~ beauty')\nprint(m1.summary().tables[1])\nprint('\\nControlled model (HC3 robust SE):')\nprint(m2.summary().tables[1])\n\n# Key numbers for conclusion\nbeauty_coef = m2.params['beauty']\nbeauty_p = m2.pvalues['beauty']\nprint(f\"\\nControlled model beauty coef: {beauty_coef:.4f}, p-value: {beauty_p:.4f}\")\n"
+    },
+    "4": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "rating of the instructor's physical appearance by a panel of six students, averaged across the six panelists, shifted to have a mean of zero.",
+            "columns": [
+              "beauty"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "course overall teaching evaluation score, on a scale of 1 (very unsatisfactory) to 5 (excellent).",
+          "columns": [
+            "eval"
+          ]
+        },
+        "controls": [
+          {
+            "description": "factor. Does the instructor belong to a minority (non-Caucasian)?",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "minority"
+            ]
+          },
+          {
+            "description": "the professor's age.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "age"
+            ]
+          },
+          {
+            "description": "factor indicating instructor's gender.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "gender"
+            ]
+          },
+          {
+            "description": "factor. Is the course a single-credit elective (e.g., yoga, aerobics, dance)?",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "credits"
+            ]
+          },
+          {
+            "description": "factor. Is the course an upper or lower division course? (Lower division courses are mainly large freshman and sophomore courses)?",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "division"
+            ]
+          },
+          {
+            "description": "factor. Is the instructor a native English speaker?",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "native"
+            ]
+          },
+          {
+            "description": "factor. Is the instructor on tenure track?",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "tenure"
+            ]
+          },
+          {
+            "description": "number of students that participated in the evaluation.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "students"
+            ]
+          },
+          {
+            "description": "number of students enrolled in the course.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "allstudents"
+            ]
+          }
+        ]
+      },
+      "analysis_code": "import pandas as pd\nimport statsmodels.api as sm\n\n# Load data\n_df = pd.read_csv('teachingratings.csv')\n\n# Baseline model: eval ~ beauty\nX_base = sm.add_constant(_df[['beauty']])\nmodel_base = sm.OLS(_df['eval'], X_base).fit(cov_type='HC3')\n\n# Expanded model with controls\ncat_cols = ['minority', 'gender', 'credits', 'division', 'native', 'tenure']\nX = _df[['beauty', 'age', 'students', 'allstudents']].copy()\nX['age2'] = _df['age'] ** 2\nX = pd.concat([X, pd.get_dummies(_df[cat_cols], drop_first=True)], axis=1)\nX = sm.add_constant(X)\nmodel_full = sm.OLS(_df['eval'], X).fit(cov_type='HC3')\n\nprint('Baseline model (eval ~ beauty)')\nprint(model_base.summary())\nprint('\\nFull model (controls added)')\nprint(model_full.summary())\n\n# Key coefficient for reporting\nprint('\\nBeauty coefficient (baseline):', model_base.params['beauty'], 'p=', model_base.pvalues['beauty'])\nprint('Beauty coefficient (full):', model_full.params['beauty'], 'p=', model_full.pvalues['beauty'])\n"
+    }
+  }
+}

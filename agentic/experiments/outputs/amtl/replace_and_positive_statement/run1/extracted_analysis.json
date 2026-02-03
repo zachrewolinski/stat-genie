@@ -1,0 +1,62 @@
+{
+  "dataset_name": "amtl",
+  "run_dir": "agentic/experiments/outputs/amtl/replace_and_positive_statement/run1",
+  "research_question": "I strongly believe the answer to the following question to be 'Yes'. Perform an analysis that verifies this. Do modern humans (Homo sapiens) have higher frequencies of antemortem tooth loss (AMTL) compared to non-human primate genera (Pan, Pongo, Papio), after accounting for the effects of age, sex, and tooth class?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Specimen genus (categorical predictor); primary independent variable of interest comparing Homo sapiens to non-human primate genera (Pan, Pongo, Papio).",
+          "columns": [
+            "genus"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Antemortem tooth loss (AMTL) frequency/proportion for a given tooth class (modeled as number of missing teeth out of observable sockets).",
+        "columns": [
+          "num_amtl",
+          "sockets"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Estimated age at death (included to adjust for age-related differences in AMTL).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "age"
+          ]
+        },
+        {
+          "description": "Estimated probability of being male (sex estimate used as a covariate to control for sex differences).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "prob_male"
+          ]
+        },
+        {
+          "description": "Tooth class (categorical: Anterior, Posterior, Premolar) included to control for differences in AMTL by tooth type.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "tooth_class"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\nimport statsmodels.formula.api as smf\nfrom scipy.stats import norm\n\n# Load data\n\ndf = pd.read_csv('amtl.csv')\n\n# Basic cleaning: drop rows with missing values in needed columns\ncols = ['num_amtl', 'sockets', 'age', 'prob_male', 'tooth_class', 'genus']\ndf = df.dropna(subset=cols).copy()\n\n# Ensure categorical types with controlled reference level\n# Use Pan as reference (non-human), so Homo coefficient is vs Pan\ncat_order = ['Pan', 'Papio', 'Pongo', 'Homo sapiens']\ndf['genus'] = pd.Categorical(df['genus'], categories=cat_order)\n\n# Tooth class categorical\nif df['tooth_class'].dtype.name != 'category':\n    df['tooth_class'] = df['tooth_class'].astype('category')\n\n# Proportion and weights for binomial GLM\n# Use freq_weights = sockets, endog = proportion missing\n# (equivalent to binomial counts with weights)\ndf['prop_amtl'] = df['num_amtl'] / df['sockets']\n\nmodel = smf.glm(\n    'prop_amtl ~ C(genus) + age + prob_male + C(tooth_class)',\n    data=df,\n    family=sm.families.Binomial(),\n    freq_weights=df['sockets']\n).fit()\n\nprint(model.summary())\n\n# Wald tests for Homo vs each non-human genus\nparams = model.params\ncov = model.cov_params()\n\n# Helper for linear contrast\nparam_names = params.index.tolist()\n\ndef wald_test(contrast):\n    # contrast: dict of param->weight\n    c = np.zeros(len(param_names))\n    for k, v in contrast.items():\n        if k not in param_names:\n            raise KeyError(f\"Param {k} not in model\")\n        c[param_names.index(k)] = v\n    est = float(np.dot(c, params))\n    var = float(np.dot(c, np.dot(cov.values, c)))\n    se = np.sqrt(var)\n    z = est / se if se > 0 else np.nan\n    p = 2 * (1 - norm.cdf(abs(z)))\n    return est, se, z, p\n\n# Parameter names for genus levels\nhomo = 'C(genus)[T.Homo sapiens]'\npapio = 'C(genus)[T.Papio]'\npongo = 'C(genus)[T.Pongo]'\n\nresults = {}\n\n# Homo vs Pan: just homo coefficient\nif homo in param_names:\n    est = params[homo]\n    se = np.sqrt(cov.loc[homo, homo])\n    z = est / se if se > 0 else np.nan\n    p = 2 * (1 - norm.cdf(abs(z)))\n    results['Homo vs Pan'] = (est, se, z, p)\n\n# Homo vs Papio: homo - papio\nif homo in param_names and papio in param_names:\n    results['Homo vs Papio'] = wald_test({homo: 1.0, papio: -1.0})\n\n# Homo vs Pongo: homo - pongo\nif homo in param_names and pongo in param_names:\n    results['Homo vs Pongo'] = wald_test({homo: 1.0, pongo: -1.0})\n\nprint(\"\\nWald tests (log-odds difference, positive => higher AMTL in Homo):\")\nfor k, (est, se, z, p) in results.items():\n    print(f\"{k}: est={est:.4f}, se={se:.4f}, z={z:.2f}, p={p:.4g}\")\n\n# Marginal standardized predicted AMTL for each genus\n# For each genus, replace genus in each row and average predicted prob\npred_means = {}\nfor g in cat_order:\n    tmp = df.copy()\n    tmp['genus'] = g\n    pred = model.predict(tmp)\n    pred_means[g] = float(np.average(pred, weights=tmp['sockets']))\n\nprint(\"\\nWeighted marginal predicted AMTL proportion by genus:\")\nfor g, v in pred_means.items():\n    print(f\"{g}: {v:.4f}\")\n\n# Save key results for manual conclusion if needed\nwith open('analysis_results.txt', 'w') as f:\n    f.write(model.summary().as_text())\n    f.write(\"\\n\\nWald tests (log-odds difference, positive => higher AMTL in Homo):\\n\")\n    for k, (est, se, z, p) in results.items():\n        f.write(f\"{k}: est={est:.6f}, se={se:.6f}, z={z:.3f}, p={p:.6g}\\n\")\n    f.write(\"\\nWeighted marginal predicted AMTL proportion by genus:\\n\")\n    for g, v in pred_means.items():\n        f.write(f\"{g}: {v:.6f}\\n\")\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T18:12:14.711076+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/amtl/replace_and_positive_statement/run1/analysis.py",
+      "info_json": "agentic/experiments/outputs/amtl/replace_and_positive_statement/run1/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/amtl/replace_and_positive_statement/run1/conclusion.txt"
+    }
+  }
+}

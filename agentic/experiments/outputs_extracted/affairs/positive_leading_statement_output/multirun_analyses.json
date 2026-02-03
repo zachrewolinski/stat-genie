@@ -1,0 +1,265 @@
+{
+  "dataset_name": "affairs",
+  "n": 5,
+  "analyses": {
+    "0": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Main independent variable: whether there are children in the marriage. This is the treatment/predictor of interest (used as C(children) in regressions and for group comparisons).",
+            "columns": [
+              "children"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Dependent variable: frequency of extramarital affairs in the past year ('affairs' in the dataset). The analysis used this column both as a continuous outcome in OLS and as the basis for a binary indicator (any affair: affairs > 0) for logistic regression.",
+          "columns": [
+            "affairs"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Covariates included to hold constant in regression analyses: gender, age, years married, religiousness, education, occupation, and self-rated marriage happiness (rating). These were included alongside C(children) in both the OLS and logistic models.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "gender",
+              "age",
+              "yearsmarried",
+              "religiousness",
+              "education",
+              "occupation",
+              "rating"
+            ]
+          }
+        ]
+      },
+      "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.formula.api as smf\nfrom statsmodels.stats.weightstats import ttest_ind\n\n# Load data\nDF = pd.read_csv('affairs.csv')\n\n# Basic derived variables\nDF['any_affair'] = (DF['affairs'] > 0).astype(int)\n\n# Group summaries\ngroup_stats = DF.groupby('children').agg(\n    n=('affairs', 'size'),\n    mean_affairs=('affairs', 'mean'),\n    mean_any_affair=('any_affair', 'mean')\n)\n\n# Two-sample t-test for mean affairs (unequal var)\nwith_children = DF.loc[DF['children'] == 'yes', 'affairs']\nwithout_children = DF.loc[DF['children'] == 'no', 'affairs']\n\nt_stat, p_val, dfree = ttest_ind(with_children, without_children, usevar='unequal')\n\n# Regression: affairs count as continuous (OLS) with controls\nols = smf.ols(\n    'affairs ~ C(children) + C(gender) + age + yearsmarried + religiousness + education + occupation + rating',\n    data=DF\n).fit(cov_type='HC3')\n\n# Logistic regression: any affair\nlogit = smf.logit(\n    'any_affair ~ C(children) + C(gender) + age + yearsmarried + religiousness + education + occupation + rating',\n    data=DF\n).fit(disp=False)\n\n# Extract children effect\nols_coef = ols.params.get('C(children)[T.yes]', np.nan)\nols_p = ols.pvalues.get('C(children)[T.yes]', np.nan)\nlogit_coef = logit.params.get('C(children)[T.yes]', np.nan)\nlogit_p = logit.pvalues.get('C(children)[T.yes]', np.nan)\n\n# Print results\nprint('Group stats by children:')\nprint(group_stats)\nprint('\\nT-test (affairs mean, yes vs no):')\nprint({'t_stat': float(t_stat), 'p_val': float(p_val), 'df': float(dfree)})\nprint('\\nOLS (affairs) children effect:')\nprint({'coef': float(ols_coef), 'p_val': float(ols_p)})\nprint('\\nLogit (any_affair) children effect:')\nprint({'coef': float(logit_coef), 'p_val': float(logit_p)})\n"
+    },
+    "1": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Indicator for whether there are children in the marriage (main treatment/predictor of interest).",
+            "columns": [
+              "children"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Count of extramarital sexual intercourse in the past year (numeric frequency measure used as the primary outcome). Note: the analysis also examined a binary indicator of any affair derived from this variable, but the canonical column is shown here.",
+          "columns": [
+            "affairs"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Demographic and marital covariates included to hold constant potential confounders: respondent gender, age, years married, religiousness, education level, occupation, and self-rated marriage happiness.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "gender",
+              "age",
+              "yearsmarried",
+              "religiousness",
+              "education",
+              "occupation",
+              "rating"
+            ]
+          }
+        ]
+      },
+      "analysis_code": "import pandas as pd\nimport statsmodels.formula.api as smf\n\n\ndef main():\n    df = pd.read_csv(\"affairs.csv\")\n    df[\"affair_any\"] = (df[\"affairs\"] > 0).astype(int)\n\n    # Group summaries\n    group_means = df.groupby(\"children\")[\"affairs\"].mean()\n    group_rates = df.groupby(\"children\")[\"affair_any\"].mean()\n\n    print(\"Mean affairs by children status:\")\n    print(group_means)\n    print(\"\\nShare with any affair by children status:\")\n    print(group_rates)\n\n    # Simple difference in means (OLS)\n    ols_simple = smf.ols(\"affairs ~ C(children)\", data=df).fit(cov_type=\"HC3\")\n    print(\"\\nOLS difference in means (affairs ~ children):\")\n    print(ols_simple.summary().tables[1])\n\n    # OLS with controls\n    ols_controls = smf.ols(\n        \"affairs ~ C(children) + C(gender) + age + yearsmarried + religiousness + \"\n        \"education + occupation + rating\",\n        data=df,\n    ).fit(cov_type=\"HC3\")\n    print(\"\\nOLS with controls:\")\n    print(ols_controls.summary().tables[1])\n\n    # Logit for any affair\n    logit_controls = smf.logit(\n        \"affair_any ~ C(children) + C(gender) + age + yearsmarried + religiousness + \"\n        \"education + occupation + rating\",\n        data=df,\n    ).fit(disp=0)\n    print(\"\\nLogit (any affair) with controls:\")\n    print(logit_controls.summary().tables[1])\n\n    # Poisson for count outcome\n    poisson_controls = smf.poisson(\n        \"affairs ~ C(children) + C(gender) + age + yearsmarried + religiousness + \"\n        \"education + occupation + rating\",\n        data=df,\n    ).fit(disp=0)\n    print(\"\\nPoisson with controls:\")\n    print(poisson_controls.summary().tables[1])\n\n\nif __name__ == \"__main__\":\n    main()\n"
+    },
+    "2": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Presence of children in the marriage (main predictor/treatment: whether the couple has children).",
+            "columns": [
+              "children"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Engagement in extramarital affairs (frequency of affairs reported in the past year). Analysis maps to this numeric measure.",
+          "columns": [
+            "affairs"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Respondent age (coded in years / age categories).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "age"
+            ]
+          },
+          {
+            "description": "Number of years married (duration of the current marriage).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "yearsmarried"
+            ]
+          },
+          {
+            "description": "Respondent gender (factor indicating male or female).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "gender"
+            ]
+          },
+          {
+            "description": "Self-reported religiousness (numeric scale).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "religiousness"
+            ]
+          },
+          {
+            "description": "Level of education (years/degree coding).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "education"
+            ]
+          },
+          {
+            "description": "Occupation category (Hollingshead classification).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "occupation"
+            ]
+          },
+          {
+            "description": "Self rating of the marriage (marital happiness).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "rating"
+            ]
+          }
+        ]
+      },
+      "analysis_code": "import pandas as pd\nimport statsmodels.formula.api as smf\nfrom statsmodels.stats.weightstats import ttest_ind\n\n# Load data\n\ndf = pd.read_csv('affairs.csv')\n\n# Binary indicator for any affair\n\ndf['affair_any'] = (df['affairs'] > 0).astype(int)\n\n# Group summaries\n\ngroup_means = df.groupby('children')['affairs'].mean()\nany_rates = df.groupby('children')['affair_any'].mean()\n\n# Two-sample t-test for mean affairs\n\naffairs_yes = df.loc[df['children'] == 'yes', 'affairs']\naffairs_no = df.loc[df['children'] == 'no', 'affairs']\nt_stat, p_val, dfree = ttest_ind(affairs_yes, affairs_no, usevar='unequal')\n\n# OLS with controls\n\nols = smf.ols(\n    'affairs ~ C(children) + age + yearsmarried + C(gender) + religiousness + '\n    'education + occupation + rating',\n    data=df\n).fit()\n\n# Logit for any affair with controls\n\nlogit = smf.logit(\n    'affair_any ~ C(children) + age + yearsmarried + C(gender) + religiousness + '\n    'education + occupation + rating',\n    data=df\n).fit(disp=False)\n\n# Output key results\n\nprint('Group mean affairs (children=yes):', group_means.get('yes'))\nprint('Group mean affairs (children=no):', group_means.get('no'))\nprint('Group any-affair rate (children=yes):', any_rates.get('yes'))\nprint('Group any-affair rate (children=no):', any_rates.get('no'))\nprint('T-test for mean affairs (yes vs no): t=%.3f p=%.3f df=%.1f' % (t_stat, p_val, dfree))\n\nprint('\\nOLS coefficient for children=yes:')\nprint('coef=%.4f p=%.4f' % (ols.params.get('C(children)[T.yes]'), ols.pvalues.get('C(children)[T.yes]')))\n\nprint('\\nLogit coefficient for children=yes:')\nprint('coef=%.4f p=%.4f' % (logit.params.get('C(children)[T.yes]'), logit.pvalues.get('C(children)[T.yes]')))\n\n"
+    },
+    "3": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Are there children in the marriage? (factor indicating presence of children: 'yes'/'no').",
+            "columns": [
+              "children"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "How often engaged in extramarital sexual intercourse during the past year (numeric coding: 0 = none, 1 = once, 2 = twice, 3 = 3 times, 7 = 4–10 times, 12 = monthly/weekly/daily aggregated as 12).",
+          "columns": [
+            "affairs"
+          ]
+        },
+        "controls": [
+          {
+            "description": "factor indicating gender (used as a categorical control).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "gender"
+            ]
+          },
+          {
+            "description": "Age in years (coded categories: 17.5 = under 20, 22 = 20–24, …, 57 = 55 or over).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "age"
+            ]
+          },
+          {
+            "description": "Number of years married (coded categories: e.g. 0.125, 0.417, 0.75, 1.5, 4, 7, 10, 15).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "yearsmarried"
+            ]
+          },
+          {
+            "description": "Self-reported religiousness (1 = anti, 2 = not at all, 3 = slightly, 4 = somewhat, 5 = very).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "religiousness"
+            ]
+          },
+          {
+            "description": "Education level coded numerically (9 = grade school, 12 = high school, 14 = some college, 16 = college graduate, 17 = some graduate work, 18 = master's, 20 = Ph.D./M.D./advanced).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "education"
+            ]
+          },
+          {
+            "description": "Occupation code according to Hollingshead classification (numeric 1–7, reverse numbering).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "occupation"
+            ]
+          },
+          {
+            "description": "Self-rating of marriage (1 = very unhappy, 2 = somewhat unhappy, 3 = average, 4 = happier than average, 5 = very happy).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "rating"
+            ]
+          }
+        ]
+      },
+      "analysis_code": "import pandas as pd\nimport statsmodels.formula.api as smf\n\n\ndef main():\n    df = pd.read_csv('affairs.csv')\n    df['any_affair'] = (df['affairs'] > 0).astype(int)\n\n    # Descriptive comparisons\n    mean_by_children = df.groupby('children')['affairs'].mean()\n    prop_any_by_children = df.groupby('children')['any_affair'].mean()\n\n    print('Mean affairs by children:')\n    print(mean_by_children)\n    print('\\nProportion with any affair by children:')\n    print(prop_any_by_children)\n\n    # Regression models with controls\n    ols = smf.ols(\n        'affairs ~ C(children) + age + yearsmarried + religiousness + education + occupation + rating + C(gender)',\n        data=df,\n    ).fit()\n    logit = smf.logit(\n        'any_affair ~ C(children) + age + yearsmarried + religiousness + education + occupation + rating + C(gender)',\n        data=df,\n    ).fit(disp=0)\n    poisson = smf.poisson(\n        'affairs ~ C(children) + age + yearsmarried + religiousness + education + occupation + rating + C(gender)',\n        data=df,\n    ).fit(disp=0)\n\n    print('\\nOLS coefficient for children=yes:')\n    print(ols.params['C(children)[T.yes]'], 'p=', ols.pvalues['C(children)[T.yes]'])\n\n    print('\\nLogit coefficient for children=yes:')\n    print(logit.params['C(children)[T.yes]'], 'p=', logit.pvalues['C(children)[T.yes]'])\n\n    print('\\nPoisson coefficient for children=yes:')\n    print(poisson.params['C(children)[T.yes]'], 'p=', poisson.pvalues['C(children)[T.yes]'])\n\n\nif __name__ == '__main__':\n    main()\n"
+    },
+    "4": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Presence of children in the marriage (factor indicating whether there are children: 'yes'/'no'); the main predictor of interest assessing whether having children affects extramarital affairs.",
+            "columns": [
+              "children"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Number of extramarital sexual intercourse events during the past year (numeric count coded in the 'affairs' column: 0 = none, 1 = once, 2 = twice, 3 = 3 times, 7 = 4–10 times, 12 = monthly/weekly/daily as coded). This was the primary outcome; the analysis also derived a binary indicator (any affair) from this column for logistic regression.",
+          "columns": [
+            "affairs"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Demographic and marital covariates included to adjust for confounding: gender, age, years married, religiousness, education, occupation, and self-rated marriage quality (rating).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "gender",
+              "age",
+              "yearsmarried",
+              "religiousness",
+              "education",
+              "occupation",
+              "rating"
+            ]
+          }
+        ]
+      },
+      "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.formula.api as smf\nfrom statsmodels.stats.weightstats import ttest_ind\n\n# Load data\n_df = pd.read_csv('affairs.csv')\n\n# Basic checks\n_df['any_affair'] = (_df['affairs'] > 0).astype(int)\n\n# Group summaries\nsummary = _df.groupby('children').agg(\n    n=('affairs', 'size'),\n    mean_affairs=('affairs', 'mean'),\n    median_affairs=('affairs', 'median'),\n    prop_any_affair=('any_affair', 'mean')\n)\n\n# Two-sample t-test for mean affairs (unequal variances)\nwith_children = _df[_df['children'] == 'yes']['affairs']\nwithout_children = _df[_df['children'] == 'no']['affairs']\n\nt_stat, p_val, _ = ttest_ind(with_children, without_children, usevar='unequal')\n\n# OLS on count with controls (robust SE)\nols_formula = (\n    'affairs ~ C(children) + C(gender) + age + yearsmarried + '\n    'religiousness + education + occupation + rating'\n)\nols_model = smf.ols(ols_formula, data=_df).fit(cov_type='HC3')\n\n# Logistic regression for any affair\nlogit_formula = (\n    'any_affair ~ C(children) + C(gender) + age + yearsmarried + '\n    'religiousness + education + occupation + rating'\n)\nlogit_model = smf.logit(logit_formula, data=_df).fit(disp=0)\n\n# Extract key coefficients\nols_coef = ols_model.params.get('C(children)[T.yes]', np.nan)\nols_p = ols_model.pvalues.get('C(children)[T.yes]', np.nan)\n\nlogit_coef = logit_model.params.get('C(children)[T.yes]', np.nan)\nlogit_p = logit_model.pvalues.get('C(children)[T.yes]', np.nan)\n\n# Print results\nprint('Group summary by children:')\nprint(summary)\nprint('\\nT-test (affairs mean, children yes vs no):')\nprint({'t_stat': t_stat, 'p_value': p_val})\n\nprint('\\nOLS (affairs count) coefficient for children=yes:')\nprint({'coef': ols_coef, 'p_value': ols_p})\n\nprint('\\nLogit (any affair) coefficient for children=yes:')\nprint({'coef': logit_coef, 'p_value': logit_p})\n\n# Save key stats for conclusion use\nresults = {\n    'mean_affairs_yes': summary.loc['yes', 'mean_affairs'],\n    'mean_affairs_no': summary.loc['no', 'mean_affairs'],\n    'prop_any_affair_yes': summary.loc['yes', 'prop_any_affair'],\n    'prop_any_affair_no': summary.loc['no', 'prop_any_affair'],\n    'ttest_p': p_val,\n    'ols_coef_children_yes': ols_coef,\n    'ols_p_children_yes': ols_p,\n    'logit_coef_children_yes': logit_coef,\n    'logit_p_children_yes': logit_p,\n}\n\npd.Series(results).to_csv('analysis_results.csv')\n"
+    }
+  }
+}

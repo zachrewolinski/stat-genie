@@ -1,0 +1,37 @@
+{
+  "dataset_name": "reading",
+  "run_dir": "agentic/experiments/outputs/reading/shuffle_names/run5",
+  "research_question": "Does 'Reader View' --- a modified web page layout --- improves reading speed for individuals with dyslexia?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Reader View treatment indicator (1 = reader view activated, 0 = reader view off) used as the primary independent variable.",
+          "columns": [
+            "language"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Reading speed (words per minute), computed in the analysis from the number of words on the page and the time spent reading; represented here by the underlying columns used to compute it.",
+        "columns": [
+          "num_words",
+          "running_time"
+        ]
+      },
+      "controls": []
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nfrom statsmodels.stats.weightstats import ttest_ind\n\n# Load data\npath = 'reading.csv'\ndf = pd.read_csv(path)\n\n# Interpret columns based on metadata + inspection\n# language: 0/1 indicator (reader view off/on)\n# dyslexia_bin: 0/1 indicator (no dyslexia/dyslexia)\n# running_time: reading time in seconds (distribution aligns with typical reading times)\n# num_words: number of words on the page\n\n# Compute reading speed in words per minute\n# Avoid divide-by-zero and missing values\nvalid = df[['language', 'dyslexia_bin', 'running_time', 'num_words']].copy()\nvalid = valid.dropna()\nvalid = valid[valid['running_time'] > 0]\nvalid['wpm'] = valid['num_words'] / (valid['running_time'] / 60.0)\n\n# Focus on participants with dyslexia\nsub = valid[valid['dyslexia_bin'] == 1]\n\n# Group statistics by reader view\nstats = sub.groupby('language')['wpm'].agg(['count', 'mean', 'std']).rename(index={0: 'reader_view_off', 1: 'reader_view_on'})\n\n# Two-sample t-test (Welch) comparing reader view on vs off\nrv_on = sub[sub['language'] == 1]['wpm']\nrv_off = sub[sub['language'] == 0]['wpm']\n\n# If either group is empty, avoid crashing\nif len(rv_on) > 1 and len(rv_off) > 1:\n    t_stat, p_value, dfree = ttest_ind(rv_on, rv_off, usevar='unequal')\nelse:\n    t_stat, p_value, dfree = (np.nan, np.nan, np.nan)\n\n# Print results for inspection\nprint('Dyslexia subset size:', len(sub))\nprint(stats)\nprint('Mean difference (on - off):', rv_on.mean() - rv_off.mean())\nprint('Welch t-test: t=%.4f, p=%.4f, df=%.2f' % (t_stat, p_value, dfree))\n\n# Save a compact summary for downstream use if needed\nsummary = {\n    'n_dyslexia': int(len(sub)),\n    'mean_wpm_reader_view_on': float(rv_on.mean()),\n    'mean_wpm_reader_view_off': float(rv_off.mean()),\n    'mean_diff_on_minus_off': float(rv_on.mean() - rv_off.mean()),\n    't_stat': float(t_stat),\n    'p_value': float(p_value),\n    'df': float(dfree),\n}\n\npd.Series(summary).to_csv('analysis_summary.csv')\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-02T16:32:56.343293+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/reading/shuffle_names/run5/analysis.py",
+      "info_json": "agentic/experiments/outputs/reading/shuffle_names/run5/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/reading/shuffle_names/run5/conclusion.txt"
+    }
+  }
+}

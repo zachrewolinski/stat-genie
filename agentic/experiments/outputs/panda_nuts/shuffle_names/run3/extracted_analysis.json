@@ -1,0 +1,49 @@
+{
+  "dataset_name": "panda_nuts",
+  "run_dir": "agentic/experiments/outputs/panda_nuts/shuffle_names/run3",
+  "research_question": "Do age, sex, and receiving help from another chimpanzee influence the nut-cracking efficiency of western chimpanzees?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Age of the individual (used as an independent variable). In the analysis script 'hammer' is treated as the subject's age in years.",
+          "columns": [
+            "hammer"
+          ]
+        },
+        {
+          "description": "Sex of the individual (used as an independent variable). In the analysis script sex is derived from the 'nuts_opened' column (values 'm'/'f').",
+          "columns": [
+            "nuts_opened"
+          ]
+        },
+        {
+          "description": "Whether the individual received help from another chimpanzee (used as an independent variable). In the analysis script this is taken from the 'seconds' column (values 'y'/'n').",
+          "columns": [
+            "seconds"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Nut-cracking efficiency: nuts opened per second (dependent variable). Computed in the analysis as number of nuts opened divided by session duration.",
+        "columns": [
+          "help",
+          "chimpanzee"
+        ]
+      },
+      "controls": []
+    },
+    "analysis_code": "import pandas as pd\nimport statsmodels.api as sm\n\n# Load data\nDF_PATH = 'panda_nuts.csv'\ndf = pd.read_csv(DF_PATH)\n\n# Column meanings inferred from metadata mismatch:\n# - 'hammer' appears to be age in years\n# - 'nuts_opened' appears to be sex (m/f)\n# - 'seconds' appears to be help from another chimp (y/n)\n# - 'help' appears to be number of nuts opened in session\n# - 'chimpanzee' appears to be session duration in seconds\n\n# Build variables\nsec = df['seconds'].astype(str).str.lower()\ndf['help_yes'] = sec.map({'y': 1, 'n': 0})\n\ndf['sex_m'] = df['nuts_opened'].map({'m': 1, 'f': 0})\n\n# Efficiency: nuts opened per second\n# Guard against zero duration (not expected, but safe)\ndf['efficiency'] = df['help'] / df['chimpanzee'].replace({0: pd.NA})\n\n# Drop rows with missing derived values\nanalysis_df = df.dropna(subset=['efficiency', 'help_yes', 'sex_m', 'hammer']).copy()\n\n# Regression: efficiency ~ age (hammer) + sex + help\nX = analysis_df[['hammer', 'sex_m', 'help_yes']]\nX = sm.add_constant(X)\ny = analysis_df['efficiency']\n\nmodel = sm.OLS(y, X).fit()\n\nprint('Model summary:')\nprint(model.summary())\n\n# Group means for interpretability\nprint('\\nGroup means (efficiency):')\nprint(analysis_df.groupby('sex_m')['efficiency'].mean().rename({0: 'female', 1: 'male'}))\nprint(analysis_df.groupby('help_yes')['efficiency'].mean().rename({0: 'no_help', 1: 'help'}))\n\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T19:13:35.028060+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/panda_nuts/shuffle_names/run3/analysis.py",
+      "info_json": "agentic/experiments/outputs/panda_nuts/shuffle_names/run3/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/panda_nuts/shuffle_names/run3/conclusion.txt"
+    }
+  }
+}

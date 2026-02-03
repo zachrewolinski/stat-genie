@@ -1,0 +1,49 @@
+{
+  "dataset_name": "panda_nuts",
+  "run_dir": "agentic/experiments/outputs/panda_nuts/replace_with_rvs/run5",
+  "research_question": "Do age, sex, and receiving help from another chimpanzee influence the nut-cracking efficiency of western chimpanzees?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Age of the individual (years) — tested as a predictor of nut‑cracking efficiency.",
+          "columns": [
+            "age"
+          ]
+        },
+        {
+          "description": "Sex of the individual (female/male) — tested as a categorical predictor of efficiency.",
+          "columns": [
+            "sex"
+          ]
+        },
+        {
+          "description": "Whether the individual received help from another chimpanzee (yes/no) — tested as a categorical predictor of efficiency.",
+          "columns": [
+            "help"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Nut‑cracking efficiency operationalized as nuts opened per second. Modeled via counts of nuts opened with session duration (seconds) as an exposure (offset) and also as the derived rate nuts_opened/seconds.",
+        "columns": [
+          "nuts_opened",
+          "seconds"
+        ]
+      },
+      "controls": []
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\nimport statsmodels.formula.api as smf\n\n# Load data\n_df = pd.read_csv('panda_nuts.csv')\n\n# Basic cleaning\n_df = _df.copy()\n_df['sex'] = _df['sex'].astype('category')\n_df['help'] = _df['help'].astype('category')\n\n# Efficiency: nuts per second\n_df['rate'] = _df['nuts_opened'] / _df['seconds']\n\nprint('Rows:', len(_df))\nprint(_df[['nuts_opened','seconds','rate']].describe())\n\n# Poisson regression with exposure (seconds) to model counts -> efficiency\n# This estimates effects on the rate of nuts opened per second\nmodel_glm = smf.glm(\n    formula='nuts_opened ~ age + C(sex) + C(help)',\n    data=_df,\n    family=sm.families.Poisson(),\n    offset=np.log(_df['seconds'])\n).fit(cov_type='HC0')\n\nprint('\\nPoisson GLM with log(seconds) offset (robust SE):')\nprint(model_glm.summary())\n\n# Incidence rate ratios\nparams = model_glm.params\nirr = np.exp(params)\nci = model_glm.conf_int()\nci_irr = np.exp(ci)\nprint('\\nIncidence Rate Ratios (IRR) with 95% CI:')\nfor term in irr.index:\n    lo, hi = ci_irr.loc[term]\n    print(f'{term:15s} IRR={irr[term]:.3f}  CI[{lo:.3f}, {hi:.3f}]')\n\n# OLS on rate as a robustness check\nmodel_ols = smf.ols('rate ~ age + C(sex) + C(help)', data=_df).fit(cov_type='HC3')\nprint('\\nOLS on rate (nuts/sec) with robust SE:')\nprint(model_ols.summary())\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T19:12:35.743583+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/panda_nuts/replace_with_rvs/run5/analysis.py",
+      "info_json": "agentic/experiments/outputs/panda_nuts/replace_with_rvs/run5/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/panda_nuts/replace_with_rvs/run5/conclusion.txt"
+    }
+  }
+}

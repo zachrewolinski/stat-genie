@@ -1,0 +1,93 @@
+{
+  "dataset_name": "affairs",
+  "run_dir": "agentic/experiments/outputs/affairs/anonymize/run1",
+  "research_question": "Does having children decrease (if at all) the engagement in extramarital affairs?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Are there children in the marriage? Factor with values 'yes'/'no' — main predictor of interest (whether having children affects engagement in extramarital affairs).",
+          "columns": [
+            "feature6"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Frequency of extramarital sexual intercourse during the past year (numeric coding: 0 = none, 1 = once, 2 = twice, 3 = 3 times, 7 = 4–10 times, 12 = monthly/weekly/daily aggregated) — outcome measuring engagement in affairs.",
+        "columns": [
+          "feature2"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Gender (factor indicating female or male) — included as a demographic control.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature3"
+          ]
+        },
+        {
+          "description": "Age in years (coded categories: 17.5 = under 20, 22 = 20–24, 27 = 25–29, ..., 57 = 55 or over) — demographic control.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature4"
+          ]
+        },
+        {
+          "description": "Number of years married (coded: 0.125 = ≤3 months, 0.417 = 4–6 months, 0.75 = 6 months–1 year, 1.5 = 1–2 years, 4 = 3–5 years, 7 = 6–8 years, 10 = 9–11 years, 15 = 12+ years) — relationship duration control.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature5"
+          ]
+        },
+        {
+          "description": "Religiosity (1 = anti, 2 = not at all, 3 = slightly, 4 = somewhat, 5 = very) — cultural/religious control.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature7"
+          ]
+        },
+        {
+          "description": "Education level (coded 9 = grade school, 12 = high school, 14 = some college, 16 = college graduate, 17 = some grad work, 18 = master's, 20 = Ph.D./M.D./advanced) — socioeconomic/attainment control.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature8"
+          ]
+        },
+        {
+          "description": "Occupation (numeric Hollingshead classification, reverse numbering) — socioeconomic control.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature9"
+          ]
+        },
+        {
+          "description": "Self-rating of marriage (1 = very unhappy, 2 = somewhat unhappy, 3 = average, 4 = happier than average, 5 = very happy) — relationship quality control.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature10"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nfrom scipy import stats\nfrom statsmodels.stats.proportion import proportions_ztest\nimport statsmodels.formula.api as smf\n\n# Load data\n# feature2: frequency of extramarital affairs\n# feature6: children in marriage (yes/no)\n# feature3: gender\n# feature4: age\n# feature5: years married\n# feature7: religiosity\n# feature8: education\n# feature9: occupation\n# feature10: marriage rating\n\ndf = pd.read_csv('affairs.csv')\n\n# Basic group summaries\nsummary = df.groupby('feature6')['feature2'].agg(['count', 'mean', 'median'])\nsummary['any_affair_rate'] = df.groupby('feature6')['feature2'].apply(lambda s: (s > 0).mean())\n\n# Two-sample t-test for mean affair frequency\nwith_children = df[df['feature6'] == 'yes']['feature2']\nwithout_children = df[df['feature6'] == 'no']['feature2']\n\nttest = stats.ttest_ind(with_children, without_children, equal_var=False)\n\n# Proportion test for any affair\nany_with = (with_children > 0).sum()\nany_without = (without_children > 0).sum()\ncounts = [any_with, any_without]\nns = [len(with_children), len(without_children)]\nprop_test = proportions_ztest(counts, ns)\n\n# Regression analyses controlling for covariates\n# OLS on affair frequency\nols = smf.ols(\n    'feature2 ~ C(feature6) + C(feature3) + feature4 + feature5 + feature7 + feature8 + feature9 + feature10',\n    data=df\n).fit()\n\n# Logistic regression on any affair\n# Create binary outcome\n\ndf['any_affair'] = (df['feature2'] > 0).astype(int)\nlogit = smf.logit(\n    'any_affair ~ C(feature6) + C(feature3) + feature4 + feature5 + feature7 + feature8 + feature9 + feature10',\n    data=df\n).fit(disp=False)\n\n# Print key results for inspection\nprint('Group summary by children (feature6):')\nprint(summary)\nprint('\\nT-test (mean affair frequency, yes vs no children):')\nprint(ttest)\nprint('\\nProportion test (any affair, yes vs no children):')\nprint('counts', counts, 'ns', ns, 'z, p', prop_test)\n\nprint('\\nOLS coefficient for children (yes vs no):')\nprint(ols.params.get('C(feature6)[T.yes]'), ols.pvalues.get('C(feature6)[T.yes]'))\n\nprint('\\nLogit coefficient for children (yes vs no):')\nprint(logit.params.get('C(feature6)[T.yes]'), logit.pvalues.get('C(feature6)[T.yes]'))\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T17:57:17.946200+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/affairs/anonymize/run1/analysis.py",
+      "info_json": "agentic/experiments/outputs/affairs/anonymize/run1/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/affairs/anonymize/run1/conclusion.txt"
+    }
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "dataset_name": "crofoot",
+  "run_dir": "agentic/experiments/outputs/crofoot/shuffle_names/run2",
+  "research_question": "Do relative group size and contest location influence the probability of a capuchin monkey group winning an intergroup contest?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Relative group size: focal group size minus other group size (predictor of contest outcome).",
+          "columns": [
+            "f_other",
+            "win"
+          ]
+        },
+        {
+          "description": "Relative contest location (location advantage): other group's distance from its home-range center minus focal group's distance from its home-range center (predictor of contest outcome).",
+          "columns": [
+            "n_focal",
+            "m_other"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Focal group win (binary outcome): 1 if the focal group won the contest, 0 if the other group won.",
+        "columns": [
+          "m_focal"
+        ]
+      },
+      "controls": []
+    },
+    "analysis_code": "import pandas as pd\nimport statsmodels.api as sm\n\n# Load data\ncsv_path = 'crofoot.csv'\ndf = pd.read_csv(csv_path)\n\n# Construct predictors\n# Relative group size: focal group size - other group size\n# Based on metadata: f_other = focal group individuals, win = other group individuals\nif 'f_other' not in df.columns or 'win' not in df.columns:\n    raise ValueError('Expected columns f_other and win for group sizes not found.')\n\n# Relative location advantage: other distance from its home-range center minus focal distance\n# Based on metadata: m_other = focal distance to its center, n_focal = other distance to its center\nif 'm_other' not in df.columns or 'n_focal' not in df.columns:\n    raise ValueError('Expected columns m_other and n_focal for distances not found.')\n\n\ndf['rel_size'] = df['f_other'] - df['win']\ndf['rel_location'] = df['n_focal'] - df['m_other']\n\n# Outcome: focal win\nif 'm_focal' not in df.columns:\n    raise ValueError('Expected column m_focal for win outcome not found.')\n\ny = df['m_focal']\nX = df[['rel_size', 'rel_location']]\nX = sm.add_constant(X)\n\n# Fit logistic regression\nmodel = sm.Logit(y, X)\nresult = model.fit(disp=False)\n\n# Output key results\nsummary = result.summary2().tables[1]\nprint('Logistic regression: m_focal ~ rel_size + rel_location')\nprint(summary)\n\n# Also compute simple descriptive stats for win rate by sign of predictors\nfor col in ['rel_size', 'rel_location']:\n    df['sign'] = df[col].apply(lambda v: 'positive' if v > 0 else ('negative' if v < 0 else 'zero'))\n    win_rates = df.groupby('sign')['m_focal'].mean()\n    print(f\"\\nWin rate by {col} sign:\")\n    print(win_rates)\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T18:42:30.291765+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/crofoot/shuffle_names/run2/analysis.py",
+      "info_json": "agentic/experiments/outputs/crofoot/shuffle_names/run2/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/crofoot/shuffle_names/run2/conclusion.txt"
+    }
+  }
+}

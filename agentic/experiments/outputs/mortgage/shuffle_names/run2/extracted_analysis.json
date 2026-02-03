@@ -1,0 +1,56 @@
+{
+  "dataset_name": "mortgage",
+  "run_dir": "agentic/experiments/outputs/mortgage/shuffle_names/run2",
+  "research_question": "Does gender affect whether banks approve an individual's mortgage application?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Gender indicator used as the main independent variable (female = 1, male = 0).",
+          "columns": [
+            "female"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Mortgage application approval outcome used as the dependent variable (1 = application accepted, 0 = application denied).",
+        "columns": [
+          "accept"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Other observed covariates included as controls in the logistic regression (financial, credit, demographic, and application characteristics).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "bad_history",
+            "denied_PMI",
+            "consumer_credit",
+            "mortgage_credit",
+            "loan_to_value",
+            "married",
+            "black",
+            "PI_ratio",
+            "housing_expense_ratio",
+            "self_employed",
+            "Unnamed: 0",
+            "deny"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\n\n# Load dataset\n_df = pd.read_csv('mortgage.csv')\n\n# Identify outcome column: use 'accept' as approval indicator\n# The 'deny' column is not a clean complement of 'accept' in this dataset.\nif 'accept' not in _df.columns:\n    raise ValueError(\"Expected 'accept' column for approval outcome.\")\n\n# Compute raw approval rates by gender\nif 'female' not in _df.columns:\n    raise ValueError(\"Expected 'female' column for gender indicator.\")\n\napproval_by_gender = _df.groupby('female')['accept'].mean()\nprint('Approval rate by gender (female=1, male=0):')\nprint(approval_by_gender)\n\n# Logistic regression controlling for other observed covariates\nfeatures = [c for c in _df.columns if c != 'accept']\nX = _df[features].select_dtypes(include=[np.number]).copy()\n\n# Remove columns with no variation\nX = X.loc[:, X.nunique(dropna=True) > 1]\n\n# Assemble modeling dataset\nmodel_data = pd.concat([_df['accept'], X], axis=1).dropna()\ny = model_data['accept']\nX = model_data.drop(columns=['accept'])\nX = sm.add_constant(X, has_constant='add')\n\nmodel = sm.Logit(y, X).fit(disp=False)\nprint('\\nLogit regression results (coefficients):')\nprint(model.summary().tables[1])\n\nif 'female' in model.params.index:\n    coef = model.params['female']\n    pval = model.pvalues['female']\n    print(f\"\\nFemale coefficient: {coef:.4f}, p-value: {pval:.4f}\")\nelse:\n    print(\"\\nFemale coefficient not found in model.\")\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T19:03:23.284366+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/mortgage/shuffle_names/run2/analysis.py",
+      "info_json": "agentic/experiments/outputs/mortgage/shuffle_names/run2/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/mortgage/shuffle_names/run2/conclusion.txt"
+    }
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "dataset_name": "boxes",
+  "run_dir": "agentic/experiments/outputs/boxes/replace_and_positive_statement/run3",
+  "research_question": "I strongly believe the answer to the following question to be 'Yes'. Perform an analysis that verifies this. Do children’s reliance on social information and preference for majority cues vary across cultures and developmental stages?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Child age in years, used as a predictor to test developmental change in reliance on social information and preference for majority cues (entered as a continuous predictor).",
+          "columns": [
+            "age"
+          ]
+        },
+        {
+          "description": "Cultural site identifier (IDs 1–8). Entered as a categorical predictor (C(culture)) to test cross-cultural variation in social reliance and majority preference.",
+          "columns": [
+            "culture"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Original outcome variable 'y' (1=unchosen option, 2=majority option, 3=minority option). The analysis derived two dependent measures from this column: (a) social_reliance — a binary indicator of whether the child chose a demonstrated option (y != 1), modeled with a binomial GLM; (b) majority_choice — among cases with y in {2,3}, a binary indicator of choosing the majority (y == 2), modeled with a binomial GLM.",
+        "columns": [
+          "y"
+        ]
+      },
+      "controls": []
+    },
+    "analysis_code": "import pandas as pd\nimport statsmodels.formula.api as smf\nimport statsmodels.api as sm\nfrom scipy import stats\n\n# Load data\nDATA_PATH = \"boxes.csv\"\ndf = pd.read_csv(DATA_PATH)\n\n# Define outcomes\n# Reliance on social information: choosing majority or minority vs unchosen\n# y: 1=unchosen, 2=majority, 3=minority\n\ndf[\"social_reliance\"] = (df[\"y\"] != 1).astype(int)\n\n# Preference for majority cues among those who used social information\nsocial_df = df[df[\"y\"].isin([2, 3])].copy()\nsocial_df[\"majority_choice\"] = (social_df[\"y\"] == 2).astype(int)\n\n# Model 1: Does social reliance vary by age and culture?\nmodel_social = smf.glm(\n    formula=\"social_reliance ~ age + C(culture)\",\n    data=df,\n    family=sm.families.Binomial()\n).fit()\n\n# Model 2: Does majority preference vary by age and culture (conditional on using social info)?\nmodel_majority = smf.glm(\n    formula=\"majority_choice ~ age + C(culture)\",\n    data=social_df,\n    family=sm.families.Binomial()\n).fit()\n\n# Summaries\nprint(\"=== Social reliance model ===\")\nprint(model_social.summary())\nprint(\"\\n=== Majority preference model ===\")\nprint(model_majority.summary())\n\n# Extract key p-values\nsocial_p_age = model_social.pvalues.get(\"age\", float(\"nan\"))\n# Any culture effects (overall) via likelihood ratio test vs model without culture\nmodel_social_no_culture = smf.glm(\n    formula=\"social_reliance ~ age\",\n    data=df,\n    family=sm.families.Binomial()\n).fit()\n\nlr_stat_social = 2 * (model_social.llf - model_social_no_culture.llf)\ndf_diff_social = model_social.df_model - model_social_no_culture.df_model\nsocial_p_culture = stats.chi2.sf(lr_stat_social, df_diff_social)\n\nmajority_p_age = model_majority.pvalues.get(\"age\", float(\"nan\"))\nmodel_majority_no_culture = smf.glm(\n    formula=\"majority_choice ~ age\",\n    data=social_df,\n    family=sm.families.Binomial()\n).fit()\n\nlr_stat_majority = 2 * (model_majority.llf - model_majority_no_culture.llf)\ndf_diff_majority = model_majority.df_model - model_majority_no_culture.df_model\nmajority_p_culture = stats.chi2.sf(lr_stat_majority, df_diff_majority)\n\nprint(\"\\n=== Key p-values ===\")\nprint(f\"Social reliance: age p={social_p_age:.4g}, culture LRT p={social_p_culture:.4g}\")\nprint(f\"Majority preference: age p={majority_p_age:.4g}, culture LRT p={majority_p_culture:.4g}\")\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T18:22:57.129788+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/boxes/replace_and_positive_statement/run3/analysis.py",
+      "info_json": "agentic/experiments/outputs/boxes/replace_and_positive_statement/run3/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/boxes/replace_and_positive_statement/run3/conclusion.txt"
+    }
+  }
+}

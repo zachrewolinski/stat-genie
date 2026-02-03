@@ -1,0 +1,46 @@
+{
+  "dataset_name": "soccer",
+  "run_dir": "agentic/experiments/outputs/soccer/shuffle_names/run2",
+  "research_question": "Are soccer players with a dark skin tone more likely than those with a light skin tone to receive red cards from referees?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Player skin tone as rated by two independent coders (5-point scale normalized to 0–1). The analysis averaged these ratings and dichotomized into light vs dark to serve as the predictor of interest.",
+          "columns": [
+            "rater1",
+            "nExp"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Count of red cards a player received from a particular referee in the player-referee dyad (outcome modeled with a Poisson regression).",
+        "columns": [
+          "yellowCards"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Number of games in the player-referee dyad used as the exposure (offset) in the Poisson rate model to account for differing opportunities for red cards.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "redCards"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\n\n# Load data\n_df = pd.read_csv('soccer.csv')\n\n# Map columns based on provided metadata and observed distributions\n# rater1 and nExp are 0-1 skin tone ratings; yellowCards is red card count; redCards is games count\nskin1 = _df['rater1']\nskin2 = _df['nExp']\nred_cards = _df['yellowCards']\ngames = _df['redCards']\n\n# Build mean skin tone when both ratings available\nmean_skin = (skin1 + skin2) / 2.0\n\n# Define light vs dark using ends of the 5-point scale\n# 0.0-0.25: light/very light; 0.75-1.0: dark/very dark\nlight_mask = mean_skin <= 0.25\ndark_mask = mean_skin >= 0.75\n\n# Keep only rows with defined light or dark and valid counts\nmask = (light_mask | dark_mask) & red_cards.notna() & games.notna()\n\ndf = pd.DataFrame({\n    'dark': dark_mask[mask].astype(int),\n    'red_cards': red_cards[mask].astype(float),\n    'games': games[mask].astype(float)\n}).copy()\n\n# Aggregate rates\nsummary = df.groupby('dark').agg(\n    total_red_cards=('red_cards', 'sum'),\n    total_games=('games', 'sum'),\n    n=('red_cards', 'size')\n)\nsummary['rate_per_game'] = summary['total_red_cards'] / summary['total_games']\n\n# Poisson regression with exposure (games) to estimate rate ratio\nX = sm.add_constant(df['dark'])\nmodel = sm.GLM(df['red_cards'], X, family=sm.families.Poisson(), offset=np.log(df['games']))\nres = model.fit()\n\nbeta = res.params['dark']\nse = res.bse['dark']\nrate_ratio = float(np.exp(beta))\nci_low = float(np.exp(beta - 1.96 * se))\nci_high = float(np.exp(beta + 1.96 * se))\np_value = float(res.pvalues['dark'])\n\n# Save outputs for downstream use\nsummary.to_csv('analysis_summary.csv')\n\nwith open('analysis_results.txt', 'w') as f:\n    f.write(f\"rate_light={summary.loc[0, 'rate_per_game'] if 0 in summary.index else np.nan}\\n\")\n    f.write(f\"rate_dark={summary.loc[1, 'rate_per_game'] if 1 in summary.index else np.nan}\\n\")\n    f.write(f\"rate_ratio={rate_ratio}\\n\")\n    f.write(f\"ci_low={ci_low}\\n\")\n    f.write(f\"ci_high={ci_high}\\n\")\n    f.write(f\"p_value={p_value}\\n\")\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-02T16:43:17.967159+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/soccer/shuffle_names/run2/analysis.py",
+      "info_json": "agentic/experiments/outputs/soccer/shuffle_names/run2/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/soccer/shuffle_names/run2/conclusion.txt"
+    }
+  }
+}

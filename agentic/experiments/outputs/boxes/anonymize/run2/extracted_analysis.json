@@ -1,0 +1,42 @@
+{
+  "dataset_name": "boxes",
+  "run_dir": "agentic/experiments/outputs/boxes/anonymize/run2",
+  "research_question": "Do children’s reliance on social information and preference for majority cues vary across cultures and developmental stages?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Child age in years (developmental stage; primary predictor of interest)",
+          "columns": [
+            "feature3"
+          ]
+        },
+        {
+          "description": "Study site ID representing cultural context / country (primary predictor of interest)",
+          "columns": [
+            "feature5"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Behavioral outcome recorded in feature1. Used to derive two dependent measures: (a) reliance on social information (whether the child chose a demonstrated option vs the unchosen option) and (b) among social choices, preference for the majority vs minority demonstrated option.",
+        "columns": [
+          "feature1"
+        ]
+      },
+      "controls": []
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.formula.api as smf\nfrom scipy import stats\n\n# Load data\npath = \"boxes.csv\"\ndf = pd.read_csv(path)\n\n# Rename for clarity\n# feature1: outcome (1=unchosen, 2=majority, 3=minority)\n# feature3: age\n# feature5: site ID\n\ndf = df.copy()\ndf[\"site\"] = df[\"feature5\"].astype(\"category\")\ndf[\"age\"] = df[\"feature3\"].astype(float)\n\n# Social choice: chose either majority or minority\n\ndf[\"social\"] = (df[\"feature1\"] != 1).astype(int)\n# Majority choice among social choices\n\ndf[\"majority\"] = (df[\"feature1\"] == 2).astype(int)\n\n# Helper: likelihood ratio test\n\ndef lr_test(full, reduced):\n    lr_stat = 2 * (full.llf - reduced.llf)\n    df_diff = full.df_model - reduced.df_model\n    p_value = stats.chi2.sf(lr_stat, df_diff)\n    return lr_stat, df_diff, p_value\n\nresults = {}\n\n# Model A: social reliance ~ age + site\nmodel_social_full = smf.logit(\"social ~ age + C(site)\", data=df).fit(disp=False)\nmodel_social_age_only = smf.logit(\"social ~ age\", data=df).fit(disp=False)\nmodel_social_site_only = smf.logit(\"social ~ C(site)\", data=df).fit(disp=False)\n\nlr_age_social = lr_test(model_social_full, model_social_site_only)\nlr_site_social = lr_test(model_social_full, model_social_age_only)\n\nresults[\"social_lr_age\"] = lr_age_social\nresults[\"social_lr_site\"] = lr_site_social\n\n# Model B: majority preference among social choices\nsocial_df = df[df[\"social\"] == 1].copy()\nmodel_majority_full = smf.logit(\"majority ~ age + C(site)\", data=social_df).fit(disp=False)\nmodel_majority_age_only = smf.logit(\"majority ~ age\", data=social_df).fit(disp=False)\nmodel_majority_site_only = smf.logit(\"majority ~ C(site)\", data=social_df).fit(disp=False)\n\nlr_age_majority = lr_test(model_majority_full, model_majority_site_only)\nlr_site_majority = lr_test(model_majority_full, model_majority_age_only)\n\nresults[\"majority_lr_age\"] = lr_age_majority\nresults[\"majority_lr_site\"] = lr_site_majority\n\n# Descriptives by age group and site\nbins = [3, 6, 9, 12, 14.5]\nlabels = [\"4-6\", \"7-9\", \"10-12\", \"13-14\"]\ndf[\"age_group\"] = pd.cut(df[\"age\"], bins=bins, labels=labels, right=True)\n\n# Proportions overall by age group\nage_group_stats = df.groupby(\"age_group\").apply(\n    lambda g: pd.Series({\n        \"n\": len(g),\n        \"social_rate\": g[\"social\"].mean(),\n        \"majority_rate\": g.loc[g[\"social\"] == 1, \"majority\"].mean()\n    })\n).reset_index()\n\n# Proportions by site\nsite_stats = df.groupby(\"site\").apply(\n    lambda g: pd.Series({\n        \"n\": len(g),\n        \"social_rate\": g[\"social\"].mean(),\n        \"majority_rate\": g.loc[g[\"social\"] == 1, \"majority\"].mean()\n    })\n).reset_index()\n\n# Save outputs for review\nage_group_stats.to_csv(\"age_group_stats.csv\", index=False)\nsite_stats.to_csv(\"site_stats.csv\", index=False)\n\nprint(\"LR tests (stat, df, p):\")\nprint(\"social ~ age + site: age effect\", results[\"social_lr_age\"])\nprint(\"social ~ age + site: site effect\", results[\"social_lr_site\"])\nprint(\"majority ~ age + site: age effect\", results[\"majority_lr_age\"])\nprint(\"majority ~ age + site: site effect\", results[\"majority_lr_site\"])\nprint(\"\\nAge group stats:\\n\", age_group_stats)\nprint(\"\\nSite stats:\\n\", site_stats)\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T18:17:43.218884+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/boxes/anonymize/run2/analysis.py",
+      "info_json": "agentic/experiments/outputs/boxes/anonymize/run2/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/boxes/anonymize/run2/conclusion.txt"
+    }
+  }
+}

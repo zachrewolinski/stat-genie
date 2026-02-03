@@ -1,0 +1,93 @@
+{
+  "dataset_name": "affairs",
+  "run_dir": "agentic/experiments/outputs/affairs/replace_with_rvs/run1",
+  "research_question": "Does having children decrease (if at all) the engagement in extramarital affairs?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Factor indicating whether there are children in the marriage (main predictor of interest).",
+          "columns": [
+            "children"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Numeric measure of how often the respondent engaged in extramarital sexual intercourse during the past year (0 = none, 1 = once, 2 = twice, 3 = 3 times, 7 = 4–10 times, 12 = monthly/weekly/daily categories aggregated as 12).",
+        "columns": [
+          "affairs"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Factor indicating respondent gender.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "gender"
+          ]
+        },
+        {
+          "description": "Numeric variable coding age in years (categorized codes: 17.5 = under 20, 22 = 20–24, 27 = 25–29, etc.).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "age"
+          ]
+        },
+        {
+          "description": "Numeric variable coding number of years married (coded in intervals, e.g. 0.125 = ≤3 months, 15 = 12+ years).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "yearsmarried"
+          ]
+        },
+        {
+          "description": "Numeric variable coding level of religiousness (1 = anti, 2 = not at all, 3 = slightly, 4 = somewhat, 5 = very).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "religiousness"
+          ]
+        },
+        {
+          "description": "Numeric variable coding education level (e.g. 9 = grade school, 12 = high school, 16 = college graduate, 18 = master's, 20 = advanced degree).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "education"
+          ]
+        },
+        {
+          "description": "Numeric variable coding occupation according to Hollingshead classification (reverse numbering).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "occupation"
+          ]
+        },
+        {
+          "description": "Numeric self-rating of marriage (1 = very unhappy to 5 = very happy).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "rating"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport statsmodels.api as sm\nfrom statsmodels.stats.weightstats import ttest_ind\n\n# Load data\n_df = pd.read_csv('affairs.csv')\n\n# Binary indicators\n_df['children_yes'] = (_df['children'] == 'yes').astype(int)\n_df['gender_male'] = (_df['gender'] == 'male').astype(int)\n_df['any_affair'] = (_df['affairs'] > 0).astype(int)\n\n# Descriptive comparison\nmean_by_children = _df.groupby('children')['affairs'].mean()\nmedian_by_children = _df.groupby('children')['affairs'].median()\nrate_any_by_children = _df.groupby('children')['any_affair'].mean()\n\n# Two-sample t-test for difference in means (affairs count)\nno_affairs = _df.loc[_df['children'] == 'no', 'affairs']\nyes_affairs = _df.loc[_df['children'] == 'yes', 'affairs']\nt_stat, p_value, dfree = ttest_ind(yes_affairs, no_affairs, usevar='unequal')\n\n# OLS regression with controls\nX = _df[['children_yes', 'age', 'yearsmarried', 'religiousness', 'education', 'occupation', 'rating', 'gender_male']]\nX = sm.add_constant(X)\nols = sm.OLS(_df['affairs'], X).fit()\n\n# Logistic regression on any affair (binary)\nlogit = sm.Logit(_df['any_affair'], X).fit(disp=False)\n\n# Collect key results for reporting\nresults = {\n    'mean_affairs_no_children': float(mean_by_children.get('no')),\n    'mean_affairs_yes_children': float(mean_by_children.get('yes')),\n    'median_affairs_no_children': float(median_by_children.get('no')),\n    'median_affairs_yes_children': float(median_by_children.get('yes')),\n    'any_affair_rate_no_children': float(rate_any_by_children.get('no')),\n    'any_affair_rate_yes_children': float(rate_any_by_children.get('yes')),\n    'ttest_t': float(t_stat),\n    'ttest_p': float(p_value),\n    'ols_children_coef': float(ols.params['children_yes']),\n    'ols_children_p': float(ols.pvalues['children_yes']),\n    'logit_children_coef': float(logit.params['children_yes']),\n    'logit_children_p': float(logit.pvalues['children_yes']),\n}\n\nprint('Descriptive means:', mean_by_children.to_dict())\nprint('Descriptive medians:', median_by_children.to_dict())\nprint('Any-affair rate:', rate_any_by_children.to_dict())\nprint('T-test (yes vs no children): t=%.3f p=%.3f' % (results['ttest_t'], results['ttest_p']))\nprint('OLS children coef=%.3f p=%.3f' % (results['ols_children_coef'], results['ols_children_p']))\nprint('Logit children coef=%.3f p=%.3f' % (results['logit_children_coef'], results['logit_children_p']))\n\n# Write conclusion\nconclusion_lines = []\n# Determine answer: does having children decrease affairs? Based on sign + p-values\n# Here the difference is not negative and not significant; answer is No.\nconclusion_lines.append('No')\nconclusion_lines.append(\n    'Respondents with children do not show lower affairs counts; the mean is slightly higher and the difference is not statistically significant.'\n)\nconclusion_lines.append(\n    'Regression models with controls also yield a small positive, non-significant children coefficient, indicating no evidence of a decrease.'\n)\n\nwith open('conclusion.txt', 'w', encoding='utf-8') as f:\n    f.write('\\n'.join(conclusion_lines).strip() + '\\n')\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T18:03:35.656063+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/affairs/replace_with_rvs/run1/analysis.py",
+      "info_json": "agentic/experiments/outputs/affairs/replace_with_rvs/run1/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/affairs/replace_with_rvs/run1/conclusion.txt"
+    }
+  }
+}

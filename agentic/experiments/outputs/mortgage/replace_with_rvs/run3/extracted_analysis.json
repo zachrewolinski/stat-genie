@@ -1,0 +1,117 @@
+{
+  "dataset_name": "mortgage",
+  "run_dir": "agentic/experiments/outputs/mortgage/replace_with_rvs/run3",
+  "research_question": "Does gender affect whether banks approve an individual's mortgage application?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Applicant gender: main independent variable of interest (1 if applicant is female, 0 if male).",
+          "columns": [
+            "female"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Mortgage application denial indicator used as the outcome (1 if mortgage application was denied, 0 if accepted).",
+        "columns": [
+          "deny"
+        ]
+      },
+      "controls": [
+        {
+          "description": "1 if applicant is Black, 0 otherwise (racial indicator included as a control).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "black"
+          ]
+        },
+        {
+          "description": "Housing expense as a ratio of total income (controls for housing cost burden).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "housing_expense_ratio"
+          ]
+        },
+        {
+          "description": "1 if applicant is self-employed, 0 otherwise (employment type control).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "self_employed"
+          ]
+        },
+        {
+          "description": "1 if applicant is married, 0 otherwise (marital status control).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "married"
+          ]
+        },
+        {
+          "description": "Applicant's mortgage credit score (ordinal credit-quality control).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "mortgage_credit"
+          ]
+        },
+        {
+          "description": "Applicant's consumer credit score (ordinal consumer-credit control).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "consumer_credit"
+          ]
+        },
+        {
+          "description": "1 if applicant has history of bad credit, 0 otherwise (adverse credit history control).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "bad_history"
+          ]
+        },
+        {
+          "description": "Total debt payments to income ratio (payment-to-income control).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "PI_ratio"
+          ]
+        },
+        {
+          "description": "Ratio of loan amount to appraised value of property (loan-to-value control).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "loan_to_value"
+          ]
+        },
+        {
+          "description": "1 if application was denied private mortgage insurance, 0 otherwise (PMI denial indicator control).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "denied_PMI"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\n\n# Load data\npath = \"mortgage.csv\"\ndf = pd.read_csv(path)\n\n# Basic cleanup\nif \"Unnamed: 0\" in df.columns:\n    df = df.drop(columns=[\"Unnamed: 0\"])\n\n# Ensure numeric\nfor col in df.columns:\n    df[col] = pd.to_numeric(df[col], errors=\"coerce\")\n\n# Drop rows with any missing values in used columns\noutcome = \"deny\"\nmain_var = \"female\"\ncontrols = [\n    \"black\",\n    \"housing_expense_ratio\",\n    \"self_employed\",\n    \"married\",\n    \"mortgage_credit\",\n    \"consumer_credit\",\n    \"bad_history\",\n    \"PI_ratio\",\n    \"loan_to_value\",\n    \"denied_PMI\",\n]\nuse_cols = [outcome, main_var] + controls\n\ndf_model = df[use_cols].dropna().copy()\n\n# Logistic regression with and without controls\nX_simple = sm.add_constant(df_model[[main_var]])\ny = df_model[outcome]\nlogit_simple = sm.Logit(y, X_simple).fit(disp=False)\n\n# Logistic regression with controls\nX = df_model[[main_var] + controls]\nX = sm.add_constant(X)\nlogit_model = sm.Logit(y, X)\nresult = logit_model.fit(disp=False)\n\ncoef_female = result.params[main_var]\nse_female = result.bse[main_var]\npval_female = result.pvalues[main_var]\n\n# Convert to odds ratio\nodds_ratio = float(np.exp(coef_female))\n\n# Save summary for debugging (optional)\nsummary_text = result.summary2().as_text()\nwith open(\"analysis_results.txt\", \"w\") as f:\n    f.write(\"Logit (deny ~ female) results:\\n\")\n    f.write(logit_simple.summary2().as_text())\n    f.write(\"\\n\\nLogit (deny ~ female + controls) results:\\n\")\n    f.write(\"\\nLogit coefficient (female): {:.6f}\\n\".format(coef_female))\n    f.write(\"Std err: {:.6f}\\n\".format(se_female))\n    f.write(\"P-value: {:.6f}\\n\".format(pval_female))\n    f.write(\"Odds ratio: {:.6f}\\n\\n\".format(odds_ratio))\n    f.write(summary_text)\n\n# Write conclusion\n# Decision rule: if p-value for female in multivariate logit < 0.05 -> \"Yes\"\n# otherwise \"No\". Interpret effect direction.\nif pval_female < 0.05:\n    decision = \"Yes\"\n    direction = \"higher\" if coef_female > 0 else \"lower\"\n    reasoning = (\n        f\"In a logistic regression controlling for credit and application factors, \"\n        f\"female has a statistically significant association with denial (p={pval_female:.3f}). \"\n        f\"The estimated odds of denial are {direction} for female applicants (odds ratio {odds_ratio:.2f}).\"\n    )\nelse:\n    decision = \"No\"\n    reasoning = (\n        f\"In a logistic regression controlling for credit and application factors, \"\n        f\"female is not a statistically significant predictor of denial (p={pval_female:.3f}).\"\n    )\n\nwith open(\"conclusion.txt\", \"w\") as f:\n    f.write(decision + \"\\n\")\n    f.write(reasoning + \"\\n\")\n\nprint(\"Done. See analysis_results.txt and conclusion.txt\")\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T19:02:16.966084+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/mortgage/replace_with_rvs/run3/analysis.py",
+      "info_json": "agentic/experiments/outputs/mortgage/replace_with_rvs/run3/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/mortgage/replace_with_rvs/run3/conclusion.txt"
+    }
+  }
+}

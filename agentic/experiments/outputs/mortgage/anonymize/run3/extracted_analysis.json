@@ -1,0 +1,117 @@
+{
+  "dataset_name": "mortgage",
+  "run_dir": "agentic/experiments/outputs/mortgage/anonymize/run3",
+  "research_question": "Does gender affect whether banks approve an individual's mortgage application?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Applicant gender (main independent variable): 1 if female, 0 if male",
+          "columns": [
+            "feature2"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Mortgage application outcome: 1 if accepted, 0 if denied (approval)",
+        "columns": [
+          "feature14"
+        ]
+      },
+      "controls": [
+        {
+          "description": "1 if applicant is Black, 0 otherwise",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature3"
+          ]
+        },
+        {
+          "description": "Housing expense as a ratio of total income",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature4"
+          ]
+        },
+        {
+          "description": "1 if applicant is self-employed, 0 otherwise",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature5"
+          ]
+        },
+        {
+          "description": "1 if applicant is married, 0 otherwise",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature6"
+          ]
+        },
+        {
+          "description": "Applicant's mortgage credit score",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature7"
+          ]
+        },
+        {
+          "description": "Applicant's consumer credit score",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature8"
+          ]
+        },
+        {
+          "description": "1 if applicant has history of bad credit, 0 otherwise",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature9"
+          ]
+        },
+        {
+          "description": "Total debt payments to income ratio",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature10"
+          ]
+        },
+        {
+          "description": "Ratio of loan amount to appraised value of property",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature12"
+          ]
+        },
+        {
+          "description": "1 if application was denied private mortgage insurance, 0 otherwise",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature13"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\n\n# Load data\npath = 'mortgage.csv'\ndf = pd.read_csv(path)\n\n# Basic approval rates by gender\n# feature2: 1 if female, 0 if male\n# feature14: 1 if accepted, 0 if denied\napproval_rates = df.groupby('feature2')['feature14'].mean()\n\n# Prepare logistic regression\n# Exclude feature11 (denial) because it's the complement of acceptance\n# Exclude feature1 because it appears to be a row id\nfeatures = [\n    'feature2',  # gender\n    'feature3',\n    'feature4',\n    'feature5',\n    'feature6',\n    'feature7',\n    'feature8',\n    'feature9',\n    'feature10',\n    'feature12',\n    'feature13'\n]\n\ndf_model = df.replace([np.inf, -np.inf], np.nan)\ndf_model = df_model.dropna(subset=features + ['feature14'])\n\nX = df_model[features]\nX = sm.add_constant(X)\ny = df_model['feature14']\n\nlogit = sm.Logit(y, X)\nresult = logit.fit(disp=False)\n\n# Average marginal effect of gender on approval probability\nX_female = X.copy()\nX_male = X.copy()\nX_female['feature2'] = 1\nX_male['feature2'] = 0\n\npred_female = result.predict(X_female)\npred_male = result.predict(X_male)\n\name_gender = (pred_female - pred_male).mean()\n\n# Collect key outputs\noutput = {\n    'approval_rate_male': float(approval_rates.loc[0.0]),\n    'approval_rate_female': float(approval_rates.loc[1.0]),\n    'logit_gender_coef': float(result.params['feature2']),\n    'logit_gender_pvalue': float(result.pvalues['feature2']),\n    'ame_gender': float(ame_gender)\n}\n\nprint(output)\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T18:56:00.415567+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/mortgage/anonymize/run3/analysis.py",
+      "info_json": "agentic/experiments/outputs/mortgage/anonymize/run3/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/mortgage/anonymize/run3/conclusion.txt"
+    }
+  }
+}

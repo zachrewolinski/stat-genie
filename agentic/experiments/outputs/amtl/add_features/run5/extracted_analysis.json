@@ -1,0 +1,62 @@
+{
+  "dataset_name": "amtl",
+  "run_dir": "agentic/experiments/outputs/amtl/add_features/run5",
+  "research_question": "Do modern humans (Homo sapiens) have higher frequencies of antemortem tooth loss (AMTL) compared to non-human primate genera (Pan, Pongo, Papio), after accounting for the effects of age, sex, and tooth class?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Specimen taxonomic genus; the primary predictor comparing Homo sapiens to non-human primate genera (Pan, Pongo, Papio).",
+          "columns": [
+            "genus"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Antemortem tooth loss measured as the number of missing teeth out of the number of observable sockets (modeled as binomial counts/trials).",
+        "columns": [
+          "num_amtl",
+          "sockets"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Estimated age of specimen at death, included as a continuous covariate to control for age effects.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "age"
+          ]
+        },
+        {
+          "description": "Estimated probability the specimen is male; included to control for sex differences in AMTL.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "prob_male"
+          ]
+        },
+        {
+          "description": "Tooth class (Anterior, Posterior, or Premolar); included to control for differences in AMTL by tooth type.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "tooth_class"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.formula.api as smf\nimport statsmodels.api as sm\n\n# Load data\n_df = pd.read_csv('amtl.csv')\n\n# Keep only the relevant genera\nkeep_genera = ['Homo sapiens', 'Pan', 'Pongo', 'Papio']\ndf = _df[_df['genus'].isin(keep_genera)].copy()\n\n# Basic cleaning\n# Ensure sockets and num_amtl are valid\nvalid = (df['sockets'] > 0) & (df['num_amtl'] >= 0) & (df['num_amtl'] <= df['sockets'])\ndf = df[valid].copy()\n\n# Response as proportion with binomial weights\n# Using freq_weights = sockets is equivalent to modeling counts with binomial trials\n# Add small jitter to age if any missing? We'll drop missing rows for model vars.\nmodel_cols = ['num_amtl', 'sockets', 'age', 'prob_male', 'tooth_class', 'genus']\ndf_model = df[model_cols].dropna().copy()\ndf_model['amtl_rate'] = df_model['num_amtl'] / df_model['sockets']\n\n# Fit binomial regression: control for age, sex (prob_male), tooth_class\n# Set Homo sapiens as reference level\nformula = 'amtl_rate ~ C(genus, Treatment(reference=\"Homo sapiens\")) + age + prob_male + C(tooth_class)'\nmodel = smf.glm(\n    formula=formula,\n    data=df_model,\n    family=sm.families.Binomial(),\n    freq_weights=df_model['sockets']\n)\nresult = model.fit()\n\n# Marginal standardization: predict AMTL rate for each genus using same covariate distribution\npred_means = {}\nfor genus in keep_genera:\n    temp = df_model.copy()\n    temp['genus'] = genus\n    pred = result.predict(temp)\n    pred_means[genus] = float(np.average(pred, weights=temp['sockets']))\n\n# Extract genus coefficients relative to Homo sapiens\ncoef = result.params\npvals = result.pvalues\n\nsummary = {\n    'n_obs': int(df_model.shape[0]),\n    'genera_counts': df_model['genus'].value_counts().to_dict(),\n    'pred_means': pred_means,\n    'coef': coef.to_dict(),\n    'pvals': pvals.to_dict(),\n}\n\n# Save a concise text summary\nwith open('analysis_summary.txt', 'w') as f:\n    f.write('Model: Binomial GLM with logit link\\n')\n    f.write(f'Observations used: {summary[\"n_obs\"]}\\n')\n    f.write(f'Genus counts: {summary[\"genera_counts\"]}\\n\\n')\n    f.write('Predicted mean AMTL rate (marginalized over covariates):\\n')\n    for g, v in pred_means.items():\n        f.write(f'  {g}: {v:.4f}\\n')\n    f.write('\\nGenus coefficients vs Homo sapiens (log-odds scale):\\n')\n    for g in ['Pan', 'Pongo', 'Papio']:\n        key = f'C(genus, Treatment(reference=\"Homo sapiens\"))[T.{g}]'\n        if key in coef:\n            f.write(f'  {g}: coef={coef[key]:.4f}, p={pvals[key]:.4g}\\n')\n\n# Print summary to stdout for quick inspection\nprint(result.summary())\nprint('\\nPredicted mean AMTL rate by genus (marginalized):')\nfor g, v in pred_means.items():\n    print(f'{g}: {v:.4f}')\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T18:07:20.173197+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/amtl/add_features/run5/analysis.py",
+      "info_json": "agentic/experiments/outputs/amtl/add_features/run5/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/amtl/add_features/run5/conclusion.txt"
+    }
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "dataset_name": "boxes",
+  "run_dir": "agentic/experiments/outputs/boxes/add_features/run4",
+  "research_question": "Do children’s reliance on social information and preference for majority cues vary across cultures and developmental stages?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Child age (developmental stage proxy) in years; used as a predictor of children's reliance on social information and majority preference.",
+          "columns": [
+            "age"
+          ]
+        },
+        {
+          "description": "Study site / cultural group (categorical site ID); used to test cross-cultural differences in social learning and majority preference.",
+          "columns": [
+            "culture"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Child's choice on the task, coded in y where 1=undemonstrated option, 2=majority option, 3=minority option. Analysis derived binary outcomes from this (social choice: y!=1; majority preference: y==2 among y in {2,3}).",
+        "columns": [
+          "y"
+        ]
+      },
+      "controls": []
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.formula.api as smf\nfrom scipy.stats import chi2\n\n# Load data\nDF_PATH = \"boxes.csv\"\ndf = pd.read_csv(DF_PATH)\n\n# Keep relevant columns\ncols = [\"y\", \"age\", \"culture\"]\ndf = df[cols].copy()\n\n# Drop rows with missing key data\nbefore_rows = len(df)\ndf = df.dropna(subset=cols)\n\nafter_rows = len(df)\n\n# Ensure types\n# y should be integers 1,2,3\n# culture is a site id, treat as categorical\n# age is numeric\n# Coerce y to int if possible\ntry:\n    df[\"y\"] = df[\"y\"].astype(int)\nexcept ValueError:\n    df[\"y\"] = pd.to_numeric(df[\"y\"], errors=\"coerce\").astype(\"Int64\")\n    df = df.dropna(subset=[\"y\"]).copy()\n    df[\"y\"] = df[\"y\"].astype(int)\n\n# Derived outcomes\n# social_choice: chose any demonstrated option (majority or minority)\n# majority_choice: chose majority among demonstrated options\n\ndf[\"social_choice\"] = (df[\"y\"] != 1).astype(int)\n\n# Define helper for likelihood ratio test\n\ndef lr_test(model_full, model_restricted):\n    lr = 2 * (model_full.llf - model_restricted.llf)\n    df_diff = model_full.df_model - model_restricted.df_model\n    p_value = chi2.sf(lr, df_diff)\n    return lr, int(df_diff), p_value\n\n# Model 1: social choice ~ age + culture\nmodel_social_full = smf.logit(\"social_choice ~ age + C(culture)\", data=df).fit(disp=0)\nmodel_social_age = smf.logit(\"social_choice ~ age\", data=df).fit(disp=0)\nmodel_social_culture = smf.logit(\"social_choice ~ C(culture)\", data=df).fit(disp=0)\n\nlr_culture_social = lr_test(model_social_full, model_social_age)\nlr_age_social = lr_test(model_social_full, model_social_culture)\n\n# Model 2: majority preference among demonstrated options\n# Filter to those who chose majority or minority\n\ndf_social = df[df[\"y\"].isin([2, 3])].copy()\ndf_social[\"majority_choice\"] = (df_social[\"y\"] == 2).astype(int)\n\nmodel_maj_full = smf.logit(\"majority_choice ~ age + C(culture)\", data=df_social).fit(disp=0)\nmodel_maj_age = smf.logit(\"majority_choice ~ age\", data=df_social).fit(disp=0)\nmodel_maj_culture = smf.logit(\"majority_choice ~ C(culture)\", data=df_social).fit(disp=0)\n\nlr_culture_maj = lr_test(model_maj_full, model_maj_age)\nlr_age_maj = lr_test(model_maj_full, model_maj_culture)\n\n# Descriptive rates by culture and age quantiles\nage_bins = pd.qcut(df[\"age\"], q=4, duplicates=\"drop\")\nrate_by_age = df.groupby(age_bins)[\"social_choice\"].mean()\nrate_majority_by_age = df_social.groupby(pd.qcut(df_social[\"age\"], q=4, duplicates=\"drop\"))[\"majority_choice\"].mean()\n\nrate_by_culture = df.groupby(\"culture\")[\"social_choice\"].mean().sort_index()\nrate_majority_by_culture = df_social.groupby(\"culture\")[\"majority_choice\"].mean().sort_index()\n\n# Print results\nprint(\"Rows before drop:\", before_rows)\nprint(\"Rows after drop:\", after_rows)\nprint(\"Age range:\", df[\"age\"].min(), df[\"age\"].max())\nprint(\"\\nSocial choice model (y!=1):\")\nprint(model_social_full.summary())\nprint(\"LR test culture effect (full vs age-only):\", lr_culture_social)\nprint(\"LR test age effect (full vs culture-only):\", lr_age_social)\n\nprint(\"\\nMajority choice model (y==2 among y in {2,3}):\")\nprint(model_maj_full.summary())\nprint(\"LR test culture effect (full vs age-only):\", lr_culture_maj)\nprint(\"LR test age effect (full vs culture-only):\", lr_age_maj)\n\nprint(\"\\nRates by age quartile (social choice):\")\nprint(rate_by_age)\nprint(\"\\nRates by age quartile (majority choice):\")\nprint(rate_majority_by_age)\n\nprint(\"\\nRates by culture (social choice):\")\nprint(rate_by_culture)\nprint(\"\\nRates by culture (majority choice):\")\nprint(rate_majority_by_culture)\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T18:16:56.800319+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/boxes/add_features/run4/analysis.py",
+      "info_json": "agentic/experiments/outputs/boxes/add_features/run4/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/boxes/add_features/run4/conclusion.txt"
+    }
+  }
+}

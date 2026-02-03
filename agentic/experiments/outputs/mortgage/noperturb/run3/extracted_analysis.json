@@ -1,0 +1,54 @@
+{
+  "dataset_name": "mortgage",
+  "run_dir": "agentic/experiments/outputs/mortgage/noperturb/run3",
+  "research_question": "Does gender affect whether banks approve an individual's mortgage application?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Applicant gender indicator used as the main independent variable (treatment of interest): 1 if applicant is female, 0 if male.",
+          "columns": [
+            "female"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Mortgage application denial indicator used as the outcome variable: 1 if application was denied, 0 if accepted.",
+        "columns": [
+          "deny"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Covariates included to hold constant applicants' creditworthiness, financial status, and some demographics in the logistic regression (used as controls for the female effect).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "black",
+            "housing_expense_ratio",
+            "self_employed",
+            "married",
+            "mortgage_credit",
+            "consumer_credit",
+            "bad_history",
+            "PI_ratio",
+            "loan_to_value",
+            "denied_PMI"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\n\nDATA_PATH = \"mortgage.csv\"\n\ndef main():\n    df = pd.read_csv(DATA_PATH)\n\n    # Clean column names if needed\n    df = df.copy()\n\n    # Outcome: deny (1=denied, 0=accepted)\n    y = df[\"deny\"].astype(float)\n\n    # Predictors\n    predictors = [\n        \"female\",\n        \"black\",\n        \"housing_expense_ratio\",\n        \"self_employed\",\n        \"married\",\n        \"mortgage_credit\",\n        \"consumer_credit\",\n        \"bad_history\",\n        \"PI_ratio\",\n        \"loan_to_value\",\n        \"denied_PMI\",\n    ]\n    X = df[predictors].astype(float)\n    X = sm.add_constant(X)\n\n    # Drop rows with missing or infinite values\n    data = pd.concat([y, X], axis=1)\n    data = data.replace([np.inf, -np.inf], np.nan).dropna()\n    y = data[\"deny\"]\n    X = data.drop(columns=[\"deny\"])\n\n    # Fit logistic regression\n    model = sm.Logit(y, X)\n    result = model.fit(disp=False, cov_type=\"HC1\")\n\n    # Raw denial rates by gender\n    rates = df.groupby(\"female\")[\"deny\"].mean()\n\n    # Extract female effect\n    coef = result.params[\"female\"]\n    se = result.bse[\"female\"]\n    pval = result.pvalues[\"female\"]\n    odds_ratio = float(np.exp(coef))\n\n    # Print key outputs\n    print(\"Raw denial rates by gender (female=1, male=0):\")\n    print(rates)\n    print(\"\\nLogit (deny) with controls, robust SE (HC1):\")\n    print(f\"female coef: {coef:.4f}, SE: {se:.4f}, p-value: {pval:.4g}, odds ratio: {odds_ratio:.4f}\")\n\n    # Also report confidence interval for odds ratio\n    ci_low, ci_high = result.conf_int().loc[\"female\"]\n    or_low, or_high = np.exp(ci_low), np.exp(ci_high)\n    print(f\"female odds ratio 95% CI: [{or_low:.4f}, {or_high:.4f}]\")\n\nif __name__ == \"__main__\":\n    main()\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T18:58:24.169322+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/mortgage/noperturb/run3/analysis.py",
+      "info_json": "agentic/experiments/outputs/mortgage/noperturb/run3/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/mortgage/noperturb/run3/conclusion.txt"
+    }
+  }
+}

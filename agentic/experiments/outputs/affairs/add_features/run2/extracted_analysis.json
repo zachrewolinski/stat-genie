@@ -1,0 +1,93 @@
+{
+  "dataset_name": "affairs",
+  "run_dir": "agentic/experiments/outputs/affairs/add_features/run2",
+  "research_question": "Does having children decrease (if at all) the engagement in extramarital affairs?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Main independent variable: whether there are children in the marriage (binary factor 'yes'/'no'); analysis uses this to test effect of having children on extramarital affairs.",
+          "columns": [
+            "children"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Dependent variable: reported engagement in extramarital affairs (numeric count of affairs in the past year). Also analyzed as a binary indicator of any affair (>0) derived from this column.",
+        "columns": [
+          "affairs"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Respondent age (coded in years / age categories).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "age"
+          ]
+        },
+        {
+          "description": "Number of years married (duration of current marriage).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "yearsmarried"
+          ]
+        },
+        {
+          "description": "Self-reported religiousness (1=anti to 5=very).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "religiousness"
+          ]
+        },
+        {
+          "description": "Education level (years/degree codes).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "education"
+          ]
+        },
+        {
+          "description": "Occupation classification (Hollingshead coding).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "occupation"
+          ]
+        },
+        {
+          "description": "Self-rating of the marriage (1=very unhappy to 5=very happy).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "rating"
+          ]
+        },
+        {
+          "description": "Indicator for female respondent (1 if female, 0 if male).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "female"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport statsmodels.api as sm\nfrom statsmodels.stats.weightstats import ttest_ind\n\n# Load data\npath = 'affairs.csv'\ndf = pd.read_csv(path)\n\n# Clean/prepare\n# children column is 'yes'/'no'\ndf['children_bin'] = df['children'].map({'yes': 1, 'no': 0})\n\n# Basic group stats\nsummary = df.groupby('children')['affairs'].agg(['count', 'mean', 'median'])\nsummary_any = df.groupby('children').apply(lambda g: (g['affairs'] > 0).mean()).rename('prop_any_affair')\n\n# t-test for difference in mean affairs\nchildren_yes = df.loc[df['children'] == 'yes', 'affairs']\nchildren_no = df.loc[df['children'] == 'no', 'affairs']\n\nt_stat, p_val, _ = ttest_ind(children_yes, children_no, usevar='unequal')\n\n# OLS with controls\n# Use female indicator if present; gender is categorical, so prefer numeric female\ncontrol_cols = ['children_bin', 'age', 'yearsmarried', 'religiousness', 'education', 'occupation', 'rating', 'female']\nmodel_df = df[control_cols + ['affairs']].dropna()\n\nX = sm.add_constant(model_df[control_cols])\ny = model_df['affairs']\nols = sm.OLS(y, X).fit()\n\n# Logistic regression on any affair\nmodel_df['any_affair'] = (model_df['affairs'] > 0).astype(int)\nlogit = sm.Logit(model_df['any_affair'], X).fit(disp=False)\n\n# Print results\nprint('Group summary (affairs):')\nprint(summary)\nprint('\\nProportion with any affair:')\nprint(summary_any)\nprint('\\nT-test (mean affairs, yes vs no):')\nprint({'t_stat': t_stat, 'p_value': p_val})\n\nprint('\\nOLS coefficient for children (affairs ~ controls):')\nprint(ols.params['children_bin'])\nprint('OLS p-value:', ols.pvalues['children_bin'])\n\nprint('\\nLogit coefficient for children (any affair ~ controls):')\nprint(logit.params['children_bin'])\nprint('Logit p-value:', logit.pvalues['children_bin'])\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T17:56:18.141628+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/affairs/add_features/run2/analysis.py",
+      "info_json": "agentic/experiments/outputs/affairs/add_features/run2/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/affairs/add_features/run2/conclusion.txt"
+    }
+  }
+}

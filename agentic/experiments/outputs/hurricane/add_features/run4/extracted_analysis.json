@@ -1,0 +1,55 @@
+{
+  "dataset_name": "hurricane",
+  "run_dir": "agentic/experiments/outputs/hurricane/add_features/run4",
+  "research_question": "Hurricanes with more feminine names are perceived as less threatening and hence lead to fewer precautionary measures by the general public.",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Continuous masculinity–femininity index of the hurricane name (higher = more feminine), coded by independent raters.",
+          "columns": [
+            "masfem"
+          ]
+        },
+        {
+          "description": "Binary gender indicator of the hurricane name (0 = male, 1 = female).",
+          "columns": [
+            "gender_mf"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Total number of deaths caused by the hurricane (the analysis used a log1p transform of this variable for OLS models).",
+        "columns": [
+          "alldeaths"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Storm intensity and exposure controls: maximum wind speed at landfall, minimum pressure at landfall, Saffir–Simpson category, normalized property damage (2015 dollars), and year of occurrence.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "wind",
+            "min",
+            "category",
+            "ndam15",
+            "year"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\nimport statsmodels.formula.api as smf\n\n# Load data\n_df = pd.read_csv('hurricane.csv')\n\n# Relevant columns\ncols = [\n    'alldeaths',\n    'masfem',\n    'gender_mf',\n    'wind',\n    'min',\n    'category',\n    'ndam15',\n    'year'\n]\n\ndf = _df[cols].copy()\n\n# Ensure numeric\nfor c in cols:\n    df[c] = pd.to_numeric(df[c], errors='coerce')\n\n# Drop rows with missing values\nmodel_df = df.dropna().copy()\n\n# Log deaths for OLS\nmodel_df['log_deaths'] = np.log1p(model_df['alldeaths'])\n\n# OLS with robust SE\nformula_masfem = 'log_deaths ~ masfem + wind + min + category + ndam15 + year'\nmodel_masfem = smf.ols(formula_masfem, data=model_df).fit(cov_type='HC3')\n\nformula_gender = 'log_deaths ~ gender_mf + wind + min + category + ndam15 + year'\nmodel_gender = smf.ols(formula_gender, data=model_df).fit(cov_type='HC3')\n\n# Poisson GLM (count outcome)\npoisson_formula = 'alldeaths ~ masfem + wind + min + category + ndam15 + year'\npoisson_model = smf.glm(poisson_formula, data=model_df, family=sm.families.Poisson()).fit(cov_type='HC3')\n\n# Overdispersion check\nmean_deaths = model_df['alldeaths'].mean()\nvar_deaths = model_df['alldeaths'].var(ddof=1)\nalpha_hat = max((var_deaths - mean_deaths) / (mean_deaths ** 2), 1e-8)\n\n# Negative Binomial GLM using moment-based alpha\nnb_mom = smf.glm(\n    poisson_formula,\n    data=model_df,\n    family=sm.families.NegativeBinomial(alpha=alpha_hat)\n).fit(cov_type='HC3')\n\nprint('N:', len(model_df))\nprint(f\"Mean deaths: {mean_deaths:.2f}, Variance deaths: {var_deaths:.2f}\")\nprint(f\"Moment-based alpha (overdispersion): {alpha_hat:.4f}\")\n\nprint('\\nOLS log1p deaths ~ masfem + controls')\nprint(model_masfem.summary().tables[1])\n\nprint('\\nOLS log1p deaths ~ gender_mf + controls')\nprint(model_gender.summary().tables[1])\n\nprint('\\nPoisson alldeaths ~ masfem + controls')\nprint(poisson_model.summary().tables[1])\n\nprint('\\nNegBin (GLM, moment alpha) alldeaths ~ masfem + controls')\nprint(nb_mom.summary().tables[1])\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T18:44:16.987166+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/hurricane/add_features/run4/analysis.py",
+      "info_json": "agentic/experiments/outputs/hurricane/add_features/run4/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/hurricane/add_features/run4/conclusion.txt"
+    }
+  }
+}

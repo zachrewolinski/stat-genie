@@ -1,0 +1,51 @@
+{
+  "dataset_name": "affairs",
+  "run_dir": "agentic/experiments/outputs/affairs/shuffle_names/run1",
+  "research_question": "Does having children decrease (if at all) the engagement in extramarital affairs?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Main independent variable: indicator for whether there are children in the marriage (binary yes/no). In the analysis this was represented as a has_children dummy mapped from the dataset column 'religiousness'.",
+          "columns": [
+            "religiousness"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Dependent variable: engagement in extramarital affairs measured as frequency (coded values such as 0,1,2,3,7,12). In the analysis this was taken from the dataset column 'age'.",
+        "columns": [
+          "age"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Adjustment covariates included in the adjusted logistic regression: age category, years married, religiousness score, education level, occupation score, self-rated marriage satisfaction, and gender. These correspond to the canonical columns listed below.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "occupation",
+            "children",
+            "rating",
+            "yearsmarried",
+            "rownames",
+            "affairs",
+            "gender"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\nimport statsmodels.formula.api as smf\n\n# Load data\n_df = pd.read_csv('affairs.csv')\n\n# Map shuffled columns to their actual meanings based on value patterns\n# affairs count (0,1,2,3,7,12) is in the 'age' column\n_df['affairs_count'] = _df['age']\n# children indicator (yes/no) is in 'religiousness'\n_df['has_children'] = _df['religiousness'].map({'yes': 1, 'no': 0})\n# other covariates (optional controls)\n_df['age_cat'] = _df['occupation']\n_df['years_married'] = _df['children']\n_df['religiousness_score'] = _df['rating']\n_df['education_level'] = _df['yearsmarried']\n_df['occupation_score'] = _df['rownames']\n_df['marriage_rating'] = _df['affairs']\n\n# Basic comparisons\nsummary = (\n    _df.groupby('has_children')['affairs_count']\n    .agg(['count', 'mean', 'median'])\n)\nsummary['any_affair_rate'] = (\n    _df.groupby('has_children')['affairs_count']\n    .apply(lambda s: (s > 0).mean())\n)\n\nprint('Affairs by children (0=no, 1=yes):')\nprint(summary)\n\n# Difference in means\nmean_no = summary.loc[0, 'mean']\nmean_yes = summary.loc[1, 'mean']\nprint('\\nMean difference (has_children=1 minus 0):', mean_yes - mean_no)\n\n# Logistic regression: any affair vs. children (with and without controls)\n_df['any_affair'] = (_df['affairs_count'] > 0).astype(int)\n\n# Unadjusted model\nlogit_unadj = smf.logit('any_affair ~ has_children', data=_df).fit(disp=False)\nprint('\\nUnadjusted logit:')\nprint(logit_unadj.summary())\n\n# Adjusted model with common controls\nlogit_adj = smf.logit(\n    'any_affair ~ has_children + age_cat + years_married + religiousness_score + '\n    'education_level + occupation_score + marriage_rating + C(gender)',\n    data=_df\n).fit(disp=False)\nprint('\\nAdjusted logit:')\nprint(logit_adj.summary())\n\n# Odds ratios for has_children\nor_unadj = np.exp(logit_unadj.params['has_children'])\nor_adj = np.exp(logit_adj.params['has_children'])\nprint('\\nOdds ratio (has_children): unadjusted', or_unadj)\nprint('Odds ratio (has_children): adjusted', or_adj)\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T18:04:57.079868+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/affairs/shuffle_names/run1/analysis.py",
+      "info_json": "agentic/experiments/outputs/affairs/shuffle_names/run1/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/affairs/shuffle_names/run1/conclusion.txt"
+    }
+  }
+}

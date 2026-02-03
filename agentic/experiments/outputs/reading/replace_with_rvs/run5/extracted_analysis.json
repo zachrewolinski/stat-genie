@@ -1,0 +1,61 @@
+{
+  "dataset_name": "reading",
+  "run_dir": "agentic/experiments/outputs/reading/replace_with_rvs/run5",
+  "research_question": "Does 'Reader View' --- a modified web page layout --- improves reading speed for individuals with dyslexia?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Indicator for whether the modified page layout 'Reader View' was activated (treatment vs control).",
+          "columns": [
+            "reader_view"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Measured reading speed (outcome variable used to assess reading performance).",
+        "columns": [
+          "speed"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Identifier for the specific page shown (included as a categorical control to account for page-level differences).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "page_id"
+          ]
+        },
+        {
+          "description": "Number of words on the page (included as a numeric control to account for text length).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "num_words"
+          ]
+        },
+        {
+          "description": "Language of the text (included as a categorical control to account for language-related differences).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "language"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nfrom scipy import stats\nimport statsmodels.formula.api as smf\n\n# Load data\ncsv_path = \"reading.csv\"\ndf = pd.read_csv(csv_path)\n\n# Focus on individuals with dyslexia\nif 'dyslexia_bin' in df.columns:\n    # If dyslexia_bin isn't strictly binary, treat >= 0.5 as dyslexia\n    unique_vals = set(pd.Series(df['dyslexia_bin'].dropna().unique()))\n    if unique_vals.issubset({0, 1}):\n        dyslexia_indicator = df['dyslexia_bin'] == 1\n    else:\n        dyslexia_indicator = df['dyslexia_bin'] >= 0.5\n    dfx = df[dyslexia_indicator].copy()\nelse:\n    # Fall back to dyslexia scale; treat >= 1 as dyslexia\n    dfx = df[df['dyslexia'] >= 1].copy()\n\n# Basic cleaning\nfor col in ['speed', 'reader_view']:\n    dfx = dfx[np.isfinite(dfx[col])]\n\n# Guard: require both groups present\nrv_groups = dfx.groupby('reader_view')['speed']\n\nsummary = rv_groups.agg(['count', 'mean', 'median', 'std'])\n\n# Two-sample t-test (Welch)\nif set(dfx['reader_view'].unique()) >= {0, 1}:\n    speed_rv1 = dfx[dfx['reader_view'] == 1]['speed']\n    speed_rv0 = dfx[dfx['reader_view'] == 0]['speed']\n    t_stat, p_val = stats.ttest_ind(speed_rv1, speed_rv0, equal_var=False, nan_policy='omit')\nelse:\n    t_stat, p_val = np.nan, np.nan\n\n# Regression with controls on log speed to reduce skew\n# Add small constant to avoid log(0) though speed min should be >0\n\ndfx = dfx[dfx['speed'] > 0].copy()\ndfx['log_speed'] = np.log(dfx['speed'])\n\n# Use a modest set of controls to avoid overfitting\ncontrols = []\nfor c in ['page_id', 'num_words', 'language']:\n    if c in dfx.columns:\n        # Skip controls with only one level/value in the dyslexia subset\n        if dfx[c].nunique(dropna=True) > 1:\n            controls.append(c)\n\nformula = 'log_speed ~ reader_view'\nif controls:\n    formula += ' + ' + ' + '.join([f'C({c})' if dfx[c].dtype == 'object' or str(dfx[c].dtype) == 'category' else c for c in controls])\n\nif len(dfx) > 0 and dfx['reader_view'].nunique() > 1:\n    model = smf.ols(formula, data=dfx).fit(cov_type='HC3')\n    coef = model.params.get('reader_view', np.nan)\n    p_reg = model.pvalues.get('reader_view', np.nan)\nelse:\n    coef = np.nan\n    p_reg = np.nan\n\n# Save analysis outputs for reference\nsummary.to_csv('analysis_summary.csv')\n\nwith open('analysis_results.txt', 'w') as f:\n    f.write('Dyslexia-only summary by reader_view\\n')\n    f.write(summary.to_string())\n    f.write('\\n\\n')\n    f.write(f'Welch t-test: t={t_stat:.4f}, p={p_val:.6g}\\n')\n    f.write(f'Regression (log_speed) coef={coef:.6f}, p={p_reg:.6g}\\n')\n\n# Decide answer\nimproves = bool((coef > 0) and (p_reg < 0.05))\n\nwith open('conclusion.txt', 'w') as f:\n    f.write('Yes\\n' if improves else 'No\\n')\n    # brief reasoning\n    mean0 = summary.loc[0, 'mean'] if 0 in summary.index else np.nan\n    mean1 = summary.loc[1, 'mean'] if 1 in summary.index else np.nan\n    f.write(f\"Among readers with dyslexia, mean speed was {mean1:.1f} with Reader View vs {mean0:.1f} without. \")\n    if np.isfinite(p_reg):\n        f.write(f\"A log-speed regression with controls finds a reader_view effect of {coef:.3f} (p={p_reg:.3g}), so the evidence does {'not ' if not improves else ''}support faster reading with Reader View.\")\n    else:\n        f.write(\"Regression results were unavailable due to missing groups.\")\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-02T16:31:11.653988+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/reading/replace_with_rvs/run5/analysis.py",
+      "info_json": "agentic/experiments/outputs/reading/replace_with_rvs/run5/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/reading/replace_with_rvs/run5/conclusion.txt"
+    }
+  }
+}

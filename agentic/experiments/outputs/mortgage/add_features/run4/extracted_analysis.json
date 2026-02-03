@@ -1,0 +1,53 @@
+{
+  "dataset_name": "mortgage",
+  "run_dir": "agentic/experiments/outputs/mortgage/add_features/run4",
+  "research_question": "Does gender affect whether banks approve an individual's mortgage application?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Applicant gender (treatment of interest) — indicator for female applicants used to test whether gender affects mortgage approval.",
+          "columns": [
+            "female"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Mortgage application approval outcome (dependent variable) — whether the application was accepted by the lender.",
+        "columns": [
+          "accept"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Applicant race and financial/creditworthiness covariates used to adjust for differences in credit risk and financial situation that could confound the relationship between gender and approval.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "black",
+            "housing_expense_ratio",
+            "self_employed",
+            "married",
+            "mortgage_credit",
+            "consumer_credit",
+            "bad_history",
+            "PI_ratio",
+            "loan_to_value"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\nfrom statsmodels.stats.proportion import proportions_ztest\n\n# Load data\nDATA_PATH = \"mortgage.csv\"\ndf = pd.read_csv(DATA_PATH)\n\n# Focus on variables relevant to mortgage approval and applicant characteristics\ncols = [\n    \"female\",\n    \"accept\",\n    \"black\",\n    \"housing_expense_ratio\",\n    \"self_employed\",\n    \"married\",\n    \"mortgage_credit\",\n    \"consumer_credit\",\n    \"bad_history\",\n    \"PI_ratio\",\n    \"loan_to_value\",\n]\n\nsub = df[cols].copy()\nsub = sub.dropna()\n\n# Basic approval rates by gender\nrate_by_gender = sub.groupby(\"female\")[\"accept\"].mean()\ncount_by_gender = sub.groupby(\"female\")[\"accept\"].size()\naccept_counts = sub.groupby(\"female\")[\"accept\"].sum()\n\nprint(\"Approval rate by gender (female=1):\")\nprint(rate_by_gender)\nprint(\"Counts by gender:\")\nprint(count_by_gender)\n\n# Two-proportion z-test for difference in approval rates\ncount = np.array([accept_counts.loc[0.0], accept_counts.loc[1.0]])\nobs = np.array([count_by_gender.loc[0.0], count_by_gender.loc[1.0]])\nstat, pval = proportions_ztest(count, obs)\nprint(\"\\nTwo-proportion z-test (female vs male) for approval rate difference:\")\nprint(f\"z-stat: {stat:.3f}, p-value: {pval:.4f}\")\n\n# Logistic regression with controls\nX = sub[[\n    \"female\",\n    \"black\",\n    \"housing_expense_ratio\",\n    \"self_employed\",\n    \"married\",\n    \"mortgage_credit\",\n    \"consumer_credit\",\n    \"bad_history\",\n    \"PI_ratio\",\n    \"loan_to_value\",\n]]\nX = sm.add_constant(X)\ny = sub[\"accept\"]\n\nlogit = sm.Logit(y, X).fit(disp=False)\n# Use robust standard errors to be conservative; handle older statsmodels\ntry:\n    logit_robust = logit.get_robustcov_results(cov_type=\"HC3\")\nexcept AttributeError:\n    # Older statsmodels: robust covariances are set in-place\n    logit_robust = logit\n    logit_robust._get_robustcov_results(cov_type=\"HC3\")\n\nprint(\"\\nLogit regression (accept ~ female + controls), robust SEs:\")\nprint(logit_robust.summary())\n\n# Effect size for female\ncoef = logit_robust.params[\"female\"]\np_value = logit_robust.pvalues[\"female\"]\nodds_ratio = float(np.exp(coef))\n\nmargeff = logit_robust.get_margeff(at=\"overall\")\nme_df = margeff.summary_frame()\nme = me_df.loc[\"female\", \"dy/dx\"]\np_cols = [c for c in me_df.columns if \"Pr(\" in c or \"P>|\" in c]\nme_p = me_df.loc[\"female\", p_cols[0]] if p_cols else float(\"nan\")\n\nprint(\"\\nFemale effect (adjusted):\")\nprint(f\"coef={coef:.4f}, odds_ratio={odds_ratio:.3f}, p-value={p_value:.4f}\")\nprint(f\"marginal_effect={me:.4f}, p-value={me_p:.4f}\")\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T18:54:57.489231+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/mortgage/add_features/run4/analysis.py",
+      "info_json": "agentic/experiments/outputs/mortgage/add_features/run4/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/mortgage/add_features/run4/conclusion.txt"
+    }
+  }
+}

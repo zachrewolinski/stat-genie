@@ -1,0 +1,55 @@
+{
+  "dataset_name": "hurricane",
+  "run_dir": "agentic/experiments/outputs/hurricane/noperturb/run2",
+  "research_question": "Hurricanes with more feminine names are perceived as less threatening and hence lead to fewer precautionary measures by the general public.",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Continuous masculinity–femininity index for hurricane names (average rating from independent coders; higher = more feminine).",
+          "columns": [
+            "masfem"
+          ]
+        },
+        {
+          "description": "Binary gender indicator of the hurricane name (0 = male name, 1 = female name); alternative operationalization of name femininity.",
+          "columns": [
+            "gender_mf"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Total number of deaths caused by the hurricane (outcome of interest; analysis used a log-transformed version).",
+        "columns": [
+          "alldeaths"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Storm intensity and contextual covariates included to hold constant potential confounders: maximum wind speed at landfall (wind), minimum pressure at landfall (min), Saffir–Simpson category (category), year of occurrence (year), and inflation/population-adjusted property damage in 2015 dollars (ndam15).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "wind",
+            "min",
+            "category",
+            "year",
+            "ndam15"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.formula.api as smf\n\n# Load data\n_df = pd.read_csv('hurricane.csv')\n\n# Basic preprocessing\n_df['log_deaths'] = np.log1p(_df['alldeaths'])\n\n# Models\nmodels = {}\nmodels['bivariate_masfem'] = smf.ols('log_deaths ~ masfem', data=_df).fit(cov_type='HC3')\nmodels['controls_intensity'] = smf.ols(\n    'log_deaths ~ masfem + wind + min + category + year',\n    data=_df\n).fit(cov_type='HC3')\nmodels['controls_plus_damage'] = smf.ols(\n    'log_deaths ~ masfem + wind + min + category + year + ndam15',\n    data=_df\n).fit(cov_type='HC3')\nmodels['gender_binary_controls'] = smf.ols(\n    'log_deaths ~ gender_mf + wind + min + category + year',\n    data=_df\n).fit(cov_type='HC3')\n\n# Collect key results\nsummary_rows = []\nfor name, m in models.items():\n    if 'masfem' in m.params.index:\n        coef = m.params['masfem']\n        pval = m.pvalues['masfem']\n        summary_rows.append((name, 'masfem', coef, pval))\n    if 'gender_mf' in m.params.index:\n        coef = m.params['gender_mf']\n        pval = m.pvalues['gender_mf']\n        summary_rows.append((name, 'gender_mf', coef, pval))\n\nsummary = pd.DataFrame(summary_rows, columns=['model', 'term', 'coef', 'pvalue'])\n\nprint('Rows:', len(_df))\nprint('Missing values per column:')\nprint(_df.isna().sum())\nprint('\\nCorrelation masfem vs deaths:', _df['masfem'].corr(_df['alldeaths']))\nprint('\\nModel summaries (HC3 robust SEs):')\nfor name, m in models.items():\n    print('\\n===', name, '===')\n    print(m.summary())\n\nprint('\\nKey coefficients:')\nprint(summary.to_string(index=False))\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T18:47:43.629071+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/hurricane/noperturb/run2/analysis.py",
+      "info_json": "agentic/experiments/outputs/hurricane/noperturb/run2/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/hurricane/noperturb/run2/conclusion.txt"
+    }
+  }
+}

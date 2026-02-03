@@ -1,0 +1,250 @@
+{
+  "dataset_name": "mortgage",
+  "n": 5,
+  "analyses": {
+    "0": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Applicant gender indicator (1 if female, 0 if male) — main independent variable of interest (does gender affect mortgage approval).",
+            "columns": [
+              "female"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Mortgage application outcome (1 if accepted, 0 if denied) — dependent variable measuring approval.",
+          "columns": [
+            "accept"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Applicant and loan characteristics included as covariates to adjust for creditworthiness, debt burden, and loan risk (used to hold constant confounders in the logistic regression).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "black",
+              "housing_expense_ratio",
+              "self_employed",
+              "married",
+              "mortgage_credit",
+              "consumer_credit",
+              "bad_history",
+              "PI_ratio",
+              "loan_to_value",
+              "denied_PMI"
+            ]
+          }
+        ]
+      },
+      "analysis_code": "import numpy as np\nimport pandas as pd\nimport statsmodels.api as sm\nfrom scipy import stats\n\n\ndef main():\n    df = pd.read_csv(\"mortgage.csv\")\n\n    # Basic approval rate comparison by gender (unadjusted)\n    approval_rates = df.groupby(\"female\")[\"accept\"].mean()\n    contingency = pd.crosstab(df[\"female\"], df[\"accept\"])\n    chi2, chi2_p, _, _ = stats.chi2_contingency(contingency)\n\n    # Logistic regression of acceptance on gender + credit controls\n    cols = [\n        \"accept\",\n        \"female\",\n        \"black\",\n        \"housing_expense_ratio\",\n        \"self_employed\",\n        \"married\",\n        \"mortgage_credit\",\n        \"consumer_credit\",\n        \"bad_history\",\n        \"PI_ratio\",\n        \"loan_to_value\",\n        \"denied_PMI\",\n    ]\n    df_model = df[cols].dropna()\n    X = sm.add_constant(df_model.drop(columns=[\"accept\"]))\n    y = df_model[\"accept\"]\n    model = sm.Logit(y, X).fit(disp=False)\n\n    female_coef = model.params[\"female\"]\n    female_p = model.pvalues[\"female\"]\n    odds_ratio = float(np.exp(female_coef))\n\n    # Print a compact summary for reproducibility\n    print(\"Unadjusted approval rates (female=0,1):\")\n    print(approval_rates)\n    print(\"Chi-square p-value (gender vs acceptance):\", chi2_p)\n    print(\"Logit female coef:\", female_coef)\n    print(\"Logit female p-value:\", female_p)\n    print(\"Female odds ratio:\", odds_ratio)\n\n\nif __name__ == \"__main__\":\n    main()\n"
+    },
+    "1": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Applicant gender — main independent variable of interest (1 if applicant is female, 0 if male).",
+            "columns": [
+              "female"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Mortgage application outcome (dependent variable): 1 if mortgage application was accepted, 0 if denied.",
+          "columns": [
+            "accept"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Covariates included to adjust for creditworthiness and application characteristics (potential confounders): race, financial ratios, employment/marital status, credit scores, and loan-to-value.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "black",
+              "housing_expense_ratio",
+              "self_employed",
+              "married",
+              "mortgage_credit",
+              "consumer_credit",
+              "bad_history",
+              "PI_ratio",
+              "loan_to_value"
+            ]
+          }
+        ]
+      },
+      "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\n\n# Load data\ndf = pd.read_csv('mortgage.csv')\n\n# Basic cleaning\n# Ensure binary columns are numeric\nfor col in [\"female\", \"accept\", \"deny\", \"black\", \"self_employed\", \"married\", \"bad_history\", \"denied_PMI\"]:\n    if col in df.columns:\n        df[col] = pd.to_numeric(df[col], errors='coerce')\n\n# Outcome: accept (1=accepted, 0=denied)\nif \"accept\" not in df.columns:\n    # fallback if accept not available\n    df[\"accept\"] = 1 - df[\"deny\"]\n\n# Simple acceptance rates by gender\nrate_by_gender = df.groupby('female')[\"accept\"].mean()\n\n# Controls for creditworthiness and application characteristics\ncontrols = [\n    \"black\",\n    \"housing_expense_ratio\",\n    \"self_employed\",\n    \"married\",\n    \"mortgage_credit\",\n    \"consumer_credit\",\n    \"bad_history\",\n    \"PI_ratio\",\n    \"loan_to_value\",\n]\n\ncols = [\"accept\", \"female\"] + controls\nmodel_df = df[cols].dropna()\n\n# Unadjusted model: accept ~ female\nX_simple = sm.add_constant(model_df[[\"female\"]], has_constant='add')\ny_simple = model_df[\"accept\"]\nsimple_model = sm.Logit(y_simple, X_simple)\nsimple_result = simple_model.fit(disp=0)\n\nX = model_df[[\"female\"] + controls]\nX = sm.add_constant(X, has_constant='add')\ny = model_df[\"accept\"]\n\n# Logistic regression\nlogit_model = sm.Logit(y, X)\nresult = logit_model.fit(disp=0)\n\n# Extract female effect\ncoef = result.params[\"female\"]\nse = result.bse[\"female\"]\npval = result.pvalues[\"female\"]\n\n# Odds ratio and 95% CI\nodds_ratio = float(np.exp(coef))\nci_low = float(np.exp(coef - 1.96 * se))\nci_high = float(np.exp(coef + 1.96 * se))\n\nprint(\"Acceptance rate by gender (female=0 male, female=1 female):\")\nprint(rate_by_gender)\nprint(\"\\nLogit model (accept ~ female)\")\nprint(f\"Female coef: {simple_result.params['female']:.4f}\")\nprint(f\"Female p-value: {simple_result.pvalues['female']:.4g}\")\n\nprint(\"\\nLogit model (accept ~ female + controls)\")\nprint(f\"Female coef: {coef:.4f}\")\nprint(f\"Female p-value: {pval:.4g}\")\nprint(f\"Female odds ratio: {odds_ratio:.4f}\")\nprint(f\"95% CI for odds ratio: [{ci_low:.4f}, {ci_high:.4f}]\")\n"
+    },
+    "2": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Applicant gender (main independent variable): 1 if applicant is female, 0 if male.",
+            "columns": [
+              "female"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Mortgage application outcome: 1 if mortgage application was accepted, 0 if denied.",
+          "columns": [
+            "accept"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Covariates included to control for creditworthiness and other applicant/loan characteristics (race, financial ratios, employment/marital status, credit scores, prior bad credit, loan-to-value, and PMI denial).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "black",
+              "housing_expense_ratio",
+              "self_employed",
+              "married",
+              "mortgage_credit",
+              "consumer_credit",
+              "bad_history",
+              "PI_ratio",
+              "loan_to_value",
+              "denied_PMI"
+            ]
+          }
+        ]
+      },
+      "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\nfrom statsmodels.stats.proportion import proportions_ztest\n\nDATA_PATH = \"mortgage.csv\"\n\n\ndef main():\n    df = pd.read_csv(DATA_PATH)\n\n    # Basic approval rates by gender\n    approval_by_gender = df.groupby(\"female\")[\"accept\"].mean()\n    counts_by_gender = df.groupby(\"female\")[\"accept\"].count()\n    successes_by_gender = df.groupby(\"female\")[\"accept\"].sum()\n\n    # Two-proportion z-test for difference in approval rates\n    count = np.array([successes_by_gender.get(1.0, 0), successes_by_gender.get(0.0, 0)])\n    nobs = np.array([counts_by_gender.get(1.0, 0), counts_by_gender.get(0.0, 0)])\n    zstat, pval = proportions_ztest(count, nobs, alternative=\"two-sided\")\n\n    # Logistic regression controlling for creditworthiness and other factors\n    features = [\n        \"female\",\n        \"black\",\n        \"housing_expense_ratio\",\n        \"self_employed\",\n        \"married\",\n        \"mortgage_credit\",\n        \"consumer_credit\",\n        \"bad_history\",\n        \"PI_ratio\",\n        \"loan_to_value\",\n        \"denied_PMI\",\n    ]\n    model_df = df[features + [\"accept\"]].replace([np.inf, -np.inf], np.nan).dropna()\n    X = model_df[features]\n    X = sm.add_constant(X)\n    y = model_df[\"accept\"]\n\n    model = sm.Logit(y, X)\n    result = model.fit(disp=False)\n\n    female_coef = result.params[\"female\"]\n    female_pval = result.pvalues[\"female\"]\n    female_odds_ratio = float(np.exp(female_coef))\n\n    print(\"Approval rate by gender (female=1, male=0):\")\n    print(approval_by_gender)\n    print()\n    print(\"Counts by gender:\")\n    print(counts_by_gender)\n    print()\n    print(\"Two-proportion z-test for approval rates (female vs male):\")\n    print(f\"z-stat: {zstat:.4f}, p-value: {pval:.4g}\")\n    print()\n    print(\"Logit model (accept ~ controls + female):\")\n    print(f\"female coef: {female_coef:.4f}\")\n    print(f\"female odds ratio: {female_odds_ratio:.4f}\")\n    print(f\"female p-value: {female_pval:.4g}\")\n\n\nif __name__ == \"__main__\":\n    main()\n"
+    },
+    "3": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Applicant gender indicator used as the main independent variable (treatment/predictor): 1 if applicant is female, 0 if male.",
+            "columns": [
+              "female"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Mortgage application denial indicator used as the dependent/outcome variable: 1 if the mortgage application was denied, 0 if accepted.",
+          "columns": [
+            "deny"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Covariates included to adjust for creditworthiness, financial burden, demographics, and loan characteristics: race indicator, housing expense ratio, self-employment status, marital status, mortgage credit score, consumer credit score, history of bad credit, total debt payments-to-income ratio (PI_ratio), loan-to-value ratio, and private mortgage insurance denial indicator.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "black",
+              "housing_expense_ratio",
+              "self_employed",
+              "married",
+              "mortgage_credit",
+              "consumer_credit",
+              "bad_history",
+              "PI_ratio",
+              "loan_to_value",
+              "denied_PMI"
+            ]
+          }
+        ]
+      },
+      "analysis_code": "import pandas as pd\nimport statsmodels.api as sm\nfrom statsmodels.stats.proportion import proportions_ztest\n\n# Load data\npath = \"mortgage.csv\"\ndf = pd.read_csv(path)\n\n# Basic sanity: keep required columns\ncols = [\n    \"female\",\n    \"black\",\n    \"housing_expense_ratio\",\n    \"self_employed\",\n    \"married\",\n    \"mortgage_credit\",\n    \"consumer_credit\",\n    \"bad_history\",\n    \"PI_ratio\",\n    \"loan_to_value\",\n    \"denied_PMI\",\n    \"deny\",\n]\n\n# Drop rows with missing values in model columns\nmodel_df = df[cols].dropna().copy()\n\n# Descriptive denial rates by gender\nrate_by_gender = model_df.groupby(\"female\")[\"deny\"].mean()\ncount_by_gender = model_df.groupby(\"female\")[\"deny\"].count()\n\n# Two-proportion z-test (female vs male)\n# female==1, male==0\nn_female = int(count_by_gender.get(1.0, 0))\nn_male = int(count_by_gender.get(0.0, 0))\n\nx_female = int(model_df.loc[model_df[\"female\"] == 1.0, \"deny\"].sum())\nx_male = int(model_df.loc[model_df[\"female\"] == 0.0, \"deny\"].sum())\n\nstat, pval = proportions_ztest([x_female, x_male], [n_female, n_male])\n\n# Logistic regression with controls\nX = model_df.drop(columns=[\"deny\"])\nX = sm.add_constant(X)\ny = model_df[\"deny\"]\n\nlogit = sm.Logit(y, X)\nres = logit.fit(disp=False)\n\n# Extract female effect\nfemale_coef = res.params.get(\"female\")\nfemale_p = res.pvalues.get(\"female\")\n\nprint(\"Denial rates by gender (female=1, male=0):\")\nprint(rate_by_gender)\nprint(\"Counts by gender:\")\nprint(count_by_gender)\nprint(\"Two-proportion z-test p-value (female vs male denial rate):\", pval)\nprint(\"Logit female coefficient:\", female_coef)\nprint(\"Logit female p-value:\", female_p)\n"
+    },
+    "4": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "1 if applicant is female, 0 if male",
+            "columns": [
+              "female"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "1 if mortgage application was denied, 0 if accepted",
+          "columns": [
+            "deny"
+          ]
+        },
+        "controls": [
+          {
+            "description": "1 if applicant is Black, 0 otherwise",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "black"
+            ]
+          },
+          {
+            "description": "Housing expense as a ratio of total income",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "housing_expense_ratio"
+            ]
+          },
+          {
+            "description": "1 if applicant is self-employed, 0 otherwise",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "self_employed"
+            ]
+          },
+          {
+            "description": "1 if applicant is married, 0 otherwise",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "married"
+            ]
+          },
+          {
+            "description": "Applicant's mortgage credit score",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "mortgage_credit"
+            ]
+          },
+          {
+            "description": "Applicant's consumer credit score",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "consumer_credit"
+            ]
+          },
+          {
+            "description": "1 if applicant has history of bad credit, 0 otherwise",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "bad_history"
+            ]
+          },
+          {
+            "description": "Total debt payments to income ratio",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "PI_ratio"
+            ]
+          },
+          {
+            "description": "Ratio of loan amount to appraised value of property",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "loan_to_value"
+            ]
+          }
+        ]
+      },
+      "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\n\n\ndef main():\n    df = pd.read_csv('mortgage.csv')\n\n    # Core features to control for applicant and loan characteristics\n    features = [\n        'female',\n        'black',\n        'housing_expense_ratio',\n        'self_employed',\n        'married',\n        'mortgage_credit',\n        'consumer_credit',\n        'bad_history',\n        'PI_ratio',\n        'loan_to_value',\n    ]\n\n    # Simple acceptance rate comparison (unadjusted)\n    simple_df = df[['female', 'accept']].dropna()\n    accept_rates = simple_df.groupby('female')['accept'].mean()\n    counts = simple_df['female'].value_counts().sort_index()\n\n    print('Unadjusted acceptance rates by gender (female=1):')\n    print(accept_rates)\n    print('Counts:', counts.to_dict())\n    print()\n\n    # Adjusted model: denial probability\n    model_df = df[['deny'] + features].dropna()\n    X = sm.add_constant(model_df[features])\n    y = model_df['deny']\n\n    logit_model = sm.Logit(y, X).fit(disp=0)\n\n    coef = logit_model.params['female']\n    pval = logit_model.pvalues['female']\n    odds_ratio = float(np.exp(coef))\n\n    print('Adjusted logit model on denial (deny=1):')\n    print(f\"female coefficient: {coef:.6f}\")\n    print(f\"female p-value: {pval:.6f}\")\n    print(f\"female odds ratio: {odds_ratio:.4f}\")\n\n\nif __name__ == '__main__':\n    main()\n"
+    }
+  }
+}

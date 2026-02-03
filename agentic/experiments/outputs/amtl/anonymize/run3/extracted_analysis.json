@@ -1,0 +1,62 @@
+{
+  "dataset_name": "amtl",
+  "run_dir": "agentic/experiments/outputs/amtl/anonymize/run3",
+  "research_question": "Do modern humans (Homo sapiens) have higher frequencies of antemortem tooth loss (AMTL) compared to non-human primate genera (Pan, Pongo, Papio), after accounting for the effects of age, sex, and tooth class?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Specimen genus (categorical predictor comparing Homo sapiens to non-human genera Pan, Pongo, Papio); primary independent variable of interest.",
+          "columns": [
+            "feature8"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Antemortem tooth loss (AMTL) measured as the number of teeth missing out of the number of observable tooth sockets — modeled as a binomial proportion (missing / observed).",
+        "columns": [
+          "feature3",
+          "feature4"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Estimated age at death (numeric covariate included to adjust for age-related variation in AMTL).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature5"
+          ]
+        },
+        {
+          "description": "Estimate of specimen sex (numeric-coded sex estimate used as a covariate to adjust for sex differences in AMTL).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature7"
+          ]
+        },
+        {
+          "description": "Tooth class (categorical covariate: Anterior, Posterior, or Premolar) included to account for differences in AMTL by tooth type.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature1"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.formula.api as smf\nimport statsmodels.api as sm\n\n# Load data\n_df = pd.read_csv('amtl.csv')\n_df = _df.rename(\n    columns={\n        'feature1': 'tooth_class',\n        'feature2': 'specimen_id',\n        'feature3': 'missing',\n        'feature4': 'observed',\n        'feature5': 'age',\n        'feature6': 'age_uncert',\n        'feature7': 'sex',\n        'feature8': 'genus',\n        'feature9': 'region',\n    }\n)\n\n# Basic cleaning\n_df = _df.copy()\n_df = _df[(_df['observed'] > 0) & (_df['missing'] >= 0)]\n_df['prop_missing'] = _df['missing'] / _df['observed']\n\n# Ensure categorical ordering with Homo sapiens as reference\n_df['genus'] = _df['genus'].astype('category')\n_df['tooth_class'] = _df['tooth_class'].astype('category')\n\n# Fit binomial GLM with proportion response and trial weights\nformula = 'prop_missing ~ C(genus, Treatment(reference=\"Homo sapiens\")) + age + sex + C(tooth_class)'\nmodel = smf.glm(\n    formula=formula,\n    data=_df,\n    family=sm.families.Binomial(),\n    var_weights=_df['observed']\n)\nresult = model.fit()\n\n# Compute average predicted probabilities for each genus (standardized over covariates)\nweights = _df['observed'].to_numpy()\nunique_genera = ['Homo sapiens', 'Pan', 'Pongo', 'Papio']\n\npred_means = {}\nfor g in unique_genera:\n    tmp = _df.copy()\n    tmp['genus'] = g\n    preds = result.predict(tmp)\n    pred_means[g] = np.average(preds, weights=weights)\n\n# Extract genus coefficients and p-values\ncoef = result.params\npvals = result.pvalues\n\ncomparisons = {}\nfor g in ['Pan', 'Pongo', 'Papio']:\n    term = f'C(genus, Treatment(reference=\"Homo sapiens\"))[T.{g}]'\n    if term in coef.index:\n        comparisons[g] = {\n            'log_odds_diff': coef[term],\n            'odds_ratio': float(np.exp(coef[term])),\n            'p_value': float(pvals[term]),\n        }\n\n# Decide if Homo sapiens has higher AMTL than each non-human genus\nhomo_mean = pred_means['Homo sapiens']\nall_higher = True\nall_signif = True\nfor g in ['Pan', 'Pongo', 'Papio']:\n    if g in pred_means:\n        all_higher = all_higher and (homo_mean > pred_means[g])\n    if g in comparisons:\n        # With Homo as reference, negative coefficient means lower AMTL in non-human\n        all_signif = all_signif and (comparisons[g]['log_odds_diff'] < 0) and (comparisons[g]['p_value'] < 0.05)\n\nprint('Model fit complete.')\nprint('Average predicted missing proportion by genus (standardized over covariates):')\nfor g in unique_genera:\n    print(f'  {g}: {pred_means.get(g, np.nan):.4f}')\nprint('Genus comparisons vs Homo sapiens (log-odds difference, odds ratio, p-value):')\nfor g, vals in comparisons.items():\n    print(f\"  {g}: log_odds_diff={vals['log_odds_diff']:.3f}, OR={vals['odds_ratio']:.3f}, p={vals['p_value']:.4g}\")\n\nprint('Homo higher than all non-human (predicted means):', all_higher)\nprint('All non-human lower than Homo with p<0.05:', all_signif)\n\n# Save key outputs for downstream use if needed\nout = {\n    'pred_means': pred_means,\n    'comparisons': comparisons,\n    'homo_higher_all_pred': all_higher,\n    'all_nonhuman_lower_signif': all_signif,\n}\n\npd.Series(out).to_json('analysis_results.json')\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T18:08:02.784840+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/amtl/anonymize/run3/analysis.py",
+      "info_json": "agentic/experiments/outputs/amtl/anonymize/run3/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/amtl/anonymize/run3/conclusion.txt"
+    }
+  }
+}

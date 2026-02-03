@@ -1,0 +1,49 @@
+{
+  "dataset_name": "panda_nuts",
+  "run_dir": "agentic/experiments/outputs/panda_nuts/anonymize/run4",
+  "research_question": "Do age, sex, and receiving help from another chimpanzee influence the nut-cracking efficiency of western chimpanzees?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Age in years (predictor of nut-cracking efficiency)",
+          "columns": [
+            "feature2"
+          ]
+        },
+        {
+          "description": "Sex of individual (male/female; predictor of nut-cracking efficiency)",
+          "columns": [
+            "feature3"
+          ]
+        },
+        {
+          "description": "Received help from another chimpanzee (yes/no; predictor of nut-cracking efficiency)",
+          "columns": [
+            "feature7"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Nut-cracking efficiency (nuts opened per second), computed as number of nuts opened divided by session duration",
+        "columns": [
+          "feature5",
+          "feature6"
+        ]
+      },
+      "controls": []
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.formula.api as smf\n\n# Load data\ncsv_path = \"panda_nuts.csv\"\n\ndf = pd.read_csv(csv_path)\n\n# Compute efficiency: nuts opened per second\n# Avoid division by zero if any duration is zero\nif (df[\"feature6\"] <= 0).any():\n    raise ValueError(\"Non-positive session duration found; cannot compute efficiency.\")\n\ndf = df.copy()\n\ndf[\"efficiency\"] = df[\"feature5\"] / df[\"feature6\"]\n\n# Clean categorical labels\n# feature3: sex (f/m), feature7: help (y/N)\n\ndf[\"feature3\"] = df[\"feature3\"].astype(str)\n\ndf[\"feature7\"] = df[\"feature7\"].astype(str)\n\n# Fit OLS model\nmodel = smf.ols(\"efficiency ~ feature2 + C(feature3) + C(feature7)\", data=df).fit(cov_type=\"HC3\")\n\n# Collect results\nparams = model.params\npvalues = model.pvalues\n\n# Prepare a concise result table\nresults = pd.DataFrame({\n    \"coef\": params,\n    \"p_value\": pvalues\n})\n\nprint(\"Model: efficiency ~ age + sex + help (OLS, robust HC3)\\n\")\nprint(results)\nprint(\"\\nR-squared:\", model.rsquared)\n\n# Also compute group means for interpretability\nsex_means = df.groupby(\"feature3\")[\"efficiency\"].mean()\nhelp_means = df.groupby(\"feature7\")[\"efficiency\"].mean()\n\nprint(\"\\nMean efficiency by sex:\\n\", sex_means)\nprint(\"\\nMean efficiency by help:\\n\", help_means)\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T19:06:20.098010+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/panda_nuts/anonymize/run4/analysis.py",
+      "info_json": "agentic/experiments/outputs/panda_nuts/anonymize/run4/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/panda_nuts/anonymize/run4/conclusion.txt"
+    }
+  }
+}

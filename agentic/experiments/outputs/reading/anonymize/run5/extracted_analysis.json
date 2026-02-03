@@ -1,0 +1,36 @@
+{
+  "dataset_name": "reading",
+  "run_dir": "agentic/experiments/outputs/reading/anonymize/run5",
+  "research_question": "Does 'Reader View' --- a modified web page layout --- improves reading speed for individuals with dyslexia?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Indicates if the Reader View layout was activated (1 = activated, 0 = not activated) — the treatment whose effect on reading speed is of interest.",
+          "columns": [
+            "feature3"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Reading speed in words per minute (derived from words/time).",
+        "columns": [
+          "feature20"
+        ]
+      },
+      "controls": []
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nfrom scipy import stats\n\n\ndef main():\n    df = pd.read_csv(\"reading.csv\")\n\n    # Reading speed is provided in feature20 (words per minute derived from words/time).\n    df = df.copy()\n    df[\"reading_speed_wpm\"] = df[\"feature20\"]\n\n    # Dyslexia indicator (1 = dyslexia) in feature17.\n    dys = df[df[\"feature17\"] == 1].copy()\n    dys = dys.dropna(subset=[\"feature1\", \"feature3\", \"reading_speed_wpm\"])\n\n    rv = dys[dys[\"feature3\"] == 1][\"reading_speed_wpm\"]\n    no = dys[dys[\"feature3\"] == 0][\"reading_speed_wpm\"]\n\n    print(\"Dyslexia-only observation-level comparison\")\n    print(f\"n reader-view = {len(rv)}, n control = {len(no)}\")\n    print(f\"mean wpm reader-view = {rv.mean():.3f}, control = {no.mean():.3f}\")\n    print(f\"median wpm reader-view = {rv.median():.3f}, control = {no.median():.3f}\")\n    print(\"Welch t-test:\", stats.ttest_ind(rv, no, equal_var=False))\n    print(\"Mann-Whitney U:\", stats.mannwhitneyu(rv, no, alternative=\"two-sided\"))\n\n    # Aggregate per participant to reduce repeated-measures bias.\n    agg = dys.groupby([\"feature1\", \"feature3\"])[\"reading_speed_wpm\"].mean().reset_index()\n    wide = agg.pivot(index=\"feature1\", columns=\"feature3\", values=\"reading_speed_wpm\")\n\n    paired = wide.dropna()\n    print(\"\\nPer-participant paired comparison (participants with both conditions)\")\n    print(f\"paired n = {len(paired)}\")\n    if len(paired) >= 2:\n        diff = paired[1] - paired[0]\n        print(f\"mean diff (reader-view - control) = {diff.mean():.3f}\")\n        print(f\"median diff = {diff.median():.3f}\")\n        print(\"Paired t-test:\", stats.ttest_rel(paired[1], paired[0]))\n        print(\"Wilcoxon signed-rank:\", stats.wilcoxon(diff))\n\n    # Also show per-participant (unpaired) comparison of means by condition.\n    rv_part = wide[1].dropna()\n    no_part = wide[0].dropna()\n    print(\"\\nPer-participant mean comparison (unpaired)\")\n    print(f\"n reader-view participants = {len(rv_part)}, n control participants = {len(no_part)}\")\n    print(f\"mean wpm reader-view = {rv_part.mean():.3f}, control = {no_part.mean():.3f}\")\n    print(\"Welch t-test:\", stats.ttest_ind(rv_part, no_part, equal_var=False))\n\n\nif __name__ == \"__main__\":\n    main()\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T19:16:57.864063+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/reading/anonymize/run5/analysis.py",
+      "info_json": "agentic/experiments/outputs/reading/anonymize/run5/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/reading/anonymize/run5/conclusion.txt"
+    }
+  }
+}

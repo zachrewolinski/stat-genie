@@ -1,0 +1,51 @@
+{
+  "dataset_name": "affairs",
+  "run_dir": "agentic/experiments/outputs/affairs/noperturb/run2",
+  "research_question": "Does having children decrease (if at all) the engagement in extramarital affairs?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Primary independent variable: whether there are children in the marriage (treatment/predictor of interest). Analysis uses a derived binary indicator but the underlying column is the marriage-level children indicator.",
+          "columns": [
+            "children"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Dependent variable: engagement in extramarital affairs measured by the reported count of affairs in the past year. (The analyst also constructed a binary 'any affair' indicator from this count for logistic regression, but the canonical column is the count.)",
+        "columns": [
+          "affairs"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Covariates included in regression models to adjust for demographic and relationship factors (age, duration of marriage, religiosity, education, occupation, self-rated marriage happiness, and gender).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "age",
+            "yearsmarried",
+            "religiousness",
+            "education",
+            "occupation",
+            "rating",
+            "gender"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.formula.api as smf\nfrom statsmodels.stats.weightstats import ttest_ind\n\n\ndef main():\n    df = pd.read_csv('affairs.csv')\n    df['affair_any'] = (df['affairs'] > 0).astype(int)\n    df['children_yes'] = (df['children'] == 'yes').astype(int)\n\n    group = df.groupby('children')\n    summary = group['affairs'].agg(['count', 'mean', 'median']).rename(columns={'count': 'n'})\n    prop_any = group['affair_any'].mean().rename('prop_any')\n    summary = summary.join(prop_any)\n\n    affairs_yes = df.loc[df['children'] == 'yes', 'affairs']\n    affairs_no = df.loc[df['children'] == 'no', 'affairs']\n    t_stat, t_p, _ = ttest_ind(affairs_yes, affairs_no, usevar='unequal')\n\n    logit = smf.logit(\n        'affair_any ~ children_yes + age + yearsmarried + religiousness + education + occupation + rating + C(gender)',\n        data=df,\n    ).fit(disp=False)\n\n    ols = smf.ols(\n        'affairs ~ children_yes + age + yearsmarried + religiousness + education + occupation + rating + C(gender)',\n        data=df,\n    ).fit()\n\n    print('Summary by children')\n    print(summary)\n    print('\\nT-test on affairs counts (children yes vs no):')\n    print(f't={t_stat:.3f}, p={t_p:.4f}')\n\n    print('\\nLogit (any affair) coefficient for children_yes:')\n    print(logit.params['children_yes'], 'p=', logit.pvalues['children_yes'])\n\n    print('\\nOLS (affair count) coefficient for children_yes:')\n    print(ols.params['children_yes'], 'p=', ols.pvalues['children_yes'])\n\n    summary.to_csv('children_summary.csv')\n\n\nif __name__ == '__main__':\n    main()\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T17:59:52.986527+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/affairs/noperturb/run2/analysis.py",
+      "info_json": "agentic/experiments/outputs/affairs/noperturb/run2/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/affairs/noperturb/run2/conclusion.txt"
+    }
+  }
+}

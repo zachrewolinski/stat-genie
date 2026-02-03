@@ -1,0 +1,51 @@
+{
+  "dataset_name": "affairs",
+  "run_dir": "agentic/experiments/outputs/affairs/noperturb/run5",
+  "research_question": "Does having children decrease (if at all) the engagement in extramarital affairs?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Presence of children in the marriage (main predictor of interest; factor with values 'yes'/'no').",
+          "columns": [
+            "children"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Frequency of extramarital sexual intercourse during the past year (numeric count). Note: the analysis also derived a binary indicator for 'any affair' from this column for logistic regression.",
+        "columns": [
+          "affairs"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Covariates included to adjust for demographics and marital/background factors: age, years married, self-reported religiousness, education level, occupation class, self-rating of marriage, and gender.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "age",
+            "yearsmarried",
+            "religiousness",
+            "education",
+            "occupation",
+            "rating",
+            "gender"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.formula.api as smf\nfrom statsmodels.stats.weightstats import ttest_ind\n\n# Load data\nDF_PATH = 'affairs.csv'\ndf = pd.read_csv(DF_PATH)\n\n# Basic derived variables\n\ndf['any_affair'] = (df['affairs'] > 0).astype(int)\n\n# Group summaries\nsummary = df.groupby('children').agg(\n    n=('affairs', 'size'),\n    mean_affairs=('affairs', 'mean'),\n    median_affairs=('affairs', 'median'),\n    prop_any_affair=('any_affair', 'mean')\n)\n\n# Difference in means (affairs count)\nno_affairs = df.loc[df['children'] == 'no', 'affairs']\nyes_affairs = df.loc[df['children'] == 'yes', 'affairs']\nt_stat, p_val, _ = ttest_ind(yes_affairs, no_affairs, usevar='unequal')\n\n# Logistic regression for any affair\nlogit_model = smf.logit(\n    'any_affair ~ C(children) + age + yearsmarried + religiousness + education + occupation + rating + C(gender)',\n    data=df\n).fit(disp=0)\n\ncoef = logit_model.params.get('C(children)[T.yes]', np.nan)\nse = logit_model.bse.get('C(children)[T.yes]', np.nan)\np_logit = logit_model.pvalues.get('C(children)[T.yes]', np.nan)\nodds_ratio = float(np.exp(coef)) if np.isfinite(coef) else np.nan\n\n# Average marginal effect for children\nmargeff = logit_model.get_margeff(at='overall')\nme_table = margeff.summary_frame()\nme_children = me_table.loc['C(children)[T.yes]']\n\nprint('Group summary by children')\nprint(summary)\nprint('\\nT-test (affairs count) yes vs no children:')\nprint({'t_stat': float(t_stat), 'p_value': float(p_val)})\nprint('\\nLogit coefficient for children=yes (baseline no):')\nprint({'coef': float(coef), 'se': float(se), 'p_value': float(p_logit), 'odds_ratio': odds_ratio})\nprint('\\nAverage marginal effect (children=yes):')\nprint(me_children)\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T18:00:40.978694+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/affairs/noperturb/run5/analysis.py",
+      "info_json": "agentic/experiments/outputs/affairs/noperturb/run5/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/affairs/noperturb/run5/conclusion.txt"
+    }
+  }
+}

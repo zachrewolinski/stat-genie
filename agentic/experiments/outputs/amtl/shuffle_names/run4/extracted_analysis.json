@@ -1,0 +1,62 @@
+{
+  "dataset_name": "amtl",
+  "run_dir": "agentic/experiments/outputs/amtl/shuffle_names/run4",
+  "research_question": "Do modern humans (Homo sapiens) have higher frequencies of antemortem tooth loss (AMTL) compared to non-human primate genera (Pan, Pongo, Papio), after accounting for the effects of age, sex, and tooth class?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Indicator for taxon (Homo sapiens vs non-human primates); the main predictor of interest derived from the specimen's taxon.",
+          "columns": [
+            "tooth_class"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Frequency of antemortem tooth loss (proportion missing): number of missing teeth out of observable sockets (AMTL rate).",
+        "columns": [
+          "genus",
+          "age"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Estimated age at death (continuous); included to control for effects of age on AMTL.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "pop"
+          ]
+        },
+        {
+          "description": "Estimate of sex of specimen (probability male; 0-1); included to control for sex differences in AMTL.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "stdev_age"
+          ]
+        },
+        {
+          "description": "Tooth class (Anterior, Posterior, Premolar); categorical control for differences in AMTL by tooth type.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "sockets"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport statsmodels.api as sm\nimport statsmodels.formula.api as smf\nimport math\n\n\ndef main():\n    df = pd.read_csv('amtl.csv')\n\n    # Column mapping based on metadata/value patterns:\n    # - sockets: tooth class (Anterior/Posterior/Premolar)\n    # - genus: number of missing teeth (AMTL count)\n    # - age: number of observable sockets (total trials)\n    # - pop: estimated age at death (continuous)\n    # - stdev_age: sex estimate (probability male, 0-1)\n    # - tooth_class: taxon (Homo sapiens, Pan, Papio, Pongo)\n\n    df = df.copy()\n    df['total_sockets'] = df['age']\n    df['missing'] = df['genus']\n\n    # Guard against invalid rows\n    df = df[df['total_sockets'] > 0].copy()\n\n    # Proportion model with binomial weights\n    df['prop_missing'] = df['missing'] / df['total_sockets']\n    df['is_human'] = (df['tooth_class'] == 'Homo sapiens').astype(int)\n\n    model = smf.glm(\n        'prop_missing ~ is_human + pop + stdev_age + C(sockets)',\n        data=df,\n        family=sm.families.Binomial(),\n        freq_weights=df['total_sockets'],\n    ).fit()\n\n    coef = model.params['is_human']\n    se = model.bse['is_human']\n    or_val = math.exp(coef)\n    ci_low = math.exp(coef - 1.96 * se)\n    ci_high = math.exp(coef + 1.96 * se)\n\n    print(model.summary())\n    print('\\nAdjusted odds ratio for Homo sapiens vs non-human primates:')\n    print(f'OR = {or_val:.3f} (95% CI {ci_low:.3f} to {ci_high:.3f}), p = {model.pvalues[\"is_human\"]:.3g}')\n\n\nif __name__ == '__main__':\n    main()\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T18:15:39.382095+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/amtl/shuffle_names/run4/analysis.py",
+      "info_json": "agentic/experiments/outputs/amtl/shuffle_names/run4/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/amtl/shuffle_names/run4/conclusion.txt"
+    }
+  }
+}

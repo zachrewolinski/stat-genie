@@ -1,0 +1,50 @@
+{
+  "dataset_name": "caschools",
+  "run_dir": "agentic/experiments/outputs/caschools/replace_with_rvs/run2",
+  "research_question": "Is a lower student-teacher ratio associated with higher academic performance?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Student-teacher ratio (main predictor), computed as total enrollment divided by number of teachers.",
+          "columns": [
+            "students",
+            "teachers"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Academic performance measured as the average of district average reading and math Stanford-9 scores.",
+        "columns": [
+          "read",
+          "math"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Socioeconomic and demographic covariates included to hold constant: percent qualifying for reduced-price lunch, district average income (in $1,000), percent English learners, and expenditure per student.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "lunch",
+            "income",
+            "english",
+            "expenditure"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport statsmodels.api as sm\n\n# Load data\ncsv_path = \"caschools.csv\"\ndf = pd.read_csv(csv_path)\n\n# Compute student-teacher ratio\n# Avoid division by zero just in case\n\ndf[\"stratio\"] = df[\"students\"] / df[\"teachers\"]\n\n# Academic performance: average of reading and math\n\ndf[\"avg_score\"] = df[[\"read\", \"math\"]].mean(axis=1)\n\n# Drop rows with missing values in key columns\nkey_cols = [\"stratio\", \"avg_score\", \"lunch\", \"income\", \"english\", \"expenditure\"]\nclean = df.dropna(subset=key_cols)\n\n# Simple correlation\ncorr = clean[[\"stratio\", \"avg_score\"]].corr().iloc[0, 1]\n\n# Simple regression: avg_score ~ stratio\nX_simple = sm.add_constant(clean[\"stratio\"])\nmodel_simple = sm.OLS(clean[\"avg_score\"], X_simple).fit()\n\n# Controlled regression: add socioeconomic/demographic controls\nX_controls = clean[[\"stratio\", \"lunch\", \"income\", \"english\", \"expenditure\"]]\nX_controls = sm.add_constant(X_controls)\nmodel_controls = sm.OLS(clean[\"avg_score\"], X_controls).fit()\n\n# Save key results for manual inspection\nprint(\"Rows used:\", len(clean))\nprint(\"Correlation (stratio vs avg_score):\", corr)\nprint(\"Simple regression coef (stratio):\", model_simple.params[\"stratio\"], \"p=\", model_simple.pvalues[\"stratio\"])\nprint(\"Controlled regression coef (stratio):\", model_controls.params[\"stratio\"], \"p=\", model_controls.pvalues[\"stratio\"])\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T18:33:13.716910+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/caschools/replace_with_rvs/run2/analysis.py",
+      "info_json": "agentic/experiments/outputs/caschools/replace_with_rvs/run2/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/caschools/replace_with_rvs/run2/conclusion.txt"
+    }
+  }
+}

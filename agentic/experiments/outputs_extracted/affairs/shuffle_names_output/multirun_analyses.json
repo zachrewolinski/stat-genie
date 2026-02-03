@@ -1,0 +1,178 @@
+{
+  "dataset_name": "affairs",
+  "n": 5,
+  "analyses": {
+    "0": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Main independent variable: indicator for whether there are children in the marriage (binary yes/no). In the analysis this was represented as a has_children dummy mapped from the dataset column 'religiousness'.",
+            "columns": [
+              "religiousness"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Dependent variable: engagement in extramarital affairs measured as frequency (coded values such as 0,1,2,3,7,12). In the analysis this was taken from the dataset column 'age'.",
+          "columns": [
+            "age"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Adjustment covariates included in the adjusted logistic regression: age category, years married, religiousness score, education level, occupation score, self-rated marriage satisfaction, and gender. These correspond to the canonical columns listed below.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "occupation",
+              "children",
+              "rating",
+              "yearsmarried",
+              "rownames",
+              "affairs",
+              "gender"
+            ]
+          }
+        ]
+      },
+      "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\nimport statsmodels.formula.api as smf\n\n# Load data\n_df = pd.read_csv('affairs.csv')\n\n# Map shuffled columns to their actual meanings based on value patterns\n# affairs count (0,1,2,3,7,12) is in the 'age' column\n_df['affairs_count'] = _df['age']\n# children indicator (yes/no) is in 'religiousness'\n_df['has_children'] = _df['religiousness'].map({'yes': 1, 'no': 0})\n# other covariates (optional controls)\n_df['age_cat'] = _df['occupation']\n_df['years_married'] = _df['children']\n_df['religiousness_score'] = _df['rating']\n_df['education_level'] = _df['yearsmarried']\n_df['occupation_score'] = _df['rownames']\n_df['marriage_rating'] = _df['affairs']\n\n# Basic comparisons\nsummary = (\n    _df.groupby('has_children')['affairs_count']\n    .agg(['count', 'mean', 'median'])\n)\nsummary['any_affair_rate'] = (\n    _df.groupby('has_children')['affairs_count']\n    .apply(lambda s: (s > 0).mean())\n)\n\nprint('Affairs by children (0=no, 1=yes):')\nprint(summary)\n\n# Difference in means\nmean_no = summary.loc[0, 'mean']\nmean_yes = summary.loc[1, 'mean']\nprint('\\nMean difference (has_children=1 minus 0):', mean_yes - mean_no)\n\n# Logistic regression: any affair vs. children (with and without controls)\n_df['any_affair'] = (_df['affairs_count'] > 0).astype(int)\n\n# Unadjusted model\nlogit_unadj = smf.logit('any_affair ~ has_children', data=_df).fit(disp=False)\nprint('\\nUnadjusted logit:')\nprint(logit_unadj.summary())\n\n# Adjusted model with common controls\nlogit_adj = smf.logit(\n    'any_affair ~ has_children + age_cat + years_married + religiousness_score + '\n    'education_level + occupation_score + marriage_rating + C(gender)',\n    data=_df\n).fit(disp=False)\nprint('\\nAdjusted logit:')\nprint(logit_adj.summary())\n\n# Odds ratios for has_children\nor_unadj = np.exp(logit_unadj.params['has_children'])\nor_adj = np.exp(logit_adj.params['has_children'])\nprint('\\nOdds ratio (has_children): unadjusted', or_unadj)\nprint('Odds ratio (has_children): adjusted', or_adj)\n"
+    },
+    "1": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Presence of children in the marriage (binary indicator coded 'yes'/'no' in the metadata column 'religiousness'); treated as the main predictor (having children).",
+            "columns": [
+              "religiousness"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Frequency of extramarital sexual intercourse during the past year (metadata column 'age'), coded with values {0,1,2,3,7,12} representing increasing frequency (0 = none, 1 = once, 2 = twice, 3 = three times, 7 = 4–10 times, 12 = monthly/weekly/daily).",
+          "columns": [
+            "age"
+          ]
+        },
+        "controls": []
+      },
+      "analysis_code": "import pandas as pd\nimport numpy as np\nfrom statsmodels.stats.weightstats import ttest_ind\nfrom statsmodels.stats.proportion import proportions_ztest\n\ndef main():\n    df = pd.read_csv(\"affairs.csv\")\n\n    # Based on metadata value patterns:\n    # - \"age\" column has values {0,1,2,3,7,12} and matches the affairs frequency coding.\n    # - \"religiousness\" column is yes/no and matches the children indicator.\n    affairs_col = \"age\"\n    children_col = \"religiousness\"\n\n    df = df[[affairs_col, children_col]].copy()\n    df[children_col] = df[children_col].str.lower()\n\n    df[\"any_affair\"] = df[affairs_col] > 0\n\n    # Group stats\n    group_stats = df.groupby(children_col)[affairs_col].agg([\"count\", \"mean\", \"median\"]) \n    any_affair_rate = df.groupby(children_col)[\"any_affair\"].mean()\n\n    # Welch t-test for mean affairs frequency\n    yes = df[df[children_col] == \"yes\"][affairs_col]\n    no = df[df[children_col] == \"no\"][affairs_col]\n    t_stat, p_val, dfree = ttest_ind(yes, no, usevar=\"unequal\")\n\n    # Two-proportion z-test for any-affair rate\n    count = np.array([df[df[children_col] == \"yes\"][\"any_affair\"].sum(),\n                      df[df[children_col] == \"no\"][\"any_affair\"].sum()])\n    nobs = np.array([df[df[children_col] == \"yes\"].shape[0],\n                     df[df[children_col] == \"no\"].shape[0]])\n    z_stat, p_val_prop = proportions_ztest(count, nobs)\n\n    print(\"Group stats (affairs frequency):\")\n    print(group_stats)\n    print(\"\\nAny-affair rate:\")\n    print(any_affair_rate)\n    print(\"\\nWelch t-test (mean affairs frequency, yes vs no children):\")\n    print(f\"t={t_stat:.3f}, p={p_val:.4g}, df={dfree:.1f}\")\n    print(\"\\nTwo-proportion z-test (any affair, yes vs no children):\")\n    print(f\"z={z_stat:.3f}, p={p_val_prop:.4g}\")\n\nif __name__ == \"__main__\":\n    main()\n"
+    },
+    "2": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Indicator for whether there are children in the marriage (binary factor coded yes/no). In the analysis this column ('religiousness') was used as the 'children' indicator.",
+            "columns": [
+              "religiousness"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Frequency of extramarital sexual intercourse during the past year (coded with values 0,1,2,3,7,12). In the analysis the 'age' column was used as the affairs frequency outcome.",
+          "columns": [
+            "age"
+          ]
+        },
+        "controls": []
+      },
+      "analysis_code": "import pandas as pd\nfrom statsmodels.stats.weightstats import ttest_ind\n\n# Load data\npath = \"affairs.csv\"\ndf = pd.read_csv(path)\n\n# The column names are shuffled; infer true variables by value patterns.\n# 'religiousness' is binary yes/no -> children indicator\n# 'age' has values {0,1,2,3,7,12} -> affairs frequency\nchildren = df[\"religiousness\"]\naffairs = df[\"age\"]\n\n# Group summaries\nsummary = (\n    df.assign(children=children, affairs=affairs)\n    .groupby(\"children\")\n    .agg(\n        n=(\"affairs\", \"size\"),\n        mean_affairs=(\"affairs\", \"mean\"),\n        median_affairs=(\"affairs\", \"median\"),\n        any_affair_rate=(\"affairs\", lambda x: (x > 0).mean()),\n    )\n)\n\n# T-test for difference in mean affairs (Welch)\nwith_children = affairs[children == \"yes\"]\nwithout_children = affairs[children == \"no\"]\n\n# statsmodels returns (tstat, pvalue, df)\ntstat, pval, _ = ttest_ind(with_children, without_children, usevar=\"unequal\")\n\nprint(\"Summary by children (yes/no):\")\nprint(summary)\nprint(\"\\nWelch t-test for mean affairs (yes vs no):\")\nprint(f\"t = {tstat:.3f}, p = {pval:.4f}\")\n\n# Difference in means\nmean_diff = with_children.mean() - without_children.mean()\nprint(f\"\\nMean difference (yes - no): {mean_diff:.3f}\")\n"
+    },
+    "3": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Presence of children in the marriage (binary factor coded as 'yes'/'no'). The analysis treats the 'religiousness' column as the indicator for having children and uses it as the main predictor of affair frequency.",
+            "columns": [
+              "religiousness"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Frequency of engagement in extramarital affairs during the past year. The analysis uses the 'age' column (which in this dataset holds affair frequency values coded 0=None, 1=once, 2=twice, 3=3 times, 7=4–10 times, 12=monthly/weekly/daily) as the outcome variable.",
+          "columns": [
+            "age"
+          ]
+        },
+        "controls": []
+      },
+      "analysis_code": "import pandas as pd\nimport numpy as np\nfrom statsmodels.stats.weightstats import ttest_ind\nimport statsmodels.api as sm\n\n# Load data\npath = \"affairs.csv\"\ndf = pd.read_csv(path)\n\n# Based on value ranges and metadata mismatches, interpret columns:\n# - 'age' holds affair frequency count (0-12)\n# - 'religiousness' is a yes/no indicator that aligns with having children\n# We'll analyze whether having children (yes/no) is associated with lower affair frequency.\n\n# Prepare variables\nchildren_yes = df[\"religiousness\"].str.lower().map({\"yes\": 1, \"no\": 0})\naffairs_count = df[\"age\"].astype(float)\n\n# Basic group stats\nstats = df.groupby(children_yes).agg(\n    mean_affairs=(\"age\", \"mean\"),\n    median_affairs=(\"age\", \"median\"),\n    prop_affair_gt0=(\"age\", lambda s: (s > 0).mean()),\n    n=(\"age\", \"size\"),\n)\n\n# T-test for difference in means\nx = affairs_count[children_yes == 1]\ny = affairs_count[children_yes == 0]\nt_stat, p_value, dfree = ttest_ind(x, y, usevar=\"unequal\")\n\n# Simple regression: affairs count ~ children indicator\nX = sm.add_constant(children_yes)\nmodel = sm.OLS(affairs_count, X).fit()\n\nprint(\"Group stats by children (0=no, 1=yes):\")\nprint(stats)\nprint(\"\\nT-test (children yes vs no):\")\nprint(f\"t={t_stat:.3f}, p={p_value:.4f}\")\nprint(\"\\nOLS: affairs_count ~ children_yes\")\nprint(model.summary().tables[1])\n"
+    },
+    "4": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Indicator for whether there are children in the marriage (binary yes/no). This is the main predictor of interest: whether having children affects affair engagement.",
+            "columns": [
+              "religiousness"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Frequency of extramarital sexual intercourse during the past year (affair frequency coded ordinally: 0,1,2,3,7,12). This is the outcome measuring engagement in affairs.",
+          "columns": [
+            "age"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Respondent age (coded in categories as numeric values, e.g. 17.5, 22, 27, ...). Included to adjust for age differences.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "occupation"
+            ]
+          },
+          {
+            "description": "Years married (coded in categories: e.g. 0.125, 0.417, 0.75, 1.5, 4, 7, 10, 15). Included as a control for marriage duration.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "children"
+            ]
+          },
+          {
+            "description": "Education level (coded categories for highest degree attained). Included as a socioeconomic control.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "yearsmarried"
+            ]
+          },
+          {
+            "description": "Occupation classification (Hollingshead coding). Included as an occupational / socioeconomic control.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "rownames"
+            ]
+          },
+          {
+            "description": "Gender of respondent (factor: male/female). Included as a demographic control (modeled as categorical).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "gender"
+            ]
+          },
+          {
+            "description": "Religiousness scale (coded 1-5 from anti to very). Included to control for religiosity.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "rating"
+            ]
+          },
+          {
+            "description": "Self-rating of marriage quality (scale 1-5). Included to control for baseline marital satisfaction.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "affairs"
+            ]
+          }
+        ]
+      },
+      "analysis_code": "import pandas as pd\nimport numpy as np\nfrom scipy import stats\nimport statsmodels.api as sm\nimport statsmodels.formula.api as smf\n\n# Load data\n_df = pd.read_csv('affairs.csv')\n\n# Map shuffled columns back to their likely meaning by value ranges\n# Affairs frequency is coded as 0,1,2,3,7,12 -> stored in column named 'age'\n# Children is yes/no -> stored in column named 'religiousness'\n# Age categories 17.5..57 -> stored in column named 'occupation'\n# Years married 0.125..15 -> stored in column named 'children'\n# Education 9..20 -> stored in column named 'yearsmarried'\n# Occupation 1..7 -> stored in column named 'rownames'\n# Remaining two 1..5 scales are religiousness and marriage rating\nmapped = pd.DataFrame({\n    'affairs': _df['age'],\n    'children': (_df['religiousness'] == 'yes').astype(int),\n    'age': _df['occupation'],\n    'years_married': _df['children'],\n    'education': _df['yearsmarried'],\n    'occupation': _df['rownames'],\n    'gender': _df['gender'],\n    'religiousness': _df['rating'],\n    'rate_marriage': _df['affairs'],\n})\n\n# Basic checks to guard against unexpected schema\nassert mapped['affairs'].isin([0, 1, 2, 3, 7, 12]).all(), 'Affairs coding unexpected'\nassert mapped['children'].isin([0, 1]).all(), 'Children should be binary'\n\n# Descriptives: mean affairs by children status\nmean_by_children = mapped.groupby('children')['affairs'].mean()\ncount_by_children = mapped.groupby('children')['affairs'].size()\n\n# Two-sample t-test (Welch)\n_yes = mapped.loc[mapped['children'] == 1, 'affairs']\n_no = mapped.loc[mapped['children'] == 0, 'affairs']\nwelch_t = stats.ttest_ind(_yes, _no, equal_var=False)\n\n# Regression with controls (Poisson for count outcome)\nformula = (\n    'affairs ~ children + age + years_married + education + occupation '\n    '+ C(gender) + religiousness + rate_marriage'\n)\npois = smf.glm(formula, data=mapped, family=sm.families.Poisson()).fit()\n\nprint('Counts by children status')\nprint(count_by_children)\nprint('\\nMean affairs by children status (0=no, 1=yes)')\nprint(mean_by_children)\nprint('\\nWelch t-test (yes vs no):')\nprint(welch_t)\nprint('\\nPoisson regression (coefficients):')\nprint(pois.summary().tables[1])\n"
+    }
+  }
+}

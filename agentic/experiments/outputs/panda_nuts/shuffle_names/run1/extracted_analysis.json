@@ -1,0 +1,57 @@
+{
+  "dataset_name": "panda_nuts",
+  "run_dir": "agentic/experiments/outputs/panda_nuts/shuffle_names/run1",
+  "research_question": "Do age, sex, and receiving help from another chimpanzee influence the nut-cracking efficiency of western chimpanzees?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Age in years at time of observation — predictor of nut-cracking efficiency (independent variable).",
+          "columns": [
+            "hammer"
+          ]
+        },
+        {
+          "description": "Individual's sex (male/female) — categorical predictor of nut-cracking efficiency.",
+          "columns": [
+            "nuts_opened"
+          ]
+        },
+        {
+          "description": "Whether the individual received help from another chimpanzee (yes/no) — predictor of nut-cracking efficiency.",
+          "columns": [
+            "seconds"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Number of nuts opened in the session (count outcome); modeled as a rate (nuts per unit time).",
+        "columns": [
+          "help"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Session duration in seconds used as an exposure offset in the Poisson model to account for differing observation times.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "chimpanzee"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\nimport statsmodels.formula.api as smf\n\n# Load data\npath = 'panda_nuts.csv'\ndf = pd.read_csv(path)\n\n# Rename columns based on metadata mismatch\n# age column seems to be individual ID; hammer column holds age in years\n# nuts_opened column holds sex (m/f); sex column holds hammer type\n# help column holds number of nuts opened; chimpanzee column holds session duration (seconds)\n# seconds column holds whether help was received (y/N)\ndf = df.rename(columns={\n    'age': 'chimp_id',\n    'hammer': 'age_years',\n    'nuts_opened': 'sex',\n    'sex': 'hammer_type',\n    'help': 'nuts_opened',\n    'chimpanzee': 'session_seconds',\n    'seconds': 'help_received'\n})\n\n# Clean help_received to binary\n# values appear as 'y'/'N'\ndf['help_received'] = df['help_received'].str.strip().str.lower().map({'y': 1, 'n': 0})\n\n# Some rows may be missing or unexpected values\n# Drop rows with missing key fields\nkey_cols = ['age_years', 'sex', 'help_received', 'nuts_opened', 'session_seconds']\ndf = df.dropna(subset=key_cols)\n\n# Ensure numeric types\nfor col in ['age_years', 'nuts_opened', 'session_seconds']:\n    df[col] = pd.to_numeric(df[col], errors='coerce')\n\n# Drop any rows with non-positive session time\n# (offset requires positive exposure)\ndf = df[df['session_seconds'] > 0]\n\n# Poisson regression with offset for exposure time to model efficiency (rate of nuts opened)\n# Predictors: age, sex, help_received\nmodel = smf.glm(\n    formula='nuts_opened ~ age_years + C(sex) + help_received',\n    data=df,\n    family=sm.families.Poisson(),\n    offset=np.log(df['session_seconds'])\n).fit()\n\nprint(model.summary())\n\n# Save key results for interpretation\nparams = model.params\npvalues = model.pvalues\nresults = pd.DataFrame({'coef': params, 'pvalue': pvalues})\nresults.to_csv('model_results.csv')\n\n# Compute rate ratios for interpretability\nrate_ratios = np.exp(params)\nrr = pd.DataFrame({'rate_ratio': rate_ratios, 'pvalue': pvalues})\nrr.to_csv('rate_ratios.csv')\n\n# Also compute simple group summaries for context\nsummary = df.groupby(['sex', 'help_received']).apply(\n    lambda x: pd.Series({\n        'mean_rate': (x['nuts_opened'] / x['session_seconds']).mean(),\n        'median_rate': (x['nuts_opened'] / x['session_seconds']).median(),\n        'n': len(x)\n    })\n).reset_index()\nsummary.to_csv('group_rate_summary.csv', index=False)\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T19:12:56.037965+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/panda_nuts/shuffle_names/run1/analysis.py",
+      "info_json": "agentic/experiments/outputs/panda_nuts/shuffle_names/run1/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/panda_nuts/shuffle_names/run1/conclusion.txt"
+    }
+  }
+}

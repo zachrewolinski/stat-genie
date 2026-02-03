@@ -1,0 +1,117 @@
+{
+  "dataset_name": "mortgage",
+  "run_dir": "agentic/experiments/outputs/mortgage/noperturb/run2",
+  "research_question": "Does gender affect whether banks approve an individual's mortgage application?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Applicant gender indicator (primary independent variable): 1 if applicant is female, 0 if male.",
+          "columns": [
+            "female"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Mortgage application denial indicator (dependent variable modeled): 1 if application was denied, 0 if accepted. Analysis uses 'deny' as the outcome in a logistic regression.",
+        "columns": [
+          "deny"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Race indicator: 1 if applicant is Black, 0 otherwise.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "black"
+          ]
+        },
+        {
+          "description": "Housing expense as a ratio of total income (measure of housing-related debt burden).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "housing_expense_ratio"
+          ]
+        },
+        {
+          "description": "Self-employment indicator: 1 if applicant is self-employed, 0 otherwise.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "self_employed"
+          ]
+        },
+        {
+          "description": "Marital status indicator: 1 if applicant is married, 0 otherwise.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "married"
+          ]
+        },
+        {
+          "description": "Applicant's mortgage credit score (categorical/ordinal score used by lenders).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "mortgage_credit"
+          ]
+        },
+        {
+          "description": "Applicant's consumer credit score (categorical/ordinal score).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "consumer_credit"
+          ]
+        },
+        {
+          "description": "Indicator for history of bad credit: 1 if applicant has a history of bad credit, 0 otherwise.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "bad_history"
+          ]
+        },
+        {
+          "description": "Total debt payments to income ratio (payment-to-income ratio).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "PI_ratio"
+          ]
+        },
+        {
+          "description": "Ratio of loan amount to appraised value of the property (loan-to-value).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "loan_to_value"
+          ]
+        },
+        {
+          "description": "Indicator for denied private mortgage insurance: 1 if application was denied PMI, 0 otherwise.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "denied_PMI"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\n\n# Load data\n_df = pd.read_csv(\"mortgage.csv\")\n\n# Basic cleaning\nif \"Unnamed: 0\" in _df.columns:\n    _df = _df.drop(columns=[\"Unnamed: 0\"])\n\n# Outcome: deny (1 = denied)\n# Primary predictor: female (1 = female)\n\n# Unadjusted denial rates\nrates = _df.groupby(\"female\")[\"deny\"].mean()\ncount = _df.groupby(\"female\")[\"deny\"].count()\n\n# Logistic regression with controls\ncontrols = [\n    \"female\",\n    \"black\",\n    \"housing_expense_ratio\",\n    \"self_employed\",\n    \"married\",\n    \"mortgage_credit\",\n    \"consumer_credit\",\n    \"bad_history\",\n    \"PI_ratio\",\n    \"loan_to_value\",\n    \"denied_PMI\",\n]\n\nX = _df[controls].copy()\ny = _df[\"deny\"].astype(float)\n\n# Drop rows with missing/inf values in model inputs\nX = X.replace([np.inf, -np.inf], np.nan)\nmodel_df = pd.concat([y, X], axis=1).dropna()\ny = model_df[\"deny\"]\nX = model_df[controls]\nX = sm.add_constant(X, has_constant=\"add\")\n\nmodel = sm.Logit(y, X)\nresult = model.fit(disp=False)\n\nfemale_coef = result.params.get(\"female\")\nfemale_p = result.pvalues.get(\"female\")\n\n# Print key outputs for inspection\nprint(\"Unadjusted denial rates by female (0=male, 1=female):\")\nfor k in rates.index:\n    print(f\"  female={int(k)}: rate={rates.loc[k]:.4f} (n={int(count.loc[k])})\")\n\nprint(\"\\nLogit deny ~ female + controls:\")\nprint(f\"  female coef (log-odds): {female_coef:.6f}\")\nprint(f\"  female p-value: {female_p:.6g}\")\n\n# Also compute odds ratio for interpretability\nodds_ratio = float(np.exp(female_coef)) if female_coef is not None else np.nan\nprint(f\"  female odds ratio: {odds_ratio:.4f}\")\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T18:58:11.164664+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/mortgage/noperturb/run2/analysis.py",
+      "info_json": "agentic/experiments/outputs/mortgage/noperturb/run2/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/mortgage/noperturb/run2/conclusion.txt"
+    }
+  }
+}

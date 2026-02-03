@@ -1,0 +1,54 @@
+{
+  "dataset_name": "mortgage",
+  "run_dir": "agentic/experiments/outputs/mortgage/anonymize/run2",
+  "research_question": "Does gender affect whether banks approve an individual's mortgage application?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Applicant gender (treatment/predictor of interest; 1 if female, 0 if male).",
+          "columns": [
+            "feature2"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Mortgage application outcome (1 if application accepted, 0 if denied).",
+        "columns": [
+          "feature14"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Applicant and application covariates included to adjust for creditworthiness and application characteristics: race (Black indicator), housing expense ratio, self-employment status, marital status, mortgage credit score, consumer credit score, bad credit history indicator, total debt-to-income ratio, loan-to-value ratio, and PMI denied indicator.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature3",
+            "feature4",
+            "feature5",
+            "feature6",
+            "feature7",
+            "feature8",
+            "feature9",
+            "feature10",
+            "feature12",
+            "feature13"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport statsmodels.api as sm\nfrom scipy import stats\n\n# Load data\nDF_PATH = \"mortgage.csv\"\ndf = pd.read_csv(DF_PATH)\n\n# Key variables\n# feature2: 1 if applicant is female, 0 if male\n# feature14: 1 if application accepted, 0 if denied\n\n# Descriptive approval rates by gender\napproval_by_gender = df.groupby(\"feature2\")[\"feature14\"].mean()\ncounts_by_gender = df[\"feature2\"].value_counts().sort_index()\n\n# Two-proportion z-test (female vs male)\n# p1 = approval rate for females, p0 = approval rate for males\nfemale_mask = df[\"feature2\"] == 1\nmale_mask = df[\"feature2\"] == 0\np1 = df.loc[female_mask, \"feature14\"].mean()\np0 = df.loc[male_mask, \"feature14\"].mean()\n\nn1 = female_mask.sum()\nn0 = male_mask.sum()\n\np_pool = df[\"feature14\"].mean()\nse = (p_pool * (1 - p_pool) * (1 / n1 + 1 / n0)) ** 0.5\nz = (p1 - p0) / se\np_value_z = 2 * (1 - stats.norm.cdf(abs(z)))\n\n# Logistic regression controlling for other factors\n# Drop identifier-like feature1 and avoid redundancy with feature11 (denied) and feature14 (accepted)\nfeatures = [\n    \"feature2\",  # gender (female=1)\n    \"feature3\",  # Black\n    \"feature4\",  # housing expense ratio\n    \"feature5\",  # self-employed\n    \"feature6\",  # married\n    \"feature7\",  # mortgage credit score\n    \"feature8\",  # consumer credit score\n    \"feature9\",  # bad credit history\n    \"feature10\", # total debt ratio\n    \"feature12\", # loan-to-value\n    \"feature13\", # PMI denied\n]\n\nX = df[features].copy()\ny = df[\"feature14\"]\n\n# Clean missing or infinite values for modeling\nmodel_df = pd.concat([X, y], axis=1).replace([float(\"inf\"), float(\"-inf\")], pd.NA).dropna()\nX = sm.add_constant(model_df[features])\ny = model_df[\"feature14\"]\n\nlogit_model = sm.Logit(y, X)\nlogit_result = logit_model.fit(disp=False)\n\ncoef_gender = logit_result.params[\"feature2\"]\np_value_gender = logit_result.pvalues[\"feature2\"]\n\n# Save key outputs for conclusion\nresults_summary = {\n    \"approval_rate_male\": float(p0),\n    \"approval_rate_female\": float(p1),\n    \"z_test_p_value\": float(p_value_z),\n    \"logit_gender_coef\": float(coef_gender),\n    \"logit_gender_p_value\": float(p_value_gender),\n}\n\nprint(\"Approval rates by gender (0=male, 1=female):\")\nprint(approval_by_gender)\nprint(\"Counts by gender:\")\nprint(counts_by_gender)\nprint(\"Two-proportion z-test p-value:\", p_value_z)\nprint(\"Logit gender coef:\", coef_gender)\nprint(\"Logit gender p-value:\", p_value_gender)\n\n# Write results for downstream use\npd.Series(results_summary).to_csv(\"analysis_results.csv\")\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T18:55:43.508734+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/mortgage/anonymize/run2/analysis.py",
+      "info_json": "agentic/experiments/outputs/mortgage/anonymize/run2/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/mortgage/anonymize/run2/conclusion.txt"
+    }
+  }
+}

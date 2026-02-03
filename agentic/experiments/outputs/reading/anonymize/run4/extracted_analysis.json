@@ -1,0 +1,60 @@
+{
+  "dataset_name": "reading",
+  "run_dir": "agentic/experiments/outputs/reading/anonymize/run4",
+  "research_question": "Does 'Reader View' --- a modified web page layout --- improves reading speed for individuals with dyslexia?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Reader View activation (treatment): indicates if the reader view layout was activated (1) or not (0).",
+          "columns": [
+            "feature3"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Reading speed (outcome): reading speed measured as words per minute.",
+        "columns": [
+          "feature20"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Regression covariates included to adjust for text difficulty, demographics, device and trial factors: Flesch-Kincaid readability score, age, retake indicator, device, education, gender, language, native speaker.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature19",
+            "feature10",
+            "feature16",
+            "feature11",
+            "feature13",
+            "feature14",
+            "feature15",
+            "feature18"
+          ]
+        },
+        {
+          "description": "Sample restriction: analysis limited to participants identified as having dyslexia (used to subset the dataset).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature17"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nfrom scipy import stats\nimport statsmodels.api as sm\nimport statsmodels.formula.api as smf\n\n# Load data\ndf = pd.read_csv('reading.csv')\n\n# Define columns\nREADER_VIEW = 'feature3'\nDYSLEXIA = 'feature17'\nREADING_SPEED = 'feature20'  # words per minute\n\n# Subset to dyslexic readers\ndys = df[df[DYSLEXIA] == 1].copy()\n\n# Basic group stats\nrv_on = dys[dys[READER_VIEW] == 1][READING_SPEED]\nrv_off = dys[dys[READER_VIEW] == 0][READING_SPEED]\n\nsummary = {\n    'n_dys_total': len(dys),\n    'n_rv_on': rv_on.shape[0],\n    'n_rv_off': rv_off.shape[0],\n    'mean_rv_on': rv_on.mean(),\n    'mean_rv_off': rv_off.mean(),\n    'diff_on_minus_off': rv_on.mean() - rv_off.mean(),\n    'median_rv_on': rv_on.median(),\n    'median_rv_off': rv_off.median(),\n}\n\n# Welch t-test (unequal variances)\nt_stat, p_val = stats.ttest_ind(rv_on, rv_off, equal_var=False, nan_policy='omit')\n\n# 95% CI for difference in means (Welch)\n# Compute using standard error of difference\nse_diff = np.sqrt(rv_on.var(ddof=1)/rv_on.shape[0] + rv_off.var(ddof=1)/rv_off.shape[0])\n# Welch-Satterthwaite df\nnum = (rv_on.var(ddof=1)/rv_on.shape[0] + rv_off.var(ddof=1)/rv_off.shape[0])**2\nden = ((rv_on.var(ddof=1)/rv_on.shape[0])**2/(rv_on.shape[0]-1)) + ((rv_off.var(ddof=1)/rv_off.shape[0])**2/(rv_off.shape[0]-1))\ndf_welch = num/den\nci_low, ci_high = stats.t.interval(0.95, df_welch, loc=summary['diff_on_minus_off'], scale=se_diff)\n\n# Regression with basic controls to check robustness\n# Use reading speed as outcome; include readability, device, language, age, education, gender, retake, native speaker\n# Keep within dyslexic group to answer question\nreg_df = dys.copy()\n# Convert to categorical for statsmodels\ncategoricals = ['feature11', 'feature13', 'feature14', 'feature15', 'feature18']\nfor c in categoricals:\n    reg_df[c] = reg_df[c].astype('category')\n\nformula = (\n    \"feature20 ~ feature3 + feature19 + feature10 + feature16 + C(feature11) + \"\n    \"C(feature13) + C(feature14) + C(feature15) + C(feature18)\"\n)\nmodel = smf.ols(formula, data=reg_df).fit()\n\n# Collect key regression result\ncoef = model.params.get('feature3', np.nan)\ncoef_p = model.pvalues.get('feature3', np.nan)\n\nprint('SUMMARY')\nfor k, v in summary.items():\n    print(f\"{k}: {v}\")\nprint(f\"t_stat: {t_stat}\")\nprint(f\"p_val: {p_val}\")\nprint(f\"95% CI diff (on - off): [{ci_low}, {ci_high}]\")\nprint(f\"reg_coef_feature3: {coef}\")\nprint(f\"reg_pval_feature3: {coef_p}\")\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T19:16:44.905869+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/reading/anonymize/run4/analysis.py",
+      "info_json": "agentic/experiments/outputs/reading/anonymize/run4/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/reading/anonymize/run4/conclusion.txt"
+    }
+  }
+}

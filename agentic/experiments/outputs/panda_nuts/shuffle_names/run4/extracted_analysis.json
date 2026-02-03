@@ -1,0 +1,49 @@
+{
+  "dataset_name": "panda_nuts",
+  "run_dir": "agentic/experiments/outputs/panda_nuts/shuffle_names/run4",
+  "research_question": "Do age, sex, and receiving help from another chimpanzee influence the nut-cracking efficiency of western chimpanzees?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Age of the individual in years (predictor of nut-cracking efficiency).",
+          "columns": [
+            "age"
+          ]
+        },
+        {
+          "description": "Sex of the individual (male/female), encoded in the 'nuts_opened' column in the raw file.",
+          "columns": [
+            "nuts_opened"
+          ]
+        },
+        {
+          "description": "Whether the individual received help from another chimpanzee during the session (yes/no), encoded in the 'seconds' column in the raw file.",
+          "columns": [
+            "seconds"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Nut-cracking efficiency calculated as nuts opened per second (help ÷ chimpanzee), i.e., number of nuts opened in the session divided by session duration in seconds.",
+        "columns": [
+          "help",
+          "chimpanzee"
+        ]
+      },
+      "controls": []
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.formula.api as smf\n\n# Load data\n_df = pd.read_csv('panda_nuts.csv')\n\n# Map columns based on metadata mismatch\n# age: numeric age in years\n# nuts_opened: sex (m/f)\n# seconds: help received (y/N)\n# help: number of nuts opened in session\n# chimpanzee: duration in seconds\n\n_df = _df.copy()\n_df['sex_cat'] = _df['nuts_opened'].astype('category')\n_df['help_cat'] = _df['seconds'].astype('category')\n\n# Efficiency: nuts opened per second\n_df['efficiency'] = _df['help'] / _df['chimpanzee']\n\n# Remove any invalid rows (e.g., zero duration)\n_df = _df.replace([np.inf, -np.inf], np.nan).dropna(subset=['efficiency', 'age', 'sex_cat', 'help_cat'])\n\n# Fit OLS with robust SE\nmodel = smf.ols('efficiency ~ age + C(sex_cat) + C(help_cat)', data=_df).fit(cov_type='HC3')\n\n# Save summary to a text file for inspection\nwith open('analysis_summary.txt', 'w') as f:\n    f.write(model.summary().as_text())\n    f.write('\\n\\n')\n    f.write('N=' + str(len(_df)) + '\\n')\n\n# Also compute group means for interpretation\nmeans = _df.groupby(['sex_cat', 'help_cat'])['efficiency'].mean().reset_index()\nmeans.to_csv('group_means.csv', index=False)\n\nprint(model.summary())\nprint('\\nGroup means (efficiency):')\nprint(means)\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T19:13:50.580809+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/panda_nuts/shuffle_names/run4/analysis.py",
+      "info_json": "agentic/experiments/outputs/panda_nuts/shuffle_names/run4/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/panda_nuts/shuffle_names/run4/conclusion.txt"
+    }
+  }
+}

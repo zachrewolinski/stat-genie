@@ -1,0 +1,46 @@
+{
+  "dataset_name": "soccer",
+  "run_dir": "agentic/experiments/outputs/soccer/replace_with_rvs/run3",
+  "research_question": "Are soccer players with a dark skin tone more likely than those with a light skin tone to receive red cards from referees?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Player skin tone (dark vs light), measured from two independent photo raters (5-point scale normalized to 1) and averaged to create the skin tone measure used to define dark vs light.",
+          "columns": [
+            "rater1",
+            "rater2"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Player red-card outcome: number of red cards a player received from a given referee (used both as a count outcome and dichotomized to 'any red' for logistic models).",
+        "columns": [
+          "redCards"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Number of games in the player-referee dyad; used as the exposure (offset) in the Poisson regression to model red-card rate per game.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "games"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\nimport statsmodels.formula.api as smf\n\n\ndef main():\n    df = pd.read_csv(\"soccer.csv\")\n\n    # Average the two raters to get a single skin tone score\n    df[\"skin_avg\"] = df[[\"rater1\", \"rater2\"]].mean(axis=1)\n\n    # Median split into light vs dark for a simple, transparent comparison\n    median_skin = df[\"skin_avg\"].median()\n    df[\"dark\"] = (df[\"skin_avg\"] > median_skin).astype(int)\n\n    # Outcome: any red card in the dyad\n    df[\"any_red\"] = (df[\"redCards\"] > 0).astype(int)\n\n    # Logistic regression: probability of at least one red card\n    logit_model = smf.logit(\"any_red ~ dark\", data=df).fit(disp=False)\n\n    # Poisson regression with exposure (games) for red-card rate per game\n    df[\"log_games\"] = np.log(df[\"games\"])\n    poisson_model = smf.glm(\n        \"redCards ~ dark\",\n        data=df,\n        family=sm.families.Poisson(),\n        offset=df[\"log_games\"],\n    ).fit()\n\n    # Group-level descriptive rates\n    grp = df.groupby(\"dark\").apply(\n        lambda g: pd.Series(\n            {\n                \"n\": g.shape[0],\n                \"any_red_rate\": g[\"any_red\"].mean(),\n                \"red_per_game\": g[\"redCards\"].sum() / g[\"games\"].sum(),\n            }\n        )\n    )\n\n    print(\"Median skin_avg:\", median_skin)\n    print(\"Logit coef (dark):\", logit_model.params[\"dark\"], \"p=\", logit_model.pvalues[\"dark\"])\n    print(\"Poisson coef (dark):\", poisson_model.params[\"dark\"], \"p=\", poisson_model.pvalues[\"dark\"])\n    print(\"Group rates:\\n\", grp)\n\n\nif __name__ == \"__main__\":\n    main()\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-02T16:42:13.058620+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/soccer/replace_with_rvs/run3/analysis.py",
+      "info_json": "agentic/experiments/outputs/soccer/replace_with_rvs/run3/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/soccer/replace_with_rvs/run3/conclusion.txt"
+    }
+  }
+}

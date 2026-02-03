@@ -1,0 +1,83 @@
+{
+  "dataset_name": "hurricane",
+  "run_dir": "agentic/experiments/outputs/hurricane/noperturb/run3",
+  "research_question": "Hurricanes with more feminine names are perceived as less threatening and hence lead to fewer precautionary measures by the general public.",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Continuous masculinity–femininity index of the hurricane name rated by independent coders (higher = more feminine).",
+          "columns": [
+            "masfem"
+          ]
+        },
+        {
+          "description": "Binary indicator of the hurricane name's gender (0 = male name, 1 = female name) used as an alternative specification of name femininity.",
+          "columns": [
+            "gender_mf"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Total number of deaths caused by the hurricane (outcome of interest; analysis also used a log-transformed version).",
+        "columns": [
+          "alldeaths"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Maximum wind speed of the hurricane at the time of landfall (NOAA).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "wind"
+          ]
+        },
+        {
+          "description": "Minimum central pressure of the hurricane at the time of landfall (NOAA).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "min"
+          ]
+        },
+        {
+          "description": "Saffir–Simpson category of the hurricane.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "category"
+          ]
+        },
+        {
+          "description": "Monetary damage normalized to 2015 values (adjusted for inflation, wealth, and population density).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "ndam15"
+          ]
+        },
+        {
+          "description": "Year the hurricane occurred (calendar year).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "year"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\nimport statsmodels.formula.api as smf\n\n\ndef main() -> None:\n    df = pd.read_csv(\"hurricane.csv\")\n\n    # Basic summaries\n    df[\"log_deaths\"] = np.log1p(df[\"alldeaths\"])\n\n    # Correlation between name femininity and deaths\n    corr = df[\"masfem\"].corr(df[\"alldeaths\"])\n\n    # OLS on log deaths with controls (robust SE)\n    X = df[[\"masfem\", \"wind\", \"min\", \"category\", \"ndam15\", \"year\"]].copy()\n    X = sm.add_constant(X)\n    ols = sm.OLS(df[\"log_deaths\"], X).fit(cov_type=\"HC3\")\n\n    # Alternative specification using binary gender\n    X2 = df[[\"gender_mf\", \"wind\", \"min\", \"category\", \"ndam15\", \"year\"]].copy()\n    X2 = sm.add_constant(X2)\n    ols_gender = sm.OLS(df[\"log_deaths\"], X2).fit(cov_type=\"HC3\")\n\n    # Count model (negative binomial GLM)\n    nb = smf.glm(\n        formula=\"alldeaths ~ masfem + wind + min + category + ndam15 + year\",\n        data=df,\n        family=sm.families.NegativeBinomial(),\n    ).fit()\n\n    print(\"Rows:\", len(df))\n    print(\"Deaths summary:\\n\", df[\"alldeaths\"].describe())\n    print(\"Masfem summary:\\n\", df[\"masfem\"].describe())\n    print(\"Correlation (masfem, alldeaths):\", corr)\n\n    print(\"\\nOLS log1p(deaths) ~ masfem + controls (HC3 SE)\")\n    print(ols.summary())\n\n    print(\"\\nOLS log1p(deaths) ~ gender_mf + controls (HC3 SE)\")\n    print(ols_gender.summary())\n\n    print(\"\\nNegative Binomial GLM deaths ~ masfem + controls\")\n    print(nb.summary())\n\n\nif __name__ == \"__main__\":\n    main()\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T18:48:01.036210+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/hurricane/noperturb/run3/analysis.py",
+      "info_json": "agentic/experiments/outputs/hurricane/noperturb/run3/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/hurricane/noperturb/run3/conclusion.txt"
+    }
+  }
+}

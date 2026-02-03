@@ -1,0 +1,93 @@
+{
+  "dataset_name": "affairs",
+  "run_dir": "agentic/experiments/outputs/affairs/anonymize/run3",
+  "research_question": "Does having children decrease (if at all) the engagement in extramarital affairs?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Presence of children in the marriage (binary factor: yes/no) — the main predictor of interest (does having children affect engagement in extramarital affairs?).",
+          "columns": [
+            "feature6"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Frequency of extramarital sexual intercourse during the past year (numeric/count-like coding: 0 = none, 1 = once, 2 = twice, 3 = 3 times, 7 = 4–10 times, 12 = monthly/weekly/daily coding conflation) — outcome measuring engagement in affairs.",
+        "columns": [
+          "feature2"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Gender / sex of respondent (factor: female/male) included as a demographic control.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature3"
+          ]
+        },
+        {
+          "description": "Respondent age (coded in years bands: 17.5 = under 20, 22 = 20–24, ..., 57 = 55 or over) included as a demographic control.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature4"
+          ]
+        },
+        {
+          "description": "Number of years married (coded: 0.125 = 3 months or less, 0.417 = 4–6 months, ..., 15 = 12+ years) included as a marital-duration control.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature5"
+          ]
+        },
+        {
+          "description": "Religiousness (1 = anti, 2 = not at all, 3 = slightly, 4 = somewhat, 5 = very) included as a control for religiosity.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature7"
+          ]
+        },
+        {
+          "description": "Education level (coded: 9 = grade school, 12 = high school grad, 14 = some college, 16 = college grad, 17 = some graduate work, 18 = master's, 20 = Ph.D./M.D./advanced) included as a socioeconomic control.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature8"
+          ]
+        },
+        {
+          "description": "Occupation (Hollingshead classification, numeric) included as an SES/occupation control.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature9"
+          ]
+        },
+        {
+          "description": "Self-rated marriage quality (1 = very unhappy ... 5 = very happy) included as a control for marital satisfaction.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature10"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import numpy as np\nimport pandas as pd\nimport statsmodels.api as sm\n\n# Load data\npath = \"affairs.csv\"\ndf = pd.read_csv(path)\n\n# Identify key variables\n# feature2: frequency of extramarital intercourse in past year (count-like)\n# feature6: children in marriage (yes/no)\n# feature3: gender (female/male)\n\naffairs = df[\"feature2\"].astype(float)\nchildren = (df[\"feature6\"].astype(str).str.lower() == \"yes\").astype(int)\n\n# Basic grouping stats\nstats = (\n    df.assign(has_children=children, affairs=affairs)\n      .groupby(\"has_children\")\n      .agg(\n          n=(\"affairs\", \"size\"),\n          mean_affairs=(\"affairs\", \"mean\"),\n          median_affairs=(\"affairs\", \"median\"),\n          prop_any_affair=(\"affairs\", lambda x: (x > 0).mean()),\n      )\n)\n\n# Differences: children yes (1) minus no (0)\nmean_diff = stats.loc[1, \"mean_affairs\"] - stats.loc[0, \"mean_affairs\"]\nprop_diff = stats.loc[1, \"prop_any_affair\"] - stats.loc[0, \"prop_any_affair\"]\n\n# Bootstrap CIs for differences\nrng = np.random.default_rng(0)\nB = 1000\nmean_diffs = np.empty(B)\nprop_diffs = np.empty(B)\n\nfor b in range(B):\n    idx = rng.integers(0, len(df), len(df))\n    samp = df.iloc[idx].copy()\n    s_affairs = samp[\"feature2\"].astype(float)\n    s_children = (samp[\"feature6\"].astype(str).str.lower() == \"yes\").astype(int)\n    g = (\n        samp.assign(has_children=s_children, affairs=s_affairs)\n           .groupby(\"has_children\")\n           .agg(\n               mean_affairs=(\"affairs\", \"mean\"),\n               prop_any_affair=(\"affairs\", lambda x: (x > 0).mean()),\n           )\n    )\n    # Ensure both groups exist in resample\n    if 0 in g.index and 1 in g.index:\n        mean_diffs[b] = g.loc[1, \"mean_affairs\"] - g.loc[0, \"mean_affairs\"]\n        prop_diffs[b] = g.loc[1, \"prop_any_affair\"] - g.loc[0, \"prop_any_affair\"]\n    else:\n        mean_diffs[b] = np.nan\n        prop_diffs[b] = np.nan\n\nmean_ci = np.nanpercentile(mean_diffs, [2.5, 97.5])\nprop_ci = np.nanpercentile(prop_diffs, [2.5, 97.5])\n\n# Logistic regression for any affair > 0\n# Controls: gender, age, years married, religiousness, education, occupation, marriage rating\nmodel_df = df.copy()\nmodel_df[\"has_children\"] = children\nmodel_df[\"male\"] = (model_df[\"feature3\"].astype(str).str.lower() == \"male\").astype(int)\nmodel_df[\"any_affair\"] = (model_df[\"feature2\"].astype(float) > 0).astype(int)\n\nX = model_df[[\"has_children\", \"male\", \"feature4\", \"feature5\", \"feature7\", \"feature8\", \"feature9\", \"feature10\"]].astype(float)\nX = sm.add_constant(X)\ny = model_df[\"any_affair\"].astype(int)\n\nlogit = sm.Logit(y, X)\nres = logit.fit(disp=False)\n\ncoef = res.params[\"has_children\"]\nse = res.bse[\"has_children\"]\npval = res.pvalues[\"has_children\"]\nci_low, ci_high = res.conf_int().loc[\"has_children\"].tolist()\n\nodds_ratio = float(np.exp(coef))\nor_ci_low, or_ci_high = float(np.exp(ci_low)), float(np.exp(ci_high))\n\n# Report\nprint(\"Group stats (has_children=1 means children present):\")\nprint(stats)\nprint(\"\\nDifferences (children - no children):\")\nprint(f\"Mean affairs diff: {mean_diff:.4f} (95% CI {mean_ci[0]:.4f}, {mean_ci[1]:.4f})\")\nprint(f\"Prop any affair diff: {prop_diff:.4f} (95% CI {prop_ci[0]:.4f}, {prop_ci[1]:.4f})\")\nprint(\"\\nLogistic regression on any affair (controls included):\")\nprint(f\"has_children coef: {coef:.4f}, SE {se:.4f}, p={pval:.4g}\")\nprint(f\"Odds ratio: {odds_ratio:.4f} (95% CI {or_ci_low:.4f}, {or_ci_high:.4f})\")\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T17:57:48.786871+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/affairs/anonymize/run3/analysis.py",
+      "info_json": "agentic/experiments/outputs/affairs/anonymize/run3/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/affairs/anonymize/run3/conclusion.txt"
+    }
+  }
+}

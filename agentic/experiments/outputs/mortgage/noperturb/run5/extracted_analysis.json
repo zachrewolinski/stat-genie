@@ -1,0 +1,54 @@
+{
+  "dataset_name": "mortgage",
+  "run_dir": "agentic/experiments/outputs/mortgage/noperturb/run5",
+  "research_question": "Does gender affect whether banks approve an individual's mortgage application?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Gender of applicant, main independent variable (1 = female, 0 = male).",
+          "columns": [
+            "female"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Mortgage application outcome used as the dependent variable (1 = accepted, 0 = denied).",
+        "columns": [
+          "accept"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Applicant and creditworthiness covariates included to adjust the estimated effect of gender on approval: race indicator, housing expense, self-employment, marital status, mortgage and consumer credit scores, history of bad credit, payment-to-income ratio, loan-to-value ratio, and private mortgage insurance denial indicator.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "black",
+            "housing_expense_ratio",
+            "self_employed",
+            "married",
+            "mortgage_credit",
+            "consumer_credit",
+            "bad_history",
+            "PI_ratio",
+            "loan_to_value",
+            "denied_PMI"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\nfrom scipy import stats\n\n\ndef main():\n    df = pd.read_csv(\"mortgage.csv\")\n\n    # Basic sanity checks\n    required = [\"female\", \"accept\", \"deny\"]\n    for col in required:\n        if col not in df.columns:\n            raise ValueError(f\"Missing required column: {col}\")\n\n    # Use accept as outcome (1=accepted)\n    y = df[\"accept\"].astype(float)\n    female = df[\"female\"].astype(float)\n\n    # Unadjusted difference in approval rates\n    rate_female = y[female == 1].mean()\n    rate_male = y[female == 0].mean()\n    diff = rate_female - rate_male\n\n    # Two-proportion z-test (approx) for difference in rates\n    n_f = (female == 1).sum()\n    n_m = (female == 0).sum()\n    p_pool = (y[female == 1].sum() + y[female == 0].sum()) / (n_f + n_m)\n    se_pool = np.sqrt(p_pool * (1 - p_pool) * (1 / n_f + 1 / n_m))\n    z = diff / se_pool if se_pool > 0 else np.nan\n    p_unadj = 2 * (1 - stats.norm.cdf(abs(z))) if np.isfinite(z) else np.nan\n\n    # Adjusted logistic regression with key covariates\n    # Select columns that are likely available and relevant to creditworthiness\n    covariates = [\n        \"female\",\n        \"black\",\n        \"housing_expense_ratio\",\n        \"self_employed\",\n        \"married\",\n        \"mortgage_credit\",\n        \"consumer_credit\",\n        \"bad_history\",\n        \"PI_ratio\",\n        \"loan_to_value\",\n        \"denied_PMI\",\n    ]\n    covariates = [c for c in covariates if c in df.columns]\n    X = df[covariates].astype(float)\n    X = sm.add_constant(X, has_constant=\"add\")\n\n    # Fit logit; drop missing rows if any\n    data = pd.concat([y, X], axis=1).dropna()\n    y2 = data[\"accept\"]\n    X2 = data.drop(columns=[\"accept\"])\n\n    model = sm.Logit(y2, X2)\n    result = model.fit(disp=False)\n\n    # Extract female coefficient and p-value\n    if \"female\" in result.params.index:\n        coef_female = result.params[\"female\"]\n        p_female = result.pvalues[\"female\"]\n        odds_ratio = np.exp(coef_female)\n    else:\n        coef_female = np.nan\n        p_female = np.nan\n        odds_ratio = np.nan\n\n    print(\"Unadjusted approval rate female:\", rate_female)\n    print(\"Unadjusted approval rate male:\", rate_male)\n    print(\"Unadjusted difference (female - male):\", diff)\n    print(\"Unadjusted p-value (two-proportion z):\", p_unadj)\n    print(\"Adjusted logit female coef:\", coef_female)\n    print(\"Adjusted logit female p-value:\", p_female)\n    print(\"Adjusted logit female odds ratio:\", odds_ratio)\n\n\nif __name__ == \"__main__\":\n    main()\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T18:58:48.094033+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/mortgage/noperturb/run5/analysis.py",
+      "info_json": "agentic/experiments/outputs/mortgage/noperturb/run5/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/mortgage/noperturb/run5/conclusion.txt"
+    }
+  }
+}

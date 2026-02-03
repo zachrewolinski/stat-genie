@@ -1,0 +1,42 @@
+{
+  "dataset_name": "boxes",
+  "run_dir": "agentic/experiments/outputs/boxes/add_features/run2",
+  "research_question": "Do children’s reliance on social information and preference for majority cues vary across cultures and developmental stages?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Child age in years, used as a continuous predictor representing developmental stage (assesses age-related change).",
+          "columns": [
+            "age"
+          ]
+        },
+        {
+          "description": "Site/culture identifier (categorical), used to assess cross-cultural differences in social learning and majority preference.",
+          "columns": [
+            "culture"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Outcome variable y (1 = unchosen option, 2 = majority option, 3 = minority option). The analysis derives two dependent measures from y: (a) reliance on social information — choosing a demonstrated option (majority or minority), and (b) majority preference among demonstrated choices — choosing the majority when only demonstrated options are considered.",
+        "columns": [
+          "y"
+        ]
+      },
+      "controls": []
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.formula.api as smf\n\n# Load data\n_df = pd.read_csv('boxes.csv')\n\n# Keep only relevant columns and drop missing\ncols = ['y', 'age', 'culture']\ndf = _df[cols].dropna().copy()\n\n# Define outcomes\n# y: 1=unchosen option, 2=majority option, 3=minority option\n# Social information reliance: choosing demonstrated options (majority or minority)\ndf['choice_demo'] = df['y'].isin([2, 3]).astype(int)\n# Majority preference among all choices\n_df['choice_majority'] = (_df['y'] == 2).astype(int)\n# Majority preference among demonstrated choices only\nsub_demo = df[df['y'].isin([2, 3])].copy()\nsub_demo['choice_majority'] = (sub_demo['y'] == 2).astype(int)\n\n# Descriptives\noverall = {\n    'n_total': len(df),\n    'majority_rate_all': (df['y'] == 2).mean(),\n    'minority_rate_all': (df['y'] == 3).mean(),\n    'unchosen_rate_all': (df['y'] == 1).mean(),\n    'demo_rate': df['choice_demo'].mean(),\n    'majority_rate_demo': sub_demo['choice_majority'].mean() if len(sub_demo) else np.nan,\n}\n\n# Logistic regression: reliance on social info\n# choice_demo ~ age + culture (categorical)\nmodel_demo = smf.logit('choice_demo ~ age + C(culture)', data=df).fit(disp=False)\n\n# Logistic regression: preference for majority among demonstrated choices\nmodel_majority = smf.logit('choice_majority ~ age + C(culture)', data=sub_demo).fit(disp=False)\n\n# Extract key p-values\np_age_demo = model_demo.pvalues.get('age', np.nan)\np_age_majority = model_majority.pvalues.get('age', np.nan)\n\n# Any culture effect?\n# Consider any culture coefficient significant at 0.05\nculture_terms_demo = [k for k in model_demo.pvalues.index if k.startswith('C(culture)')]\nculture_terms_majority = [k for k in model_majority.pvalues.index if k.startswith('C(culture)')]\n\np_culture_demo = model_demo.pvalues[culture_terms_demo].min() if culture_terms_demo else np.nan\np_culture_majority = model_majority.pvalues[culture_terms_majority].min() if culture_terms_majority else np.nan\n\n# Odds ratios for age\nor_age_demo = float(np.exp(model_demo.params['age']))\nor_age_majority = float(np.exp(model_majority.params['age']))\n\nprint('Descriptives:', overall)\nprint('Demo model p(age):', p_age_demo, 'OR(age):', or_age_demo)\nprint('Demo model min p(culture):', p_culture_demo)\nprint('Majority model p(age):', p_age_majority, 'OR(age):', or_age_majority)\nprint('Majority model min p(culture):', p_culture_majority)\n\n# Save key results for interpretation\nresults = {\n    'overall': overall,\n    'p_age_demo': float(p_age_demo),\n    'p_age_majority': float(p_age_majority),\n    'p_culture_demo': float(p_culture_demo),\n    'p_culture_majority': float(p_culture_majority),\n    'or_age_demo': or_age_demo,\n    'or_age_majority': or_age_majority,\n}\n\npd.Series(results).to_json('analysis_results.json')\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T18:16:24.891135+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/boxes/add_features/run2/analysis.py",
+      "info_json": "agentic/experiments/outputs/boxes/add_features/run2/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/boxes/add_features/run2/conclusion.txt"
+    }
+  }
+}

@@ -1,0 +1,52 @@
+{
+  "dataset_name": "soccer",
+  "run_dir": "agentic/experiments/outputs/soccer/noperturb/run5",
+  "research_question": "Are soccer players with a dark skin tone more likely than those with a light skin tone to receive red cards from referees?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Player skin tone as measured by two independent photo raters (5-point scale normalized to 1); the analysis used the mean of rater1 and rater2 and dichotomized at the median into darker vs lighter skin.",
+          "columns": [
+            "rater1",
+            "rater2"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Count of red cards the player received from a particular referee in the player-referee dyad (outcome modeled with a Poisson regression, with games used as exposure).",
+        "columns": [
+          "redCards"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Covariates included in the adjusted Poisson model to hold constant player role and match/context factors: player position (categorical), league country (categorical), and player-level numeric covariates height, weight, goals, yellowCards, and yellowReds.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "position",
+            "leagueCountry",
+            "height",
+            "weight",
+            "goals",
+            "yellowCards",
+            "yellowReds"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\nimport statsmodels.formula.api as smf\n\n# Load data\ncsv_path = \"soccer.csv\"\ndf = pd.read_csv(csv_path)\n\n# Skin tone (mean of two raters)\ndf[\"skin_tone\"] = df[[\"rater1\", \"rater2\"]].mean(axis=1)\n\n# Keep rows with skin tone and games > 0\nanalysis_df = df.dropna(subset=[\"skin_tone\", \"games\", \"redCards\"]).copy()\nanalysis_df = analysis_df[analysis_df[\"games\"] > 0]\n\n# Dark vs light split at median\nmedian_skin = analysis_df[\"skin_tone\"].median()\nanalysis_df[\"dark_skin\"] = (analysis_df[\"skin_tone\"] >= median_skin).astype(int)\n\n# Aggregate red-card rates by group\nrate_table = (\n    analysis_df.groupby(\"dark_skin\")[[\"redCards\", \"games\"]]\n    .sum()\n    .assign(red_per_100_games=lambda x: 100 * x[\"redCards\"] / x[\"games\"])\n)\n\n# Poisson regression with offset for exposure (games)\nanalysis_df[\"log_games\"] = np.log(analysis_df[\"games\"])\n\n# Unadjusted model (skin tone only)\nmodel_unadj = smf.glm(\n    formula=\"redCards ~ skin_tone\",\n    data=analysis_df,\n    family=sm.families.Poisson(),\n    offset=analysis_df[\"log_games\"],\n).fit()\n\n# Adjusted model with basic controls\n# Use categorical for position and leagueCountry, and numeric covariates\nmodel_adj = smf.glm(\n    formula=\"redCards ~ skin_tone + C(position) + C(leagueCountry) + height + weight + goals + yellowCards + yellowReds\",\n    data=analysis_df,\n    family=sm.families.Poisson(),\n    offset=analysis_df[\"log_games\"],\n).fit()\n\n# Collect key results\nresults = {\n    \"median_skin\": float(median_skin),\n    \"rate_table\": rate_table.reset_index().to_dict(orient=\"records\"),\n    \"unadj_coef\": float(model_unadj.params[\"skin_tone\"]),\n    \"unadj_p\": float(model_unadj.pvalues[\"skin_tone\"]),\n    \"adj_coef\": float(model_adj.params[\"skin_tone\"]),\n    \"adj_p\": float(model_adj.pvalues[\"skin_tone\"]),\n}\n\n# Save a brief summary for inspection\nsummary_lines = []\nsummary_lines.append(f\"Median skin tone: {results['median_skin']:.3f}\")\nsummary_lines.append(\"Rates per 100 games by dark_skin (0=light,1=dark):\")\nfor row in results[\"rate_table\"]:\n    summary_lines.append(\n        f\"  dark_skin={row['dark_skin']}: redCards={row['redCards']}, games={row['games']}, red_per_100_games={row['red_per_100_games']:.3f}\"\n    )\nsummary_lines.append(\n    f\"Unadjusted Poisson coef for skin_tone: {results['unadj_coef']:.4f} (p={results['unadj_p']:.4g})\"\n)\nsummary_lines.append(\n    f\"Adjusted Poisson coef for skin_tone: {results['adj_coef']:.4f} (p={results['adj_p']:.4g})\"\n)\n\nwith open(\"analysis_summary.txt\", \"w\", encoding=\"utf-8\") as f:\n    f.write(\"\\n\".join(summary_lines))\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-02T16:38:21.150233+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/soccer/noperturb/run5/analysis.py",
+      "info_json": "agentic/experiments/outputs/soccer/noperturb/run5/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/soccer/noperturb/run5/conclusion.txt"
+    }
+  }
+}

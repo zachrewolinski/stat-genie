@@ -1,0 +1,284 @@
+{
+  "dataset_name": "caschools",
+  "n": 5,
+  "analyses": {
+    "0": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Student–teacher ratio computed as students divided by teachers (main predictor of interest).",
+            "columns": [
+              "students",
+              "teachers"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Average academic performance measured as the mean of 5th-grade reading and math Stanford 9 scores.",
+          "columns": [
+            "read",
+            "math"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Percent qualifying for reduced-price lunch (socioeconomic proxy).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "lunch"
+            ]
+          },
+          {
+            "description": "Percent of students who are English learners.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "english"
+            ]
+          },
+          {
+            "description": "District average income (in USD 1,000).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "income"
+            ]
+          },
+          {
+            "description": "Expenditure per student.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "expenditure"
+            ]
+          }
+        ]
+      },
+      "analysis_code": "import pandas as pd\nimport statsmodels.api as sm\n\n\ndef main():\n    df = pd.read_csv(\"caschools.csv\")\n\n    # Construct student-teacher ratio\n    df[\"str\"] = df[\"students\"] / df[\"teachers\"]\n\n    # Academic performance: average of reading and math scores\n    df[\"avg_score\"] = (df[\"read\"] + df[\"math\"]) / 2.0\n\n    # Basic correlation\n    corr = df[[\"str\", \"avg_score\"]].corr().iloc[0, 1]\n\n    # Simple OLS: avg_score ~ str\n    X_simple = sm.add_constant(df[[\"str\"]])\n    model_simple = sm.OLS(df[\"avg_score\"], X_simple).fit(cov_type=\"HC1\")\n\n    # Multivariate OLS with common controls\n    controls = [\"lunch\", \"english\", \"income\", \"expenditure\"]\n    X_ctrl = sm.add_constant(df[[\"str\"] + controls])\n    model_ctrl = sm.OLS(df[\"avg_score\"], X_ctrl).fit(cov_type=\"HC1\")\n\n    print(\"Rows:\", len(df))\n    print(\"Correlation(str, avg_score):\", corr)\n    print(\"\\nSimple OLS: avg_score ~ str (HC1 robust)\")\n    print(model_simple.summary().tables[1])\n    print(\"\\nControlled OLS: avg_score ~ str + lunch + english + income + expenditure (HC1 robust)\")\n    print(model_ctrl.summary().tables[1])\n\n    # Save key results for easier reuse if needed\n    results = {\n        \"corr\": corr,\n        \"simple_coef\": model_simple.params[\"str\"],\n        \"simple_p\": model_simple.pvalues[\"str\"],\n        \"ctrl_coef\": model_ctrl.params[\"str\"],\n        \"ctrl_p\": model_ctrl.pvalues[\"str\"],\n    }\n    pd.Series(results).to_csv(\"analysis_results.csv\", header=False)\n\n\nif __name__ == \"__main__\":\n    main()\n"
+    },
+    "1": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Student-teacher ratio (constructed in analysis as students divided by teachers) — the primary predictor of interest; lower values indicate fewer students per teacher.",
+            "columns": [
+              "students",
+              "teachers"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Average academic performance measured as the mean of reading and math Stanford-9 scores (constructed in analysis as the average of read and math).",
+          "columns": [
+            "read",
+            "math"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Percent qualifying for reduced-price lunch (socioeconomic indicator).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "lunch"
+            ]
+          },
+          {
+            "description": "Percent of English learners (students for whom English is a second language).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "english"
+            ]
+          },
+          {
+            "description": "District average income (in USD 1,000).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "income"
+            ]
+          },
+          {
+            "description": "Expenditure per student.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "expenditure"
+            ]
+          }
+        ]
+      },
+      "analysis_code": "import pandas as pd\nimport statsmodels.api as sm\n\n# Load data\ncsv_path = \"caschools.csv\"\n\ndf = pd.read_csv(csv_path)\n\n# Compute student-teacher ratio\n# Avoid division by zero just in case\n\ndf = df.copy()\ndf[\"stratio\"] = df[\"students\"] / df[\"teachers\"]\n\n# Academic performance: average of read and math scores\n\ndf[\"perf\"] = (df[\"read\"] + df[\"math\"]) / 2.0\n\n# Drop missing values for relevant columns\nbasic_cols = [\"perf\", \"stratio\"]\nreg_df = df[basic_cols].dropna()\n\n# Simple correlation\ncorr = reg_df[\"perf\"].corr(reg_df[\"stratio\"])\n\n# Simple OLS: perf ~ stratio\nX = sm.add_constant(reg_df[\"stratio\"])\nmodel_simple = sm.OLS(reg_df[\"perf\"], X).fit()\n\n# Multiple OLS with common controls\ncontrol_cols = [\"stratio\", \"lunch\", \"english\", \"income\", \"expenditure\"]\nreg_df2 = df[[\"perf\"] + control_cols].dropna()\nX2 = sm.add_constant(reg_df2[control_cols])\nmodel_controls = sm.OLS(reg_df2[\"perf\"], X2).fit()\n\nprint(\"Simple correlation (perf vs stratio):\", corr)\nprint(\"\\nSimple OLS: perf ~ stratio\")\nprint(model_simple.summary())\n\nprint(\"\\nOLS with controls: perf ~ stratio + lunch + english + income + expenditure\")\nprint(model_controls.summary())\n"
+    },
+    "2": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Student–teacher ratio (constructed as students per teacher). Represented in the analysis by the ratio of total enrollment to number of teachers.",
+            "columns": [
+              "students",
+              "teachers"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Academic performance measured as the average of 5th grade reading and math standardized test scores (Stanford 9).",
+          "columns": [
+            "read",
+            "math"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Percent qualifying for reduced-price lunch (socioeconomic indicator).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "lunch"
+            ]
+          },
+          {
+            "description": "Percent qualifying for CalWorks (income assistance; socioeconomic indicator).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "calworks"
+            ]
+          },
+          {
+            "description": "Percent of English learners (students for whom English is a second language).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "english"
+            ]
+          },
+          {
+            "description": "District average income (in USD 1,000).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "income"
+            ]
+          },
+          {
+            "description": "Expenditure per student (district spending).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "expenditure"
+            ]
+          }
+        ]
+      },
+      "analysis_code": "import pandas as pd\nimport statsmodels.api as sm\n\n# Load data\n_df = pd.read_csv('caschools.csv')\n\n# Compute student-teacher ratio (students per teacher)\n_df['stratio'] = _df['students'] / _df['teachers']\n\n# Academic performance: average of reading and math scores\n_df['avg_score'] = (_df['read'] + _df['math']) / 2\n\n# Simple correlation\ncorr = _df['stratio'].corr(_df['avg_score'])\n\n# Simple regression\nX_simple = sm.add_constant(_df['stratio'])\nmodel_simple = sm.OLS(_df['avg_score'], X_simple).fit()\n\n# Multiple regression controlling for demographics and spending\ncontrol_vars = ['lunch', 'calworks', 'english', 'income', 'expenditure']\nX_multi = sm.add_constant(_df[['stratio'] + control_vars])\nmodel_multi = sm.OLS(_df['avg_score'], X_multi).fit()\n\n# Save key results for inspection\nresults = {\n    'corr_stratio_avgscore': corr,\n    'simple_coef': model_simple.params['stratio'],\n    'simple_pvalue': model_simple.pvalues['stratio'],\n    'multi_coef': model_multi.params['stratio'],\n    'multi_pvalue': model_multi.pvalues['stratio'],\n}\n\nprint(results)\n"
+    },
+    "3": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Student–teacher ratio (students per teacher), the main predictor of interest; computed in the analysis as students / teachers.",
+            "columns": [
+              "students",
+              "teachers"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Academic performance measured as the average of standardized reading and math scores (Stanford 9); computed in the analysis as the mean of read and math.",
+          "columns": [
+            "read",
+            "math"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Covariates included to adjust for socioeconomic status and resource differences: percent qualifying for reduced-price lunch, district average income (in $1,000), percent English learners, and expenditure per student.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "lunch",
+              "income",
+              "english",
+              "expenditure"
+            ]
+          }
+        ]
+      },
+      "analysis_code": "import pandas as pd\nimport statsmodels.api as sm\n\nDATA_PATH = \"caschools.csv\"\n\ndf = pd.read_csv(DATA_PATH)\n\n# Student-teacher ratio\nif \"students\" not in df.columns or \"teachers\" not in df.columns:\n    raise ValueError(\"Expected columns 'students' and 'teachers' in dataset.\")\n\ndf[\"str\"] = df[\"students\"] / df[\"teachers\"]\n\n# Academic performance: average of reading and math scores\nfor col in [\"read\", \"math\"]:\n    if col not in df.columns:\n        raise ValueError(f\"Expected column '{col}' in dataset.\")\n\ndf[\"performance\"] = df[[\"read\", \"math\"]].mean(axis=1)\n\n# Simple correlation\ncorr = df[\"str\"].corr(df[\"performance\"])\n\n# Simple OLS: performance ~ str\nX_simple = sm.add_constant(df[[\"str\"]])\nmodel_simple = sm.OLS(df[\"performance\"], X_simple).fit()\n\n# Controlled OLS with key covariates\ncontrols = [\"lunch\", \"income\", \"english\", \"expenditure\"]\ncontrols = [c for c in controls if c in df.columns]\nX_ctrl = sm.add_constant(df[[\"str\"] + controls])\nmodel_ctrl = sm.OLS(df[\"performance\"], X_ctrl).fit()\n\n# Save a brief report for inspection\nreport = {\n    \"corr_str_performance\": corr,\n    \"simple_coef_str\": model_simple.params.get(\"str\"),\n    \"simple_p_str\": model_simple.pvalues.get(\"str\"),\n    \"ctrl_coef_str\": model_ctrl.params.get(\"str\"),\n    \"ctrl_p_str\": model_ctrl.pvalues.get(\"str\"),\n    \"n\": int(df.shape[0]),\n}\n\nprint(report)\n"
+    },
+    "4": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Student–teacher ratio (main predictor of interest). In the analysis this was computed as students / teachers; underlying columns are total enrollment and number of teachers.",
+            "columns": [
+              "students",
+              "teachers"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Academic performance measured as the average of standardized reading and math scores (Stanford 9, 5th grade).",
+          "columns": [
+            "read",
+            "math"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Percent qualifying for reduced-price lunch (socioeconomic indicator).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "lunch"
+            ]
+          },
+          {
+            "description": "Percent of students who are English learners.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "english"
+            ]
+          },
+          {
+            "description": "District average income (in USD 1,000).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "income"
+            ]
+          },
+          {
+            "description": "Expenditure per student (spending).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "expenditure"
+            ]
+          },
+          {
+            "description": "Percent qualifying for CalWorks (income assistance).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "calworks"
+            ]
+          },
+          {
+            "description": "Number of computers (school resources).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "computer"
+            ]
+          }
+        ]
+      },
+      "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\n\n# Load data\npath = \"/home/chenwang/stat-genie/agentic/experiments/outputs/caschools/positive_leading_statement/run5/caschools.csv\"\ndf = pd.read_csv(path)\n\n# Compute student-teacher ratio\n# Avoid division by zero just in case\n\ndf = df.copy()\ndf[\"str\"] = df[\"students\"] / df[\"teachers\"]\n\n# Academic performance: average of reading and math scores\n\ndf[\"avg_score\"] = df[[\"read\", \"math\"]].mean(axis=1)\n\n# Basic correlation\ncorr = df[[\"str\", \"avg_score\"]].corr().iloc[0, 1]\n\n# Simple regression: avg_score ~ str\nX1 = sm.add_constant(df[[\"str\"]])\nmodel1 = sm.OLS(df[\"avg_score\"], X1, missing=\"drop\").fit()\n\n# Multiple regression controlling for demographics and spending\ncontrols = [\"lunch\", \"english\", \"income\", \"expenditure\", \"calworks\", \"computer\"]\nX2 = sm.add_constant(df[[\"str\"] + controls])\nmodel2 = sm.OLS(df[\"avg_score\"], X2, missing=\"drop\").fit()\n\n# Save key results to a small report for inspection\nreport_lines = []\nreport_lines.append(f\"Rows used: {len(df)}\")\nreport_lines.append(f\"Correlation(str, avg_score): {corr:.4f}\")\nreport_lines.append(\"\\nSimple OLS: avg_score ~ str\")\nreport_lines.append(model1.summary().as_text())\nreport_lines.append(\"\\nControlled OLS: avg_score ~ str + controls\")\nreport_lines.append(model2.summary().as_text())\n\nreport_path = \"/home/chenwang/stat-genie/agentic/experiments/outputs/caschools/positive_leading_statement/run5/analysis_report.txt\"\nwith open(report_path, \"w\") as f:\n    f.write(\"\\n\".join(report_lines))\n\nprint(\"Analysis complete. Report written to\", report_path)\n"
+    }
+  }
+}

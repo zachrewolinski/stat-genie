@@ -1,0 +1,125 @@
+{
+  "dataset_name": "mortgage",
+  "run_dir": "agentic/experiments/outputs/mortgage/anonymize/run1",
+  "research_question": "Does gender affect whether banks approve an individual's mortgage application?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Applicant gender (1 if female, 0 if male)",
+          "columns": [
+            "feature2"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Mortgage application accepted (1 if accepted, 0 if denied)",
+        "columns": [
+          "feature14"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Numeric variable (no description provided in metadata)",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature1"
+          ]
+        },
+        {
+          "description": "1 if applicant is Black, 0 otherwise",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature3"
+          ]
+        },
+        {
+          "description": "Housing expense as a ratio of total income",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature4"
+          ]
+        },
+        {
+          "description": "1 if applicant is self-employed, 0 otherwise",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature5"
+          ]
+        },
+        {
+          "description": "1 if applicant is married, 0 otherwise",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature6"
+          ]
+        },
+        {
+          "description": "Applicant's mortgage credit score",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature7"
+          ]
+        },
+        {
+          "description": "Applicant's consumer credit score",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature8"
+          ]
+        },
+        {
+          "description": "1 if applicant has history of bad credit, 0 otherwise",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature9"
+          ]
+        },
+        {
+          "description": "Total debt payments to income ratio",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature10"
+          ]
+        },
+        {
+          "description": "Ratio of loan amount to appraised value of property",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature12"
+          ]
+        },
+        {
+          "description": "1 if application was denied private mortgage insurance, 0 otherwise",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature13"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import numpy as np\nimport pandas as pd\nimport statsmodels.api as sm\n\n\ndef main():\n    df = pd.read_csv(\"mortgage.csv\")\n\n    # Outcome: accepted (1) vs denied (0)\n    y = df[\"feature14\"]\n\n    # Unadjusted approval rates by gender\n    approval_rates = df.groupby(\"feature2\")[\"feature14\"].mean()\n    # 0 = male, 1 = female\n    unadjusted_diff = approval_rates.get(1.0, float('nan')) - approval_rates.get(0.0, float('nan'))\n\n    # Adjusted logistic regression with controls\n    # Exclude feature11 (denied) to avoid perfect collinearity with accepted\n    control_cols = [\n        \"feature1\",\n        \"feature3\",\n        \"feature4\",\n        \"feature5\",\n        \"feature6\",\n        \"feature7\",\n        \"feature8\",\n        \"feature9\",\n        \"feature10\",\n        \"feature12\",\n        \"feature13\",\n    ]\n    X = df[[\"feature2\"] + control_cols]\n    X = sm.add_constant(X, has_constant=\"add\")\n\n    # Drop rows with missing or non-finite values\n    valid_mask = np.isfinite(X).all(axis=1) & np.isfinite(y)\n    X = X.loc[valid_mask]\n    y = y.loc[valid_mask]\n\n    model = sm.Logit(y, X)\n    result = model.fit(disp=False)\n\n    coef = result.params[\"feature2\"]\n    pval = result.pvalues[\"feature2\"]\n\n    # Save key outputs for conclusion\n    print(\"Unadjusted approval rates (male=0, female=1):\")\n    print(approval_rates)\n    print(f\"Unadjusted approval rate difference (female - male): {unadjusted_diff:.4f}\")\n    print(\"\\nAdjusted logistic regression (accepted ~ female + controls):\")\n    print(f\"Female coef (log-odds): {coef:.4f}\")\n    print(f\"Female p-value: {pval:.6f}\")\n\n\nif __name__ == \"__main__\":\n    main()\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T18:55:30.611553+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/mortgage/anonymize/run1/analysis.py",
+      "info_json": "agentic/experiments/outputs/mortgage/anonymize/run1/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/mortgage/anonymize/run1/conclusion.txt"
+    }
+  }
+}

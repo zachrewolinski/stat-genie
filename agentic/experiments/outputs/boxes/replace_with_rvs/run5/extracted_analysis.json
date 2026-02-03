@@ -1,0 +1,42 @@
+{
+  "dataset_name": "boxes",
+  "run_dir": "agentic/experiments/outputs/boxes/replace_with_rvs/run5",
+  "research_question": "Do children’s reliance on social information and preference for majority cues vary across cultures and developmental stages?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Child's age in years (developmental stage). Tested as a main predictor and in interaction with culture.",
+          "columns": [
+            "age"
+          ]
+        },
+        {
+          "description": "Cultural site / study location ID (captures cultural context). Treated as a categorical predictor and tested in interaction with age.",
+          "columns": [
+            "culture"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Child's choice on the trial, coded 1 = undemonstrated (unchosen) option, 2 = majority option, 3 = minority option. The analysis derived binary outcomes from this column (social_reliance: choice in {2,3}; majority_choice: among demonstrated choices, whether choice == 2).",
+        "columns": [
+          "y"
+        ]
+      },
+      "controls": []
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\nimport statsmodels.formula.api as smf\nfrom scipy.stats import chi2\n\n\ndef lr_test(full, reduced):\n    lr_stat = 2 * (full.llf - reduced.llf)\n    df_diff = int(full.df_model - reduced.df_model)\n    p_value = chi2.sf(lr_stat, df_diff)\n    return lr_stat, df_diff, p_value\n\n\ndef fit_models(df, outcome):\n    model_age = smf.glm(f\"{outcome} ~ age\", data=df, family=sm.families.Binomial()).fit()\n    model_culture = smf.glm(f\"{outcome} ~ C(culture)\", data=df, family=sm.families.Binomial()).fit()\n    model_age_culture = smf.glm(f\"{outcome} ~ age + C(culture)\", data=df, family=sm.families.Binomial()).fit()\n    model_interaction = smf.glm(f\"{outcome} ~ age * C(culture)\", data=df, family=sm.families.Binomial()).fit()\n\n    age_test = lr_test(model_age_culture, model_culture)\n    culture_test = lr_test(model_age_culture, model_age)\n    interaction_test = lr_test(model_interaction, model_age_culture)\n\n    return {\n        \"model_age\": model_age,\n        \"model_culture\": model_culture,\n        \"model_age_culture\": model_age_culture,\n        \"model_interaction\": model_interaction,\n        \"age_test\": age_test,\n        \"culture_test\": culture_test,\n        \"interaction_test\": interaction_test,\n    }\n\n\ndef main():\n    df = pd.read_csv(\"boxes.csv\")\n\n    df[\"social_reliance\"] = (df[\"y\"].isin([2, 3])).astype(int)\n\n    df_demo = df[df[\"y\"].isin([2, 3])].copy()\n    df_demo[\"majority_choice\"] = (df_demo[\"y\"] == 2).astype(int)\n\n    print(\"Rows:\", len(df))\n    print(\"Social reliance rate:\", df[\"social_reliance\"].mean())\n    print(\"Majority preference rate (among demonstrated choices):\", df_demo[\"majority_choice\"].mean())\n\n    print(\"\\nSocial reliance by culture:\")\n    print(df.groupby(\"culture\")[\"social_reliance\"].mean().sort_index())\n\n    print(\"\\nMajority preference by culture (among demonstrated choices):\")\n    print(df_demo.groupby(\"culture\")[\"majority_choice\"].mean().sort_index())\n\n    print(\"\\nLogistic regression LR tests for social reliance:\")\n    social_models = fit_models(df, \"social_reliance\")\n    print(\"Age effect (add age to culture): LR=%.3f, df=%d, p=%.4g\" % social_models[\"age_test\"])\n    print(\"Culture effect (add culture to age): LR=%.3f, df=%d, p=%.4g\" % social_models[\"culture_test\"])\n    print(\"Age*Culture interaction: LR=%.3f, df=%d, p=%.4g\" % social_models[\"interaction_test\"])\n\n    print(\"\\nLogistic regression LR tests for majority preference (among demonstrated choices):\")\n    majority_models = fit_models(df_demo, \"majority_choice\")\n    print(\"Age effect (add age to culture): LR=%.3f, df=%d, p=%.4g\" % majority_models[\"age_test\"])\n    print(\"Culture effect (add culture to age): LR=%.3f, df=%d, p=%.4g\" % majority_models[\"culture_test\"])\n    print(\"Age*Culture interaction: LR=%.3f, df=%d, p=%.4g\" % majority_models[\"interaction_test\"])\n\n\nif __name__ == \"__main__\":\n    main()\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T18:24:36.273546+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/boxes/replace_with_rvs/run5/analysis.py",
+      "info_json": "agentic/experiments/outputs/boxes/replace_with_rvs/run5/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/boxes/replace_with_rvs/run5/conclusion.txt"
+    }
+  }
+}

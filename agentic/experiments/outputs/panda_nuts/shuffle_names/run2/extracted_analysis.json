@@ -1,0 +1,49 @@
+{
+  "dataset_name": "panda_nuts",
+  "run_dir": "agentic/experiments/outputs/panda_nuts/shuffle_names/run2",
+  "research_question": "Do age, sex, and receiving help from another chimpanzee influence the nut-cracking efficiency of western chimpanzees?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Age in years (predictor of nut-cracking efficiency). In the raw file this information is stored in the column labeled 'hammer'.",
+          "columns": [
+            "hammer"
+          ]
+        },
+        {
+          "description": "Sex of the individual (categorical predictor, e.g. m/f). In the raw file this information is stored in the column labeled 'nuts_opened'.",
+          "columns": [
+            "nuts_opened"
+          ]
+        },
+        {
+          "description": "Whether the subject received help from another chimpanzee during the session (binary predictor, y/N). In the raw file this information is stored in the column labeled 'seconds'.",
+          "columns": [
+            "seconds"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Nut-cracking efficiency (outcome) defined as number of nuts opened per second; computed from the number of nuts opened ('help') divided by session duration in seconds ('chimpanzee').",
+        "columns": [
+          "help",
+          "chimpanzee"
+        ]
+      },
+      "controls": []
+    },
+    "analysis_code": "import pandas as pd\nimport statsmodels.formula.api as smf\n\n# Load data\n_df = pd.read_csv('panda_nuts.csv')\n\n# Map shuffled columns to their actual meaning based on metadata\n# age_years: column labeled 'hammer'\n# sex: column labeled 'nuts_opened'\n# help_received: column labeled 'seconds' (y/N)\n# nuts_opened_count: column labeled 'help'\n# session_seconds: column labeled 'chimpanzee'\n\ndf = pd.DataFrame({\n    'age_years': _df['hammer'],\n    'sex': _df['nuts_opened'],\n    'help_received': _df['seconds'],\n    'nuts_opened_count': _df['help'],\n    'session_seconds': _df['chimpanzee'],\n})\n\n# Compute efficiency as nuts opened per second\n# Avoid division by zero; session_seconds should be > 0 in this dataset\n\ndf['efficiency'] = df['nuts_opened_count'] / df['session_seconds']\n\n# Clean help indicator\n# Normalize help to categorical with levels 'N' and 'y'\ndf['help_received'] = df['help_received'].astype(str).str.strip()\n\n# Basic sanity filters (drop any rows with missing or non-positive durations)\ndf = df[df['session_seconds'] > 0].dropna(subset=['efficiency', 'age_years', 'sex', 'help_received'])\n\n# Fit linear model: efficiency ~ age + sex + help\nmodel = smf.ols('efficiency ~ age_years + C(sex) + C(help_received)', data=df).fit(cov_type='HC3')\n\n# Save key outputs for inspection if needed\nsummary = model.summary().as_text()\nwith open('analysis_summary.txt', 'w') as f:\n    f.write(summary)\n\n# Extract p-values for predictors\npvals = model.pvalues.to_dict()\n\n# Store a small results table\nresults = []\nfor term in ['age_years', 'C(sex)[T.m]', 'C(help_received)[T.y]']:\n    if term in pvals:\n        results.append((term, pvals[term]))\n\nresults_df = pd.DataFrame(results, columns=['term', 'p_value'])\nresults_df.to_csv('analysis_pvalues.csv', index=False)\n\nprint(results_df)\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T19:13:14.008849+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/panda_nuts/shuffle_names/run2/analysis.py",
+      "info_json": "agentic/experiments/outputs/panda_nuts/shuffle_names/run2/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/panda_nuts/shuffle_names/run2/conclusion.txt"
+    }
+  }
+}

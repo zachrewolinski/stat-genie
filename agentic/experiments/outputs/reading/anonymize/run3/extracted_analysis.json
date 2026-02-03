@@ -1,0 +1,36 @@
+{
+  "dataset_name": "reading",
+  "run_dir": "agentic/experiments/outputs/reading/anonymize/run3",
+  "research_question": "Does 'Reader View' --- a modified web page layout --- improves reading speed for individuals with dyslexia?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Indicator whether Reader View was activated (1 = on, 0 = off); the treatment/predictor whose effect on reading speed is tested",
+          "columns": [
+            "feature3"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Reading speed (words per minute) derived from words/time; outcome measure of interest",
+        "columns": [
+          "feature20"
+        ]
+      },
+      "controls": []
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nfrom statsmodels.stats.weightstats import ttest_ind\n\n# Load data\n\ndf = pd.read_csv('reading.csv')\n\n# Feature mapping from info.json:\n# feature3 = reader view (1 on, 0 off)\n# feature17 = dyslexia (1 yes, 0 no)\n# feature20 = reading speed (words per minute; derived from words/time)\n\n# Subset to participants with dyslexia and valid reading speed / reader view indicators\nsub = df[(df['feature17'] == 1) & df['feature20'].notna() & df['feature3'].notna()]\n\non = sub[sub['feature3'] == 1]['feature20']\noff = sub[sub['feature3'] == 0]['feature20']\n\n# Summary stats\nsummary = {\n    'n_on': int(on.shape[0]),\n    'n_off': int(off.shape[0]),\n    'mean_on': float(on.mean()),\n    'mean_off': float(off.mean()),\n    'median_on': float(on.median()),\n    'median_off': float(off.median()),\n}\n\n# Welch's t-test\nif len(on) > 1 and len(off) > 1:\n    tstat, pval, dfree = ttest_ind(on, off, usevar='unequal')\nelse:\n    tstat, pval, dfree = (np.nan, np.nan, np.nan)\n\n# Cohen's d\n\ndef cohens_d(x, y):\n    nx = len(x)\n    ny = len(y)\n    if nx < 2 or ny < 2:\n        return np.nan\n    vx = x.var(ddof=1)\n    vy = y.var(ddof=1)\n    pooled = ((nx - 1) * vx + (ny - 1) * vy) / (nx + ny - 2)\n    return (x.mean() - y.mean()) / np.sqrt(pooled)\n\n\nd = cohens_d(on, off)\n\nprint('Reading speed (feature20) for dyslexic readers:')\nprint(f\"n_on={summary['n_on']} n_off={summary['n_off']}\")\nprint(f\"mean_on={summary['mean_on']:.3f} mean_off={summary['mean_off']:.3f}\")\nprint(f\"median_on={summary['median_on']:.3f} median_off={summary['median_off']:.3f}\")\nprint(f\"Welch t-test: t={tstat:.3f} p={pval:.4f} df={dfree:.1f}\")\nprint(f\"Cohen's d={d:.3f}\")\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T19:16:26.427540+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/reading/anonymize/run3/analysis.py",
+      "info_json": "agentic/experiments/outputs/reading/anonymize/run3/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/reading/anonymize/run3/conclusion.txt"
+    }
+  }
+}

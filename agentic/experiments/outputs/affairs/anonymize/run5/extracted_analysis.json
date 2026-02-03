@@ -1,0 +1,51 @@
+{
+  "dataset_name": "affairs",
+  "run_dir": "agentic/experiments/outputs/affairs/anonymize/run5",
+  "research_question": "Does having children decrease (if at all) the engagement in extramarital affairs?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Presence of children in the marriage (main predictor of interest). Analysis used a derived binary indicator from this column to test whether having children affects engagement in extramarital affairs.",
+          "columns": [
+            "feature6"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Engagement in extramarital affairs measured by respondents' reported frequency of affairs over the past year. The analysis used both the raw count/frequency and derived indicators (any affair, log1p of affairs) based on this column.",
+        "columns": [
+          "feature2"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Covariates included to hold constant demographic and relationship factors: gender, age, years married, religiosity, education, occupation, and self-rated marriage quality.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature3",
+            "feature4",
+            "feature5",
+            "feature7",
+            "feature8",
+            "feature9",
+            "feature10"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\nimport statsmodels.formula.api as smf\nfrom statsmodels.stats.proportion import proportions_ztest\n\n# Load data\npath = \"affairs.csv\"\ndf = pd.read_csv(path)\n\n# Rename columns for clarity\ncol_map = {\n    \"feature1\": \"id\",\n    \"feature2\": \"affairs\",\n    \"feature3\": \"gender\",\n    \"feature4\": \"age\",\n    \"feature5\": \"years_married\",\n    \"feature6\": \"children\",\n    \"feature7\": \"religiosity\",\n    \"feature8\": \"education\",\n    \"feature9\": \"occupation\",\n    \"feature10\": \"marriage_rating\",\n}\ndf = df.rename(columns=col_map)\n\n# Derived variables\n\ndf[\"children_yes\"] = (df[\"children\"].str.lower() == \"yes\").astype(int)\ndf[\"any_affair\"] = (df[\"affairs\"] > 0).astype(int)\ndf[\"log1p_affairs\"] = np.log1p(df[\"affairs\"])\n\n# Group stats\n\ngrp = df.groupby(\"children_yes\")\nsummary = grp[\"affairs\"].agg([\"count\", \"mean\", \"median\"])\nsummary[\"prop_any_affair\"] = grp[\"any_affair\"].mean()\n\n# Two-proportion z-test for any affair\ncounts = grp[\"any_affair\"].sum()\nns = grp[\"any_affair\"].count()\nz_stat, p_value = proportions_ztest(counts, ns)\n\n# Difference in mean affairs\nmean_no_children = summary.loc[0, \"mean\"]\nmean_children = summary.loc[1, \"mean\"]\n\n# Logistic regression: any affair\nlogit_model = smf.logit(\n    \"any_affair ~ children_yes + C(gender) + age + years_married + religiosity + education + occupation + marriage_rating\",\n    data=df,\n).fit(disp=False)\n\n# OLS on log1p(affairs) with robust SE\nols_model = smf.ols(\n    \"log1p_affairs ~ children_yes + C(gender) + age + years_married + religiosity + education + occupation + marriage_rating\",\n    data=df,\n).fit(cov_type=\"HC3\")\n\n# Extract key coefficients\nlogit_coef = logit_model.params[\"children_yes\"]\nlogit_p = logit_model.pvalues[\"children_yes\"]\nlogit_or = np.exp(logit_coef)\n\nols_coef = ols_model.params[\"children_yes\"]\nols_p = ols_model.pvalues[\"children_yes\"]\n\nprint(\"Group summary (by children_yes: 0=no, 1=yes):\")\nprint(summary)\nprint()\nprint(f\"Two-proportion z-test for any affair: z={z_stat:.3f}, p={p_value:.4f}\")\nprint(f\"Mean affairs (no children): {mean_no_children:.3f}\")\nprint(f\"Mean affairs (children): {mean_children:.3f}\")\nprint(f\"Mean difference (children - no children): {mean_children - mean_no_children:.3f}\")\nprint()\nprint(\"Logit model (any affair) key effect:\")\nprint(f\"children_yes coef={logit_coef:.3f}, odds ratio={logit_or:.3f}, p={logit_p:.4f}\")\nprint()\nprint(\"OLS on log1p(affairs) key effect:\")\nprint(f\"children_yes coef={ols_coef:.3f}, p={ols_p:.4f}\")\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T17:58:13.297855+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/affairs/anonymize/run5/analysis.py",
+      "info_json": "agentic/experiments/outputs/affairs/anonymize/run5/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/affairs/anonymize/run5/conclusion.txt"
+    }
+  }
+}

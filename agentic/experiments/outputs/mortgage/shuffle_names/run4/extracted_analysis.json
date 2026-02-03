@@ -1,0 +1,61 @@
+{
+  "dataset_name": "mortgage",
+  "run_dir": "agentic/experiments/outputs/mortgage/shuffle_names/run4",
+  "research_question": "Does gender affect whether banks approve an individual's mortgage application?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Applicant gender indicator (per metadata 'denied_PMI': 1 = female, 0 = male) used as the main independent variable",
+          "columns": [
+            "denied_PMI"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Mortgage application approval indicator (per metadata 'deny': 1 = accepted, 0 = denied)",
+        "columns": [
+          "deny"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Housing expense / mortgage credit proxy (affordability)",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "mortgage_credit"
+          ]
+        },
+        {
+          "description": "Total debt payments to income ratio (debt-to-income)",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "housing_expense_ratio"
+          ]
+        },
+        {
+          "description": "Loan-to-value ratio (ratio of loan amount to appraised value of property)",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "Unnamed: 0"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport statsmodels.api as sm\nimport numpy as np\n\nDATA_PATH = \"mortgage.csv\"\n\n# Based on metadata:\n# - denied_PMI: 1 if applicant is female, 0 if male\n# - deny: 1 if application was accepted, 0 if denied (approval indicator)\nGENDER_COL = \"denied_PMI\"\nAPPROVAL_COL = \"deny\"\n\n# Controls chosen to reflect core affordability/credit ratios without leaking the outcome\nCONTROL_COLS = [\n    \"mortgage_credit\",          # housing expense ratio proxy (per metadata)\n    \"housing_expense_ratio\",    # debt-to-income style ratio\n    \"Unnamed: 0\",               # loan-to-value ratio (per metadata)\n]\n\n\ndef main() -> None:\n    df = pd.read_csv(DATA_PATH)\n\n    # Basic approval rates by gender\n    rates = df.groupby(GENDER_COL)[APPROVAL_COL].mean()\n    rate_female = rates.get(1, np.nan)\n    rate_male = rates.get(0, np.nan)\n    rate_diff = rate_female - rate_male\n\n    # Logistic regression: approval on gender + controls\n    cols = [APPROVAL_COL, GENDER_COL] + CONTROL_COLS\n    data = df[cols].dropna()\n    X = sm.add_constant(data[[GENDER_COL] + CONTROL_COLS], has_constant=\"add\")\n    y = data[APPROVAL_COL]\n    model = sm.Logit(y, X)\n    res = model.fit(disp=False)\n\n    coef = res.params[GENDER_COL]\n    pval = res.pvalues[GENDER_COL]\n    odds_ratio = float(np.exp(coef))\n    ci_low, ci_high = np.exp(res.conf_int().loc[GENDER_COL])\n\n    print(\"Approval rate (female=1):\", rate_female)\n    print(\"Approval rate (male=0):\", rate_male)\n    print(\"Difference (female - male):\", rate_diff)\n    print(\"Logit coef (female):\", coef)\n    print(\"Odds ratio (female):\", odds_ratio)\n    print(\"95% CI (odds ratio):\", (float(ci_low), float(ci_high)))\n    print(\"p-value (female):\", pval)\n\n\nif __name__ == \"__main__\":\n    main()\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T19:04:06.594686+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/mortgage/shuffle_names/run4/analysis.py",
+      "info_json": "agentic/experiments/outputs/mortgage/shuffle_names/run4/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/mortgage/shuffle_names/run4/conclusion.txt"
+    }
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "dataset_name": "boxes",
+  "run_dir": "agentic/experiments/outputs/boxes/shuffle_names/run4",
+  "research_question": "Do children’s reliance on social information and preference for majority cues vary across cultures and developmental stages?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Child's developmental stage (age in years); used as a predictor of social learning outcomes",
+          "columns": [
+            "age"
+          ]
+        },
+        {
+          "description": "Site ID used as a proxy for cultural context (whether outcomes vary across sites/cultures); coded 1-8 and entered as a categorical predictor C(y) in the analysis",
+          "columns": [
+            "y"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Choices coded in 'majority_first' (1 = undemonstrated/unchosen option, 2 = majority option, 3 = minority option). Two derived outcomes were analyzed from this column: (a) preference for majority cues (choice == majority option) and (b) reliance on social information (choice == either demonstrated option, majority or minority). Both DVs are derived from 'majority_first'.",
+        "columns": [
+          "majority_first"
+        ]
+      },
+      "controls": []
+    },
+    "analysis_code": "import pandas as pd\nimport statsmodels.formula.api as smf\nfrom scipy import stats\n\n# Load data\n# Columns:\n# majority_first: 1=unchosen, 2=majority, 3=minority\n# y: site id (1-8), used as culture proxy\n\ndf = pd.read_csv('boxes.csv')\n\n# Outcomes\n# Reliance on social information: chose demonstrated option (majority or minority)\n# Preference for majority cues: chose majority option\n\ndf['social_choice'] = df['majority_first'].isin([2, 3]).astype(int)\ndf['majority_choice'] = (df['majority_first'] == 2).astype(int)\n\n# Logistic regression with age (developmental stage) and site (culture proxy)\nmodel_majority = smf.logit('majority_choice ~ age + C(y)', data=df).fit(disp=False)\nmodel_social = smf.logit('social_choice ~ age + C(y)', data=df).fit(disp=False)\n\n# Likelihood ratio tests for site effects (culture differences)\nmodel_majority_nosite = smf.logit('majority_choice ~ age', data=df).fit(disp=False)\nmodel_social_nosite = smf.logit('social_choice ~ age', data=df).fit(disp=False)\n\nlr_majority = 2 * (model_majority.llf - model_majority_nosite.llf)\nlr_social = 2 * (model_social.llf - model_social_nosite.llf)\n\ndf_site = model_majority.df_model - model_majority_nosite.df_model\np_majority_site = stats.chi2.sf(lr_majority, df_site)\np_social_site = stats.chi2.sf(lr_social, df_site)\n\n# Age-group chi-square tests\nbins = [3, 6, 9, 12, 14]\nlabels = ['4-6', '7-9', '10-12', '13-14']\ndf['age_group'] = pd.cut(df['age'], bins=bins, labels=labels)\n\nct_majority = pd.crosstab(df['age_group'], df['majority_choice'])\nct_social = pd.crosstab(df['age_group'], df['social_choice'])\n\nchi_majority = stats.chi2_contingency(ct_majority)\nchi_social = stats.chi2_contingency(ct_social)\n\n# Descriptive rates\nsite_majority = df.groupby('y')['majority_choice'].mean()\nsite_social = df.groupby('y')['social_choice'].mean()\n\nage_majority = df.groupby('age_group')['majority_choice'].mean()\nage_social = df.groupby('age_group')['social_choice'].mean()\n\n# Print results for review\nprint('Logit majority_choice ~ age + C(y)')\nprint(model_majority.summary())\nprint('\\nLogit social_choice ~ age + C(y)')\nprint(model_social.summary())\n\nprint('\\nLR test for site effect (majority choice): chi2=%.3f df=%d p=%.4f' % (lr_majority, df_site, p_majority_site))\nprint('LR test for site effect (social choice): chi2=%.3f df=%d p=%.4f' % (lr_social, df_site, p_social_site))\n\nprint('\\nChi-square age group vs majority choice: chi2=%.3f df=%d p=%.4f' % (chi_majority[0], chi_majority[2], chi_majority[1]))\nprint('Chi-square age group vs social choice: chi2=%.3f df=%d p=%.4f' % (chi_social[0], chi_social[2], chi_social[1]))\n\nprint('\\nSite-level majority choice rates:')\nprint(site_majority)\nprint('\\nSite-level social choice rates:')\nprint(site_social)\n\nprint('\\nAge-group majority choice rates:')\nprint(age_majority)\nprint('\\nAge-group social choice rates:')\nprint(age_social)\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T18:25:37.048720+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/boxes/shuffle_names/run4/analysis.py",
+      "info_json": "agentic/experiments/outputs/boxes/shuffle_names/run4/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/boxes/shuffle_names/run4/conclusion.txt"
+    }
+  }
+}

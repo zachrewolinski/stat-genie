@@ -1,0 +1,136 @@
+{
+  "dataset_name": "boxes",
+  "n": 5,
+  "analyses": {
+    "0": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Child age in years (developmental stage). Modeled as the primary predictor (linear) and tested for interaction with site.",
+            "columns": [
+              "feature3"
+            ]
+          },
+          {
+            "description": "Study site / cultural group ID representing cultural context. Included as a categorical predictor and tested for an age × site interaction.",
+            "columns": [
+              "feature5"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Children's social learning outcomes derived from the choice variable feature1: (1) social reliance = chose a demonstrated option (majority or minority; feature1 ∈ {2,3}); (2) majority preference = chose the majority option (feature1 == 2), analyzed among social choices.",
+          "columns": [
+            "feature1"
+          ]
+        },
+        "controls": []
+      },
+      "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.formula.api as smf\nfrom scipy import stats\n\n# Load data\ndf = pd.read_csv('boxes.csv')\n\n# Recode outcomes\n# feature1: 1=unchosen, 2=majority, 3=minority\n# Social reliance: chose any demonstrated option (majority or minority)\ndf['social'] = df['feature1'].isin([2, 3]).astype(int)\n# Majority preference among social choices\ndf['majority'] = (df['feature1'] == 2).astype(int)\n\n# Helper: likelihood ratio test between nested models\n\ndef lr_test(reduced, full):\n    lr_stat = 2 * (full.llf - reduced.llf)\n    df_diff = full.df_model - reduced.df_model\n    p_value = stats.chi2.sf(lr_stat, df_diff)\n    return lr_stat, df_diff, p_value\n\nresults = {}\n\n# Model 1: Social reliance (binary)\n# Base: age only\nm_social_age = smf.logit('social ~ feature3', data=df).fit(disp=0)\n# Add culture/site\nm_social_age_site = smf.logit('social ~ feature3 + C(feature5)', data=df).fit(disp=0)\n# Add interaction age x site\nm_social_age_site_int = smf.logit('social ~ feature3 * C(feature5)', data=df).fit(disp=0)\n\nresults['social_age_coef'] = m_social_age_site.params['feature3']\nresults['social_age_p'] = m_social_age_site.pvalues['feature3']\n\nlr_site_social = lr_test(m_social_age, m_social_age_site)\nlr_int_social = lr_test(m_social_age_site, m_social_age_site_int)\nresults['social_site_lr'] = lr_site_social\nresults['social_int_lr'] = lr_int_social\n\n# Model 2: Majority preference among social choices\nsocial_df = df[df['social'] == 1].copy()\n\nm_maj_age = smf.logit('majority ~ feature3', data=social_df).fit(disp=0)\nm_maj_age_site = smf.logit('majority ~ feature3 + C(feature5)', data=social_df).fit(disp=0)\nm_maj_age_site_int = smf.logit('majority ~ feature3 * C(feature5)', data=social_df).fit(disp=0)\n\nresults['maj_age_coef'] = m_maj_age_site.params['feature3']\nresults['maj_age_p'] = m_maj_age_site.pvalues['feature3']\n\nlr_site_maj = lr_test(m_maj_age, m_maj_age_site)\nlr_int_maj = lr_test(m_maj_age_site, m_maj_age_site_int)\nresults['maj_site_lr'] = lr_site_maj\nresults['maj_int_lr'] = lr_int_maj\n\n# Descriptives\nsite_summary = df.groupby('feature5').agg(\n    n=('feature1','size'),\n    social_rate=('social','mean'),\n    majority_rate=('majority','mean')\n).reset_index()\n\nage_bins = pd.cut(df['feature3'], bins=[3.5,6.5,9.5,12.5,14.5], labels=['4-6','7-9','10-12','13-14'])\nage_summary = df.assign(age_bin=age_bins).groupby('age_bin').agg(\n    n=('feature1','size'),\n    social_rate=('social','mean'),\n    majority_rate=('majority','mean')\n).reset_index()\n\n# Save outputs for quick inspection\nsite_summary.to_csv('site_summary.csv', index=False)\nage_summary.to_csv('age_summary.csv', index=False)\n\nprint('Social reliance model:')\nprint('Age coef (with site):', results['social_age_coef'], 'p=', results['social_age_p'])\nprint('LR test site effect (age vs age+site):', results['social_site_lr'])\nprint('LR test age*site interaction:', results['social_int_lr'])\n\nprint('\\nMajority preference model (social choices only):')\nprint('Age coef (with site):', results['maj_age_coef'], 'p=', results['maj_age_p'])\nprint('LR test site effect (age vs age+site):', results['maj_site_lr'])\nprint('LR test age*site interaction:', results['maj_int_lr'])\n\nprint('\\nSite summary:\\n', site_summary)\nprint('\\nAge summary:\\n', age_summary)\n"
+    },
+    "1": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Child age in years (developmental stage; primary predictor of interest)",
+            "columns": [
+              "feature3"
+            ]
+          },
+          {
+            "description": "Study site ID representing cultural context / country (primary predictor of interest)",
+            "columns": [
+              "feature5"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Behavioral outcome recorded in feature1. Used to derive two dependent measures: (a) reliance on social information (whether the child chose a demonstrated option vs the unchosen option) and (b) among social choices, preference for the majority vs minority demonstrated option.",
+          "columns": [
+            "feature1"
+          ]
+        },
+        "controls": []
+      },
+      "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.formula.api as smf\nfrom scipy import stats\n\n# Load data\npath = \"boxes.csv\"\ndf = pd.read_csv(path)\n\n# Rename for clarity\n# feature1: outcome (1=unchosen, 2=majority, 3=minority)\n# feature3: age\n# feature5: site ID\n\ndf = df.copy()\ndf[\"site\"] = df[\"feature5\"].astype(\"category\")\ndf[\"age\"] = df[\"feature3\"].astype(float)\n\n# Social choice: chose either majority or minority\n\ndf[\"social\"] = (df[\"feature1\"] != 1).astype(int)\n# Majority choice among social choices\n\ndf[\"majority\"] = (df[\"feature1\"] == 2).astype(int)\n\n# Helper: likelihood ratio test\n\ndef lr_test(full, reduced):\n    lr_stat = 2 * (full.llf - reduced.llf)\n    df_diff = full.df_model - reduced.df_model\n    p_value = stats.chi2.sf(lr_stat, df_diff)\n    return lr_stat, df_diff, p_value\n\nresults = {}\n\n# Model A: social reliance ~ age + site\nmodel_social_full = smf.logit(\"social ~ age + C(site)\", data=df).fit(disp=False)\nmodel_social_age_only = smf.logit(\"social ~ age\", data=df).fit(disp=False)\nmodel_social_site_only = smf.logit(\"social ~ C(site)\", data=df).fit(disp=False)\n\nlr_age_social = lr_test(model_social_full, model_social_site_only)\nlr_site_social = lr_test(model_social_full, model_social_age_only)\n\nresults[\"social_lr_age\"] = lr_age_social\nresults[\"social_lr_site\"] = lr_site_social\n\n# Model B: majority preference among social choices\nsocial_df = df[df[\"social\"] == 1].copy()\nmodel_majority_full = smf.logit(\"majority ~ age + C(site)\", data=social_df).fit(disp=False)\nmodel_majority_age_only = smf.logit(\"majority ~ age\", data=social_df).fit(disp=False)\nmodel_majority_site_only = smf.logit(\"majority ~ C(site)\", data=social_df).fit(disp=False)\n\nlr_age_majority = lr_test(model_majority_full, model_majority_site_only)\nlr_site_majority = lr_test(model_majority_full, model_majority_age_only)\n\nresults[\"majority_lr_age\"] = lr_age_majority\nresults[\"majority_lr_site\"] = lr_site_majority\n\n# Descriptives by age group and site\nbins = [3, 6, 9, 12, 14.5]\nlabels = [\"4-6\", \"7-9\", \"10-12\", \"13-14\"]\ndf[\"age_group\"] = pd.cut(df[\"age\"], bins=bins, labels=labels, right=True)\n\n# Proportions overall by age group\nage_group_stats = df.groupby(\"age_group\").apply(\n    lambda g: pd.Series({\n        \"n\": len(g),\n        \"social_rate\": g[\"social\"].mean(),\n        \"majority_rate\": g.loc[g[\"social\"] == 1, \"majority\"].mean()\n    })\n).reset_index()\n\n# Proportions by site\nsite_stats = df.groupby(\"site\").apply(\n    lambda g: pd.Series({\n        \"n\": len(g),\n        \"social_rate\": g[\"social\"].mean(),\n        \"majority_rate\": g.loc[g[\"social\"] == 1, \"majority\"].mean()\n    })\n).reset_index()\n\n# Save outputs for review\nage_group_stats.to_csv(\"age_group_stats.csv\", index=False)\nsite_stats.to_csv(\"site_stats.csv\", index=False)\n\nprint(\"LR tests (stat, df, p):\")\nprint(\"social ~ age + site: age effect\", results[\"social_lr_age\"])\nprint(\"social ~ age + site: site effect\", results[\"social_lr_site\"])\nprint(\"majority ~ age + site: age effect\", results[\"majority_lr_age\"])\nprint(\"majority ~ age + site: site effect\", results[\"majority_lr_site\"])\nprint(\"\\nAge group stats:\\n\", age_group_stats)\nprint(\"\\nSite stats:\\n\", site_stats)\n"
+    },
+    "2": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Cultural site (which society/site the child was tested in), used to assess cross-cultural differences in social learning.",
+            "columns": [
+              "feature5"
+            ]
+          },
+          {
+            "description": "Child's age in years (developmental stage), used to assess age-related changes in reliance on social information and majority preference.",
+            "columns": [
+              "feature3"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Child's choice on the task coded as 1=undemonstrated option, 2=majority-demonstrated option, 3=minority-demonstrated option. This variable is used to derive the outcomes: (a) reliance on social information (choosing 2 or 3 vs 1) and (b) majority preference among social choices (2 vs 3).",
+          "columns": [
+            "feature1"
+          ]
+        },
+        "controls": []
+      },
+      "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.formula.api as smf\n\n# Load data\n_df = pd.read_csv('boxes.csv')\n\n# Prepare variables\n_df['site'] = _df['feature5'].astype('category')\n_df['age'] = _df['feature3'].astype(float)\n\n# Outcome 1: reliance on social information (choose majority or minority)\n_df['social_choice'] = (_df['feature1'] != 1).astype(int)\n\n# Outcome 2: majority preference among social choices\n_df_social = _df[_df['feature1'].isin([2, 3])].copy()\n_df_social['majority_choice'] = (_df_social['feature1'] == 2).astype(int)\n\n\ndef lr_test(full_model, reduced_model):\n    \"\"\"Likelihood-ratio test for nested models.\"\"\"\n    lr_stat = 2 * (full_model.llf - reduced_model.llf)\n    df_diff = full_model.df_model - reduced_model.df_model\n    from scipy.stats import chi2\n    p = chi2.sf(lr_stat, df_diff)\n    return lr_stat, df_diff, p\n\n\n# Model for social reliance\nm_social_full = smf.logit('social_choice ~ age + C(site)', data=_df).fit(disp=False)\nm_social_no_age = smf.logit('social_choice ~ C(site)', data=_df).fit(disp=False)\nm_social_no_site = smf.logit('social_choice ~ age', data=_df).fit(disp=False)\n\nsocial_age_lr = lr_test(m_social_full, m_social_no_age)\nsocial_site_lr = lr_test(m_social_full, m_social_no_site)\n\n# Model for majority preference among social choices\nm_majority_full = smf.logit('majority_choice ~ age + C(site)', data=_df_social).fit(disp=False)\nm_majority_no_age = smf.logit('majority_choice ~ C(site)', data=_df_social).fit(disp=False)\nm_majority_no_site = smf.logit('majority_choice ~ age', data=_df_social).fit(disp=False)\n\nmajority_age_lr = lr_test(m_majority_full, m_majority_no_age)\nmajority_site_lr = lr_test(m_majority_full, m_majority_no_site)\n\n# Summaries for quick inspection\nprint('Social reliance model (full):')\nprint(m_social_full.summary())\nprint('\\nLR test age (social reliance):', social_age_lr)\nprint('LR test site (social reliance):', social_site_lr)\n\nprint('\\nMajority preference model (full):')\nprint(m_majority_full.summary())\nprint('\\nLR test age (majority preference):', majority_age_lr)\nprint('LR test site (majority preference):', majority_site_lr)\n\n# Also compute simple rates by site and age bins for interpretation\n_df['age_bin'] = pd.cut(_df['age'], bins=[3, 5, 7, 9, 11, 13, 15], labels=['4-5', '6-7', '8-9', '10-11', '12-13', '14'])\n_df_social['age_bin'] = pd.cut(_df_social['age'], bins=[3, 5, 7, 9, 11, 13, 15], labels=['4-5', '6-7', '8-9', '10-11', '12-13', '14'])\n\nrate_social_by_site = _df.groupby('site')['social_choice'].mean()\nrate_majority_by_site = _df_social.groupby('site')['majority_choice'].mean()\nrate_social_by_age = _df.groupby('age_bin')['social_choice'].mean()\nrate_majority_by_age = _df_social.groupby('age_bin')['majority_choice'].mean()\n\nprint('\\nSocial reliance rate by site:')\nprint(rate_social_by_site)\nprint('\\nMajority preference rate by site (among social choices):')\nprint(rate_majority_by_site)\nprint('\\nSocial reliance rate by age bin:')\nprint(rate_social_by_age)\nprint('\\nMajority preference rate by age bin (among social choices):')\nprint(rate_majority_by_age)\n"
+    },
+    "3": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Child age (developmental stage); predictor of social-information reliance and majority preference.",
+            "columns": [
+              "feature3"
+            ]
+          },
+          {
+            "description": "Site ID representing cultural context (different societies); predictor of social-information reliance and majority preference.",
+            "columns": [
+              "feature5"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Child's choice on the task (1 = unchosen option, 2 = majority option, 3 = minority option). From this variable the analyses derive social-information reliance (choosing 2 or 3) and majority preference (choosing 2).",
+          "columns": [
+            "feature1"
+          ]
+        },
+        "controls": []
+      },
+      "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.formula.api as smf\nimport statsmodels.api as sm\n\n# Load data\n_df = pd.read_csv('boxes.csv')\n\n# Rename for clarity\n_df = _df.rename(columns={\n    'feature1': 'choice',\n    'feature2': 'gender',\n    'feature3': 'age',\n    'feature4': 'majority_first',\n    'feature5': 'site'\n})\n\n# Map outcomes\n# choice: 1=unchosen, 2=majority, 3=minority\n_df['social_choice'] = _df['choice'].isin([2, 3]).astype(int)  # reliance on social info\n_df['majority_choice'] = (_df['choice'] == 2).astype(int)      # preference for majority\n_df['minority_choice'] = (_df['choice'] == 3).astype(int)\n\n# Age groups for developmental stages\nbins = [3, 6, 9, 12, 15]\nlabels = ['4-6', '7-9', '10-12', '13-14']\n_df['age_group'] = pd.cut(_df['age'], bins=bins, labels=labels, right=True)\n\n# Descriptive stats by site and age group\nsite_summary = _df.groupby('site')[['social_choice', 'majority_choice', 'minority_choice']].mean()\nage_summary = _df.groupby('age_group')[['social_choice', 'majority_choice', 'minority_choice']].mean()\n\n# Logistic regression: social reliance ~ age + site\nsocial_model = smf.glm('social_choice ~ age + C(site)', data=_df, family=sm.families.Binomial()).fit()\n\n# Logistic regression: majority preference among all choices ~ age + site\nmajority_model = smf.glm('majority_choice ~ age + C(site)', data=_df, family=sm.families.Binomial()).fit()\n\n# Logistic regression: majority vs minority among social choices only\nsocial_only = _df[_df['social_choice'] == 1].copy()\nmajority_vs_minority = smf.glm('majority_choice ~ age + C(site)', data=social_only, family=sm.families.Binomial()).fit()\n\n# Prepare results\nprint('Rows:', len(_df))\nprint('\\nOverall choice proportions:')\nprint(_df['choice'].value_counts(normalize=True).sort_index())\n\nprint('\\nSite-level means:')\nprint(site_summary)\n\nprint('\\nAge-group means:')\nprint(age_summary)\n\nprint('\\nSocial reliance model:')\nprint(social_model.summary())\n\nprint('\\nMajority preference model (all choices):')\nprint(majority_model.summary())\n\nprint('\\nMajority vs minority among social choices:')\nprint(majority_vs_minority.summary())\n"
+    },
+    "4": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Developmental stage represented by the child's age in years (predictor of social reliance and majority preference).",
+            "columns": [
+              "feature3"
+            ]
+          },
+          {
+            "description": "Cultural context / study site (categorical predictor of social reliance and majority preference).",
+            "columns": [
+              "feature5"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Behavioral choice outcome from the demonstration video (from which two analytic DVs are derived): reliance on social information (chose a demonstrated option vs the undemonstrated option) and preference for the majority demonstrators (chose the majority option).",
+          "columns": [
+            "feature1"
+          ]
+        },
+        "controls": []
+      },
+      "analysis_code": "import pandas as pd\nimport statsmodels.formula.api as smf\nfrom scipy import stats\n\n# Load data\n_df = pd.read_csv('boxes.csv')\n\n# Define outcomes\n_df['social'] = (_df['feature1'] != 1).astype(int)  # relied on social info\n_df['majority'] = (_df['feature1'] == 2).astype(int)  # chose majority option\n\n# Logistic regression: social reliance ~ age + site\nm_social_full = smf.logit('social ~ feature3 + C(feature5)', data=_df).fit(disp=False)\nm_social_red = smf.logit('social ~ feature3', data=_df).fit(disp=False)\n\n# Logistic regression: majority preference ~ age + site\nm_majority_full = smf.logit('majority ~ feature3 + C(feature5)', data=_df).fit(disp=False)\nm_majority_red = smf.logit('majority ~ feature3', data=_df).fit(disp=False)\n\n# Likelihood-ratio tests for overall site effect\nlr_social = 2 * (m_social_full.llf - m_social_red.llf)\nsite_df_social = m_social_full.df_model - m_social_red.df_model\np_social_site = stats.chi2.sf(lr_social, df=site_df_social)\n\nlr_majority = 2 * (m_majority_full.llf - m_majority_red.llf)\nsite_df_majority = m_majority_full.df_model - m_majority_red.df_model\np_majority_site = stats.chi2.sf(lr_majority, df=site_df_majority)\n\n# Age effects (Wald tests from full models)\np_social_age = float(m_social_full.pvalues['feature3'])\np_majority_age = float(m_majority_full.pvalues['feature3'])\n\n# Descriptives for context\nsite_social = _df.groupby('feature5')['social'].mean()\nsite_majority = _df.groupby('feature5')['majority'].mean()\n\nage_bins = [3, 6, 9, 12, 14]\nage_labels = ['4-6', '7-9', '10-12', '13-14']\n_df['age_group'] = pd.cut(_df['feature3'], bins=age_bins, labels=age_labels)\n\nage_social = _df.groupby('age_group')['social'].mean()\nage_majority = _df.groupby('age_group')['majority'].mean()\n\nprint('N:', len(_df))\nprint('Outcome counts:', _df['feature1'].value_counts().sort_index().to_dict())\nprint('\\nLogit: social ~ age + site')\nprint(m_social_full.summary())\nprint('LR test site effect p:', p_social_site)\nprint('Age effect p:', p_social_age)\n\nprint('\\nLogit: majority ~ age + site')\nprint(m_majority_full.summary())\nprint('LR test site effect p:', p_majority_site)\nprint('Age effect p:', p_majority_age)\n\nprint('\\nSite-level proportions (social reliance):')\nprint(site_social)\nprint('\\nSite-level proportions (majority preference):')\nprint(site_majority)\n\nprint('\\nAge-group proportions (social reliance):')\nprint(age_social)\nprint('\\nAge-group proportions (majority preference):')\nprint(age_majority)\n"
+    }
+  }
+}

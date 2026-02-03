@@ -1,0 +1,49 @@
+{
+  "dataset_name": "panda_nuts",
+  "run_dir": "agentic/experiments/outputs/panda_nuts/add_features/run3",
+  "research_question": "Do age, sex, and receiving help from another chimpanzee influence the nut-cracking efficiency of western chimpanzees?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Age in years at time of observation — predictor of nut-cracking efficiency.",
+          "columns": [
+            "age"
+          ]
+        },
+        {
+          "description": "Individual's sex (male/female) — predictor of nut-cracking efficiency.",
+          "columns": [
+            "sex"
+          ]
+        },
+        {
+          "description": "Received help from another chimpanzee (yes/no) — predictor of nut-cracking efficiency.",
+          "columns": [
+            "help"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Nut-cracking efficiency (nuts opened per second) — outcome derived from number of nuts opened and session duration.",
+        "columns": [
+          "nuts_opened",
+          "seconds"
+        ]
+      },
+      "controls": []
+    },
+    "analysis_code": "import pandas as pd\nimport statsmodels.formula.api as smf\n\n\ndef main():\n    df = pd.read_csv(\"panda_nuts.csv\")\n\n    # Basic cleaning\n    df = df.copy()\n    df = df[df[\"seconds\"].notna() & df[\"nuts_opened\"].notna()]\n    df = df[df[\"seconds\"] > 0]\n\n    # Efficiency: nuts opened per second\n    df[\"efficiency\"] = df[\"nuts_opened\"] / df[\"seconds\"]\n\n    # Normalize categories\n    if \"sex\" in df.columns:\n        df[\"sex\"] = df[\"sex\"].astype(str).str.lower().str.strip()\n    if \"help\" in df.columns:\n        df[\"help\"] = df[\"help\"].astype(str).str.lower().str.strip()\n\n    # Model: efficiency ~ age + sex + help\n    model = smf.ols(\"efficiency ~ age + C(sex) + C(help)\", data=df).fit()\n\n    # Simple group means for context\n    group_means = (\n        df.groupby([\"sex\", \"help\"], dropna=False)[\"efficiency\"]\n        .mean()\n        .reset_index()\n        .sort_values([\"sex\", \"help\"])\n    )\n\n    print(\"Rows used:\", len(df))\n    print(\"Efficiency mean:\", df[\"efficiency\"].mean())\n    print(\"\\nGroup means (efficiency):\")\n    print(group_means.to_string(index=False))\n    print(\"\\nOLS summary:\")\n    print(model.summary())\n\n    # Extract p-values for the main predictors\n    pvals = model.pvalues\n    coef = model.params\n\n    result = {\n        \"age_p\": pvals.get(\"age\"),\n        \"sex_p\": pvals.get(\"C(sex)[T.m]\"),\n        \"help_p\": pvals.get(\"C(help)[T.y]\"),\n        \"age_coef\": coef.get(\"age\"),\n        \"sex_coef\": coef.get(\"C(sex)[T.m]\"),\n        \"help_coef\": coef.get(\"C(help)[T.y]\"),\n    }\n\n    print(\"\\nKey effects (coef, p-value):\")\n    for k in [\"age\", \"sex\", \"help\"]:\n        print(k, result[f\"{k}_coef\"], result[f\"{k}_p\"]) \n\n\nif __name__ == \"__main__\":\n    main()\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T19:04:58.227161+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/panda_nuts/add_features/run3/analysis.py",
+      "info_json": "agentic/experiments/outputs/panda_nuts/add_features/run3/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/panda_nuts/add_features/run3/conclusion.txt"
+    }
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "dataset_name": "crofoot",
+  "run_dir": "agentic/experiments/outputs/crofoot/anonymize/run1",
+  "research_question": "Do relative group size and contest location influence the probability of a capuchin monkey group winning an intergroup contest?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Relative group size (operationalized in analysis as focal group size minus other group size); positive values indicate the focal group is larger than the other.",
+          "columns": [
+            "feature7",
+            "feature8"
+          ]
+        },
+        {
+          "description": "Location advantage of the focal group (operationalized in analysis as other group's distance to its home-range center minus focal group's distance); positive values indicate the focal group is closer to its home-range center than the other group.",
+          "columns": [
+            "feature5",
+            "feature6"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Win outcome of the focal group in an intergroup contest (1 = focal won, 0 = other won).",
+        "columns": [
+          "feature4"
+        ]
+      },
+      "controls": []
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\n\n# Load data\npath = 'crofoot.csv'\ndf = pd.read_csv(path)\n\n# Rename for clarity\n# feature4: focal win (1) vs other win (0)\n# feature5: distance of focal from center of its home range\n# feature6: distance of other from center of its home range\n# feature7: focal group size\n# feature8: other group size\n\n# Derived predictors\n# Relative group size (focal - other). Positive means focal larger.\ndf['rel_size'] = df['feature7'] - df['feature8']\n\n# Location advantage: other distance - focal distance.\n# Positive means focal is closer to its home range center than the other group.\ndf['loc_adv'] = df['feature6'] - df['feature5']\n\n# Outcome\ny = df['feature4']\nX = df[['rel_size', 'loc_adv']]\nX = sm.add_constant(X)\n\n# Fit logistic regression\nmodel = sm.Logit(y, X)\nresult = model.fit(disp=False)\n\n# Also compute a simple descriptive win rate split by sign of predictors\nwin_rate_by_size = df.groupby(df['rel_size'] > 0)['feature4'].mean()\nwin_rate_by_loc = df.groupby(df['loc_adv'] > 0)['feature4'].mean()\n\n# Print key outputs\nprint('Logit coefficients:')\nprint(result.params)\nprint('\\nLogit p-values:')\nprint(result.pvalues)\nprint('\\nOdds ratios:')\nprint(np.exp(result.params))\n\nprint('\\nWin rate by relative size (focal larger?):')\nprint(win_rate_by_size)\nprint('\\nWin rate by location advantage (focal closer to center?):')\nprint(win_rate_by_loc)\n\n# Save a compact summary for reference\nwith open('analysis_summary.txt', 'w') as f:\n    f.write(result.summary2().as_text())\n    f.write('\\n\\nWin rate by relative size (focal larger?):\\n')\n    f.write(win_rate_by_size.to_string())\n    f.write('\\n\\nWin rate by location advantage (focal closer to center?):\\n')\n    f.write(win_rate_by_loc.to_string())\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T18:36:05.374476+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/crofoot/anonymize/run1/analysis.py",
+      "info_json": "agentic/experiments/outputs/crofoot/anonymize/run1/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/crofoot/anonymize/run1/conclusion.txt"
+    }
+  }
+}

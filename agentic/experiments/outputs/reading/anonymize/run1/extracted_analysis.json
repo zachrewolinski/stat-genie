@@ -1,0 +1,45 @@
+{
+  "dataset_name": "reading",
+  "run_dir": "agentic/experiments/outputs/reading/anonymize/run1",
+  "research_question": "Does 'Reader View' --- a modified web page layout --- improves reading speed for individuals with dyslexia?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Reader View activation (treatment): indicates whether the modified 'Reader View' layout was activated (1) or not (0); the main independent variable compared within participants.",
+          "columns": [
+            "feature3"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Reading speed (outcome): words per minute measure used as the dependent variable in the analysis.",
+        "columns": [
+          "feature20"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Dyslexia status: analysis is restricted to participants with dyslexia (feature17 == 1); this variable was used to subset the sample so dyslexia is held constant.",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "feature17"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nfrom scipy import stats\n\n# Load data\ndf = pd.read_csv('reading.csv')\n\n# Identify dyslexic participants (feature17 == 1)\ndys = df[df['feature17'] == 1].copy()\n\n# Reading speed is feature20 (words per minute), derived from words / reading time\nspeed_col = 'feature20'\n\n# Compute per-participant mean speed by condition (reader view on/off)\npp = dys.groupby(['feature1', 'feature3'])[speed_col].mean().unstack()\npp = pp.dropna()  # keep participants with both conditions\n\n# Paired t-test on participant-level means\nres = stats.ttest_rel(pp[1], pp[0], nan_policy='omit')\n\ndiff = pp[1] - pp[0]\ncohen_d = diff.mean() / diff.std(ddof=1)\n\nsummary = {\n    'n_participants': int(len(pp)),\n    'mean_speed_no_reader_view': float(dys[dys['feature3'] == 0][speed_col].mean()),\n    'mean_speed_reader_view': float(dys[dys['feature3'] == 1][speed_col].mean()),\n    'mean_diff_reader_minus_no': float(diff.mean()),\n    'median_diff_reader_minus_no': float(diff.median()),\n    't_stat': float(res.statistic),\n    'p_value': float(res.pvalue),\n    'cohen_d_paired': float(cohen_d),\n}\n\nprint(summary)\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T19:15:51.900569+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/reading/anonymize/run1/analysis.py",
+      "info_json": "agentic/experiments/outputs/reading/anonymize/run1/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/reading/anonymize/run1/conclusion.txt"
+    }
+  }
+}

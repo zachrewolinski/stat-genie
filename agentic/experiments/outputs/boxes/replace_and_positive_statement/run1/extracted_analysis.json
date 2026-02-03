@@ -1,0 +1,42 @@
+{
+  "dataset_name": "boxes",
+  "run_dir": "agentic/experiments/outputs/boxes/replace_and_positive_statement/run1",
+  "research_question": "I strongly believe the answer to the following question to be 'Yes'. Perform an analysis that verifies this. Do children’s reliance on social information and preference for majority cues vary across cultures and developmental stages?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Child's developmental stage (age in years). Used as the main continuous predictor (centered in analysis) to test age effects and age-by-culture interactions.",
+          "columns": [
+            "age"
+          ]
+        },
+        {
+          "description": "Cultural site / population (ID of the study site). Used as a categorical predictor to test cross-cultural differences and interactions with age.",
+          "columns": [
+            "culture"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Behavioral choice coded in column 'y' (1 = undemonstrated/unchosen option, 2 = majority option, 3 = minority option). The analysis used two operationalizations derived from this column: (a) reliance on social information (did the child choose a demonstrated option: y != 1) and (b) majority preference among demonstrated choices (was the demonstrated choice the majority: y == 2).",
+        "columns": [
+          "y"
+        ]
+      },
+      "controls": []
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.formula.api as smf\nfrom scipy.stats import chi2\n\n\ndef lr_test(model_restricted, model_full):\n    lr_stat = 2 * (model_full.llf - model_restricted.llf)\n    df_diff = model_full.df_model - model_restricted.df_model\n    p_value = chi2.sf(lr_stat, df_diff)\n    return lr_stat, df_diff, p_value\n\n\ndef summarize_logit(label, m0, m1, m2):\n    lr_culture = lr_test(m0, m1)\n    lr_inter = lr_test(m1, m2)\n    print(f\"\\n=== {label} ===\")\n    print(\"Base model: age only\")\n    age_p = m0.pvalues.get(\"age_c\", np.nan)\n    print(f\"  llf={m0.llf:.3f}, df_model={int(m0.df_model)}, age_p={age_p:.4g}\")\n    print(\"Add culture:\")\n    print(\n        f\"  LR={lr_culture[0]:.3f}, df={int(lr_culture[1])}, p={lr_culture[2]:.4g}\"\n    )\n    print(\"Add age*culture interaction:\")\n    print(f\"  LR={lr_inter[0]:.3f}, df={int(lr_inter[1])}, p={lr_inter[2]:.4g}\")\n\n\n# Load data\n_df = pd.read_csv(\"boxes.csv\")\n_df[\"age_c\"] = _df[\"age\"] - _df[\"age\"].mean()\n\n# 1) Reliance on social information: chose demonstrated option (majority or minority)\n_df[\"use_social\"] = (_df[\"y\"] != 1).astype(int)\n\nm0_social = smf.logit(\"use_social ~ age_c\", data=_df).fit(disp=0)\nm1_social = smf.logit(\"use_social ~ age_c + C(culture)\", data=_df).fit(disp=0)\nm2_social = smf.logit(\"use_social ~ age_c * C(culture)\", data=_df).fit(disp=0)\n\nsummarize_logit(\"Reliance on social information\", m0_social, m1_social, m2_social)\n\n# 2) Majority preference among those who chose a demonstrated option\n_df_demo = _df[_df[\"y\"].isin([2, 3])].copy()\n_df_demo[\"majority\"] = (_df_demo[\"y\"] == 2).astype(int)\n\nm0_maj = smf.logit(\"majority ~ age_c\", data=_df_demo).fit(disp=0)\nm1_maj = smf.logit(\"majority ~ age_c + C(culture)\", data=_df_demo).fit(disp=0)\nm2_maj = smf.logit(\"majority ~ age_c * C(culture)\", data=_df_demo).fit(disp=0)\n\nsummarize_logit(\"Preference for majority cues (among demonstrated choices)\", m0_maj, m1_maj, m2_maj)\n\n# Provide a small descriptive table to help interpret differences\n# Social reliance rate by culture and age group (4-7, 8-11, 12-14)\n_df[\"age_group\"] = pd.cut(_df[\"age\"], bins=[3, 7, 11, 14], labels=[\"4-7\", \"8-11\", \"12-14\"])\n\ndesc_social = (\n    _df.groupby([\"culture\", \"age_group\"])[\"use_social\"]\n    .mean()\n    .reset_index()\n    .pivot(index=\"culture\", columns=\"age_group\", values=\"use_social\")\n)\n\nprint(\"\\nSocial reliance rate by culture and age group (mean use_social):\")\nprint(desc_social.round(3))\n\n# Majority preference rate by culture and age group\n_desc_demo = _df_demo.copy()\n_desc_demo[\"age_group\"] = pd.cut(_desc_demo[\"age\"], bins=[3, 7, 11, 14], labels=[\"4-7\", \"8-11\", \"12-14\"])\n\nmaj_rate = (\n    _desc_demo.groupby([\"culture\", \"age_group\"])[\"majority\"]\n    .mean()\n    .reset_index()\n    .pivot(index=\"culture\", columns=\"age_group\", values=\"majority\")\n)\n\nprint(\"\\nMajority preference rate by culture and age group (mean majority):\")\nprint(maj_rate.round(3))\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T18:22:23.004990+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/boxes/replace_and_positive_statement/run1/analysis.py",
+      "info_json": "agentic/experiments/outputs/boxes/replace_and_positive_statement/run1/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/boxes/replace_and_positive_statement/run1/conclusion.txt"
+    }
+  }
+}

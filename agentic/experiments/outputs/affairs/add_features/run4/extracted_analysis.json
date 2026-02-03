@@ -1,0 +1,93 @@
+{
+  "dataset_name": "affairs",
+  "run_dir": "agentic/experiments/outputs/affairs/add_features/run4",
+  "research_question": "Does having children decrease (if at all) the engagement in extramarital affairs?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Presence of children in the marriage (main predictor of interest: whether the respondent has children).",
+          "columns": [
+            "children"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Engagement in extramarital affairs measured as the count of affairs in the past year (used as the primary outcome in the analyses, including Poisson regression and mean comparisons).",
+        "columns": [
+          "affairs"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Respondent age (coded in years/age categories).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "age"
+          ]
+        },
+        {
+          "description": "Number of years married (duration of current marriage).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "yearsmarried"
+          ]
+        },
+        {
+          "description": "Self rating of the marriage (marital happiness).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "rating"
+          ]
+        },
+        {
+          "description": "Religiousness (self-reported religiosity).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "religiousness"
+          ]
+        },
+        {
+          "description": "Education level (years/degree coding).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "education"
+          ]
+        },
+        {
+          "description": "Occupation (Hollingshead classification coding).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "occupation"
+          ]
+        },
+        {
+          "description": "Respondent gender (used as a categorical control).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "gender"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\nimport statsmodels.formula.api as smf\nfrom statsmodels.stats.weightstats import ttest_ind\nfrom statsmodels.stats.proportion import proportions_ztest\n\n\ndef main():\n    df = pd.read_csv(\"affairs.csv\")\n\n    # Basic cleaning\n    df = df.copy()\n    df[\"children_yes\"] = (df[\"children\"].str.lower() == \"yes\").astype(int)\n    df[\"any_affair\"] = (df[\"affairs\"] > 0).astype(int)\n\n    # Descriptive stats by children\n    grp = df.groupby(\"children\")\n    desc = grp[\"affairs\"].agg([\"count\", \"mean\", \"median\", \"std\"]).rename(columns={\"count\": \"n\"})\n    prop_any = grp[\"any_affair\"].mean().rename(\"prop_any_affair\")\n    summary = desc.join(prop_any)\n\n    print(\"Descriptive stats by children:\")\n    print(summary)\n    print()\n\n    # Two-sample t-test for mean affairs\n    affairs_yes = df.loc[df[\"children_yes\"] == 1, \"affairs\"].values\n    affairs_no = df.loc[df[\"children_yes\"] == 0, \"affairs\"].values\n    t_stat, p_val, dfree = ttest_ind(affairs_yes, affairs_no, usevar=\"unequal\")\n    print(\"T-test (unequal var) for mean affairs (children yes vs no):\")\n    print({\"t_stat\": float(t_stat), \"p_value\": float(p_val), \"df\": float(dfree)})\n    print()\n\n    # Proportion test for any affair\n    counts = np.array([\n        df.loc[df[\"children_yes\"] == 1, \"any_affair\"].sum(),\n        df.loc[df[\"children_yes\"] == 0, \"any_affair\"].sum(),\n    ])\n    nobs = np.array([\n        (df[\"children_yes\"] == 1).sum(),\n        (df[\"children_yes\"] == 0).sum(),\n    ])\n    z_stat, p_prop = proportions_ztest(counts, nobs)\n    print(\"Proportion z-test for any affair (children yes vs no):\")\n    print({\"z_stat\": float(z_stat), \"p_value\": float(p_prop)})\n    print()\n\n    # Poisson regression (with controls) for affairs count\n    # Use gender as categorical; drop rows with missing values in used columns\n    model_df = df[[\n        \"affairs\", \"children_yes\", \"age\", \"yearsmarried\", \"rating\",\n        \"religiousness\", \"education\", \"occupation\", \"gender\"\n    ]].dropna()\n\n    poisson = smf.glm(\n        \"affairs ~ children_yes + age + yearsmarried + rating + religiousness + education + occupation + C(gender)\",\n        data=model_df,\n        family=sm.families.Poisson(),\n    ).fit()\n\n    coef = poisson.params[\"children_yes\"]\n    irr = float(np.exp(coef))\n    p_child = float(poisson.pvalues[\"children_yes\"])\n\n    print(\"Poisson regression (count of affairs) with controls:\")\n    print({\n        \"children_yes_coef\": float(coef),\n        \"children_yes_IRR\": irr,\n        \"children_yes_p_value\": p_child,\n    })\n\n\nif __name__ == \"__main__\":\n    main()\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T17:56:45.938766+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/affairs/add_features/run4/analysis.py",
+      "info_json": "agentic/experiments/outputs/affairs/add_features/run4/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/affairs/add_features/run4/conclusion.txt"
+    }
+  }
+}

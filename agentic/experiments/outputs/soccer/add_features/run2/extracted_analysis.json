@@ -1,0 +1,37 @@
+{
+  "dataset_name": "soccer",
+  "run_dir": "agentic/experiments/outputs/soccer/add_features/run2",
+  "research_question": "Are soccer players with a dark skin tone more likely than those with a light skin tone to receive red cards from referees?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Player skin tone as coded from profile photos by two independent raters (5-point scale normalized to 0-1); the analysis uses the raters' average to define dark vs light players.",
+          "columns": [
+            "rater1",
+            "rater2"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Count of red cards a player received from a particular referee (used as the outcome in a Poisson regression with games as exposure).",
+        "columns": [
+          "redCards"
+        ]
+      },
+      "controls": []
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\n\n# Load data\nDF_PATH = \"soccer.csv\"\ndf = pd.read_csv(DF_PATH)\n\n# Skin tone: average of two raters (0=very light, 1=very dark)\ndf[\"skin_avg\"] = df[[\"rater1\", \"rater2\"]].mean(axis=1)\n\n# Keep rows with skin ratings and games > 0\nanalysis_df = df.dropna(subset=[\"skin_avg\", \"redCards\", \"games\"]).copy()\nanalysis_df = analysis_df[analysis_df[\"games\"] > 0]\n\n# Define dark vs light: dark if average > 0.5, light if <= 0.5\nanalysis_df[\"dark\"] = (analysis_df[\"skin_avg\"] > 0.5).astype(int)\n\n# Rate per game\nanalysis_df[\"red_rate\"] = analysis_df[\"redCards\"] / analysis_df[\"games\"]\n\n# Group comparison\nsummary = analysis_df.groupby(\"dark\").agg(\n    n=(\"redCards\", \"size\"),\n    total_red=(\"redCards\", \"sum\"),\n    total_games=(\"games\", \"sum\"),\n    mean_rate=(\"red_rate\", \"mean\"),\n)\nsummary[\"rate_per_game\"] = summary[\"total_red\"] / summary[\"total_games\"]\n\n# Poisson regression with exposure offset\n# redCards ~ dark + offset(log(games))\nX = sm.add_constant(analysis_df[\"dark\"])\nmodel = sm.GLM(\n    analysis_df[\"redCards\"],\n    X,\n    family=sm.families.Poisson(),\n    offset=np.log(analysis_df[\"games\"]),\n)\nres = model.fit(cov_type=\"HC0\")\n\n# Extract rate ratio for dark vs light\ncoef = res.params[\"dark\"]\nse = res.bse[\"dark\"]\nrate_ratio = np.exp(coef)\nci_low = np.exp(coef - 1.96 * se)\nci_high = np.exp(coef + 1.96 * se)\n\n# Save key outputs for inspection\nprint(\"Group summary (0=light, 1=dark):\")\nprint(summary)\nprint(\"\\nPoisson regression with offset(log(games)):\")\nprint(res.summary())\nprint(\"\\nRate ratio (dark vs light):\", rate_ratio)\nprint(\"95% CI:\", (ci_low, ci_high))\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-02T16:33:32.420046+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/soccer/add_features/run2/analysis.py",
+      "info_json": "agentic/experiments/outputs/soccer/add_features/run2/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/soccer/add_features/run2/conclusion.txt"
+    }
+  }
+}

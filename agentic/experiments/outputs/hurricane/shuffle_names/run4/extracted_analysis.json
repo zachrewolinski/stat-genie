@@ -1,0 +1,83 @@
+{
+  "dataset_name": "hurricane",
+  "run_dir": "agentic/experiments/outputs/hurricane/shuffle_names/run4",
+  "research_question": "Hurricanes with more feminine names are perceived as less threatening and hence lead to fewer precautionary measures by the general public.",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Masculinity–femininity rating of the hurricane name (index averaged from independent coders; higher = more feminine).",
+          "columns": [
+            "category"
+          ]
+        },
+        {
+          "description": "Binary female-name indicator collected via MTurk (0 = male name, 1 = female name).",
+          "columns": [
+            "masfem_mturk"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Total number of deaths caused by the hurricane (outcome variable; analysis used a log1p transform).",
+        "columns": [
+          "name"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Saffir–Simpson category of the hurricane (storm intensity).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "gender_mf"
+          ]
+        },
+        {
+          "description": "Minimum central pressure of the hurricane at landfall (NOAA).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "ndam15"
+          ]
+        },
+        {
+          "description": "Maximum wind speed of the hurricane at landfall (from NOAA).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "year"
+          ]
+        },
+        {
+          "description": "Normalized property damage (raw dollar amounts adjusted to 2013 monetary values for inflation, wealth, and population density).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "elapsedyrs"
+          ]
+        },
+        {
+          "description": "Year the hurricane occurred (calendar year).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "wind"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\n\n# Load data\nDATA_PATH = \"hurricane.csv\"\ndf = pd.read_csv(DATA_PATH)\n\n# Map columns based on observed distributions\n# wind: year (1950-2012)\n# alldeaths: hurricane name (string)\n# category: femininity rating (1-11)\n# ndam15: minimum pressure at landfall\n# masfem_mturk: binary female indicator (0 male, 1 female)\n# gender_mf: Saffir-Simpson category (1-5)\n# name: total deaths\n# elapsedyrs: normalized damage (missing for some)\n# year: wind speed at landfall (mph)\n\ndf = df.copy()\n\n# Basic sanity checks\n# Remove rows with missing key variables\nmodel_vars = [\"name\", \"category\", \"masfem_mturk\", \"gender_mf\", \"ndam15\", \"year\", \"elapsedyrs\", \"wind\"]\n\n# log1p deaths to reduce skew\nif (df[\"name\"] < 0).any():\n    raise ValueError(\"Deaths column contains negative values.\")\n\ndf[\"log_deaths\"] = np.log1p(df[\"name\"])\n\n# Create a cleaned dataset for regression\nreg_df = df[model_vars + [\"log_deaths\"]].dropna()\n\n# Model 1: femininity rating (continuous)\nX1 = reg_df[[\"category\", \"gender_mf\", \"ndam15\", \"year\", \"elapsedyrs\", \"wind\"]].copy()\nX1 = sm.add_constant(X1)\nmodel1 = sm.OLS(reg_df[\"log_deaths\"], X1).fit(cov_type=\"HC3\")\n\n# Model 2: binary female indicator\nX2 = reg_df[[\"masfem_mturk\", \"gender_mf\", \"ndam15\", \"year\", \"elapsedyrs\", \"wind\"]].copy()\nX2 = sm.add_constant(X2)\nmodel2 = sm.OLS(reg_df[\"log_deaths\"], X2).fit(cov_type=\"HC3\")\n\n# Simple group comparison\nfemale_mean = df.loc[df[\"masfem_mturk\"] == 1, \"name\"].mean()\nmale_mean = df.loc[df[\"masfem_mturk\"] == 0, \"name\"].mean()\n\nprint(\"Rows total:\", len(df))\nprint(\"Rows used in regression:\", len(reg_df))\nprint(\"Mean deaths (female names):\", round(female_mean, 2))\nprint(\"Mean deaths (male names):\", round(male_mean, 2))\n\nprint(\"\\nModel 1: log(deaths) ~ femininity rating + controls\")\nprint(model1.summary().tables[1])\n\nprint(\"\\nModel 2: log(deaths) ~ female indicator + controls\")\nprint(model2.summary().tables[1])\n\n# Save key results for quick review\nresults = {\n    \"n_total\": int(len(df)),\n    \"n_reg\": int(len(reg_df)),\n    \"female_mean_deaths\": float(female_mean),\n    \"male_mean_deaths\": float(male_mean),\n    \"model1_fem_coef\": float(model1.params[\"category\"]),\n    \"model1_fem_p\": float(model1.pvalues[\"category\"]),\n    \"model2_fem_coef\": float(model2.params[\"masfem_mturk\"]),\n    \"model2_fem_p\": float(model2.pvalues[\"masfem_mturk\"]),\n}\n\npd.Series(results).to_csv(\"analysis_results.csv\")\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T18:53:44.435679+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/hurricane/shuffle_names/run4/analysis.py",
+      "info_json": "agentic/experiments/outputs/hurricane/shuffle_names/run4/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/hurricane/shuffle_names/run4/conclusion.txt"
+    }
+  }
+}

@@ -1,0 +1,168 @@
+{
+  "dataset_name": "panda_nuts",
+  "n": 5,
+  "analyses": {
+    "0": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Age in years at time of observation — predictor of nut-cracking efficiency (independent variable).",
+            "columns": [
+              "hammer"
+            ]
+          },
+          {
+            "description": "Individual's sex (male/female) — categorical predictor of nut-cracking efficiency.",
+            "columns": [
+              "nuts_opened"
+            ]
+          },
+          {
+            "description": "Whether the individual received help from another chimpanzee (yes/no) — predictor of nut-cracking efficiency.",
+            "columns": [
+              "seconds"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Number of nuts opened in the session (count outcome); modeled as a rate (nuts per unit time).",
+          "columns": [
+            "help"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Session duration in seconds used as an exposure offset in the Poisson model to account for differing observation times.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "chimpanzee"
+            ]
+          }
+        ]
+      },
+      "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\nimport statsmodels.formula.api as smf\n\n# Load data\npath = 'panda_nuts.csv'\ndf = pd.read_csv(path)\n\n# Rename columns based on metadata mismatch\n# age column seems to be individual ID; hammer column holds age in years\n# nuts_opened column holds sex (m/f); sex column holds hammer type\n# help column holds number of nuts opened; chimpanzee column holds session duration (seconds)\n# seconds column holds whether help was received (y/N)\ndf = df.rename(columns={\n    'age': 'chimp_id',\n    'hammer': 'age_years',\n    'nuts_opened': 'sex',\n    'sex': 'hammer_type',\n    'help': 'nuts_opened',\n    'chimpanzee': 'session_seconds',\n    'seconds': 'help_received'\n})\n\n# Clean help_received to binary\n# values appear as 'y'/'N'\ndf['help_received'] = df['help_received'].str.strip().str.lower().map({'y': 1, 'n': 0})\n\n# Some rows may be missing or unexpected values\n# Drop rows with missing key fields\nkey_cols = ['age_years', 'sex', 'help_received', 'nuts_opened', 'session_seconds']\ndf = df.dropna(subset=key_cols)\n\n# Ensure numeric types\nfor col in ['age_years', 'nuts_opened', 'session_seconds']:\n    df[col] = pd.to_numeric(df[col], errors='coerce')\n\n# Drop any rows with non-positive session time\n# (offset requires positive exposure)\ndf = df[df['session_seconds'] > 0]\n\n# Poisson regression with offset for exposure time to model efficiency (rate of nuts opened)\n# Predictors: age, sex, help_received\nmodel = smf.glm(\n    formula='nuts_opened ~ age_years + C(sex) + help_received',\n    data=df,\n    family=sm.families.Poisson(),\n    offset=np.log(df['session_seconds'])\n).fit()\n\nprint(model.summary())\n\n# Save key results for interpretation\nparams = model.params\npvalues = model.pvalues\nresults = pd.DataFrame({'coef': params, 'pvalue': pvalues})\nresults.to_csv('model_results.csv')\n\n# Compute rate ratios for interpretability\nrate_ratios = np.exp(params)\nrr = pd.DataFrame({'rate_ratio': rate_ratios, 'pvalue': pvalues})\nrr.to_csv('rate_ratios.csv')\n\n# Also compute simple group summaries for context\nsummary = df.groupby(['sex', 'help_received']).apply(\n    lambda x: pd.Series({\n        'mean_rate': (x['nuts_opened'] / x['session_seconds']).mean(),\n        'median_rate': (x['nuts_opened'] / x['session_seconds']).median(),\n        'n': len(x)\n    })\n).reset_index()\nsummary.to_csv('group_rate_summary.csv', index=False)\n"
+    },
+    "1": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Age in years (predictor of nut-cracking efficiency). In the raw file this information is stored in the column labeled 'hammer'.",
+            "columns": [
+              "hammer"
+            ]
+          },
+          {
+            "description": "Sex of the individual (categorical predictor, e.g. m/f). In the raw file this information is stored in the column labeled 'nuts_opened'.",
+            "columns": [
+              "nuts_opened"
+            ]
+          },
+          {
+            "description": "Whether the subject received help from another chimpanzee during the session (binary predictor, y/N). In the raw file this information is stored in the column labeled 'seconds'.",
+            "columns": [
+              "seconds"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Nut-cracking efficiency (outcome) defined as number of nuts opened per second; computed from the number of nuts opened ('help') divided by session duration in seconds ('chimpanzee').",
+          "columns": [
+            "help",
+            "chimpanzee"
+          ]
+        },
+        "controls": []
+      },
+      "analysis_code": "import pandas as pd\nimport statsmodels.formula.api as smf\n\n# Load data\n_df = pd.read_csv('panda_nuts.csv')\n\n# Map shuffled columns to their actual meaning based on metadata\n# age_years: column labeled 'hammer'\n# sex: column labeled 'nuts_opened'\n# help_received: column labeled 'seconds' (y/N)\n# nuts_opened_count: column labeled 'help'\n# session_seconds: column labeled 'chimpanzee'\n\ndf = pd.DataFrame({\n    'age_years': _df['hammer'],\n    'sex': _df['nuts_opened'],\n    'help_received': _df['seconds'],\n    'nuts_opened_count': _df['help'],\n    'session_seconds': _df['chimpanzee'],\n})\n\n# Compute efficiency as nuts opened per second\n# Avoid division by zero; session_seconds should be > 0 in this dataset\n\ndf['efficiency'] = df['nuts_opened_count'] / df['session_seconds']\n\n# Clean help indicator\n# Normalize help to categorical with levels 'N' and 'y'\ndf['help_received'] = df['help_received'].astype(str).str.strip()\n\n# Basic sanity filters (drop any rows with missing or non-positive durations)\ndf = df[df['session_seconds'] > 0].dropna(subset=['efficiency', 'age_years', 'sex', 'help_received'])\n\n# Fit linear model: efficiency ~ age + sex + help\nmodel = smf.ols('efficiency ~ age_years + C(sex) + C(help_received)', data=df).fit(cov_type='HC3')\n\n# Save key outputs for inspection if needed\nsummary = model.summary().as_text()\nwith open('analysis_summary.txt', 'w') as f:\n    f.write(summary)\n\n# Extract p-values for predictors\npvals = model.pvalues.to_dict()\n\n# Store a small results table\nresults = []\nfor term in ['age_years', 'C(sex)[T.m]', 'C(help_received)[T.y]']:\n    if term in pvals:\n        results.append((term, pvals[term]))\n\nresults_df = pd.DataFrame(results, columns=['term', 'p_value'])\nresults_df.to_csv('analysis_pvalues.csv', index=False)\n\nprint(results_df)\n"
+    },
+    "2": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Age of the individual (used as an independent variable). In the analysis script 'hammer' is treated as the subject's age in years.",
+            "columns": [
+              "hammer"
+            ]
+          },
+          {
+            "description": "Sex of the individual (used as an independent variable). In the analysis script sex is derived from the 'nuts_opened' column (values 'm'/'f').",
+            "columns": [
+              "nuts_opened"
+            ]
+          },
+          {
+            "description": "Whether the individual received help from another chimpanzee (used as an independent variable). In the analysis script this is taken from the 'seconds' column (values 'y'/'n').",
+            "columns": [
+              "seconds"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Nut-cracking efficiency: nuts opened per second (dependent variable). Computed in the analysis as number of nuts opened divided by session duration.",
+          "columns": [
+            "help",
+            "chimpanzee"
+          ]
+        },
+        "controls": []
+      },
+      "analysis_code": "import pandas as pd\nimport statsmodels.api as sm\n\n# Load data\nDF_PATH = 'panda_nuts.csv'\ndf = pd.read_csv(DF_PATH)\n\n# Column meanings inferred from metadata mismatch:\n# - 'hammer' appears to be age in years\n# - 'nuts_opened' appears to be sex (m/f)\n# - 'seconds' appears to be help from another chimp (y/n)\n# - 'help' appears to be number of nuts opened in session\n# - 'chimpanzee' appears to be session duration in seconds\n\n# Build variables\nsec = df['seconds'].astype(str).str.lower()\ndf['help_yes'] = sec.map({'y': 1, 'n': 0})\n\ndf['sex_m'] = df['nuts_opened'].map({'m': 1, 'f': 0})\n\n# Efficiency: nuts opened per second\n# Guard against zero duration (not expected, but safe)\ndf['efficiency'] = df['help'] / df['chimpanzee'].replace({0: pd.NA})\n\n# Drop rows with missing derived values\nanalysis_df = df.dropna(subset=['efficiency', 'help_yes', 'sex_m', 'hammer']).copy()\n\n# Regression: efficiency ~ age (hammer) + sex + help\nX = analysis_df[['hammer', 'sex_m', 'help_yes']]\nX = sm.add_constant(X)\ny = analysis_df['efficiency']\n\nmodel = sm.OLS(y, X).fit()\n\nprint('Model summary:')\nprint(model.summary())\n\n# Group means for interpretability\nprint('\\nGroup means (efficiency):')\nprint(analysis_df.groupby('sex_m')['efficiency'].mean().rename({0: 'female', 1: 'male'}))\nprint(analysis_df.groupby('help_yes')['efficiency'].mean().rename({0: 'no_help', 1: 'help'}))\n\n"
+    },
+    "3": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Age of the individual in years (predictor of nut-cracking efficiency).",
+            "columns": [
+              "age"
+            ]
+          },
+          {
+            "description": "Sex of the individual (male/female), encoded in the 'nuts_opened' column in the raw file.",
+            "columns": [
+              "nuts_opened"
+            ]
+          },
+          {
+            "description": "Whether the individual received help from another chimpanzee during the session (yes/no), encoded in the 'seconds' column in the raw file.",
+            "columns": [
+              "seconds"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Nut-cracking efficiency calculated as nuts opened per second (help ÷ chimpanzee), i.e., number of nuts opened in the session divided by session duration in seconds.",
+          "columns": [
+            "help",
+            "chimpanzee"
+          ]
+        },
+        "controls": []
+      },
+      "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.formula.api as smf\n\n# Load data\n_df = pd.read_csv('panda_nuts.csv')\n\n# Map columns based on metadata mismatch\n# age: numeric age in years\n# nuts_opened: sex (m/f)\n# seconds: help received (y/N)\n# help: number of nuts opened in session\n# chimpanzee: duration in seconds\n\n_df = _df.copy()\n_df['sex_cat'] = _df['nuts_opened'].astype('category')\n_df['help_cat'] = _df['seconds'].astype('category')\n\n# Efficiency: nuts opened per second\n_df['efficiency'] = _df['help'] / _df['chimpanzee']\n\n# Remove any invalid rows (e.g., zero duration)\n_df = _df.replace([np.inf, -np.inf], np.nan).dropna(subset=['efficiency', 'age', 'sex_cat', 'help_cat'])\n\n# Fit OLS with robust SE\nmodel = smf.ols('efficiency ~ age + C(sex_cat) + C(help_cat)', data=_df).fit(cov_type='HC3')\n\n# Save summary to a text file for inspection\nwith open('analysis_summary.txt', 'w') as f:\n    f.write(model.summary().as_text())\n    f.write('\\n\\n')\n    f.write('N=' + str(len(_df)) + '\\n')\n\n# Also compute group means for interpretation\nmeans = _df.groupby(['sex_cat', 'help_cat'])['efficiency'].mean().reset_index()\nmeans.to_csv('group_means.csv', index=False)\n\nprint(model.summary())\nprint('\\nGroup means (efficiency):')\nprint(means)\n"
+    },
+    "4": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Predictors of interest from the research question: age in years, sex of the individual, and whether the individual received help from another chimpanzee. In the dataset these are represented by the columns below (age in years is stored in 'hammer' per the provided mapping; sex is stored in 'nuts_opened'; received-help indicator is stored in 'seconds').",
+            "columns": [
+              "hammer",
+              "nuts_opened",
+              "seconds"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Nut-cracking efficiency operationalized in the analysis as the number of nuts opened per unit session time (modeled as a count of nuts with session duration as exposure). The raw count of nuts opened is stored in the 'help' column in the provided dataset.",
+          "columns": [
+            "help"
+          ]
+        },
+        "controls": []
+      },
+      "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\nimport statsmodels.formula.api as smf\n\n# Load data\n_df = pd.read_csv('panda_nuts.csv')\n\n# Map shuffled columns to their described meanings\n# According to info.json descriptions:\n# age -> chimpanzee_id, hammer -> age_years, nuts_opened -> sex, sex -> hammer_type,\n# help -> nuts_opened_count, chimpanzee -> session_seconds, seconds -> received_help\n_df = _df.rename(\n    columns={\n        'age': 'chimpanzee_id',\n        'hammer': 'age_years',\n        'nuts_opened': 'sex',\n        'sex': 'hammer_type',\n        'help': 'nuts_opened_count',\n        'chimpanzee': 'session_seconds',\n        'seconds': 'received_help'\n    }\n)\n\n# Basic cleaning\n_df['received_help'] = _df['received_help'].astype(str).str.strip().str.lower().map({'y': 1, 'yes': 1, 'n': 0, 'no': 0})\n_df['sex'] = _df['sex'].astype(str).str.strip().str.lower().map({'m': 'm', 'f': 'f'})\n\n# Drop any rows with missing key fields\n_df = _df.dropna(subset=['nuts_opened_count', 'session_seconds', 'age_years', 'sex', 'received_help'])\n\n# Efficiency = nuts opened per second\n_df['efficiency'] = _df['nuts_opened_count'] / _df['session_seconds']\n\n# Model nuts opened as a rate with exposure = session_seconds\n# Poisson GLM with log link and offset log(seconds) to model efficiency\n_df['log_seconds'] = np.log(_df['session_seconds'])\nmodel = smf.glm(\n    formula='nuts_opened_count ~ age_years + C(sex) + received_help',\n    data=_df,\n    family=sm.families.Poisson(),\n    offset=_df['log_seconds']\n).fit()\n\nprint('N rows used:', len(_df))\nprint(_df[['age_years','sex','received_help','nuts_opened_count','session_seconds','efficiency']].head())\nprint(model.summary())\n\n# Save key stats for later use if needed\ncoef = model.params\npvals = model.pvalues\nresults = pd.DataFrame({'coef': coef, 'pval': pvals})\nresults.to_csv('model_results.csv')\n"
+    }
+  }
+}

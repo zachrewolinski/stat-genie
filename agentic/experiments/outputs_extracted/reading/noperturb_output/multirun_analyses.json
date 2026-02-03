@@ -1,0 +1,251 @@
+{
+  "dataset_name": "reading",
+  "n": 5,
+  "analyses": {
+    "0": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Whether the Reader View (modified web page layout) was activated (treatment indicator).",
+            "columns": [
+              "reader_view"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Reading speed (outcome); the analysis uses a log transform of this column but the canonical column is speed.",
+          "columns": [
+            "speed"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Content and device covariates included to hold constant page- and device-related factors (page identifier, number of words on the page, Flesch-Kincaid readability, and device used).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "page_id",
+              "num_words",
+              "Flesch_Kincaid",
+              "device"
+            ]
+          }
+        ]
+      },
+      "analysis_code": "import pandas as pd\nimport numpy as np\nfrom statsmodels.stats.weightstats import ttest_ind\nimport statsmodels.formula.api as smf\n\n\ndef main():\n    df = pd.read_csv('reading.csv')\n\n    # Focus on participants with dyslexia\n    sub = df[df['dyslexia_bin'] == 1].copy()\n    sub = sub[(sub['speed'] > 0) & sub['reader_view'].notna()]\n    sub['log_speed'] = np.log(sub['speed'])\n\n    # Descriptive stats\n    counts = sub['reader_view'].value_counts().sort_index()\n    means = sub.groupby('reader_view')['speed'].mean()\n    medians = sub.groupby('reader_view')['speed'].median()\n\n    # T-test on log speed (more stable than raw speed)\n    rv0 = sub[sub['reader_view'] == 0]['log_speed']\n    rv1 = sub[sub['reader_view'] == 1]['log_speed']\n    t_stat, p_val, dfree = ttest_ind(rv1, rv0, usevar='unequal')\n\n    # Regression with content/device controls (robust SEs)\n    cols = ['log_speed', 'reader_view', 'page_id', 'num_words', 'Flesch_Kincaid', 'device']\n    sub2 = sub[cols].dropna()\n    model = smf.ols(\n        'log_speed ~ reader_view + C(page_id) + num_words + Flesch_Kincaid + C(device)',\n        data=sub2,\n    ).fit(cov_type='HC3')\n\n    print('Dyslexia sample size:', len(sub))\n    print('Reader view counts (0,1):', counts.to_dict())\n    print('Mean speed by reader_view:', means.to_dict())\n    print('Median speed by reader_view:', medians.to_dict())\n    print('T-test log speed (t, p, df):', (t_stat, p_val, dfree))\n    print('Regression reader_view coef:', model.params['reader_view'])\n    print('Regression reader_view p-value:', model.pvalues['reader_view'])\n\n\nif __name__ == '__main__':\n    main()\n"
+    },
+    "1": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Treatment indicator for whether the Reader View layout was activated (1) or not (0); the main predictor of interest testing if Reader View affects reading speed for participants with dyslexia.",
+            "columns": [
+              "reader_view"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Observed reading speed (the outcome). The analysis models log(speed) to reduce skew, but the canonical column is used here.",
+          "columns": [
+            "speed"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Controls for the specific page and text properties: which page was read, number of words on the page, and text readability (Flesch-Kincaid score). These account for content-level differences that can affect reading speed.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "page_id",
+              "num_words",
+              "Flesch_Kincaid"
+            ]
+          },
+          {
+            "description": "Controls for the device used and whether the trial was a retake to account for presentation/context effects on reading speed.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "device",
+              "retake_trial"
+            ]
+          },
+          {
+            "description": "Demographic controls for the reader: age, education level, gender, and whether the reader is a native English speaker. These hold constant individual differences that may confound the Reader View effect.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "age",
+              "education",
+              "gender",
+              "english_native"
+            ]
+          },
+          {
+            "description": "Comprehension performance (rate of correct answers to comprehension questions) included as a control because comprehension can be related to reading speed and may confound the treatment effect.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "correct_rate"
+            ]
+          }
+        ]
+      },
+      "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\nfrom statsmodels.stats.weightstats import ttest_ind\n\n# Load data\npath = 'reading.csv'\ndf = pd.read_csv(path)\n\n# Focus on participants with dyslexia\n# dyslexia_bin: 1 indicates dyslexia\nsub = df[df['dyslexia_bin'] == 1].copy()\n\n# Basic group stats by reader_view\ngroup_stats = sub.groupby('reader_view')['speed'].agg(['count', 'mean', 'median', 'std']).rename_axis('reader_view')\n\n# Welch's t-test for difference in means\nspeed_rv1 = sub[sub['reader_view'] == 1]['speed'].dropna()\nspeed_rv0 = sub[sub['reader_view'] == 0]['speed'].dropna()\n\n# If either group is empty, skip t-test\nif len(speed_rv1) > 1 and len(speed_rv0) > 1:\n    tstat, pval, dfree = ttest_ind(speed_rv1, speed_rv0, usevar='unequal')\nelse:\n    tstat, pval, dfree = np.nan, np.nan, np.nan\n\n# Regression with controls using log(speed) to reduce skew\nsub = sub.replace([np.inf, -np.inf], np.nan)\nsub = sub[sub['speed'] > 0].copy()\nsub['log_speed'] = np.log(sub['speed'])\n\n# Select covariates\ncovariates = ['reader_view', 'page_id', 'num_words', 'device', 'age', 'education', 'gender',\n              'english_native', 'Flesch_Kincaid', 'correct_rate', 'retake_trial']\n\n# Keep rows with needed columns\nmodel_df = sub[covariates + ['log_speed']].dropna().copy()\n\n# One-hot encode categoricals\ncat_cols = ['page_id', 'device', 'education', 'english_native']\nmodel_df = pd.get_dummies(model_df, columns=cat_cols, drop_first=True)\n\nX = model_df.drop(columns=['log_speed'])\nX = sm.add_constant(X)\ny = model_df['log_speed']\n\nmodel = sm.OLS(y, X).fit()\n\n# Extract reader_view coefficient\nrv_coef = model.params.get('reader_view', np.nan)\nrv_pval = model.pvalues.get('reader_view', np.nan)\n\n# Print results for inspection\nprint('Group stats (dyslexia_bin==1):')\nprint(group_stats)\nprint('\\nWelch t-test (speed, reader_view=1 vs 0):')\nprint(f't={tstat:.4f}, p={pval:.6f}, df={dfree:.2f}')\n\nprint('\\nRegression on log(speed) with controls:')\nprint(f'reader_view coef={rv_coef:.6f}, p={rv_pval:.6f}')\nprint('\\nModel summary (abbrev):')\nprint(model.summary().tables[1].as_text())\n"
+    },
+    "2": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Treatment indicator for whether the Reader View layout was activated (1) or not (0). This is the main predictor whose effect on reading speed is of interest.",
+            "columns": [
+              "reader_view"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Reading speed measured for each page/participant (used as the outcome; log(speed) is modeled in the analysis).",
+          "columns": [
+            "speed"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Content and presentation covariates included to adjust the estimated effect of reader_view: page identifier (content), number of words on the page, device used, and language of the text.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "page_id",
+              "num_words",
+              "device",
+              "language"
+            ]
+          }
+        ]
+      },
+      "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.formula.api as smf\nfrom scipy import stats\n\n# Load data\n_df = pd.read_csv('reading.csv')\n\n# Focus on participants with dyslexia (binary indicator)\n# Use dyslexia_bin if available, otherwise fall back to dyslexia >= 1\nif 'dyslexia_bin' in _df.columns:\n    df = _df[_df['dyslexia_bin'] == 1].copy()\nelse:\n    df = _df[_df['dyslexia'] >= 1].copy()\n\n# Basic cleaning\n# Remove non-positive or missing speeds\nif 'speed' not in df.columns:\n    raise ValueError('speed column not found')\n\ndf = df.replace([np.inf, -np.inf], np.nan)\ndf = df.dropna(subset=['speed', 'reader_view'])\ndf = df[df['speed'] > 0]\n\n# Group stats by reader_view\nsummary = (\n    df.groupby('reader_view')['speed']\n    .agg(['count', 'mean', 'median', 'std'])\n    .rename(index={0: 'NoReaderView', 1: 'ReaderView'})\n)\n\n# Welch t-test on log speed for skewed distribution\nlog_speed = np.log(df['speed'])\nrv = df['reader_view']\nlog_speed_rv = log_speed[rv == 1]\nlog_speed_no = log_speed[rv == 0]\n\nttest_res = stats.ttest_ind(log_speed_rv, log_speed_no, equal_var=False, nan_policy='omit')\n\n# Regression with controls: page_id and num_words (content), device, language\n# Use log(speed) outcome for stability\n# Only include controls if present\ncontrols = []\nfor col in ['page_id', 'num_words', 'device', 'language']:\n    if col in df.columns:\n        controls.append(col)\n\nformula = 'np.log(speed) ~ reader_view'\nif controls:\n    formula += ' + ' + ' + '.join([f'C({c})' if df[c].dtype == 'object' or df[c].dtype.name == 'category' else c for c in controls])\n\nmodel = smf.ols(formula, data=df).fit(cov_type='HC3')\n\n# Collect results\nresults = {\n    'n_dyslexia': int(df.shape[0]),\n    'summary_by_reader_view': summary,\n    'ttest_log_speed_stat': float(ttest_res.statistic) if np.isfinite(ttest_res.statistic) else np.nan,\n    'ttest_log_speed_pvalue': float(ttest_res.pvalue) if np.isfinite(ttest_res.pvalue) else np.nan,\n    'reg_coef_reader_view': float(model.params.get('reader_view', np.nan)),\n    'reg_pvalue_reader_view': float(model.pvalues.get('reader_view', np.nan)),\n    'reg_nobs': int(model.nobs),\n}\n\nprint('Dyslexia subset size:', results['n_dyslexia'])\nprint('\\nSummary by reader_view:')\nprint(summary)\nprint('\\nWelch t-test on log(speed): stat=%.4f p=%.6f' % (results['ttest_log_speed_stat'], results['ttest_log_speed_pvalue']))\nprint('\\nRegression (log speed) coef reader_view=%.4f p=%.6f' % (results['reg_coef_reader_view'], results['reg_pvalue_reader_view']))\n\n# Save key results for downstream use\nresults_df = summary.copy()\nresults_df.to_csv('analysis_summary_by_reader_view.csv')\n\nwith open('analysis_results.txt', 'w') as f:\n    f.write('Dyslexia subset size: %d\\n' % results['n_dyslexia'])\n    f.write('Welch t-test on log(speed): stat=%.6f p=%.8f\\n' % (results['ttest_log_speed_stat'], results['ttest_log_speed_pvalue']))\n    f.write('Regression (log speed) coef reader_view=%.6f p=%.8f\\n' % (results['reg_coef_reader_view'], results['reg_pvalue_reader_view']))\n"
+    },
+    "3": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Indicates if the reader view was activated (1) or not (0). This is the treatment whose effect on reading speed is of interest.",
+            "columns": [
+              "reader_view"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Reading speed (outcome variable used in the analysis; 'speed' column).",
+          "columns": [
+            "speed"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Number of words on the page",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "num_words"
+            ]
+          },
+          {
+            "description": "Flesch-Kincaid readability score of the text",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "Flesch_Kincaid"
+            ]
+          },
+          {
+            "description": "Unique identifier for each page",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "page_id"
+            ]
+          },
+          {
+            "description": "Device used by the reader in the study",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "device"
+            ]
+          },
+          {
+            "description": "Indicates if the trial was a retake (1) or not (0)",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "retake_trial"
+            ]
+          },
+          {
+            "description": "Age of the reader",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "age"
+            ]
+          },
+          {
+            "description": "Gender of the reader (0 - Male, 1 - Female, 2 - Other)",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "gender"
+            ]
+          },
+          {
+            "description": "Indicates if the reader is a native English speaker ('Y') or not ('N')",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "english_native"
+            ]
+          }
+        ]
+      },
+      "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.formula.api as smf\nfrom statsmodels.stats.weightstats import ttest_ind\n\n\ndef cohen_d(x, y):\n    x = np.asarray(x)\n    y = np.asarray(y)\n    nx = len(x)\n    ny = len(y)\n    vx = x.var(ddof=1)\n    vy = y.var(ddof=1)\n    pooled = ((nx - 1) * vx + (ny - 1) * vy) / (nx + ny - 2)\n    return (x.mean() - y.mean()) / np.sqrt(pooled)\n\n\ndef main():\n    df = pd.read_csv(\"reading.csv\")\n\n    # Focus on participants with dyslexia (binary flag)\n    dys = df[df[\"dyslexia_bin\"] == 1].copy()\n\n    # Drop missing speed or reader_view\n    dys = dys.dropna(subset=[\"speed\", \"reader_view\"])\n\n    # Basic group stats\n    g0 = dys[dys[\"reader_view\"] == 0][\"speed\"]\n    g1 = dys[dys[\"reader_view\"] == 1][\"speed\"]\n\n    mean0 = g0.mean()\n    mean1 = g1.mean()\n    n0 = g0.shape[0]\n    n1 = g1.shape[0]\n\n    t_stat, p_val, _ = ttest_ind(g1, g0, usevar=\"unequal\")\n    d = cohen_d(g1, g0)\n\n    # Regression with controls (log speed to reduce skew)\n    dys = dys.copy()\n    dys[\"log_speed\"] = np.log(dys[\"speed\"])\n\n    # Build formula with categorical controls\n    # Keep key content variables that influence reading speed\n    formula = (\n        \"log_speed ~ reader_view + num_words + Flesch_Kincaid + \"\n        \"C(page_id) + C(device) + retake_trial + age + C(gender) + C(english_native)\"\n    )\n\n    model = smf.ols(formula=formula, data=dys).fit(cov_type=\"HC3\")\n\n    rv_coef = model.params.get(\"reader_view\", np.nan)\n    rv_p = model.pvalues.get(\"reader_view\", np.nan)\n\n    # Write a compact analysis report for downstream use\n    with open(\"analysis_results.txt\", \"w\", encoding=\"utf-8\") as f:\n        f.write(\"Dyslexia-only sample\\n\")\n        f.write(f\"n reader_view=0: {n0}\\n\")\n        f.write(f\"n reader_view=1: {n1}\\n\")\n        f.write(f\"mean speed (rv=0): {mean0:.3f}\\n\")\n        f.write(f\"mean speed (rv=1): {mean1:.3f}\\n\")\n        f.write(f\"mean diff (rv=1 - rv=0): {mean1 - mean0:.3f}\\n\")\n        f.write(f\"Welch t-test p-value: {p_val:.6f}\\n\")\n        f.write(f\"Cohen's d: {d:.3f}\\n\")\n        f.write(\"\\nRegression (log speed) with controls\\n\")\n        f.write(f\"reader_view coef: {rv_coef:.6f}\\n\")\n        f.write(f\"reader_view p-value: {rv_p:.6f}\\n\")\n\n\nif __name__ == \"__main__\":\n    main()\n"
+    },
+    "4": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Reader View activation (treatment/predictor indicating whether the modified 'reader view' layout was used).",
+            "columns": [
+              "reader_view"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Reading speed (outcome measuring reading speed; used as the dependent variable).",
+          "columns": [
+            "speed"
+          ]
+        },
+        "controls": [
+          {
+            "description": "Page identifier included as a covariate to control for page-level differences (entered as C(page_id) in the model).",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "page_id"
+            ]
+          },
+          {
+            "description": "Participant identifier used as the grouping variable for a random intercept (or for cluster-robust SEs) to account for within-user correlation.",
+            "is_moderator": false,
+            "moderator_on": null,
+            "columns": [
+              "uuid"
+            ]
+          }
+        ]
+      },
+      "analysis_code": "import math\nimport pandas as pd\nimport numpy as np\nimport statsmodels.formula.api as smf\nfrom scipy import stats\n\nDATA_PATH = \"reading.csv\"\nOUTPUT_PATH = \"conclusion.txt\"\n\n\ndef main():\n    df = pd.read_csv(DATA_PATH)\n\n    # Focus on individuals with dyslexia\n    df_dys = df[df[\"dyslexia_bin\"] == 1].copy()\n    df_dys = df_dys[df_dys[\"speed\"] > 0].copy()\n\n    if df_dys.empty or df_dys[\"reader_view\"].nunique() < 2:\n        with open(OUTPUT_PATH, \"w\", encoding=\"utf-8\") as f:\n            f.write(\"No\\nInsufficient data for dyslexic readers with both reader view conditions.\")\n        return\n\n    df_dys[\"log_speed\"] = np.log(df_dys[\"speed\"])\n\n    # Descriptive stats\n    group_means = df_dys.groupby(\"reader_view\")[\"speed\"].mean()\n    mean_rv0 = float(group_means.get(0, np.nan))\n    mean_rv1 = float(group_means.get(1, np.nan))\n    pct_diff = ((mean_rv1 - mean_rv0) / mean_rv0 * 100.0) if mean_rv0 > 0 else np.nan\n\n    # Paired test on per-participant means (if possible)\n    per_user = df_dys.groupby([\"uuid\", \"reader_view\"])[\"speed\"].mean().unstack()\n    paired = per_user.dropna()\n    paired_p = np.nan\n    paired_diff = np.nan\n    if len(paired) >= 5:\n        paired_diff = float((paired[1] - paired[0]).mean())\n        tstat, paired_p = stats.ttest_rel(paired[1], paired[0])\n\n    # Mixed effects model (random intercept per user), controlling for page\n    model_used = \"mixedlm\"\n    beta = np.nan\n    p_value = np.nan\n    try:\n        mixed = smf.mixedlm(\"log_speed ~ reader_view + C(page_id)\", df_dys, groups=df_dys[\"uuid\"])\n        mixed_res = mixed.fit(reml=False, method=\"lbfgs\", maxiter=200)\n        beta = float(mixed_res.params.get(\"reader_view\", np.nan))\n        p_value = float(mixed_res.pvalues.get(\"reader_view\", np.nan))\n    except Exception:\n        # Fallback to OLS with cluster-robust SEs by user\n        model_used = \"ols_cluster\"\n        ols = smf.ols(\"log_speed ~ reader_view + C(page_id)\", df_dys).fit(\n            cov_type=\"cluster\", cov_kwds={\"groups\": df_dys[\"uuid\"]}\n        )\n        beta = float(ols.params.get(\"reader_view\", np.nan))\n        p_value = float(ols.pvalues.get(\"reader_view\", np.nan))\n\n    # Convert log coefficient to percent change\n    pct_change_model = (math.exp(beta) - 1.0) * 100.0 if np.isfinite(beta) else np.nan\n\n    # Decision rule\n    improves = bool(np.isfinite(beta) and np.isfinite(p_value) and (beta > 0) and (p_value < 0.05))\n\n    # Write conclusion\n    with open(OUTPUT_PATH, \"w\", encoding=\"utf-8\") as f:\n        f.write(\"Yes\\n\" if improves else \"No\\n\")\n        sentence_parts = []\n        sentence_parts.append(\n            f\"Among dyslexic readers, mean speed was {mean_rv0:.1f} wpm without reader view and {mean_rv1:.1f} wpm with reader view\"\n        )\n        if np.isfinite(pct_diff):\n            sentence_parts.append(f\"(difference {pct_diff:.1f}%)\")\n        sentence = \" \".join(sentence_parts) + \".\"\n\n        detail_parts = []\n        if np.isfinite(pct_change_model) and np.isfinite(p_value):\n            detail_parts.append(\n                f\"A {model_used} model on log speed (controlling for page) estimates a {pct_change_model:.1f}% change with reader view (p={p_value:.3g})\"\n            )\n        if np.isfinite(paired_p):\n            detail_parts.append(\n                f\"paired within-reader comparison shows mean change {paired_diff:.1f} wpm (p={paired_p:.3g})\"\n            )\n        detail = \"; \".join(detail_parts) + \".\" if detail_parts else \"\"\n\n        if detail:\n            f.write(sentence + \" \" + detail)\n        else:\n            f.write(sentence)\n\n\nif __name__ == \"__main__\":\n    main()\n"
+    }
+  }
+}

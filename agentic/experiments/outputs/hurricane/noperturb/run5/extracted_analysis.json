@@ -1,0 +1,54 @@
+{
+  "dataset_name": "hurricane",
+  "run_dir": "agentic/experiments/outputs/hurricane/noperturb/run5",
+  "research_question": "Hurricanes with more feminine names are perceived as less threatening and hence lead to fewer precautionary measures by the general public.",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Continuous masculinity–femininity index for the hurricane name (higher = more feminine) rated by independent coders; primary independent variable testing whether feminine names affect outcomes.",
+          "columns": [
+            "masfem"
+          ]
+        },
+        {
+          "description": "Binary gender indicator for the hurricane name (0 = male, 1 = female); used as a robustness alternative independent variable.",
+          "columns": [
+            "gender_mf"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Total number of deaths caused by the hurricane (alldeaths). The analysis models log(alldeaths + 1) to reduce skewness.",
+        "columns": [
+          "alldeaths"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Storm intensity and temporal controls included to adjust for hurricane strength and time trends: maximum wind speed at landfall (wind), minimum pressure at landfall (min), Saffir–Simpson category (category), and year of occurrence (year).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "wind",
+            "min",
+            "category",
+            "year"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.formula.api as smf\n\n# Load data\ncsv_path = \"hurricane.csv\"\ndf = pd.read_csv(csv_path)\n\n# Basic cleaning\n# Ensure numeric columns are numeric\nnum_cols = [\"masfem\", \"wind\", \"min\", \"category\", \"alldeaths\", \"year\"]\nfor col in num_cols:\n    df[col] = pd.to_numeric(df[col], errors=\"coerce\")\n\n# Create log-transformed deaths to handle skew\n# Add 1 to handle zero deaths\n\ndf[\"log_deaths\"] = np.log1p(df[\"alldeaths\"])\n\n# Primary model: log deaths on femininity + storm intensity controls\n# Controls: wind speed, minimum pressure, category, year (to capture time trends)\nmodel = smf.ols(\"log_deaths ~ masfem + wind + min + category + year\", data=df).fit()\n\n# Also check binary gender as robustness\nmodel_gender = smf.ols(\"log_deaths ~ gender_mf + wind + min + category + year\", data=df).fit()\n\nprint(\"=== OLS: log(deaths+1) ~ masfem + controls ===\")\nprint(model.summary())\nprint(\"\\n=== OLS: log(deaths+1) ~ gender_mf + controls ===\")\nprint(model_gender.summary())\n\n# Simple correlation for context\ncorr = df[[\"masfem\", \"alldeaths\", \"log_deaths\"]].corr()\nprint(\"\\n=== Correlations ===\")\nprint(corr)\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T18:48:34.507550+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/hurricane/noperturb/run5/analysis.py",
+      "info_json": "agentic/experiments/outputs/hurricane/noperturb/run5/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/hurricane/noperturb/run5/conclusion.txt"
+    }
+  }
+}

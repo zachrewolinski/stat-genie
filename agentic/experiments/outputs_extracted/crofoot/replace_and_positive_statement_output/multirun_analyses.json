@@ -1,0 +1,146 @@
+{
+  "dataset_name": "crofoot",
+  "n": 5,
+  "analyses": {
+    "0": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Relative group size, operationalized as the difference between the focal group's size and the other group's size (positive values indicate the focal group is larger). This was computed from the group size columns.",
+            "columns": [
+              "n_focal",
+              "n_other"
+            ]
+          },
+          {
+            "description": "Relative contest location (location advantage), operationalized as the difference in distance to each group's home-range center (other group's distance minus focal group's distance); positive values indicate the focal group is closer to its home-range center than the other group.",
+            "columns": [
+              "dist_focal",
+              "dist_other"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Outcome of the intergroup contest: whether the focal group won (1) or lost (0).",
+          "columns": [
+            "win"
+          ]
+        },
+        "controls": []
+      },
+      "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\nfrom pathlib import Path\n\nDATA_PATH = Path(__file__).with_name(\"crofoot.csv\")\n\ndf = pd.read_csv(DATA_PATH)\n\n# Relative group size (positive means focal larger)\ndf[\"rel_size\"] = df[\"n_focal\"] - df[\"n_other\"]\n# Contest location: positive means focal is closer to its home range center than the other group\n# (other group's distance minus focal group's distance)\ndf[\"rel_loc\"] = df[\"dist_other\"] - df[\"dist_focal\"]\n\n# Standardize predictors for comparability\nfor col in [\"rel_size\", \"rel_loc\"]:\n    df[f\"z_{col}\"] = (df[col] - df[col].mean()) / df[col].std(ddof=0)\n\nX = sm.add_constant(df[[\"z_rel_size\", \"z_rel_loc\"]])\ny = df[\"win\"]\n\nmodel = sm.Logit(y, X).fit(disp=False)\n\n# Compute predicted probabilities for typical changes\nmean_row = X.mean().to_frame().T\n\n# 1 SD increase in relative size\nrow_size_up = mean_row.copy()\nrow_size_up[\"z_rel_size\"] = mean_row[\"z_rel_size\"].iloc[0] + 1\n\n# 1 SD increase in relative location advantage\nrow_loc_up = mean_row.copy()\nrow_loc_up[\"z_rel_loc\"] = mean_row[\"z_rel_loc\"].iloc[0] + 1\n\np_base = float(model.predict(mean_row))\np_size_up = float(model.predict(row_size_up))\np_loc_up = float(model.predict(row_loc_up))\n\nprint(\"Logit model: win ~ z_rel_size + z_rel_loc\")\nprint(model.summary())\nprint(\"\\nKey effects (z-scored predictors):\")\nprint(model.params)\nprint(\"P-values:\")\nprint(model.pvalues)\nprint(\"\\nPredicted win probability at mean predictors:\", round(p_base, 3))\nprint(\"Predicted win probability +1 SD rel_size:\", round(p_size_up, 3))\nprint(\"Predicted win probability +1 SD rel_loc:\", round(p_loc_up, 3))\n\n# Simple descriptive checks\nprint(\"\\nWin rate by relative size category:\")\nprint(df.groupby(pd.cut(df[\"rel_size\"], bins=[-10, -1, 0, 10]))[\"win\"].mean())\n\nprint(\"\\nWin rate by relative location advantage (rel_loc) sign:\")\nprint(df.groupby(np.sign(df[\"rel_loc\"]))[\"win\"].mean())\n"
+    },
+    "1": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Relative group size (difference between focal and other group sizes); analysis used n_focal - n_other as the size advantage for the focal group.",
+            "columns": [
+              "n_focal",
+              "n_other"
+            ]
+          },
+          {
+            "description": "Contest location / location advantage (relative proximity to home range center); analysis used dist_other - dist_focal so positive values indicate the focal group is closer to its home range center.",
+            "columns": [
+              "dist_focal",
+              "dist_other"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Outcome of the intergroup contest: whether the focal group won (1) or lost (0).",
+          "columns": [
+            "win"
+          ]
+        },
+        "controls": []
+      },
+      "analysis_code": "import numpy as np\nimport pandas as pd\nimport statsmodels.api as sm\n\n# Load data\npath = \"crofoot.csv\"\ndf = pd.read_csv(path)\n\n# Feature engineering: relative group size and contest location\n# Positive size_diff means focal group is larger\n# Positive dist_diff means focal is closer to its home range center (other is farther)\ndf[\"size_diff\"] = df[\"n_focal\"] - df[\"n_other\"]\ndf[\"dist_diff\"] = df[\"dist_other\"] - df[\"dist_focal\"]\n\n# Logistic regression: win ~ size_diff + dist_diff\nX = df[[\"size_diff\", \"dist_diff\"]]\nX = sm.add_constant(X)\ny = df[\"win\"]\n\nmodel = sm.Logit(y, X).fit(disp=False)\n\n# Summarize results\nsummary = model.summary2()\nprint(summary)\n\n# Save key outputs for quick inspection\nparams = model.params\npvalues = model.pvalues\nodds_ratios = params.apply(lambda x: float(np.exp(x)))\n\nresults = pd.DataFrame({\n    \"coef\": params,\n    \"pvalue\": pvalues,\n    \"odds_ratio\": odds_ratios\n})\nprint(\"\\nKey results (coef, pvalue, odds_ratio):\")\nprint(results)\n\n# Also compute simple win rates by size and location advantage\n# Size advantage\nsize_adv = df[\"size_diff\"] > 0\nloc_adv = df[\"dist_diff\"] > 0\n\nwin_rate_size_adv = df.loc[size_adv, \"win\"].mean()\nwin_rate_size_disadv = df.loc[~size_adv, \"win\"].mean()\nwin_rate_loc_adv = df.loc[loc_adv, \"win\"].mean()\nwin_rate_loc_disadv = df.loc[~loc_adv, \"win\"].mean()\n\nprint(\"\\nWin rates:\")\nprint(f\"Size advantage win rate: {win_rate_size_adv:.3f}\")\nprint(f\"Size disadvantage win rate: {win_rate_size_disadv:.3f}\")\nprint(f\"Location advantage (closer to home) win rate: {win_rate_loc_adv:.3f}\")\nprint(f\"Location disadvantage win rate: {win_rate_loc_disadv:.3f}\")\n\n# Save summary to a CSV for reference\nresults.to_csv(\"analysis_results.csv\", index=True)\n"
+    },
+    "2": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Relative group size (predictor): difference in group sizes between focal and other (n_focal - n_other).",
+            "columns": [
+              "n_focal",
+              "n_other"
+            ]
+          },
+          {
+            "description": "Contest location (predictor): relative distance of focal vs other from their home-range centers (dist_focal - dist_other).",
+            "columns": [
+              "dist_focal",
+              "dist_other"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Outcome: whether the focal group won the intergroup contest (1 = focal won, 0 = other won).",
+          "columns": [
+            "win"
+          ]
+        },
+        "controls": []
+      },
+      "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\n\n# Load data\n_df = pd.read_csv(\"crofoot.csv\")\n\n# Feature engineering: relative group size and contest location\n_df[\"size_diff\"] = _df[\"n_focal\"] - _df[\"n_other\"]\n# Positive loc_diff means focal is farther from its home-range center than the other group\n_df[\"loc_diff\"] = _df[\"dist_focal\"] - _df[\"dist_other\"]\n\n# Logistic regression: win ~ size_diff + loc_diff\nX = sm.add_constant(_df[[\"size_diff\", \"loc_diff\"]])\nmodel = sm.Logit(_df[\"win\"], X).fit(disp=False)\n\n# Summaries for interpretation\nparams = model.params\npvals = model.pvalues\n\n# Odds ratio for a 100m shift in loc_diff\nor_loc_100m = float(np.exp(params[\"loc_diff\"] * 100))\n\n# Simple descriptive win rates by sign of predictors\n_df[\"size_diff_pos\"] = _df[\"size_diff\"] > 0\n_df[\"loc_diff_pos\"] = _df[\"loc_diff\"] > 0\nwin_by_size = _df.groupby(\"size_diff_pos\")[\"win\"].mean()\nwin_by_loc = _df.groupby(\"loc_diff_pos\")[\"win\"].mean()\n\nprint(\"Logit model: win ~ size_diff + loc_diff\")\nprint(model.summary())\nprint(\"\\nCoefficients:\")\nprint(params)\nprint(\"\\nP-values:\")\nprint(pvals)\nprint(f\"\\nOdds ratio for +100m loc_diff (focal farther from center): {or_loc_100m:.3f}\")\nprint(\"\\nWin rate by size_diff > 0:\")\nprint(win_by_size)\nprint(\"\\nWin rate by loc_diff > 0:\")\nprint(win_by_loc)\n"
+    },
+    "3": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Relative group size (focal group size minus other group size) — the analysis uses n_focal and n_other to assess whether larger focal groups are more likely to win.",
+            "columns": [
+              "n_focal",
+              "n_other"
+            ]
+          },
+          {
+            "description": "Relative contest location (distance of each group from its home-range center) — the analysis uses dist_focal and dist_other (modeled as dist_other - dist_focal) to assess whether contests occurring closer to the focal group's home range influence winning probability.",
+            "columns": [
+              "dist_focal",
+              "dist_other"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Outcome of the intergroup contest: 1 if the focal group won the contest, 0 if the other group won.",
+          "columns": [
+            "win"
+          ]
+        },
+        "controls": []
+      },
+      "analysis_code": "import pandas as pd\nimport statsmodels.formula.api as smf\n\n# Load data\nDf = pd.read_csv('crofoot.csv')\n\n# Create predictors\nDf['rel_size'] = Df['n_focal'] - Df['n_other']\nDf['rel_dist'] = Df['dist_other'] - Df['dist_focal']  # positive means contest is closer to focal than other\n\n# Fit logistic regression: win ~ relative size + relative location\nmodel = smf.logit('win ~ rel_size + rel_dist', data=Df).fit(disp=False)\n\n# Print summary to stdout for inspection\nprint(model.summary())\n\n# Extract key stats for programmatic use if needed\nparams = model.params\npvalues = model.pvalues\nprint('\\nKey coefficients:')\nfor name in ['rel_size', 'rel_dist']:\n    print(f\"{name}: coef={params[name]:.4f}, p={pvalues[name]:.4f}\")\n"
+    },
+    "4": {
+      "cvars": {
+        "ivs": [
+          {
+            "description": "Relative group size (effect of focal group size vs other group size). In the analysis this was encoded as rel_size = n_focal - n_other (positive means focal larger).",
+            "columns": [
+              "n_focal",
+              "n_other"
+            ]
+          },
+          {
+            "description": "Contest location advantage (proximity of focal to its home-range center relative to the other group). In the analysis this was encoded as loc_adv = dist_other - dist_focal (positive means focal is closer to its home-range center than the other group).",
+            "columns": [
+              "dist_focal",
+              "dist_other"
+            ]
+          }
+        ],
+        "dv": {
+          "description": "Outcome of the intergroup contest: indicator for whether the focal group won (1 = focal won, 0 = other won).",
+          "columns": [
+            "win"
+          ]
+        },
+        "controls": []
+      },
+      "analysis_code": "import pandas as pd\nimport statsmodels.api as sm\n\n# Load data\ndf = pd.read_csv('crofoot.csv')\n\n# Derived variables\n# Relative group size (positive means focal larger)\ndf['rel_size'] = df['n_focal'] - df['n_other']\n# Contest location advantage: positive if focal is closer to its home range center\n# (smaller distance from center indicates closer to home)\ndf['loc_adv'] = df['dist_other'] - df['dist_focal']\n\n# Logistic regression\nX = df[['rel_size', 'loc_adv']]\nX = sm.add_constant(X)\ny = df['win']\n\nmodel = sm.Logit(y, X)\nres = model.fit(disp=False)\n\n# Save a brief summary to a file for inspection if needed\nwith open('analysis_summary.txt', 'w') as f:\n    f.write(res.summary2().as_text())\n\n# Also compute simple correlations for reference\ncorr_rel_size = df['win'].corr(df['rel_size'])\ncorr_loc_adv = df['win'].corr(df['loc_adv'])\n\nwith open('analysis_stats.txt', 'w') as f:\n    f.write(f\"corr(win, rel_size) = {corr_rel_size}\\n\")\n    f.write(f\"corr(win, loc_adv) = {corr_loc_adv}\\n\")\n\n# Print key stats\nprint(res.params)\nprint(res.pvalues)\n"
+    }
+  }
+}

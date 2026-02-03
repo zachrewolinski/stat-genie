@@ -1,0 +1,53 @@
+{
+  "dataset_name": "reading",
+  "run_dir": "agentic/experiments/outputs/reading/shuffle_names/run2",
+  "research_question": "Does 'Reader View' --- a modified web page layout --- improves reading speed for individuals with dyslexia?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Reader View indicator (treatment): whether the modified reader view layout was activated (1) or not (0).",
+          "columns": [
+            "language"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Reading speed measured as time spent on the page (running time) in milliseconds; used as the outcome (higher = longer time / slower reading).",
+        "columns": [
+          "running_time"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Number of words on the page (controls for passage length).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "num_words"
+          ]
+        },
+        {
+          "description": "Readability (Flesch–Kincaid) score of the text (controls for text difficulty).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "uuid"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import numpy as np\nimport pandas as pd\nimport statsmodels.api as sm\nfrom statsmodels.stats.weightstats import ttest_ind\n\ndef cohen_d(x, y):\n    nx = len(x)\n    ny = len(y)\n    vx = x.var(ddof=1)\n    vy = y.var(ddof=1)\n    pooled = ((nx - 1) * vx + (ny - 1) * vy) / (nx + ny - 2)\n    return (x.mean() - y.mean()) / np.sqrt(pooled)\n\ndef bootstrap_diff(x, y, iters=5000, seed=0):\n    rng = np.random.default_rng(seed)\n    x = np.asarray(x)\n    y = np.asarray(y)\n    diffs = np.empty(iters)\n    for i in range(iters):\n        xs = rng.choice(x, size=len(x), replace=True)\n        ys = rng.choice(y, size=len(y), replace=True)\n        diffs[i] = xs.mean() - ys.mean()\n    return np.percentile(diffs, [2.5, 97.5])\n\n# Load data\npath = 'reading.csv'\nraw = pd.read_csv(path)\n\n# Map true semantics (column names are shuffled)\n# reader_view indicator is 'language' (0/1)\n# dyslexia status is 'device' (0=no,1=dyslexia,2=severe)\n# reading speed is 'running_time'\n# num_words likely 'num_words', readability likely 'uuid'\n\ndf = raw.copy()\n\n# Basic cleaning\nfor col in ['language', 'device', 'running_time', 'num_words', 'uuid']:\n    df[col] = pd.to_numeric(df[col], errors='coerce')\n\n# Focus on dyslexia or severe dyslexia\nmask = df['device'].isin([1.0, 2.0]) & df['language'].isin([0, 1])\nsub = df.loc[mask].copy()\n\n# Remove non-positive speeds\nsub = sub[sub['running_time'] > 0]\n\nrv_on = sub[sub['language'] == 1]['running_time']\nrv_off = sub[sub['language'] == 0]['running_time']\n\nresults = {}\nresults['n_on'] = len(rv_on)\nresults['n_off'] = len(rv_off)\nresults['mean_on'] = rv_on.mean()\nresults['mean_off'] = rv_off.mean()\nresults['median_on'] = rv_on.median()\nresults['median_off'] = rv_off.median()\nresults['diff_mean'] = results['mean_on'] - results['mean_off']\nresults['pct_change_mean'] = results['diff_mean'] / results['mean_off'] * 100\nresults['diff_median'] = results['median_on'] - results['median_off']\n\n# Welch t-test\nif len(rv_on) > 1 and len(rv_off) > 1:\n    t_stat, p_val, _ = ttest_ind(rv_on, rv_off, usevar='unequal')\nelse:\n    t_stat, p_val = np.nan, np.nan\nresults['t_stat'] = t_stat\nresults['p_val'] = p_val\n\n# Effect size and bootstrap CI\nif len(rv_on) > 2 and len(rv_off) > 2:\n    results['cohen_d'] = cohen_d(rv_on, rv_off)\n    ci_low, ci_high = bootstrap_diff(rv_on, rv_off)\n    results['ci_low'] = ci_low\n    results['ci_high'] = ci_high\nelse:\n    results['cohen_d'] = np.nan\n    results['ci_low'] = np.nan\n    results['ci_high'] = np.nan\n\n# Simple regression on log speed controlling for num_words and readability\nsub_reg = sub.dropna(subset=['running_time', 'language', 'num_words', 'uuid']).copy()\nsub_reg['log_speed'] = np.log(sub_reg['running_time'])\nX = sub_reg[['language', 'num_words', 'uuid']]\nX = sm.add_constant(X)\nmodel = sm.OLS(sub_reg['log_speed'], X).fit()\nresults['reg_coef_reader_view'] = model.params.get('language', np.nan)\nresults['reg_p_reader_view'] = model.pvalues.get('language', np.nan)\n\n# Save results for inspection\nprint('Dyslexia-only sample size:', len(sub))\nprint('Reader view ON n:', results['n_on'], 'OFF n:', results['n_off'])\nprint('Mean speed ON:', results['mean_on'])\nprint('Mean speed OFF:', results['mean_off'])\nprint('Mean diff (ON - OFF):', results['diff_mean'])\nprint('Median diff (ON - OFF):', results['diff_median'])\nprint('Pct change mean:', results['pct_change_mean'])\nprint('Welch t-test p-value:', results['p_val'])\nprint('Cohen d:', results['cohen_d'])\nprint('Bootstrap 95% CI (mean diff):', results['ci_low'], results['ci_high'])\nprint('Regression coef (log speed) reader_view:', results['reg_coef_reader_view'])\nprint('Regression p-value reader_view:', results['reg_p_reader_view'])\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-02T16:31:56.821395+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/reading/shuffle_names/run2/analysis.py",
+      "info_json": "agentic/experiments/outputs/reading/shuffle_names/run2/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/reading/shuffle_names/run2/conclusion.txt"
+    }
+  }
+}

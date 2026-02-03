@@ -1,0 +1,63 @@
+{
+  "dataset_name": "hurricane",
+  "run_dir": "agentic/experiments/outputs/hurricane/shuffle_names/run1",
+  "research_question": "Hurricanes with more feminine names are perceived as less threatening and hence lead to fewer precautionary measures by the general public.",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Hurricane name femininity measures (predictor of interest). Includes a continuous masculinity-femininity rating from independent coders and MTurk, and a binary female name indicator.",
+          "columns": [
+            "category",
+            "ind",
+            "masfem_mturk"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Fatalities caused by the hurricane (outcome). The analysis models log(1 + deaths).",
+        "columns": [
+          "name"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Maximum wind speed of the hurricane at landfall (control for storm intensity).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "year"
+          ]
+        },
+        {
+          "description": "Saffir–Simpson category of the hurricane (control for storm intensity).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "gender_mf"
+          ]
+        },
+        {
+          "description": "Minimum central pressure at landfall (control for storm intensity).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "ndam15"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nimport statsmodels.api as sm\n\n# Load data\n_df = pd.read_csv('hurricane.csv')\n\n# Rename columns to clearer semantic names based on inspection\n# ndam: row id\n# wind: year of hurricane\n# alldeaths: hurricane name (string)\n# category: femininity rating (1-11)\n# ndam15: minimum pressure at landfall\n# masfem_mturk: binary female indicator (0 male, 1 female)\n# gender_mf: Saffir-Simpson category (1-5)\n# name: deaths\n# elapsedyrs: normalized damages (2013)\n# masfem: years elapsed since hurricane\n# min: data source\n# ind: MTurk femininity rating (1-11)\n# year: wind speed at landfall\n# source: normalized damages (2015)\n\ndf = _df.copy()\n\n# Outcome: deaths (highly skewed)\ndf['deaths'] = df['name']\n\ndf['log_deaths'] = np.log1p(df['deaths'])\n\n# Key predictors\nfem_rating_main = 'category'\nfem_rating_alt = 'ind'\n\n# Controls for storm intensity\ncontrols = ['year', 'gender_mf', 'ndam15']  # wind speed, category, min pressure\n\n# Drop rows with missing values in any model variables\nmodel_vars_main = ['log_deaths', fem_rating_main] + controls\nmodel_vars_alt = ['log_deaths', fem_rating_alt] + controls\nmodel_vars_bin = ['log_deaths', 'masfem_mturk'] + controls\n\n_df_main = df[model_vars_main].dropna()\n_df_alt = df[model_vars_alt].dropna()\n_df_bin = df[model_vars_bin].dropna()\n\n# Fit OLS models\nX_main = sm.add_constant(_df_main[[fem_rating_main] + controls])\nmodel_main = sm.OLS(_df_main['log_deaths'], X_main).fit()\n\nX_alt = sm.add_constant(_df_alt[[fem_rating_alt] + controls])\nmodel_alt = sm.OLS(_df_alt['log_deaths'], X_alt).fit()\n\nX_bin = sm.add_constant(_df_bin[['masfem_mturk'] + controls])\nmodel_bin = sm.OLS(_df_bin['log_deaths'], X_bin).fit()\n\n# Simple correlations (uncontrolled)\ncorr_main = df[['deaths', fem_rating_main]].dropna().corr().iloc[0,1]\ncorr_alt = df[['deaths', fem_rating_alt]].dropna().corr().iloc[0,1]\n\n# Collect results\nresults = {\n    'corr_deaths_fem_rating_main': float(corr_main),\n    'corr_deaths_fem_rating_alt': float(corr_alt),\n    'model_main_coef_fem': float(model_main.params[fem_rating_main]),\n    'model_main_pvalue_fem': float(model_main.pvalues[fem_rating_main]),\n    'model_alt_coef_fem': float(model_alt.params[fem_rating_alt]),\n    'model_alt_pvalue_fem': float(model_alt.pvalues[fem_rating_alt]),\n    'model_bin_coef_female': float(model_bin.params['masfem_mturk']),\n    'model_bin_pvalue_female': float(model_bin.pvalues['masfem_mturk']),\n    'n_main': int(_df_main.shape[0]),\n    'n_alt': int(_df_alt.shape[0]),\n    'n_bin': int(_df_bin.shape[0]),\n}\n\nprint(results)\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T18:52:37.916833+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/hurricane/shuffle_names/run1/analysis.py",
+      "info_json": "agentic/experiments/outputs/hurricane/shuffle_names/run1/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/hurricane/shuffle_names/run1/conclusion.txt"
+    }
+  }
+}

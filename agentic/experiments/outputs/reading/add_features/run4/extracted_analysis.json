@@ -1,0 +1,45 @@
+{
+  "dataset_name": "reading",
+  "run_dir": "agentic/experiments/outputs/reading/add_features/run4",
+  "research_question": "Does 'Reader View' --- a modified web page layout --- improves reading speed for individuals with dyslexia?",
+  "extracted_analysis": {
+    "cvars": {
+      "ivs": [
+        {
+          "description": "Whether the Reader View layout was activated (treatment/predictor: 1 = activated, 0 = not activated).",
+          "columns": [
+            "reader_view"
+          ]
+        }
+      ],
+      "dv": {
+        "description": "Participant reading speed (outcome measured in the dataset).",
+        "columns": [
+          "speed"
+        ]
+      },
+      "controls": [
+        {
+          "description": "Indicator used to select the analytic subgroup of interest (participants with dyslexia). Used to filter the sample to readers with dyslexia (1 = has dyslexia, 0 = no dyslexia).",
+          "is_moderator": false,
+          "moderator_on": null,
+          "columns": [
+            "dyslexia_bin"
+          ]
+        }
+      ]
+    },
+    "analysis_code": "import pandas as pd\nimport numpy as np\nfrom statsmodels.stats.weightstats import ttest_ind\n\n# Load data\ndf = pd.read_csv('reading.csv')\n\n# Basic cleaning: ensure numeric columns\nfor col in ['reader_view', 'dyslexia_bin', 'speed']:\n    if col in df.columns:\n        df[col] = pd.to_numeric(df[col], errors='coerce')\n\n# Focus on participants with dyslexia\nif 'dyslexia_bin' in df.columns:\n    dys = df[df['dyslexia_bin'] == 1].copy()\nelse:\n    # fallback: treat dyslexia 1 or 2 as dyslexia\n    dys = df[df['dyslexia'].isin([1, 2])].copy()\n\n# Filter valid speeds\nif 'speed' not in dys.columns:\n    raise ValueError('speed column missing')\n\nspeed = dys['speed']\n\n# Separate reader_view groups\nrv1 = dys[dys['reader_view'] == 1]['speed'].dropna()\nrv0 = dys[dys['reader_view'] == 0]['speed'].dropna()\n\n# Summary stats\nsummary = {\n    'n_dyslexia_total': len(dys),\n    'n_reader_view_1': len(rv1),\n    'n_reader_view_0': len(rv0),\n    'mean_speed_rv1': rv1.mean(),\n    'mean_speed_rv0': rv0.mean(),\n    'median_speed_rv1': rv1.median(),\n    'median_speed_rv0': rv0.median(),\n}\n\n# Welch t-test\nif len(rv1) > 1 and len(rv0) > 1:\n    t_stat, p_val, dfree = ttest_ind(rv1, rv0, usevar='unequal')\nelse:\n    t_stat, p_val, dfree = np.nan, np.nan, np.nan\n\nsummary.update({\n    't_stat': t_stat,\n    'p_val': p_val,\n    'dfree': dfree,\n})\n\n# Effect size (Cohen's d using pooled SD)\nif len(rv1) > 1 and len(rv0) > 1:\n    s1 = rv1.std(ddof=1)\n    s0 = rv0.std(ddof=1)\n    n1 = len(rv1)\n    n0 = len(rv0)\n    pooled = np.sqrt(((n1-1)*s1**2 + (n0-1)*s0**2) / (n1+n0-2))\n    d = (rv1.mean() - rv0.mean()) / pooled if pooled > 0 else np.nan\nelse:\n    d = np.nan\nsummary['cohens_d'] = d\n\n# Save a small report for reproducibility\nreport = pd.DataFrame([summary])\nreport.to_csv('analysis_summary.csv', index=False)\n\nprint(report.to_string(index=False))\n"
+  },
+  "extraction_metadata": {
+    "llm_provider": "azureopenai",
+    "llm_model": "gpt-5-mini-fxdata-eastus2",
+    "use_cache": false,
+    "timestamp_utc": "2026-02-01T19:15:13.888946+00:00",
+    "inputs": {
+      "analysis_py": "agentic/experiments/outputs/reading/add_features/run4/analysis.py",
+      "info_json": "agentic/experiments/outputs/reading/add_features/run4/info.json",
+      "conclusion_txt": "agentic/experiments/outputs/reading/add_features/run4/conclusion.txt"
+    }
+  }
+}
