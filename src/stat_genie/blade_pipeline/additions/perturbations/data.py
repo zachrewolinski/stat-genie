@@ -1,98 +1,63 @@
 # imports
-import os
-import random
 import pandas as pd
-import numpy as np
-
-from stat_genie.blade_pipeline.utils import (
-    get_dataset_csv_path,
-)
+from copy import deepcopy
 
 class DataPerturbation:
     """
     Centralized object for perturbing the entries of BLADE datasets. There
     is currently one supported action:
-    1. Replace the dataset's features with independent random variables.
-        - Columns with data type 'float' will be replaced with Normal r.v.s
-          centered at (max-min)/2 with std dev of the original column.
-        - Columns with data type 'int' will be replaced with Uniform r.v.s
-          over the same range as the original column.
-        - Columns with data type 'object' will be replaced with random samples
-          from the original column.
+    1. Shuffle the values of each column independently of each other.
+        - Any patterns within the data should be broken.
     If multiple types of feature perturbations are desired, their order will
     follow the order listed above.
     """
     
-    def __init__(self, replace_features: bool = False,
-                 replace_features_seed: int = 42):
+    def __init__(self, shuffle_values: bool = False,
+                 shuffle_values_seed: int = 42):
         
-        self.replace_features = replace_features
-        self.replace_features_seed = replace_features_seed
-
-    def replace_with_rvs(self, df: pd.DataFrame) -> pd.DataFrame:
+        self.shuffle_values = shuffle_values
+        self.shuffle_values_seed = shuffle_values_seed
+        
+    def shuffle_values_in_cols(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Replaces the features of the dataset with independent random variables.
-        Importantly, the changes are not reflected in the JSON metadata, to make
-        this perturbation bigger in scale and more likely to flip downstream
-        model predictions.
+        Shuffles the values in each column of the dataframe independently.
+        This should flip downstream model predictions to make the answer "No",
+        if it is not already.
         
         Args:
-            df: The dataframe whose features are to be replaced.
+            df: The dataframe whose values are to be shuffled.
             
         Returns:
         - The perturbed dataframe
         """
         
         # set random seed for reproducibility
-        random.seed(self.replace_features_seed)
+        seed = self.shuffle_values_seed
         
-        # go through each column and replace with random variables
+        # copy the dataframe to avoid modifying the original one
+        df = deepcopy(df)
+        
+        # go through each column and randomly shuffle its values,
+        # independently of how the other columns were shuffled.
         for col in df.columns:
-            old_values = df[col]
-            if pd.api.types.is_float_dtype(old_values.dtype):
-                # get mean and std for the new values
-                loc = (old_values.max() - old_values.min()) / 2.0
-                scale = old_values.std(ddof=0)
-                # handle edge case
-                if pd.isna(scale) or scale == 0:
-                    scale = 1.0
-                # replace with normal r.v.s
-                df[col] = np.random.normal(loc=loc, scale=scale, size=len(df))
-            elif pd.api.types.is_integer_dtype(old_values.dtype):
-                # get range for the new values
-                cmin = int(old_values.min())
-                cmax = int(old_values.max())
-                # handle edge case
-                if cmin == cmax:
-                    df[col] = [cmin] * len(df)
-                # replace with uniform r.v.s
-                else:
-                    df[col] = np.random.randint(
-                        low=cmin,
-                        high=cmax + 1,
-                        size=len(df)
-                    )
-            else:
-                # object / categorical: sample original values with replacement
-                df[col] = old_values.sample(n=len(df), replace=True,
-                    random_state=self.replace_features_seed).reset_index(
-                        drop=True
-                    )
+            df[col] = df[col].sample(n=df.shape[0],
+                                     random_state=seed).reset_index(drop=True)
+            seed += 1  # change seed for the next column for different shuffling
 
         return df
     
     def perturb(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         Applies the selected perturbations to the data in the following order:
-        1. Replace the dataset's features with independent random variables.
+        1. Shuffle the values of each column independently of each other.
         
         Returns:
             The perturbed dataset as a dataframe
         """
         # in case no perturbations are selected
-        perturbed_df = df
+        perturbed_df = deepcopy(df)
         
-        if self.replace_features:
-            perturbed_df = self.replace_with_rvs(df)
+        if self.shuffle_values:
+            perturbed_df = self.shuffle_values_in_cols(perturbed_df)
         
         return perturbed_df
