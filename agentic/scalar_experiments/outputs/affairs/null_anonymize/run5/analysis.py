@@ -1,98 +1,85 @@
 import pandas as pd
 import numpy as np
+from scipy import stats
 import statsmodels.api as sm
 import statsmodels.formula.api as smf
 
 # Load data
-_df = pd.read_csv('affairs.csv')
 
-# Identify columns
-# Based on info.json: feature2 = affairs frequency, feature6 = children yes/no
+df = pd.read_csv('affairs.csv')
 
-df = _df.copy()
+# Map columns
+# feature2: affairs frequency
+# feature6: children yes/no
 
-# Basic cleaning: ensure expected columns
-required = ['feature2', 'feature6']
-for col in required:
-    if col not in df.columns:
-        raise ValueError(f"Missing column: {col}")
+df = df.copy()
 
-# Encode children indicator
-# feature6 is category 'yes'/'no'
-# Create binary: children=1 if yes
+# Clean
 
-df['children'] = df['feature6'].map({'yes': 1, 'no': 0})
+df['children'] = df['feature6'].astype(str).str.lower().map({'yes':1,'no':0})
 
-# Outcome
-outcome = df['feature2'].astype(float)
+# Summary stats
 
-# Group means
-mean_with = outcome[df['children'] == 1].mean()
-mean_without = outcome[df['children'] == 0].mean()
+groups = df.groupby('children')
 
-# Difference (with - without). Negative means fewer affairs with children.
-mean_diff = mean_with - mean_without
+summary = groups['feature2'].agg(['count','mean','median','std'])
 
-# t-test (Welch) using statsmodels
-from statsmodels.stats.weightstats import ttest_ind
+# Proportion with any affairs
 
-with_vals = outcome[df['children'] == 1]
-without_vals = outcome[df['children'] == 0]
+df['any_affair'] = (df['feature2'] > 0).astype(int)
+prop = groups['any_affair'].mean()
 
-t_stat, p_val, dfree = ttest_ind(with_vals, without_vals, usevar='unequal')
+# Two-sample t-test (unequal var)
 
-# Regression (OLS) controlling for basic covariates to check robustness
-# Use other features where available (numeric) and gender
-# feature3 gender, feature4 age, feature5 years married, feature7 religiousness,
-# feature8 education, feature9 occupation, feature10 marriage rating
+yes = df.loc[df['children']==1,'feature2']
+no = df.loc[df['children']==0,'feature2']
 
-# Prepare dataframe with controls
-model_df = df.copy()
+ttest = stats.ttest_ind(yes, no, equal_var=False, nan_policy='omit')
 
-# Encode gender
-model_df['male'] = model_df['feature3'].map({'male': 1, 'female': 0})
+# Mann-Whitney U
+mwu = stats.mannwhitneyu(yes, no, alternative='two-sided')
 
-# Ensure numeric columns
-num_cols = ['feature2', 'feature4', 'feature5', 'feature7', 'feature8', 'feature9', 'feature10']
-for c in num_cols:
-    model_df[c] = pd.to_numeric(model_df[c], errors='coerce')
+# Logistic regression for any affair (unadjusted)
+logit_unadj = smf.logit('any_affair ~ children', data=df).fit(disp=0)
 
-# Drop rows with missing data
-model_df = model_df.dropna(subset=['feature2', 'children', 'male'] + num_cols[1:])
+# OLS for frequency (unadjusted)
+ols_unadj = smf.ols('feature2 ~ children', data=df).fit()
 
-# OLS
-formula = 'feature2 ~ children + male + feature4 + feature5 + feature7 + feature8 + feature9 + feature10'
-ols = smf.ols(formula=formula, data=model_df).fit()
+# Adjusted models with basic covariates if present
+# Use features: gender (feature3), age (feature4), years married (feature5), religiousness (feature7), education (feature8), occupation (feature9), marriage rating (feature10)
 
-coef_children = ols.params['children']
-se_children = ols.bse['children']
+# Build formula with categorical for gender
+formula_logit_adj = 'any_affair ~ children + C(feature3) + feature4 + feature5 + feature7 + feature8 + feature9 + feature10'
+formula_ols_adj = 'feature2 ~ children + C(feature3) + feature4 + feature5 + feature7 + feature8 + feature9 + feature10'
 
-# Convert effect to standardized effect size (Cohen's d) using pooled SD for group diff
-# For simple mean diff
-n1 = with_vals.shape[0]
-n0 = without_vals.shape[0]
-var1 = with_vals.var(ddof=1)
-var0 = without_vals.var(ddof=1)
-pooled_sd = np.sqrt(((n1-1)*var1 + (n0-1)*var0) / (n1 + n0 - 2))
-cohen_d = mean_diff / pooled_sd if pooled_sd > 0 else np.nan
+logit_adj = smf.logit(formula_logit_adj, data=df).fit(disp=0)
+ols_adj = smf.ols(formula_ols_adj, data=df).fit()
 
-# Save summary metrics to a json-like text for inspection
-summary = {
-    'n_total': int(df.shape[0]),
-    'n_children_yes': int(n1),
-    'n_children_no': int(n0),
-    'mean_affairs_children_yes': float(mean_with),
-    'mean_affairs_children_no': float(mean_without),
-    'mean_diff_yes_minus_no': float(mean_diff),
-    't_stat': float(t_stat),
-    'p_val': float(p_val),
-    'cohen_d': float(cohen_d),
-    'ols_children_coef': float(coef_children),
-    'ols_children_se': float(se_children),
-    'ols_children_p': float(ols.pvalues['children'])
-}
+# Extract key metrics
 
-import json
-with open('analysis_summary.json', 'w') as f:
-    json.dump(summary, f, indent=2)
+def coef_ci(model, term='children'):
+    coef = model.params[term]
+    se = model.bse[term]
+    z = 1.96
+    return coef, coef - z*se, coef + z*se
 
+# For logit, compute odds ratio and CI
+coef, lo, hi = coef_ci(logit_unadj)
+or_unadj = np.exp(coef)
+or_unadj_ci = (np.exp(lo), np.exp(hi))
+
+coef_a, lo_a, hi_a = coef_ci(logit_adj)
+or_adj = np.exp(coef_a)
+or_adj_ci = (np.exp(lo_a), np.exp(hi_a))
+
+# Write a brief report to stdout
+print('Summary mean feature2 by children (0=no,1=yes):')
+print(summary)
+print('\nProportion any affair by children:')
+print(prop)
+print('\nT-test (feature2):', ttest)
+print('Mann-Whitney U:', mwu)
+print('\nOLS unadj coef children:', ols_unadj.params['children'], 'p', ols_unadj.pvalues['children'])
+print('OLS adj coef children:', ols_adj.params['children'], 'p', ols_adj.pvalues['children'])
+print('\nLogit unadj OR children:', or_unadj, 'CI', or_unadj_ci, 'p', logit_unadj.pvalues['children'])
+print('Logit adj OR children:', or_adj, 'CI', or_adj_ci, 'p', logit_adj.pvalues['children'])

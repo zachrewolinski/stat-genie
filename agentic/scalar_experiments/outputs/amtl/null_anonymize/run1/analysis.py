@@ -1,92 +1,143 @@
-import json
 import pandas as pd
 import numpy as np
 import statsmodels.api as sm
-import statsmodels.formula.api as smf
+import patsy
 
 # Load data
-info = json.load(open('info.json'))
+_df = pd.read_csv('amtl.csv')
 
-df = pd.read_csv('amtl.csv')
-
-# Rename columns for clarity
-col_map = {
+# Rename for clarity
+_df = _df.rename(columns={
     'feature1': 'tooth_class',
     'feature2': 'specimen_id',
     'feature3': 'missing',
-    'feature4': 'sockets',
+    'feature4': 'observable',
     'feature5': 'age',
-    'feature6': 'age_unc',
-    'feature7': 'sex_est',
+    'feature6': 'age_uncertainty',
+    'feature7': 'sex',
     'feature8': 'genus',
     'feature9': 'region',
-}
+})
 
-df = df.rename(columns=col_map)
+# Basic validity filters
+_df = _df.dropna(subset=['missing', 'observable', 'age', 'sex', 'tooth_class', 'genus'])
+_df = _df[_df['observable'] > 0]
+_df = _df[_df['missing'] >= 0]
+_df = _df[_df['missing'] <= _df['observable']]
 
-# Basic cleaning
-# Ensure counts are integers and valid
-for c in ['missing', 'sockets']:
-    df[c] = pd.to_numeric(df[c], errors='coerce')
+# Define successes/failures
+_df = _df.copy()
+_df['successes'] = _df['missing']
+_df['failures'] = _df['observable'] - _df['missing']
 
-# Drop rows with invalid counts or missing covariates
-needed = ['missing', 'sockets', 'age', 'sex_est', 'tooth_class', 'genus']
-
-df = df.dropna(subset=needed).copy()
-
-# Keep rows with valid binomial counts
-valid = (df['sockets'] > 0) & (df['missing'] >= 0) & (df['missing'] <= df['sockets'])
-
-df = df[valid].copy()
-
-# Binary indicator for Homo sapiens
-# Use exact label as in samples
-human_label = 'Homo sapiens'
-
-df['is_human'] = (df['genus'] == human_label).astype(int)
-
-# Build endog as successes/failures
-endog = np.column_stack([df['missing'].values, (df['sockets'] - df['missing']).values])
-
-# Build design matrix with categorical tooth_class
-# Use formula for convenience
-# sex_est treated as continuous (0-1)
-formula = 'missing + I(sockets - missing) ~ is_human + age + sex_est + C(tooth_class)'
-
-# statsmodels GLM with binomial uses 2-column endog via data in formula is tricky;
-# we'll build exog separately to avoid confusion.
-
-exog = sm.add_constant(
-    pd.get_dummies(df[['is_human', 'age', 'sex_est', 'tooth_class']], columns=['tooth_class'], drop_first=True)
+# Set reference category for genus and tooth class
+# Ensure Homo sapiens is reference
+_df['genus'] = _df['genus'].astype('category')
+_df['genus'] = _df['genus'].cat.set_categories(
+    ['Homo sapiens', 'Pan', 'Papio', 'Pongo'],
+    ordered=False
 )
 
-model = sm.GLM(endog, exog, family=sm.families.Binomial())
-res = model.fit()
+# Some datasets might use 'Premolar' etc; keep as categorical
+_df['tooth_class'] = _df['tooth_class'].astype('category')
 
-# Extract coefficient for is_human
-coef = res.params['is_human']
-se = res.bse['is_human']
+# Build design matrices for binomial GLM
+formula = 'successes + failures ~ C(genus, Treatment(reference="Homo sapiens")) + age + sex + C(tooth_class)'
 
-z = coef / se if se != 0 else np.sign(coef) * np.inf
+y, X = patsy.dmatrices(formula, _df, return_type='dataframe')
 
-# Map z to Likert scale -100..100 using tanh
-score = int(np.round(100 * np.tanh(z / 2)))
+model = sm.GLM(y, X, family=sm.families.Binomial())
+result = model.fit()
 
-# Ensure within bounds
-score = max(-100, min(100, score))
+# Contrast: Homo sapiens vs average of non-human genera
+param_names = list(result.params.index)
+L = np.zeros(len(param_names))
 
-# Write conclusion
-with open('conclusion.txt', 'w') as f:
-    f.write(str(score))
-
-# Save a short summary for debugging (not required by instructions)
-summary = {
-    'coef_is_human': float(coef),
-    'se_is_human': float(se),
-    'z_is_human': float(z),
-    'score': score,
-    'n': int(len(df)),
+# Coefficients for non-human genera in Treatment coding
+coeffs = {
+    'C(genus, Treatment(reference="Homo sapiens"))[T.Pan]': 1/3,
+    'C(genus, Treatment(reference="Homo sapiens"))[T.Papio]': 1/3,
+    'C(genus, Treatment(reference="Homo sapiens"))[T.Pongo]': 1/3,
 }
 
-with open('analysis_summary.json', 'w') as f:
-    json.dump(summary, f, indent=2)
+for i, name in enumerate(param_names):
+    if name in coeffs:
+        L[i] = coeffs[name]
+
+# L * params gives average non-human effect vs Homo (log-odds)
+# We want Homo - avg_nonhuman, so use -L
+contrast = result.t_test(-L)
+contrast_est = float(np.asarray(contrast.effect).ravel()[0])
+contrast_p = float(contrast.pvalue)
+
+# Predicted probability at mean age/sex and overall tooth class distribution
+mean_age = _df['age'].mean()
+mean_sex = _df['sex'].mean()
+
+# Use overall tooth class distribution as weights
+class_counts = _df['tooth_class'].value_counts(normalize=True)
+
+# Build a small dataframe for prediction
+rows = []
+for genus in ['Homo sapiens', 'Pan', 'Papio', 'Pongo']:
+    for tooth_class, weight in class_counts.items():
+        rows.append({
+            'genus': genus,
+            'age': mean_age,
+            'sex': mean_sex,
+            'tooth_class': tooth_class,
+            'weight': weight,
+        })
+
+pred_df = pd.DataFrame(rows)
+
+design_info = X.design_info
+X_pred = patsy.build_design_matrices([design_info], pred_df, return_type='dataframe')[0]
+
+pred_lin = result.predict(X_pred)
+
+pred_df['pred_prob'] = pred_lin
+
+# Weighted average per genus
+weighted = pred_df.groupby('genus').apply(
+    lambda g: np.sum(g['pred_prob'] * g['weight']) / np.sum(g['weight'])
+)
+
+homo_prob = float(weighted.loc['Homo sapiens'])
+nonhuman_prob = float(weighted.loc[['Pan', 'Papio', 'Pongo']].mean())
+
+prob_diff = homo_prob - nonhuman_prob
+
+# Map to Likert scale [-100, 100]
+# Effect size: 0.20 probability diff => 70 points
+# Significance: p<=0.01 => +30 points, p>=0.5 => +0
+sign = 1 if prob_diff > 0 else (-1 if prob_diff < 0 else 0)
+
+effect_points = min(70.0, abs(prob_diff) / 0.20 * 70.0)
+
+if contrast_p <= 0.01:
+    sig_points = 30.0
+elif contrast_p >= 0.5:
+    sig_points = 0.0
+else:
+    # Linear interpolation between 0.5 and 0.01
+    sig_points = (0.5 - contrast_p) / (0.5 - 0.01) * 30.0
+
+score = sign * min(100.0, effect_points + sig_points)
+score_int = int(round(score))
+
+with open('conclusion.txt', 'w') as f:
+    f.write(str(score_int))
+
+# Save a compact summary for review if needed
+summary = {
+    'n': int(len(_df)),
+    'homo_prob': homo_prob,
+    'nonhuman_prob': nonhuman_prob,
+    'prob_diff': prob_diff,
+    'contrast_log_odds_diff': contrast_est,
+    'contrast_pvalue': contrast_p,
+    'score_int': score_int,
+}
+
+pd.DataFrame([summary]).to_csv('analysis_summary.csv', index=False)

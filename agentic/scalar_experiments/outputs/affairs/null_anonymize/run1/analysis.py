@@ -1,59 +1,84 @@
-import json
-import numpy as np
 import pandas as pd
-from math import sqrt
+import numpy as np
+from scipy import stats
+import statsmodels.api as sm
 
 
-def cohens_h(p1: float, p2: float) -> float:
-    p1 = min(max(p1, 1e-9), 1 - 1e-9)
-    p2 = min(max(p2, 1e-9), 1 - 1e-9)
-    return 2.0 * (np.arcsin(sqrt(p1)) - np.arcsin(sqrt(p2)))
+df = pd.read_csv('affairs.csv')
 
+# Identify columns
+# feature2 = affairs frequency; feature6 = children (yes/no)
 
-def main():
-    df = pd.read_csv("affairs.csv")
-    # feature2: affair frequency, feature6: children (yes/no)
-    df = df.copy()
-    df["children"] = df["feature6"].astype(str).str.lower()
-    df["affairs"] = pd.to_numeric(df["feature2"], errors="coerce")
-    df = df.dropna(subset=["children", "affairs"])
+# Clean / encode
 
-    grp = df.groupby("children")["affairs"]
-    means = grp.mean()
-    counts = grp.size()
-    stds = grp.std(ddof=1)
+df['children'] = (df['feature6'].str.lower() == 'yes').astype(int)
 
-    # Proportion with any affairs (>0)
-    any_affairs = df.assign(any_affairs=(df["affairs"] > 0).astype(int))
-    prop = any_affairs.groupby("children")["any_affairs"].mean()
+# outcome: any affair
 
-    # Expecting keys 'yes' and 'no'
-    if not {"yes", "no"}.issubset(means.index):
-        raise ValueError("Expected children categories 'yes' and 'no'.")
+df['affair_any'] = (df['feature2'] > 0).astype(int)
 
-    mean_no = means.loc["no"]
-    mean_yes = means.loc["yes"]
-    std_no = stds.loc["no"]
-    std_yes = stds.loc["yes"]
-    n_no = counts.loc["no"]
-    n_yes = counts.loc["yes"]
+# group summaries
 
-    # Pooled SD for Cohen's d
-    pooled_var = (((n_no - 1) * (std_no ** 2)) + ((n_yes - 1) * (std_yes ** 2))) / (n_no + n_yes - 2)
-    pooled_sd = sqrt(pooled_var) if pooled_var > 0 else np.nan
-    d = (mean_no - mean_yes) / pooled_sd if pooled_sd and not np.isnan(pooled_sd) else 0.0
+group = df.groupby('children')
+mean_affairs = group['feature2'].mean()
+prop_any = group['affair_any'].mean()
 
-    p_no = prop.loc["no"]
-    p_yes = prop.loc["yes"]
-    h = cohens_h(p_no, p_yes)
+# t-test for mean affairs
+x0 = df.loc[df['children'] == 0, 'feature2']
+x1 = df.loc[df['children'] == 1, 'feature2']
 
-    effect = 0.5 * d + 0.5 * h
-    scalar = int(round(100 * np.tanh(effect)))
-    scalar = int(max(-100, min(100, scalar)))
+t_stat, t_p = stats.ttest_ind(x1, x0, equal_var=False)
 
-    with open("conclusion.txt", "w", encoding="utf-8") as f:
-        f.write(str(scalar))
+# two-proportion z-test for affair_any
+n1 = df.loc[df['children'] == 1, 'affair_any'].count()
+n0 = df.loc[df['children'] == 0, 'affair_any'].count()
 
+p1 = prop_any.loc[1]
+p0 = prop_any.loc[0]
 
-if __name__ == "__main__":
-    main()
+p_pool = (p1*n1 + p0*n0)/(n1+n0)
+se = np.sqrt(p_pool*(1-p_pool)*(1/n1 + 1/n0))
+z = (p1 - p0)/se
+p_z = 2*(1-stats.norm.cdf(abs(z)))
+
+# regression with controls
+# controls: gender(feature3), age(feature4), years married(feature5), religious(feature7), education(feature8), occupation(feature9), marriage rating(feature10)
+
+# Build design matrix
+X = pd.DataFrame({
+    'children': df['children'],
+    'age': df['feature4'],
+    'years_married': df['feature5'],
+    'religious': df['feature7'],
+    'education': df['feature8'],
+    'occupation': df['feature9'],
+    'marriage_rating': df['feature10'],
+    'female': (df['feature3'].str.lower() == 'female').astype(int)
+})
+X = sm.add_constant(X, has_constant='add')
+
+# Logit for any affair
+try:
+    logit_model = sm.Logit(df['affair_any'], X).fit(disp=False)
+    logit_coef = logit_model.params['children']
+    logit_p = logit_model.pvalues['children']
+except Exception as e:
+    logit_model = None
+    logit_coef = np.nan
+    logit_p = np.nan
+
+# OLS for affair frequency (simple)
+ols_model = sm.OLS(df['feature2'], X).fit(cov_type='HC3')
+ols_coef = ols_model.params['children']
+ols_p = ols_model.pvalues['children']
+
+print('Mean affairs by children (0=no,1=yes):')
+print(mean_affairs.to_string())
+print('\nProportion any affair by children:')
+print(prop_any.to_string())
+print(f"\nMean diff (yes-no): {mean_affairs.loc[1]-mean_affairs.loc[0]:.3f}")
+print(f"t-test p-value: {t_p:.4f}")
+print(f"Proportion diff (yes-no): {p1-p0:.3f}")
+print(f"z-test p-value: {p_z:.4f}")
+print(f"\nLogit children coef: {logit_coef:.4f}, p={logit_p:.4f}")
+print(f"OLS children coef: {ols_coef:.4f}, p={ols_p:.4f}")

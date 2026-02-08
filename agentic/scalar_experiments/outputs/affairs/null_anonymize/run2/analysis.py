@@ -1,71 +1,78 @@
 import pandas as pd
 import numpy as np
-import statsmodels.api as sm
 from scipy import stats
+import statsmodels.api as sm
 
-# Load data
-path = 'affairs.csv'
-df = pd.read_csv(path)
 
-# Map columns
-# feature2: affairs frequency (0=none, higher codes)
-# feature6: children yes/no
+def main():
+    df = pd.read_csv('affairs.csv')
+    # children indicator: yes=1, no=0
+    child_yes = df['feature6'].str.lower().eq('yes')
 
-# Basic sanity
-children = df['feature6'].astype(str)
+    # outcome: feature2 (affair frequency code)
+    y = df['feature2'].astype(float)
 
-affairs = df['feature2']
+    # group stats
+    stats_tbl = df.groupby(child_yes)['feature2'].agg(['count', 'mean', 'median'])
+    # proportion with any affair (>0)
+    prop_any = df.assign(any_affair=y > 0).groupby(child_yes)['any_affair'].mean()
 
-# Group stats
-stats_by = df.groupby(children)['feature2'].agg(['count','mean','median'])
+    # Welch t-test for mean difference
+    y_yes = y[child_yes]
+    y_no = y[~child_yes]
+    t_res = stats.ttest_ind(y_yes, y_no, equal_var=False, nan_policy='omit')
 
-# Proportion with any affair (>0)
-prop_any = df.assign(any_affair=affairs > 0).groupby(children)['any_affair'].mean()
+    # Mann-Whitney U test for distribution shift
+    try:
+        mw_res = stats.mannwhitneyu(y_yes, y_no, alternative='two-sided')
+    except ValueError:
+        mw_res = None
 
-# T-test of means
-yes = affairs[children == 'yes']
-no = affairs[children == 'no']
+    # logistic regression for any affair (controls for age, years married, relig, educ, occup, marriage rating, gender)
+    X = df[['feature3','feature4','feature5','feature7','feature8','feature9','feature10']].copy()
+    X['child_yes'] = child_yes.astype(int)
+    # gender dummy
+    X['male'] = (X['feature3'].str.lower() == 'male').astype(int)
+    X = X.drop(columns=['feature3'])
+    X = sm.add_constant(X, has_constant='add')
+    y_bin = (y > 0).astype(int)
+    logit = sm.Logit(y_bin, X)
+    try:
+        logit_res = logit.fit(disp=False)
+    except Exception:
+        logit_res = None
 
-ttest = stats.ttest_ind(yes, no, equal_var=False, nan_policy='omit')
+    # output results
+    print('Group stats (children yes=True, no=False):')
+    print(stats_tbl)
+    print('\nProp any affair (>0):')
+    print(prop_any)
+    print('\nWelch t-test:')
+    print(t_res)
+    if mw_res is not None:
+        print('\nMann-Whitney U:')
+        print(mw_res)
+    if logit_res is not None:
+        print('\nLogit coef for child_yes:')
+        print(logit_res.params['child_yes'])
+        print('Logit p-value for child_yes:')
+        print(logit_res.pvalues['child_yes'])
 
-# Mann-Whitney for non-normal
-mwu = stats.mannwhitneyu(yes, no, alternative='two-sided')
+    # compute effect size (Cohen d)
+    mean_yes = y_yes.mean()
+    mean_no = y_no.mean()
+    var_yes = y_yes.var(ddof=1)
+    var_no = y_no.var(ddof=1)
+    n_yes = y_yes.shape[0]
+    n_no = y_no.shape[0]
+    pooled_sd = np.sqrt(((n_yes-1)*var_yes + (n_no-1)*var_no) / (n_yes + n_no - 2))
+    cohend = (mean_yes - mean_no) / pooled_sd if pooled_sd > 0 else np.nan
+    print('\nCohen d (yes - no):', cohend)
 
-# Regression controlling for covariates
-# Use feature3 gender (categorical), feature4 age, feature5 years married, feature7 religiosity,
-# feature8 education, feature9 occupation, feature10 marital happiness
+    # also compute difference in proportion any affair
+    diff_prop = prop_any.loc[True] - prop_any.loc[False]
+    print('Diff prop any (yes - no):', diff_prop)
 
-X = df[['feature6','feature3','feature4','feature5','feature7','feature8','feature9','feature10']].copy()
-X['feature6'] = (X['feature6'] == 'yes').astype(int)
-X = pd.get_dummies(X, columns=['feature3'], drop_first=True)
-X = sm.add_constant(X)
 
-model = sm.OLS(affairs, X).fit()
-coef_children = model.params['feature6']
-pval_children = model.pvalues['feature6']
-
-# Logistic regression for any affair
-X_log = X.copy()
-logit = sm.Logit((affairs > 0).astype(int), X_log).fit(disp=False)
-coef_children_logit = logit.params['feature6']
-pval_children_logit = logit.pvalues['feature6']
-
-# Effect size (Cohen's d)
-mean_yes = yes.mean()
-mean_no = no.mean()
-std_yes = yes.std(ddof=1)
-std_no = no.std(ddof=1)
-
-# Pooled SD for Cohen's d
-n_yes = yes.shape[0]
-n_no = no.shape[0]
-pooled_sd = np.sqrt(((n_yes-1)*std_yes**2 + (n_no-1)*std_no**2) / (n_yes + n_no - 2))
-cohens_d = (mean_yes - mean_no) / pooled_sd if pooled_sd > 0 else np.nan
-
-print('Group stats:\n', stats_by)
-print('\nProp any affair:\n', prop_any)
-print('\nT-test:', ttest)
-print('Mann-Whitney:', mwu)
-print('\nOLS coef children:', coef_children, 'p=', pval_children)
-print('Logit coef children:', coef_children_logit, 'p=', pval_children_logit)
-print('Cohen d:', cohens_d)
+if __name__ == '__main__':
+    main()

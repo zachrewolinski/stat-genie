@@ -3,131 +3,76 @@ import numpy as np
 import statsmodels.api as sm
 import statsmodels.formula.api as smf
 
-# Load data
-_df = pd.read_csv('amtl.csv')
+raw = pd.read_csv('amtl.csv')
 
-# Map columns based on metadata misalignment
-# Inferred meaning from info.json and data patterns
-# missing teeth count
-_df = _df.rename(columns={
-    'genus': 'num_missing',   # number of teeth missing of given class
-    'age': 'num_sockets',     # number of observable sockets
-    'pop': 'age_at_death',    # estimated age at death
-    'num_amtl': 'stdev_age',  # assigned uncertainty of age at death
-    'stdev_age': 'prob_male', # estimate of sex
-    'tooth_class': 'genus',   # specimen genus
-    'specimen': 'population', # region/population
-    'prob_male': 'specimen_id',
-    'sockets': 'tooth_class'
+# Map shuffled columns to semantic names based on value patterns and info.json descriptions
+# sockets -> tooth_class (Anterior/Posterior/Premolar)
+# prob_male -> specimen_id
+# genus -> num_amtl (integer counts 0-12)
+# age -> num_sockets (integer 2-14)
+# pop -> age_at_death (years)
+# num_amtl -> age_stdev (uncertainty of age at death)
+# stdev_age -> prob_male (0-1)
+# tooth_class -> genus (Homo sapiens/Pan/Papio/Pongo)
+# specimen -> population/region
+
+df = pd.DataFrame({
+    'tooth_class': raw['sockets'],
+    'specimen_id': raw['prob_male'],
+    'num_amtl': raw['genus'].astype(int),
+    'num_sockets': raw['age'].astype(int),
+    'age_at_death': raw['pop'].astype(float),
+    'age_stdev': raw['num_amtl'].astype(float),
+    'prob_male': raw['stdev_age'].astype(float),
+    'genus': raw['tooth_class'],
+    'population': raw['specimen'],
 })
 
-df = _df.copy()
+# Remove rows where AMTL count exceeds sockets (data inconsistencies)
+model_df = df[df['num_amtl'] <= df['num_sockets']].copy()
+model_df = model_df[model_df['num_sockets'] > 0].copy()
+model_df['amtl_rate'] = model_df['num_amtl'] / model_df['num_sockets']
 
-# Basic validity checks
-if (df['num_missing'] > df['num_sockets']).any():
-    # This would be invalid for binomial counts
-    # Cap at sockets to avoid negatives, but also flag
-    df['num_missing'] = df[['num_missing', 'num_sockets']].min(axis=1)
+# Fit binomial GLM with frequency weights (num_sockets)
+formula = 'amtl_rate ~ C(genus) + age_at_death + prob_male + C(tooth_class)'
+model = smf.glm(formula=formula, data=model_df, family=sm.families.Binomial(), freq_weights=model_df['num_sockets']).fit()
 
-# Create proportion
-# Avoid zero sockets (shouldn't be zero, but guard)
-df = df[df['num_sockets'] > 0].copy()
-df['missing_prop'] = df['num_missing'] / df['num_sockets']
+print(model.summary())
 
-# Fit binomial GLM with logit link
-formula = 'missing_prop ~ C(genus) + age_at_death + prob_male + C(tooth_class)'
-model = smf.glm(
-    formula=formula,
-    data=df,
-    family=sm.families.Binomial(),
-    freq_weights=df['num_sockets']
-).fit()
+# Compute adjusted predicted probabilities for Homo sapiens vs non-human
+non_human = ['Pan', 'Pongo', 'Papio']
 
-# Marginal standardization: predicted missing proportion by genus
-species = df['genus'].unique()
+# Average predicted prob for Homo sapiens (counterfactual, set genus to Homo for all rows)
+hs_df = model_df.copy()
+hs_df['genus'] = 'Homo sapiens'
+hs_pred = model.predict(hs_df)
 
-preds = {}
-for sp in species:
-    tmp = df.copy()
-    tmp['genus'] = sp
-    preds[sp] = model.predict(tmp).mean()
+# Average predicted prob for non-humans using observed non-human rows
+nh_df = model_df[model_df['genus'].isin(non_human)].copy()
+nh_pred = model.predict(nh_df)
 
-# Compare Homo sapiens vs non-human primates
-homo = 'Homo sapiens'
-nonhuman = [sp for sp in species if sp != homo]
+# Counterfactual equal mix of non-human genera for all rows
+nh_counter = []
+for g in non_human:
+    tmp = model_df.copy()
+    tmp['genus'] = g
+    nh_counter.append(model.predict(tmp))
+nh_pred_equal = np.mean(np.vstack(nh_counter), axis=0)
 
-homo_pred = preds.get(homo, np.nan)
-nonhuman_preds = [preds[sp] for sp in nonhuman]
-nonhuman_mean = float(np.mean(nonhuman_preds))
+print("Adjusted mean predicted AMTL rate (Homo sapiens):", hs_pred.mean())
+print("Adjusted mean predicted AMTL rate (Non-human observed):", nh_pred.mean())
+print("Adjusted mean predicted AMTL rate (Non-human equal mix):", nh_pred_equal.mean())
+print("Difference (Homo sapiens - Non-human observed):", hs_pred.mean() - nh_pred.mean())
+print("Difference (Homo sapiens - Non-human equal mix):", hs_pred.mean() - nh_pred_equal.mean())
 
-diff = homo_pred - nonhuman_mean
-
-# Bootstrap for uncertainty
-rng = np.random.default_rng(42)
-B = 500
-boot_diffs = []
-
-# Precompute indices for speed
-n = len(df)
-for _ in range(B):
-    idx = rng.integers(0, n, size=n)
-    sample = df.iloc[idx].copy()
-    try:
-        m = smf.glm(
-            formula=formula,
-            data=sample,
-            family=sm.families.Binomial(),
-            freq_weights=sample['num_sockets']
-        ).fit()
-    except Exception:
-        continue
-    sp_preds = {}
-    for sp in species:
-        tmp = sample.copy()
-        tmp['genus'] = sp
-        sp_preds[sp] = m.predict(tmp).mean()
-    if homo in sp_preds:
-        nh = [sp_preds[sp] for sp in nonhuman]
-        boot_diffs.append(sp_preds[homo] - float(np.mean(nh)))
-
-boot_diffs = np.array(boot_diffs)
-
-# Compute statistics
-prob_positive = float(np.mean(boot_diffs > 0)) if len(boot_diffs) else np.nan
-ci_low, ci_high = (float(np.percentile(boot_diffs, 2.5)), float(np.percentile(boot_diffs, 97.5))) if len(boot_diffs) else (np.nan, np.nan)
-
-# Save summary for decision
+# Save summary numbers for later use
 summary = {
-    'homo_pred': homo_pred,
-    'nonhuman_mean': nonhuman_mean,
-    'diff': diff,
-    'prob_positive': prob_positive,
-    'ci_low': ci_low,
-    'ci_high': ci_high,
-    'boot_n': len(boot_diffs)
+    'n_total': len(df),
+    'n_used': len(model_df),
+    'hs_mean': float(hs_pred.mean()),
+    'nh_obs_mean': float(nh_pred.mean()),
+    'nh_equal_mean': float(nh_pred_equal.mean()),
+    'diff_obs': float(hs_pred.mean() - nh_pred.mean()),
+    'diff_equal': float(hs_pred.mean() - nh_pred_equal.mean()),
 }
-
-print('Model coef summary (partial):')
-print(model.params)
-print('\nAdjusted mean missing proportion by genus:')
-print(preds)
-print('\nSummary:')
 print(summary)
-
-# Map to Likert scale: scale by probability and effect size
-# Use probability of positive difference, and standardized by magnitude
-# If effect size small (<0.01), dampen.
-if np.isnan(prob_positive):
-    score = 0
-else:
-    # effect size factor
-    mag = abs(diff)
-    mag_factor = min(1.0, mag / 0.05)  # 5 percentage points as strong
-    direction = 1 if diff > 0 else -1
-    score = int(round(direction * prob_positive * 100 * mag_factor))
-
-print('\nLikert score:', score)
-
-# Write to conclusion.txt
-with open('conclusion.txt', 'w') as f:
-    f.write(str(score))
