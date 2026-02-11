@@ -4,13 +4,12 @@ Collect conclusion.txt from each run and write CSV.
 Script expects conclusion.txt to contain JSON of the form:
 
     {
-        "conclusion": "Yes" | "No",
-        "strength": <number in [0, 100]>,
-        "confidence": <number in [0, 100]>,
+        "response": "Yes" | "No",
+        "scale": <integer in [0, 100]>,
     }
 
 Output CSV has one row per valid run, with columns:
-    run_id, perturbation, dataset, conclusion, strength, confidence
+    run_id, perturbation, dataset, response, scale
 """
 
 import csv
@@ -40,33 +39,25 @@ def validate_conclusion(content: str) -> Optional[dict]:
     if not isinstance(data, dict):
         return None
 
-    raw_conclusion = data.get("conclusion")
-    if not isinstance(raw_conclusion, str):
+    raw_response = data.get("response")
+    if not isinstance(raw_response, str):
         return None
 
-    normalized = raw_conclusion.strip().lower()
+    normalized = raw_response.strip().lower()
     if normalized not in {"yes", "no"}:
         return None
 
-    conclusion_label = raw_conclusion.strip()
+    response_label = raw_response.strip()
 
-    def _validate_prob_field(value: object) -> Optional[float]:
-        if not isinstance(value, (int, float)):
-            return None
-        v = float(value)
-        if v < 0 or v > 100:
-            return None
-        return v
-
-    strength = _validate_prob_field(data.get("strength"))
-    confidence = _validate_prob_field(data.get("confidence"))
-    if strength is None or confidence is None:
+    raw_scale = data.get("scale")
+    if not isinstance(raw_scale, int):
+        return None
+    if raw_scale < 0 or raw_scale > 100:
         return None
 
     return {
-        "conclusion": conclusion_label,
-        "strength": float(strength),
-        "confidence": float(confidence),
+        "response": response_label,
+        "scale": raw_scale,
     }
 
 
@@ -123,9 +114,8 @@ def aggregate_to_csv(output_path: Path) -> Tuple[int, int]:
                     "run_id": run_number,
                     "perturbation": perturbation,
                     "dataset": dataset,
-                    "conclusion": parsed["conclusion"],
-                    "strength": parsed["strength"],
-                    "confidence": parsed["confidence"],
+                    "response": parsed["response"],
+                    "scale": parsed["scale"],
                 }
             )
         else:
@@ -142,9 +132,8 @@ def aggregate_to_csv(output_path: Path) -> Tuple[int, int]:
                     "run_id",
                     "perturbation",
                     "dataset",
-                    "conclusion",
-                    "strength",
-                    "confidence",
+                    "response",
+                    "scale",
                 ],
             )
             writer.writeheader()
