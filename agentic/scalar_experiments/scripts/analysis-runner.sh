@@ -1,5 +1,8 @@
 #!/bin/bash
-# Run from agentic/scalar_experiments/ (or sbatch from there so job cwd is scalar_experiments/).
+#SBATCH --job-name=agent-runner
+#SBATCH --output=slurm_output/%x-%j.out
+
+# run from agentic/scalar_experiments/ (or sbatch from there so job cwd is scalar_experiments/).
 
 # list all blade datasets
 # datasets=("affairs" "amtl" "boxes" "caschools" "crofoot" "hurricane" "mortgage" "panda_nuts" "reading" "soccer" "teachingratings")

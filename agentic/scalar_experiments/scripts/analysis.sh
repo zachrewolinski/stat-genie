@@ -1,5 +1,8 @@
 #!/bin/bash
-# Run from agentic/scalar_experiments/ (job cwd must be scalar_experiments/).
+#SBATCH --job-name=agent-analysis
+#SBATCH --output=slurm_output/%x-%j.out
+
+# run from agentic/scalar_experiments/ (job cwd must be scalar_experiments/).
 
 # the first three inputs are dataset name, perturbation type, and run number.
 dataset_name="$1"
