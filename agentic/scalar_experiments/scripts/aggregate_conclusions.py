@@ -1,10 +1,19 @@
 #!/usr/bin/env python3
 """
-Collect conclusion.txt from each run, check they're valid scalars in [-100, 100],
-and write one CSV (run_id, perturbation, dataset, conclusion).
+Collect conclusion.txt from each run and write CSV.
+Script expects conclusion.txt to contain JSON of the form:
+
+    {
+        "response": "Yes" | "No",
+        "scale": <integer in [0, 100]>,
+    }
+
+Output CSV has one row per valid run, with columns:
+    run_id, perturbation, dataset, response, scale
 """
 
 import csv
+import json
 import re
 import sys
 from pathlib import Path
@@ -16,21 +25,40 @@ outputs_dir = script_dir / "outputs"
 output_csv_path = script_dir / "aggregated_results.csv"
 
 
-def validate_conclusion(content: str) -> Optional[float]:
-    """Return the scalar if it's a single number in [-100, 100], else None."""
-    content = content.strip()
-    if not content:
+def validate_conclusion(content: str) -> Optional[dict]:
+    """ Parse and validate conclusion.txt. """
+    text = content.strip()
+    if not text:
         return None
-    # one number only, no extra punctuation or text
-    if not re.match(r"^-?\d+(\.\d+)?$", content):
-        return None
+
     try:
-        value = float(content)
-    except ValueError:
+        data = json.loads(text)
+    except json.JSONDecodeError:
         return None
-    if value < -100 or value > 100:
+
+    if not isinstance(data, dict):
         return None
-    return value
+
+    raw_response = data.get("response")
+    if not isinstance(raw_response, str):
+        return None
+
+    normalized = raw_response.strip().lower()
+    if normalized not in {"yes", "no"}:
+        return None
+
+    response_label = raw_response.strip()
+
+    raw_scale = data.get("scale")
+    if not isinstance(raw_scale, int):
+        return None
+    if raw_scale < 0 or raw_scale > 100:
+        return None
+
+    return {
+        "response": response_label,
+        "scale": raw_scale,
+    }
 
 
 def discover_all_runs() -> list[Tuple[str, str, int, Path]]:
@@ -77,16 +105,19 @@ def aggregate_to_csv(output_path: Path) -> Tuple[int, int]:
     for dataset, perturbation, run_number, conclusion_path in runs:
         try:
             raw = conclusion_path.read_text(encoding="utf-8")
-            conclusion_value = validate_conclusion(raw)
+            parsed = validate_conclusion(raw)
         except Exception:
-            conclusion_value = None
-        if conclusion_value is not None:
-            valid_entries.append({
-                "run_id": run_number,
-                "perturbation": perturbation,
-                "dataset": dataset,
-                "conclusion": conclusion_value
-            })
+            parsed = None
+        if parsed is not None:
+            valid_entries.append(
+                {
+                    "run_id": run_number,
+                    "perturbation": perturbation,
+                    "dataset": dataset,
+                    "response": parsed["response"],
+                    "scale": parsed["scale"],
+                }
+            )
         else:
             invalid_files.append(conclusion_path)
 
@@ -95,7 +126,16 @@ def aggregate_to_csv(output_path: Path) -> Tuple[int, int]:
 
     if valid_entries:
         with open(output_path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=["run_id", "perturbation", "dataset", "conclusion"])
+            writer = csv.DictWriter(
+                f,
+                fieldnames=[
+                    "run_id",
+                    "perturbation",
+                    "dataset",
+                    "response",
+                    "scale",
+                ],
+            )
             writer.writeheader()
             writer.writerows(valid_entries)
         print(f"Wrote {len(valid_entries)} rows to {output_path}")
