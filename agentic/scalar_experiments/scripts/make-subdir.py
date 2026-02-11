@@ -91,11 +91,12 @@ def write_agent_instructions(dataset_name: str, perturbation_type: str, run_numb
     Create a data analysis that answers the research question.
     You are allowed to import packages that are listed in the provided 'packages.txt' file (along with their installed versions) to help with your analysis.
     When executing Python scripts, ALWAYS use the command `poetry run python <filename.py>`. Never use `python` or `python3` directly.
-    Use your data analysis to determine an integer scalar conclusion that answers the research question.
-    The scalar must follow a Likert scale from -100 to 100, where -100 is an incredibly strong "No" answer,
-    0 is a neutral answer, and 100 is an incredibly strong "Yes" answer.
-    Your final scalar output must be written to a file called 'conclusion.txt'.
-    The 'conclusion.txt' file must contain ONLY this single scalar value, with no additional text or lines.
+    Your data analysis should result in two outputs: a binary "Yes" or "No" answer to the research question,
+    and an integer scalar that places your "Yes" or "No" response on a Likert scale from 0 to 100,
+    where 0 represents a strong "No" answer and 100 represents a strong "Yes" answer.
+    These outputs must be written to a file called 'conclusion.txt' in JSON format, with the value of "Yes" or "No"
+    stored under the key "response" and the integer value stored under the key "scale".
+    The 'conclusion.txt' file must contain ONLY this JSON object, with no additional text or lines.
     """
     
     return instructions
