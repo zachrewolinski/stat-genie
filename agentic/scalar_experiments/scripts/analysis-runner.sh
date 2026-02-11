@@ -7,13 +7,15 @@
 # list all blade datasets
 # datasets=("affairs" "amtl" "boxes" "caschools" "crofoot" "hurricane" "mortgage" "panda_nuts" "reading" "soccer" "teachingratings")
 # have already done "affairs" and "amtl" so skipping those for now
-datasets=("boxes" "caschools" "crofoot" "hurricane" "mortgage" "panda_nuts" "reading" "soccer" "teachingratings")
+# datasets=("boxes" "caschools" "crofoot" "hurricane" "mortgage" "panda_nuts" "reading" "soccer" "teachingratings")
+datasets=("affairs")
 
 # list all perturbation types
 perturbations=("null_anonymize" "null_shuffle_names" "null_add_features" "null_positive_leading_statement" "null_negative_leading_statement")
 
 # number of runs per dataset-perturbation pair
-num_runs=20
+# num_runs=20
+num_runs=10
 
 # analysis script name
 analysis_script="scripts/analysis.sh"
