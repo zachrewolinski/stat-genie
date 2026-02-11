@@ -1,10 +1,20 @@
 #!/usr/bin/env python3
 """
-Collect conclusion.txt from each run, check they're valid scalars in [-100, 100],
-and write one CSV (run_id, perturbation, dataset, conclusion).
+Collect conclusion.txt from each run and write CSV.
+Script expects conclusion.txt to contain JSON of the form:
+
+    {
+        "conclusion": "Yes" | "No",
+        "strength": <number in [0, 100]>,
+        "confidence": <number in [0, 100]>,
+    }
+
+Output CSV has one row per valid run, with columns:
+    run_id, perturbation, dataset, conclusion, strength, confidence
 """
 
 import csv
+import json
 import re
 import sys
 from pathlib import Path
@@ -16,21 +26,48 @@ outputs_dir = script_dir / "outputs"
 output_csv_path = script_dir / "aggregated_results.csv"
 
 
-def validate_conclusion(content: str) -> Optional[float]:
-    """Return the scalar if it's a single number in [-100, 100], else None."""
-    content = content.strip()
-    if not content:
+def validate_conclusion(content: str) -> Optional[dict]:
+    """ Parse and validate conclusion.txt. """
+    text = content.strip()
+    if not text:
         return None
-    # one number only, no extra punctuation or text
-    if not re.match(r"^-?\d+(\.\d+)?$", content):
-        return None
+
     try:
-        value = float(content)
-    except ValueError:
+        data = json.loads(text)
+    except json.JSONDecodeError:
         return None
-    if value < -100 or value > 100:
+
+    if not isinstance(data, dict):
         return None
-    return value
+
+    raw_conclusion = data.get("conclusion")
+    if not isinstance(raw_conclusion, str):
+        return None
+
+    normalized = raw_conclusion.strip().lower()
+    if normalized not in {"yes", "no"}:
+        return None
+
+    conclusion_label = raw_conclusion.strip()
+
+    def _validate_prob_field(value: object) -> Optional[float]:
+        if not isinstance(value, (int, float)):
+            return None
+        v = float(value)
+        if v < 0 or v > 100:
+            return None
+        return v
+
+    strength = _validate_prob_field(data.get("strength"))
+    confidence = _validate_prob_field(data.get("confidence"))
+    if strength is None or confidence is None:
+        return None
+
+    return {
+        "conclusion": conclusion_label,
+        "strength": float(strength),
+        "confidence": float(confidence),
+    }
 
 
 def discover_all_runs() -> list[Tuple[str, str, int, Path]]:
@@ -77,16 +114,20 @@ def aggregate_to_csv(output_path: Path) -> Tuple[int, int]:
     for dataset, perturbation, run_number, conclusion_path in runs:
         try:
             raw = conclusion_path.read_text(encoding="utf-8")
-            conclusion_value = validate_conclusion(raw)
+            parsed = validate_conclusion(raw)
         except Exception:
-            conclusion_value = None
-        if conclusion_value is not None:
-            valid_entries.append({
-                "run_id": run_number,
-                "perturbation": perturbation,
-                "dataset": dataset,
-                "conclusion": conclusion_value
-            })
+            parsed = None
+        if parsed is not None:
+            valid_entries.append(
+                {
+                    "run_id": run_number,
+                    "perturbation": perturbation,
+                    "dataset": dataset,
+                    "conclusion": parsed["conclusion"],
+                    "strength": parsed["strength"],
+                    "confidence": parsed["confidence"],
+                }
+            )
         else:
             invalid_files.append(conclusion_path)
 
@@ -95,7 +136,17 @@ def aggregate_to_csv(output_path: Path) -> Tuple[int, int]:
 
     if valid_entries:
         with open(output_path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=["run_id", "perturbation", "dataset", "conclusion"])
+            writer = csv.DictWriter(
+                f,
+                fieldnames=[
+                    "run_id",
+                    "perturbation",
+                    "dataset",
+                    "conclusion",
+                    "strength",
+                    "confidence",
+                ],
+            )
             writer.writeheader()
             writer.writerows(valid_entries)
         print(f"Wrote {len(valid_entries)} rows to {output_path}")
