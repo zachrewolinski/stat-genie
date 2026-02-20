@@ -47,8 +47,8 @@ fi
 
 # for each dataset-perturbation pair, run analysis.sh `num_runs` times
 # for prompt_version in "${prompt_versions[@]}"; do
-for distribution in "${distributions[@]}"; do
-    for dataset in "${datasets[@]}"; do
+for dataset in "${datasets[@]}"; do
+    for distribution in "${distributions[@]}"; do
         for perturbation in "${perturbations[@]}"; do
             for run_number in $(seq 1 $num_runs); do
                 # Skip if this experiment already has output (conclusion.txt indicates completion)
