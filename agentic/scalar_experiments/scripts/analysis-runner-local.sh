@@ -17,17 +17,20 @@ EXP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # Source the token refresh helper
 source "$SCRIPT_DIR/token-refresh-helper.sh"
 
-# define three test datasets for inspecting prompts
-datasets=("affairs" "amtl" "caschools")
+# put all datasets for full suite of results
+datasets=("affairs" "amtl" "boxes" "caschools" "crofoot" "hurricane" "mortgage" "panda_nuts" "reading" "soccer" "teachingratings")
+
+# list the distribution types
+distributions=("null" "alt")
 
 # list all perturbation types
-perturbations=("null_anonymize" "null_shuffle_names" "null_add_features" "null_positive_leading_statement" "null_negative_leading_statement")
+perturbations=("anonymize" "shuffle_names" "add_features" "positive_leading_statement" "negative_leading_statement")
 
-# 10 runs to speed things up
-num_runs=10
+# 20 runs each for the full distributions
+num_runs=20
 
 # prompt version (1-4)
-prompt_versions=(1 2 3 4)
+# prompt_versions=(1 2 3 4)
 
 # analysis script name
 analysis_script="scripts/analysis.sh"
@@ -43,14 +46,17 @@ if ! refresh_azure_token_until_ok; then
 fi
 
 # for each dataset-perturbation pair, run analysis.sh `num_runs` times
-for prompt_version in "${prompt_versions[@]}"; do
+# for prompt_version in "${prompt_versions[@]}"; do
+for distribution in "${distributions[@]}"; do
     for dataset in "${datasets[@]}"; do
         for perturbation in "${perturbations[@]}"; do
             for run_number in $(seq 1 $num_runs); do
                 # Skip if this experiment already has output (conclusion.txt indicates completion)
-                output_dir="$EXP_ROOT/outputs/prompt$prompt_version/$dataset/$perturbation/run$run_number"
+                # output_dir="$EXP_ROOT/outputs/prompt$prompt_version/$dataset/$perturbation/run$run_number"
+                output_dir="$EXP_ROOT/outputs/$dataset/$distribution/$perturbation/run$run_number"
                 if [ -f "$output_dir/conclusion.txt" ]; then
-                    echo "[analysis-runner] Skipping (already completed): prompt$prompt_version $dataset $perturbation run$run_number"
+                    # echo "[analysis-runner] Skipping (already completed): prompt$prompt_version $dataset $perturbation run$run_number"
+                    echo "[analysis-runner] Skipping (already completed): $dataset $distribution $perturbation run$run_number"
                     continue
                 fi
 
@@ -59,15 +65,19 @@ for prompt_version in "${prompt_versions[@]}"; do
 
                 attempt=1
                 while true; do
-                    echo "[analysis-runner] Running analysis (attempt $attempt/$MAX_ANALYSIS_ATTEMPTS): prompt$prompt_version $dataset $perturbation run$run_number"
-                    (cd "$EXP_ROOT" && bash $analysis_script $prompt_version $dataset $perturbation $run_number) || true
+                    # echo "[analysis-runner] Running analysis (attempt $attempt/$MAX_ANALYSIS_ATTEMPTS): prompt$prompt_version $dataset $perturbation run$run_number"
+                    echo "[analysis-runner] Running analysis (attempt $attempt/$MAX_ANALYSIS_ATTEMPTS): $dataset $distribution $perturbation run$run_number"
+                    # (cd "$EXP_ROOT" && bash $analysis_script $prompt_version $dataset $perturbation $run_number) || true
+                    (cd "$EXP_ROOT" && bash $analysis_script $dataset $distribution $perturbation $run_number) || true
                     if [ -f "$output_dir/conclusion.txt" ]; then
-                        echo "[analysis-runner] Completed: prompt$prompt_version $dataset $perturbation run$run_number"
+                        # echo "[analysis-runner] Completed: prompt$prompt_version $dataset $perturbation run$run_number"
+                        echo "[analysis-runner] Completed: $dataset $distribution $perturbation run$run_number"
                         break
                     fi
 
                     if [ $attempt -ge "$MAX_ANALYSIS_ATTEMPTS" ]; then
-                        echo "[analysis-runner] FAILED after $MAX_ANALYSIS_ATTEMPTS attempts: prompt$prompt_version $dataset $perturbation run$run_number (continuing to next run)" >&2
+                        # echo "[analysis-runner] FAILED after $MAX_ANALYSIS_ATTEMPTS attempts: prompt$prompt_version $dataset $perturbation run$run_number (continuing to next run)" >&2
+                        echo "[analysis-runner] FAILED after $MAX_ANALYSIS_ATTEMPTS attempts: $dataset $distribution $perturbation run$run_number (continuing to next run)" >&2
                         break
                     fi
 
@@ -80,5 +90,6 @@ for prompt_version in "${prompt_versions[@]}"; do
         done
     done
 done
+# done
 
 echo "[analysis-runner] Done."

@@ -18,38 +18,44 @@ script_dir = Path(__file__).resolve().parent.parent
 outputs_dir = script_dir / "outputs"
 
 # def make_subdir(prompt_version: int, dataset_name: str, perturbation_type: str, run_number: int):
-def make_subdir(dataset_name: str, perturbation_type: str, run_number: int):
+def make_subdir(dataset_name: str, distribution: str, perturbation_type: str, run_number: int):
 	
     # create the subdirectory path
     # subdir_path = outputs_dir / f"prompt{prompt_version}" / dataset_name / perturbation_type / f"run{run_number}"
-    subdir_path = outputs_dir / dataset_name / perturbation_type / f"run{run_number}"
+    subdir_path = outputs_dir / dataset_name / distribution / perturbation_type / f"run{run_number}"
     os.makedirs(subdir_path, exist_ok=True)
     print(f"[make-subdir] created subdirectory: {subdir_path}")
     
     return
     
 # def add_files(prompt_version: int,dataset_name: str, perturbation_type: str, run_number: int):
-def add_files(dataset_name: str, perturbation_type: str, run_number: int):
+def add_files(dataset_name: str, distribution: str, perturbation_type: str, run_number: int):
     
-    if perturbation_type == "null_anonymize":
+    # if we are calculating the null dist, break the relationships
+    if distribution == "null":
+        data_perturbation = DataPerturbation(shuffle_values=True)
+    elif distribution == "alt":
+        data_perturbation = DataPerturbation()
+    else:
+        raise ValueError(f"Distribution type '{distribution}' is not defined. \
+            Please specify 'null' or 'alt' for the distribution type in \
+                'make-subdir.py' when adding files.")
+    
+    # now we can define the other perturbations
+    if perturbation_type == "anonymize":
         feature_perturbation = FeaturePerturbation(anonymize=True)
-        data_perturbation = DataPerturbation(shuffle_values=True)
         task_perturbation = TaskPerturbation()
-    elif perturbation_type == "null_shuffle_names":
+    elif perturbation_type == "shuffle_names":
         feature_perturbation = FeaturePerturbation(shuffle_names=True)
-        data_perturbation = DataPerturbation(shuffle_values=True)
         task_perturbation = TaskPerturbation()
-    elif perturbation_type == "null_add_features":
+    elif perturbation_type == "add_features":
         feature_perturbation = FeaturePerturbation(add_random_features=10)
-        data_perturbation = DataPerturbation(shuffle_values=True)
         task_perturbation = TaskPerturbation()
-    elif perturbation_type == "null_positive_leading_statement":
+    elif perturbation_type == "positive_leading_statement":
         feature_perturbation = FeaturePerturbation()
-        data_perturbation = DataPerturbation(shuffle_values=True)
         task_perturbation = TaskPerturbation(positive_leading_statement=True)
-    elif perturbation_type == "null_negative_leading_statement":
+    elif perturbation_type == "negative_leading_statement":
         feature_perturbation = FeaturePerturbation()
-        data_perturbation = DataPerturbation(shuffle_values=True)
         task_perturbation = TaskPerturbation(negative_leading_statement=True)
     else:
         raise ValueError(f"Perturbation type '{perturbation_type}' needs to be \
@@ -64,7 +70,7 @@ def add_files(dataset_name: str, perturbation_type: str, run_number: int):
     
     # write perturbed files to the subdirectory
     # subdir_path = outputs_dir / f"prompt{prompt_version}" / dataset_name / perturbation_type / f"run{run_number}"
-    subdir_path = outputs_dir / dataset_name / perturbation_type / f"run{run_number}"
+    subdir_path = outputs_dir / dataset_name / distribution / perturbation_type / f"run{run_number}"
     with open(subdir_path / "info.json", "w") as f:
         json.dump(dataset_info, f, indent=4)
     df.to_csv(subdir_path / f"{dataset_name}.csv", index=False)
@@ -78,21 +84,21 @@ def add_files(dataset_name: str, perturbation_type: str, run_number: int):
     
     # write instructions to the subdirectory
     # instructions = write_agent_instructions(prompt_version, dataset_name, perturbation_type, run_number)
-    instructions = write_agent_instructions(dataset_name, perturbation_type, run_number)
+    instructions = write_agent_instructions(dataset_name, distribution, perturbation_type, run_number)
     with open(subdir_path / "AGENTS.md", "w") as f:
         f.write(instructions)
     print(f"[add-files] added agent instructions to: {subdir_path}")
     
     return
 
-def write_agent_instructions(dataset_name: str, perturbation_type: str, run_number: int):
+def write_agent_instructions(dataset_name: str, distribution: str, perturbation_type: str, run_number: int):
     
     instructions = f"""
     You are an expert data scientist tasked with analyzing a dataset to answer a specific research question.
     The research question is contained in the 'info.json' file along with metadata about the dataset.
     Use the metadata from 'info.json' to understand the dataset structure and context.
     The dataset itself is provided in the '{dataset_name}.csv' file.
-    You only have access to the '{dataset_name}/{perturbation_type}/run{run_number}' subdirectory and its contents - no other files or directories.
+    You only have access to the '{dataset_name}/{distribution}/{perturbation_type}/run{run_number}' subdirectory and its contents - no other files or directories.
     Create a data analysis that answers the research question.
     You are allowed to import packages that are listed in the provided 'packages.txt' file (along with their installed versions) to help with your analysis.
     When executing Python scripts, ALWAYS use the command `poetry run python <filename.py>`. Never use `python` or `python3` directly.
@@ -231,12 +237,15 @@ if __name__ == "__main__":
                                     "soccer",
                                     "teachingratings"],
                             help="Dataset name. Must be one of the BLADE datasets.")
+        parser.add_argument("--distribution", required=True,
+                            choices=["null", "alt"],
+                            help="Are we calculating the null distribution (i.e. perturbations that should destroy relationships in the data) or the alternative distribution (i.e. perturbations that should preserve relationships in the data)?")
         parser.add_argument("--perturbation-type", required=True, 
-                        choices=["null_anonymize",
-                                    "null_shuffle_names",
-                                    "null_add_features",
-                                    "null_positive_leading_statement",
-                                    "null_negative_leading_statement"],
+                        choices=["anonymize",
+                                 "shuffle_names",
+                                 "add_features",
+                                 "positive_leading_statement",
+                                 "negative_leading_statement"],
                         help="Choice of perturbation applied to dataset.")
         parser.add_argument("--run_number", type=int, default=1,
                             help="Run number for stability purposes.")
@@ -247,13 +256,15 @@ if __name__ == "__main__":
         dataset_name = args.dataset
         perturbation_type = args.perturbation_type
         run_number = args.run_number
+        distribution = args.distribution
+        
         # make the subdirectory
         # make_subdir(prompt_version, dataset_name, perturbation_type, run_number)
-        make_subdir(dataset_name, perturbation_type, run_number)
+        make_subdir(dataset_name, distribution, perturbation_type, run_number)
         
         # add the perturbed data files
         # add_files(prompt_version, dataset_name, perturbation_type, run_number)
-        add_files(perturbation_type, run_number)
+        add_files(dataset_name, distribution, perturbation_type, run_number)
         
         # exit successfully
         sys.exit(0)
