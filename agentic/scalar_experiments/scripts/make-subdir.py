@@ -209,9 +209,15 @@ def get_package_list():
         for dist in distributions()
     ]
     
-    # Sort by package name for consistent ordering
+    # sort by package name for consistent ordering
     packages.sort(key=str.lower)
     
+    # remove the package 'stat-genie' from the list, since that is our own
+    # library code. also remove 'blade-bench' since that might have some
+    # information about the datasets that we ask it about.
+    excluded_packages = ["stat-genie", "blade-bench"]
+    packages = [pkg for pkg in packages if not any(pkg.startswith(excluded) for excluded in excluded_packages)]
+        
     return "\n".join(packages)
 
 

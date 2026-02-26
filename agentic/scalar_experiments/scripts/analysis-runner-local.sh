@@ -18,7 +18,9 @@ EXP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$SCRIPT_DIR/token-refresh-helper.sh"
 
 # put all datasets for full suite of results
-datasets=("affairs" "amtl" "boxes" "caschools" "crofoot" "hurricane" "mortgage" "panda_nuts" "reading" "soccer" "teachingratings")
+# datasets=("affairs" "amtl" "boxes" "caschools" "crofoot" "hurricane" "mortgage" "panda_nuts" "reading" "soccer" "teachingratings")
+# we have completed the first four, so we are only interested in the ones after those for now
+datasets=("crofoot" "hurricane" "mortgage" "panda_nuts" "reading" "soccer" "teachingratings")
 
 # list the distribution types
 distributions=("null" "alt")

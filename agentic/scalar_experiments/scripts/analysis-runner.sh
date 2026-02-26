@@ -8,7 +8,7 @@
 # datasets=("affairs" "amtl" "boxes" "caschools" "crofoot" "hurricane" "mortgage" "panda_nuts" "reading" "soccer" "teachingratings")
 # have already done "affairs" and "amtl" so skipping those for now
 # datasets=("boxes" "caschools" "crofoot" "hurricane" "mortgage" "panda_nuts" "reading" "soccer" "teachingratings")
-datasets=("affairs")
+datasets=("reading")
 
 # list the distribution types
 distributions=("alt") # "null")
@@ -18,7 +18,7 @@ perturbations=("anonymize") # "shuffle_names" "add_features" "positive_leading_s
 
 # number of runs per dataset-perturbation pair
 # num_runs=20
-num_runs=5
+num_runs=1
 
 # prompt version (1-4)
 # prompt_versions=(1 2 3 4)
