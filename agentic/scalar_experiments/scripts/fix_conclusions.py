@@ -7,7 +7,6 @@ import argparse
 import json
 import os
 import re
-import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -269,7 +268,6 @@ def fix_conclusions(
                 if verbose or dry_run:
                     print(f"fixed programmatically: {label}")
                 if not dry_run:
-                    shutil.copy2(conclusion_path, str(conclusion_path) + ".bak")
                     conclusion_path.write_text(fixed, encoding="utf-8")
                 stats["fixed_programmatic"] += 1
                 continue
@@ -283,7 +281,6 @@ def fix_conclusions(
                 if verbose or dry_run:
                     print(f"fixed with LLM: {label}")
                 if not dry_run:
-                    shutil.copy2(conclusion_path, str(conclusion_path) + ".bak")
                     conclusion_path.write_text(llm_fixed, encoding="utf-8")
                 stats["fixed_llm"] += 1
                 continue
