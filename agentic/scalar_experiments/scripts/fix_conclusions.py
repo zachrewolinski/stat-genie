@@ -1,0 +1,368 @@
+#!/usr/bin/env python3
+"""Repair malformed JSON in scalar-experiment conclusion files."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import sys
+from pathlib import Path
+from typing import Any
+
+from aggregate_conclusions import CONCLUSION_SCHEMA, _discover_runs, _parse_conclusion
+
+EXPERIMENT_DIR = Path(__file__).resolve().parent.parent
+DEFAULT_OUTPUTS_DIR = EXPERIMENT_DIR / "outputs"
+
+AZURE_ENDPOINT = "https://fxdata-eastus2.openai.azure.com/openai"
+AZURE_API_VERSION = "2025-04-01-preview"
+
+_OPENAI_DEFAULT_MODEL = "gpt-5"
+_AZURE_DEFAULT_MODEL = "gpt-5"
+
+
+# ---------------------------------------------------------------------------
+# Programmatic fix helpers
+# ---------------------------------------------------------------------------
+
+
+def _strip_outer_junk(text: str) -> str:
+    """Strip characters before the first '{' and after the last '}'."""
+    first = text.find("{")
+    last = text.rfind("}")
+    if first == -1 or last == -1 or last < first:
+        return text
+    return text[first : last + 1]
+
+
+def _escape_literal_whitespace(text: str) -> str:
+    """Replace literal newlines/tabs inside JSON string values with escapes."""
+    first = text.find("{")
+    last = text.rfind("}")
+    if first == -1 or last == -1:
+        return text
+
+    inner = text[first + 1 : last]
+    inner = re.sub(r'(?<!\\)\n', r'\\n', inner)
+    inner = re.sub(r'(?<!\\)\t', r'\\t', inner)
+    inner = re.sub(r'(?<!\\)\r', r'\\r', inner)
+    return text[: first + 1] + inner + text[last:]
+
+
+def _fix_unescaped_quotes(text: str) -> str:
+    """Escape unescaped double-quotes inside JSON string values.
+
+    Finds colon-quote boundaries that delimit value strings, then escapes
+    any interior quotes that aren't already escaped.
+    """
+    result: list[str] = []
+    i = 0
+    n = len(text)
+
+    while i < n:
+        colon_match = re.search(r':\s*"', text[i:])
+        if not colon_match:
+            result.append(text[i:])
+            break
+
+        value_start = i + colon_match.end()
+        result.append(text[i:value_start])
+
+        j = value_start
+        while j < n:
+            if text[j] == '\\':
+                j += 2
+                continue
+            if text[j] == '"':
+                rest = text[j + 1:].lstrip()
+                if not rest or rest[0] in (',', '}'):
+                    break
+                else:
+                    result.append('\\"')
+                    j += 1
+                    continue
+            result.append(text[j])
+            j += 1
+
+        if j < n:
+            result.append('"')
+            i = j + 1
+        else:
+            i = n
+
+    return ''.join(result)
+
+
+def _try_programmatic_fix(raw: str) -> str | None:
+    """Apply programmatic fixes and return valid JSON string, or None."""
+    text = raw.strip()
+
+    try:
+        json.loads(text)
+        return text
+    except json.JSONDecodeError:
+        pass
+
+    text = _strip_outer_junk(text)
+    try:
+        json.loads(text)
+        return text
+    except json.JSONDecodeError:
+        pass
+
+    text = _escape_literal_whitespace(text)
+    try:
+        json.loads(text)
+        return text
+    except json.JSONDecodeError:
+        pass
+
+    text = _fix_unescaped_quotes(text)
+    try:
+        json.loads(text)
+        return text
+    except json.JSONDecodeError:
+        pass
+
+    text2 = text.replace('\\\\"', '\\"')
+    try:
+        json.loads(text2)
+        return text2
+    except json.JSONDecodeError:
+        pass
+
+    # raw_decode: handles trailing junk that contains '}' characters
+    for candidate in (text, text2):
+        first = candidate.find("{")
+        if first == -1:
+            continue
+        try:
+            obj, _ = json.JSONDecoder().raw_decode(candidate, idx=first)
+            return json.dumps(obj)
+        except json.JSONDecodeError:
+            pass
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# LLM fallback
+# ---------------------------------------------------------------------------
+
+
+def _llm_fix(raw: str, deployment: str | None) -> str | None:
+    """Use OpenAI (or Azure OpenAI) to recover valid JSON from malformed text.
+
+    Provider selection uses env vars: OPENAI_API_KEY takes priority over
+    AZURE_OPENAI_API_KEY. Returns None when no key is available.
+    """
+    openai_key = os.environ.get("OPENAI_API_KEY")
+    azure_key = os.environ.get("AZURE_OPENAI_API_KEY")
+
+    if not openai_key and not azure_key:
+        return None
+
+    try:
+        import openai as _openai_mod  # noqa: F811
+    except ImportError:
+        print("openai package not installed; skipping LLM fallback", file=sys.stderr)
+        return None
+
+    if openai_key:
+        client = _openai_mod.OpenAI(api_key=openai_key)
+        model = deployment or _OPENAI_DEFAULT_MODEL
+        extra_kwargs: dict[str, Any] = {"max_completion_tokens": 4096}
+    else:
+        client = _openai_mod.AzureOpenAI(
+            api_key=azure_key,
+            azure_endpoint=AZURE_ENDPOINT,
+            api_version=AZURE_API_VERSION,
+        )
+        model = deployment or _AZURE_DEFAULT_MODEL
+        extra_kwargs = {"temperature": 0, "max_completion_tokens": 4096}
+
+    prompt = (
+        "The following text should be a JSON object with keys "
+        '"response" (integer 0-100) and "explanation" (string). '
+        "Extract the intended JSON and return only the valid JSON object, "
+        "with no extra text.\n\n"
+        f"---\n{raw}\n---"
+    )
+
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            **extra_kwargs,
+        )
+    except Exception as exc:
+        print(f"LLM request failed: {exc}", file=sys.stderr)
+        return None
+
+    choice = response.choices[0]
+    content = choice.message.content
+    if not content:
+        reason = choice.finish_reason
+        refusal = getattr(choice.message, "refusal", None)
+        print(
+            f"LLM returned empty response (finish_reason={reason}, refusal={refusal})",
+            file=sys.stderr,
+        )
+        return None
+
+    content = content.strip()
+    if content.startswith("```"):
+        content = re.sub(r"^```(?:json)?\s*\n?", "", content)
+        content = re.sub(r"\n?```\s*$", "", content)
+
+    try:
+        json.loads(content)
+        return content
+    except json.JSONDecodeError as exc:
+        preview = content[:300].replace("\n", "\\n")
+        print(f"LLM returned invalid JSON: {exc}", file=sys.stderr)
+        print(f"LLM response preview: {preview}", file=sys.stderr)
+        return None
+
+
+def fix_conclusions(
+    outputs_dir: Path,
+    *,
+    dry_run: bool = False,
+    verbose: bool = False,
+    llm_deployment: str | None = None,
+) -> dict[str, int]:
+    runs = _discover_runs(outputs_dir)
+    stats = {
+        "scanned": 0,
+        "valid": 0,
+        "fixed_programmatic": 0,
+        "fixed_llm": 0,
+        "still_broken": 0,
+    }
+
+    for dataset, distribution, perturbation, run_id, conclusion_path in runs:
+        stats["scanned"] += 1
+        label = f"{dataset}/{distribution}/{perturbation}/run{run_id}"
+
+        try:
+            raw = conclusion_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            if verbose:
+                print(f"skip {label}: unreadable ({exc})")
+            stats["still_broken"] += 1
+            continue
+
+        parsed = _parse_conclusion(raw, schema=CONCLUSION_SCHEMA)
+        if parsed is not None:
+            stats["valid"] += 1
+            continue
+
+        # Try programmatic fixes
+        fixed = _try_programmatic_fix(raw)
+        if fixed is not None:
+            check = _parse_conclusion(fixed, schema=CONCLUSION_SCHEMA)
+            if check is not None:
+                if verbose or dry_run:
+                    print(f"fixed programmatically: {label}")
+                if not dry_run:
+                    shutil.copy2(conclusion_path, str(conclusion_path) + ".bak")
+                    conclusion_path.write_text(fixed, encoding="utf-8")
+                stats["fixed_programmatic"] += 1
+                continue
+
+        if verbose or dry_run:
+            print(f"trying LLM fallback: {label}")
+        llm_fixed = _llm_fix(raw, llm_deployment)
+        if llm_fixed is not None:
+            check = _parse_conclusion(llm_fixed, schema=CONCLUSION_SCHEMA)
+            if check is not None:
+                if verbose or dry_run:
+                    print(f"fixed with LLM: {label}")
+                if not dry_run:
+                    shutil.copy2(conclusion_path, str(conclusion_path) + ".bak")
+                    conclusion_path.write_text(llm_fixed, encoding="utf-8")
+                stats["fixed_llm"] += 1
+                continue
+
+        if verbose or dry_run:
+            preview = raw[:200].replace("\n", "\\n")
+            print(f"still broken {label}: {preview}")
+        stats["still_broken"] += 1
+
+    return stats
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Fix invalid JSON in scalar experiment conclusion.txt files."
+    )
+    parser.add_argument(
+        "--outputs-dir",
+        type=Path,
+        default=DEFAULT_OUTPUTS_DIR,
+        help="Path to outputs directory (default: %(default)s).",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report issues without writing files.",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print details of each fix.",
+    )
+    parser.add_argument(
+        "--llm-deployment",
+        default=None,
+        help=(
+            "Model/deployment for LLM fallback. "
+            f"Default: {_OPENAI_DEFAULT_MODEL} (OpenAI) or {_AZURE_DEFAULT_MODEL} (Azure)."
+        ),
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+
+    if os.environ.get("OPENAI_API_KEY"):
+        provider = "OpenAI"
+        default_model = _OPENAI_DEFAULT_MODEL
+    elif os.environ.get("AZURE_OPENAI_API_KEY"):
+        provider = "Azure OpenAI"
+        default_model = _AZURE_DEFAULT_MODEL
+    else:
+        provider = None
+        default_model = None
+
+    if provider:
+        model = args.llm_deployment or default_model
+        print(f"LLM fallback enabled: {provider} ({model})")
+    else:
+        print("LLM fallback disabled: no API key found", file=sys.stderr)
+
+    stats = fix_conclusions(
+        args.outputs_dir,
+        dry_run=args.dry_run,
+        verbose=args.verbose,
+        llm_deployment=args.llm_deployment,
+    )
+
+    mode = " (DRY RUN)" if args.dry_run else ""
+    print(f"\nsummary{mode}:")
+    print(f"  scanned: {stats['scanned']}")
+    print(f"  already valid: {stats['valid']}")
+    print(f"  fixed programmatically: {stats['fixed_programmatic']}")
+    print(f"  fixed with LLM: {stats['fixed_llm']}")
+    print(f"  still broken: {stats['still_broken']}")
+
+    return 1 if stats["still_broken"] > 0 else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
