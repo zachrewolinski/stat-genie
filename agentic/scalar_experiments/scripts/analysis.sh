@@ -10,17 +10,34 @@ dataset_name="$1"
 distribution="$2"
 perturbation_type="$3"
 run_number="$4"
+# there is a fifth argument that is only used if the distribution is "pve", which is the pve value to use for that run's dataset perturbation
+if [[ "$distribution" == "pve" ]]; then
+    pve="$5"
+fi
 
 # call make-subdir.py with the given dataset name and perturbation type
-poetry run python scripts/make-subdir.py \
-    --dataset "$dataset_name" \
-    --distribution "$distribution" \
-    --perturbation-type "$perturbation_type" \
-    --run_number "$run_number"
+if [[ "$distribution" == "pve" ]]; then
+    poetry run python scripts/make-subdir.py \
+        --dataset "$dataset_name" \
+        --distribution "$distribution" \
+        --perturbation-type "$perturbation_type" \
+        --run_number "$run_number" \
+        --pve "$pve"
+else
+    poetry run python scripts/make-subdir.py \
+        --dataset "$dataset_name" \
+        --distribution "$distribution" \
+        --perturbation-type "$perturbation_type" \
+        --run_number "$run_number"
+fi
 
 # change directory to the newly created subdirectory
 # cd "outputs/prompt$prompt_version/$dataset_name/$perturbation_type/run$run_number" || exit 1
-cd "outputs/$dataset_name/$distribution/$perturbation_type/run$run_number" || exit 1
+if [[ "$distribution" == "pve" ]]; then
+    cd "outputs/$dataset_name/$distribution/pve_$pve/$perturbation_type/run$run_number" || exit 1
+else
+    cd "outputs/$dataset_name/$distribution/$perturbation_type/run$run_number" || exit 1
+fi
 
 # run codex to generate an answer to the research question
 poetry run npx codex exec --config model_reasoning_effort="high" --sandbox workspace-write "Follow the instructions given in 'AGENTS.md'" 

@@ -8,6 +8,7 @@ from stat_genie.blade_pipeline.additions.perturbations.data import DataPerturbat
 from stat_genie.blade_pipeline.additions.perturbations.task import TaskPerturbation
 from stat_genie.blade_pipeline.utils import (
     get_dataset_info_path,
+    get_dataset_iv_dv_path,
 )
 from importlib.metadata import distributions
 
@@ -18,28 +19,40 @@ script_dir = Path(__file__).resolve().parent.parent
 outputs_dir = script_dir / "outputs"
 
 # def make_subdir(prompt_version: int, dataset_name: str, perturbation_type: str, run_number: int):
-def make_subdir(dataset_name: str, distribution: str, perturbation_type: str, run_number: int):
+def make_subdir(dataset_name: str, distribution: str, perturbation_type: str, run_number: int, pve: float = None):
 	
     # create the subdirectory path
     # subdir_path = outputs_dir / f"prompt{prompt_version}" / dataset_name / perturbation_type / f"run{run_number}"
-    subdir_path = outputs_dir / dataset_name / distribution / perturbation_type / f"run{run_number}"
+    if distribution == "pve":
+        subdir_path = outputs_dir / dataset_name / distribution / f"pve_{pve}" / perturbation_type / f"run{run_number}"
+    else:
+        subdir_path = outputs_dir / dataset_name / distribution / perturbation_type / f"run{run_number}"
     os.makedirs(subdir_path, exist_ok=True)
     print(f"[make-subdir] created subdirectory: {subdir_path}")
     
     return
     
 # def add_files(prompt_version: int,dataset_name: str, perturbation_type: str, run_number: int):
-def add_files(dataset_name: str, distribution: str, perturbation_type: str, run_number: int):
+def add_files(dataset_name: str, distribution: str, perturbation_type: str, run_number: int, pve: float = None):
     
     # if we are calculating the null dist, break the relationships
     if distribution == "null":
         data_perturbation = DataPerturbation(shuffle_values=True)
     elif distribution == "alt":
         data_perturbation = DataPerturbation()
+    elif distribution == "pve":
+        # check that pve was set
+        if pve is None:
+            raise ValueError("If distribution type is 'pve', then a pve value must be provided when adding files to the subdirectory using 'make-subdir.py'.")
+        # get info that would be necessary for controlling PVE
+        iv_dv_info = get_dataset_iv_dv_path(dataset_name)
+        with open(iv_dv_info, "r") as f:
+            iv_dv_info = json.load(f)
+        data_perturbation = DataPerturbation(set_pve=True, pve=pve, iv_idxs=iv_dv_info["iv_idxs"], dv_idxs=iv_dv_info["dv_idxs"])
     else:
         raise ValueError(f"Distribution type '{distribution}' is not defined. \
-            Please specify 'null' or 'alt' for the distribution type in \
-                'make-subdir.py' when adding files.")
+            Please specify 'null', 'alt', or 'pve' for the distribution type \
+                in 'make-subdir.py' when adding files.")
     
     # now we can define the other perturbations
     if perturbation_type == "anonymize":
@@ -66,11 +79,14 @@ def add_files(dataset_name: str, distribution: str, perturbation_type: str, run_
     data_info_path = get_dataset_info_path(dataset_name)
     dataset_info, df = feature_perturbation.perturb(data_info_path)
     dataset_info = task_perturbation.perturb(dataset_info)
-    df = data_perturbation.perturb(df)
+    dataset_info, df = data_perturbation.perturb(dataset_info, df)
     
     # write perturbed files to the subdirectory
     # subdir_path = outputs_dir / f"prompt{prompt_version}" / dataset_name / perturbation_type / f"run{run_number}"
-    subdir_path = outputs_dir / dataset_name / distribution / perturbation_type / f"run{run_number}"
+    if distribution == "pve":
+        subdir_path = outputs_dir / dataset_name / distribution / f"pve_{pve}" / perturbation_type / f"run{run_number}"
+    else:
+        subdir_path = outputs_dir / dataset_name / distribution / perturbation_type / f"run{run_number}"
     with open(subdir_path / "info.json", "w") as f:
         json.dump(dataset_info, f, indent=4)
     df.to_csv(subdir_path / f"{dataset_name}.csv", index=False)
@@ -84,21 +100,27 @@ def add_files(dataset_name: str, distribution: str, perturbation_type: str, run_
     
     # write instructions to the subdirectory
     # instructions = write_agent_instructions(prompt_version, dataset_name, perturbation_type, run_number)
-    instructions = write_agent_instructions(dataset_name, distribution, perturbation_type, run_number)
+    instructions = write_agent_instructions(dataset_name, distribution, perturbation_type, run_number, pve=pve)
     with open(subdir_path / "AGENTS.md", "w") as f:
         f.write(instructions)
     print(f"[add-files] added agent instructions to: {subdir_path}")
     
     return
 
-def write_agent_instructions(dataset_name: str, distribution: str, perturbation_type: str, run_number: int):
+def write_agent_instructions(dataset_name: str, distribution: str, perturbation_type: str, run_number: int, pve: float = None):
+    
+    # if the distribution is "pve", then we should include the pve in the path
+    if distribution == "pve":
+        subdir_path = f"{dataset_name}/{distribution}/pve_{pve}/{perturbation_type}/run{run_number}"
+    else:
+        subdir_path = f"{dataset_name}/{distribution}/{perturbation_type}/run{run_number}"
     
     instructions = f"""
     You are an expert data scientist tasked with analyzing a dataset to answer a specific research question.
     The research question is contained in the 'info.json' file along with metadata about the dataset.
     Use the metadata from 'info.json' to understand the dataset structure and context.
     The dataset itself is provided in the '{dataset_name}.csv' file.
-    You only have access to the '{dataset_name}/{distribution}/{perturbation_type}/run{run_number}' subdirectory and its contents - no other files or directories.
+    You only have access to the '{subdir_path}' subdirectory and its contents - no other files or directories.
     Create a data analysis that answers the research question.
     You are allowed to import packages that are listed in the provided 'packages.txt' file (along with their installed versions) to help with your analysis.
     When executing Python scripts, ALWAYS use the command `poetry run python <filename.py>`. Never use `python` or `python3` directly.
@@ -244,7 +266,7 @@ if __name__ == "__main__":
                                     "teachingratings"],
                             help="Dataset name. Must be one of the BLADE datasets.")
         parser.add_argument("--distribution", required=True,
-                            choices=["null", "alt"],
+                            choices=["null", "alt", "pve"],
                             help="Are we calculating the null distribution (i.e. perturbations that should destroy relationships in the data) or the alternative distribution (i.e. perturbations that should preserve relationships in the data)?")
         parser.add_argument("--perturbation-type", required=True, 
                         choices=["anonymize",
@@ -255,6 +277,8 @@ if __name__ == "__main__":
                         help="Choice of perturbation applied to dataset.")
         parser.add_argument("--run_number", type=int, default=1,
                             help="Run number for stability purposes.")
+        parser.add_argument("--pve", type=float, default=None,
+                            help="Only used if distribution type is 'pve'. Represents the proportion of variance in the dependent variable that is explained by the independent variable(s) after perturbation. Must be between 0 and 1.")
         args = parser.parse_args()
         
         # get necessary info
@@ -263,14 +287,15 @@ if __name__ == "__main__":
         perturbation_type = args.perturbation_type
         run_number = args.run_number
         distribution = args.distribution
+        pve = args.pve
         
         # make the subdirectory
         # make_subdir(prompt_version, dataset_name, perturbation_type, run_number)
-        make_subdir(dataset_name, distribution, perturbation_type, run_number)
+        make_subdir(dataset_name, distribution, perturbation_type, run_number, pve=pve)
         
         # add the perturbed data files
         # add_files(prompt_version, dataset_name, perturbation_type, run_number)
-        add_files(dataset_name, distribution, perturbation_type, run_number)
+        add_files(dataset_name, distribution, perturbation_type, run_number, pve=pve)
         
         # exit successfully
         sys.exit(0)
