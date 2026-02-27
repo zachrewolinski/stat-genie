@@ -19,9 +19,9 @@ class DataPerturbation:
         shuffle_values: bool = False,
         shuffle_values_seed: int = 42,
         set_pve: bool = False,
-        pve: float = 0.5,
-        iv_idxs: list[int] = [],
-        dv_idxs: list[int] = [],
+        pve: float = None,
+        iv_idxs: list[int] = None,
+        dv_idxs: list[int] = None,
         set_pve_seed: int = 42,
     ):
         # ensure that both shuffle and pve perturbations are not selected at
@@ -30,6 +30,12 @@ class DataPerturbation:
             raise ValueError(
                 "Cannot apply both shuffle and PVE perturbations simultaneously."
             )
+        # check that necessary parameters are provided if set_pve is True
+        if set_pve:
+            if pve is None or iv_idxs is None or dv_idxs is None:
+                raise ValueError(
+                    "If set_pve is True, pve, iv_idxs, & dv_idxs are required."
+                )
 
         self.shuffle_values = shuffle_values
         self.shuffle_values_seed = shuffle_values_seed
@@ -72,12 +78,13 @@ class DataPerturbation:
 
     def set_pve(
         self,
+        json_metadata: dict,
         df: pd.DataFrame,
         pve: float,
         iv_idxs: list[int],
         dv_idxs: list[int],
         seed: int = 42,
-    ) -> pd.DataFrame:
+    ) -> tuple[dict, pd.DataFrame]:
         """
         Modifies each dependent variable column so that the independent
         variables explain exactly `pve` proportion of its variance.
@@ -87,6 +94,7 @@ class DataPerturbation:
         with $\sigma_\epsilon$ chosen so that $Var(\hat{Y}) / Var(Z)$ = pve.
 
         Args:
+            json_metadata: Dictionary containing the JSON metadata.
             df: Input dataset.
             pve: Target proportion of variance explained (0 to 1 inclusive).
             iv_idxs: Column indices of the independent variables.
@@ -94,6 +102,7 @@ class DataPerturbation:
             seed: Random seed for reproducibility.
 
         Returns:
+            The perturbed metadata
             A copy of `df` with the DV columns modified.
         """
 
@@ -108,16 +117,32 @@ class DataPerturbation:
                 "IV and DV column indices are out of range for the dataframe."
             )
 
+        # create a copy of the metadata to work with
+        json_metadata = deepcopy(json_metadata)
+
         # copy the dataframe to avoid modifying the original one
         df = deepcopy(df)
 
         # control randomness for reproducibility
         rng = np.random.default_rng(seed)
 
-        # build design matrix with intercept column
-        X = np.column_stack(
-            [np.ones(len(df)), df.iloc[:, iv_idxs].values.astype(float)]
-        )
+        # build design matrix with intercept column; string/categorical IVs
+        # are one-hot encoded (drop_first to avoid multicollinearity)
+        iv_df = df.iloc[:, iv_idxs]
+        encoded_parts = []
+        for col in iv_df.columns:
+            if pd.api.types.is_string_dtype(
+                iv_df[col]
+            ) or pd.api.types.is_categorical_dtype(iv_df[col]):
+                dummies = pd.get_dummies(iv_df[col], drop_first=True).astype(
+                    float
+                )
+                encoded_parts.append(dummies.values)
+            else:
+                encoded_parts.append(
+                    iv_df[col].values.astype(float).reshape(-1, 1)
+                )
+        X = np.column_stack([np.ones(len(df))] + encoded_parts)
 
         for dv_idx in dv_idxs:
             y = df.iloc[:, dv_idx].values
@@ -148,9 +173,22 @@ class DataPerturbation:
             # replace the original DV column with the new Z values
             df.iloc[:, dv_idx] = z
 
-        return df
+            # update field metadata to reflect the perturbed DV's distribution
+            field_props = json_metadata["data_desc"]["fields"][dv_idx][
+                "properties"
+            ]
+            sample_idxs = rng.choice(len(z), size=3, replace=False)
+            field_props["std"] = float(np.std(z))
+            field_props["min"] = float(np.min(z))
+            field_props["max"] = float(np.max(z))
+            field_props["samples"] = [float(z[i]) for i in sample_idxs]
+            field_props["num_unique_values"] = int(len(np.unique(z)))
 
-    def perturb(self, df: pd.DataFrame) -> pd.DataFrame:
+        return json_metadata, df
+
+    def perturb(
+        self, json_metadata: dict, df: pd.DataFrame
+    ) -> tuple[dict, pd.DataFrame]:
         """
         Applies the selected perturbations to the data in the following order:
         1a. Shuffle the values of each column independently of each other.
@@ -159,18 +197,24 @@ class DataPerturbation:
         Perturbations 1a and 1b cannot be applied at the same time since they
         will conflict with each other.
 
+        Args:
+            json_metadata: Metadata information for the dataset.
+            df: The dataset to perturb.
+
         Returns:
-            The perturbed dataset as a dataframe.
+            updated_metadata, perturbed_df
         """
 
         # in case no perturbations are selected
         perturbed_df = deepcopy(df)
+        updated_metadata = deepcopy(json_metadata)
 
         if self.shuffle_values:
             perturbed_df = self.shuffle_values_in_cols(perturbed_df)
 
         if self.control_pve:
-            perturbed_df = self.set_pve(
+            updated_metadata, perturbed_df = self.set_pve(
+                updated_metadata,
                 perturbed_df,
                 pve=self.pve,
                 iv_idxs=self.iv_idxs,
@@ -178,4 +222,4 @@ class DataPerturbation:
                 seed=self.set_pve_seed,
             )
 
-        return perturbed_df
+        return updated_metadata, perturbed_df

@@ -25,10 +25,11 @@ def get_conf_dir():
 def get_datasets_dir():
     return os.path.join(get_root_dir(), "datasets")
 
-
 def get_dataset_dir(dataset_name):
     return os.path.join(get_datasets_dir(), dataset_name)
 
+def get_dataset_iv_dv_path(dataset_name):
+    return os.path.join(get_datasets_dir(), dataset_name, "iv_dv_info.json")
 
 def get_dataset_csv_path(dataset_name):
     return os.path.join(get_datasets_dir(), dataset_name, "data.csv")
