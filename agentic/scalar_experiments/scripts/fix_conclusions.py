@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from aggregate_conclusions import CONCLUSION_SCHEMA, _discover_runs, _parse_conclusion
+from aggregate_pve_conclusions import _discover_pve_runs
 
 EXPERIMENT_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_OUTPUTS_DIR = EXPERIMENT_DIR / "outputs"
@@ -227,14 +228,17 @@ def _llm_fix(raw: str, deployment: str | None) -> str | None:
         return None
 
 
-def fix_conclusions(
-    outputs_dir: Path,
+def _fix_files(
+    labeled_paths: list[tuple[str, Path]],
     *,
     dry_run: bool = False,
     verbose: bool = False,
     llm_deployment: str | None = None,
 ) -> dict[str, int]:
-    runs = _discover_runs(outputs_dir)
+    """Try to repair each conclusion file in *labeled_paths*.
+
+    Each entry is (human-readable label, path to conclusion.txt).
+    """
     stats = {
         "scanned": 0,
         "valid": 0,
@@ -243,9 +247,8 @@ def fix_conclusions(
         "still_broken": 0,
     }
 
-    for dataset, distribution, perturbation, run_id, conclusion_path in runs:
+    for label, conclusion_path in labeled_paths:
         stats["scanned"] += 1
-        label = f"{dataset}/{distribution}/{perturbation}/run{run_id}"
 
         try:
             raw = conclusion_path.read_text(encoding="utf-8")
@@ -293,6 +296,37 @@ def fix_conclusions(
     return stats
 
 
+def _merge_stats(a: dict[str, int], b: dict[str, int]) -> dict[str, int]:
+    return {k: a.get(k, 0) + b.get(k, 0) for k in a}
+
+
+def fix_conclusions(
+    outputs_dir: Path,
+    *,
+    pve: bool = False,
+    dry_run: bool = False,
+    verbose: bool = False,
+    llm_deployment: str | None = None,
+) -> dict[str, int]:
+    labeled: list[tuple[str, Path]] = [
+        (f"{ds}/{dist}/{pert}/run{rid}", path)
+        for ds, dist, pert, rid, path in _discover_runs(outputs_dir)
+    ]
+
+    if pve:
+        labeled += [
+            (f"{ds}/pve/pve_{lvl}/{pert}/run{rid}", path)
+            for ds, lvl, pert, rid, path in _discover_pve_runs(outputs_dir)
+        ]
+
+    return _fix_files(
+        labeled,
+        dry_run=dry_run,
+        verbose=verbose,
+        llm_deployment=llm_deployment,
+    )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Fix invalid JSON in scalar experiment conclusion.txt files."
@@ -312,6 +346,11 @@ def parse_args() -> argparse.Namespace:
         "--verbose",
         action="store_true",
         help="Print details of each fix.",
+    )
+    parser.add_argument(
+        "--pve",
+        action="store_true",
+        help="Also scan PVE output directories.",
     )
     parser.add_argument(
         "--llm-deployment",
@@ -345,6 +384,7 @@ def main() -> int:
 
     stats = fix_conclusions(
         args.outputs_dir,
+        pve=args.pve,
         dry_run=args.dry_run,
         verbose=args.verbose,
         llm_deployment=args.llm_deployment,
