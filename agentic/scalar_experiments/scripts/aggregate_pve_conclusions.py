@@ -110,7 +110,7 @@ def aggregate_pve_runs(
         })
         fieldnames = BASE_COLUMNS + conclusion_columns + extra_columns
 
-        output_path = output_dir / "aggregated_pve_results.csv"
+        output_path = output_dir / "aggregated_results" / "aggregated_pve_results.csv"
         output_path.parent.mkdir(parents=True, exist_ok=True)
         with output_path.open("w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)

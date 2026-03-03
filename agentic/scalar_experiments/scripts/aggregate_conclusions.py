@@ -156,7 +156,7 @@ def _write_csv(
     )
     fieldnames = BASE_COLUMNS + required_conclusion_columns + extra_columns
 
-    output_path = output_dir / "aggregated_results.csv"
+    output_path = output_dir / "aggregated_results" / "aggregated_results.csv"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
