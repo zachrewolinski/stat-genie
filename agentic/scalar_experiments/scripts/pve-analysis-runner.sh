@@ -12,7 +12,9 @@ datasets=("amtl")
 distributions=("pve")
 
 # get pve values
-pves=(0.0 0.2 0.4 0.6) # only used if distribution is "pve"
+# pves=(0.0 0.2 0.4 0.6) # only used if distribution is "pve"
+# pves=(0.01 0.025) # try to find where the performance dropoff happens
+pves=(0.005)
 
 # list all perturbation types
 perturbations=("anonymize" "shuffle_names" "add_features" "positive_leading_statement" "negative_leading_statement")

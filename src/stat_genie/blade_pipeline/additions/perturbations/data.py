@@ -163,7 +163,7 @@ class DataPerturbation:
             # derivation: $Var(\hat{Y}) / (Var(\hat{Y}) + \sigma_\epsilon^2)$ = pve
             #             => $\sigma_\epsilon^2 = sqrt(Var(\hat{Y})$ * (1 - pve) / pve)
             if pve == 0:
-                z = rng.normal(0, 1, size=len(y))
+                z = rng.normal(np.mean(y_numeric), np.std(y_numeric), size=len(y))
             elif pve == 1:
                 z = y_hat
             else:
@@ -172,6 +172,12 @@ class DataPerturbation:
 
             # replace the original DV column with the new Z values
             df.iloc[:, dv_idx] = z
+            
+            # post-computation verification
+            actual_pve = np.var(y_hat) / np.var(z)
+            assert np.isclose(actual_pve, pve, atol=0.001), (
+                f"Expected PVE {pve}, but got {actual_pve:.4f}"
+            )
 
             # update field metadata to reflect the perturbed DV's distribution
             field_props = json_metadata["data_desc"]["fields"][dv_idx][
