@@ -1,4 +1,6 @@
 #!/bin/bash
+#SBATCH --job-name=agent-confidence
+#SBATCH --output=slurm_output/%x-%j.out
 
 # run from agentic/scalar_experiments/ (job cwd must be scalar_experiments/).
 
@@ -15,27 +17,26 @@ fi
 
 # call make-subdir.py with the given dataset name and perturbation type
 if [[ "$distribution" == "pve" ]]; then
-    poetry run python scripts/make-subdir.py \
+    poetry run python scripts/update-subdir.py \
         --dataset "$dataset_name" \
         --distribution "$distribution" \
         --perturbation-type "$perturbation_type" \
         --run_number "$run_number" \
         --pve "$pve"
 else
-    poetry run python scripts/make-subdir.py \
+    poetry run python scripts/update-subdir.py \
         --dataset "$dataset_name" \
         --distribution "$distribution" \
         --perturbation-type "$perturbation_type" \
         --run_number "$run_number"
 fi
 
-# change directory to the newly created subdirectory
-# cd "outputs/prompt$prompt_version/$dataset_name/$perturbation_type/run$run_number" || exit 1
+# change directory to the corresponding output subdirectory
 if [[ "$distribution" == "pve" ]]; then
     cd "outputs/$dataset_name/$distribution/pve_$pve/$perturbation_type/run$run_number" || exit 1
 else
     cd "outputs/$dataset_name/$distribution/$perturbation_type/run$run_number" || exit 1
 fi
 
-# run codex to generate an answer to the research question
+# run codex to generate a confidence score for the analysis
 poetry run npx codex exec --config model_reasoning_effort="high" --sandbox workspace-write "Follow the instructions given in 'AGENTS.md'" 
