@@ -98,7 +98,8 @@ def rewrite_agent_instructions(dataset_name: str, distribution: str, perturbatio
     Also of use is the 'data-analysis.out' file, which contains the log of the analyst's reasoning process and code that was run as they conducted their analysis.
     You are NOT to run any analyses of your own to evaluate the confidence of the conclusion.
     Your task is only to evaluate the confidence of the conclusion based on your knowledge of data science, the information provided in the subdirectory, including the conclusion itself and the analyst's reasoning process as documented in the data-analysis.out file.
-    This confidence must be an integer on a Likert scale between 0 and 100, where 0 represents “No Confidence” and 100 represents “Very High Confidence/Certain”.
+    This confidence must be an integer from 0 to 100, where the number represents:
+    - If you were to reconduct this analysis 100 times with slightly different reasonable decisions in the data science pipeline, how many times would you expect to get an answer more positive (larger on the Likert scale) than the seen in the conclusion?
     Your confidence must be written to a file called 'confidence.txt' in JSON format, with the integer scalar stored under the key "confidence" and your explanation stored under the key "explanation".
     The 'confidence.txt' file must contain ONLY this JSON object, with no additional text or lines.
     """

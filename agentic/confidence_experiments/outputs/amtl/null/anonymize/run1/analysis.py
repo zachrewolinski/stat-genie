@@ -5,16 +5,16 @@ import statsmodels.api as sm
 import statsmodels.formula.api as smf
 
 # Load data
-path = "amtl.csv"
+DF_PATH = "amtl.csv"
 
-df = pd.read_csv(path)
+df = pd.read_csv(DF_PATH)
 
 # Rename columns for clarity
-rename_map = {
+colmap = {
     "feature1": "tooth_class",
     "feature2": "specimen_id",
-    "feature3": "missing_teeth",
-    "feature4": "scorable_sockets",
+    "feature3": "missing",
+    "feature4": "observed",
     "feature5": "age",
     "feature6": "age_uncertainty",
     "feature7": "sex",
@@ -22,122 +22,105 @@ rename_map = {
     "feature9": "region",
 }
 
-df = df.rename(columns=rename_map)
+df = df.rename(columns=colmap)
 
-# Drop rows with missing or zero scorable_sockets (can't compute proportion)
-# Also drop rows with missing key covariates
-needed = ["missing_teeth", "scorable_sockets", "age", "sex", "tooth_class", "genus"]
+# Basic cleaning: drop rows with missing key fields or invalid counts
+# Ensure observed >= missing and observed > 0
+mask_valid = (
+    df["missing"].notna()
+    & df["observed"].notna()
+    & df["age"].notna()
+    & df["sex"].notna()
+    & df["tooth_class"].notna()
+    & df["genus"].notna()
+)
 
-df = df.dropna(subset=needed)
+df = df.loc[mask_valid].copy()
 
-df = df[df["scorable_sockets"] > 0].copy()
+# Ensure numeric
+for c in ["missing", "observed", "age", "sex"]:
+    df[c] = pd.to_numeric(df[c], errors="coerce")
 
-# Ensure categories
-# Explicit reference for genus
-if "Pan" in df["genus"].unique():
-    genus_order = ["Pan", "Homo sapiens", "Papio", "Pongo"]
+df = df.loc[df["observed"] > 0].copy()
+# enforce missing <= observed
+# If any rows violate, drop them
+
+df = df.loc[df["missing"] <= df["observed"]].copy()
+
+# Binary indicator for human
+# In data, genus has "Homo sapiens"
+
+df["is_human"] = (df["genus"] == "Homo sapiens").astype(int)
+
+# Prepare endog as successes/failures
+# success = missing, failure = observed - missing
+
+df["non_missing"] = df["observed"] - df["missing"]
+
+# Build formula with categorical tooth_class; sex treated as numeric (0-1)
+formula = "missing + non_missing ~ is_human + age + sex + C(tooth_class)"
+
+# Fit GLM binomial
+model = smf.glm(
+    formula=formula,
+    data=df,
+    family=sm.families.Binomial(),
+)
+
+result = model.fit()
+
+# Extract human coefficient
+coef = result.params.get("is_human", np.nan)
+se = result.bse.get("is_human", np.nan)
+pval = result.pvalues.get("is_human", np.nan)
+
+# Odds ratio
+odds_ratio = float(np.exp(coef)) if pd.notna(coef) else np.nan
+
+# Compute predicted probabilities for human vs non-human at mean covariates
+# For categorical tooth_class, use most common category
+
+tooth_mode = df["tooth_class"].mode(dropna=True)
+if len(tooth_mode) == 0:
+    tooth_ref = df["tooth_class"].iloc[0]
 else:
-    genus_order = sorted(df["genus"].unique())
+    tooth_ref = tooth_mode.iloc[0]
 
-df["genus"] = pd.Categorical(df["genus"], categories=genus_order)
+mean_age = df["age"].mean()
+mean_sex = df["sex"].mean()
 
-df["tooth_class"] = pd.Categorical(df["tooth_class"], categories=sorted(df["tooth_class"].unique()))
+pred_df = pd.DataFrame(
+    {
+        "is_human": [0, 1],
+        "age": [mean_age, mean_age],
+        "sex": [mean_sex, mean_sex],
+        "tooth_class": [tooth_ref, tooth_ref],
+        "missing": [0, 0],
+        "non_missing": [1, 1],
+    }
+)
 
-# Response as proportion with frequency weights
+pred = result.predict(pred_df)
+nonhuman_rate = float(pred.iloc[0])
+human_rate = float(pred.iloc[1])
+rate_diff = human_rate - nonhuman_rate
 
-df["missing_prop"] = df["missing_teeth"] / df["scorable_sockets"]
+# Also compute model-based marginal effect of human via delta method (approx)
+# We will not overcomplicate; use the sign and significance.
 
-# Fit binomial GLM
-formula = "missing_prop ~ C(genus, Treatment(reference='Pan')) + age + sex + C(tooth_class)"
-model = smf.glm(formula=formula, data=df, family=sm.families.Binomial(), freq_weights=df["scorable_sockets"]).fit()
-
-# Wald tests for Homo vs other genera
-# Coef names: C(genus, Treatment(reference='Pan'))[T.Homo sapiens]
-
-coef_names = model.params.index.tolist()
-
-def wald_test_linear_combination(lincomb):
-    # lincomb: dict of param->weight
-    vec = np.zeros(len(coef_names))
-    for k, v in lincomb.items():
-        if k in coef_names:
-            vec[coef_names.index(k)] = v
-        else:
-            raise ValueError(f"Parameter {k} not found")
-    return model.t_test(vec)
-
-homo_vs_pan = wald_test_linear_combination({"C(genus, Treatment(reference='Pan'))[T.Homo sapiens]": 1.0})
-
-# Homo vs Papio: (Homo - Papio) = beta_homo - beta_papio
-papio_param = "C(genus, Treatment(reference='Pan'))[T.Papio]"
-
-if papio_param in coef_names:
-    homo_vs_papio = wald_test_linear_combination({
-        "C(genus, Treatment(reference='Pan'))[T.Homo sapiens]": 1.0,
-        papio_param: -1.0,
-    })
-else:
-    homo_vs_papio = None
-
-pongo_param = "C(genus, Treatment(reference='Pan'))[T.Pongo]"
-if pongo_param in coef_names:
-    homo_vs_pongo = wald_test_linear_combination({
-        "C(genus, Treatment(reference='Pan'))[T.Homo sapiens]": 1.0,
-        pongo_param: -1.0,
-    })
-else:
-    homo_vs_pongo = None
-
-# Marginal standardized predicted probabilities by genus
-# For each genus, set genus for all rows, keep covariates, predict, then average weighted by sockets
-
-preds = {}
-for g in df["genus"].cat.categories:
-    tmp = df.copy()
-    tmp["genus"] = g
-    pred = model.predict(tmp)
-    # weighted average by scorable sockets to reflect tooth counts
-    preds[g] = np.average(pred, weights=tmp["scorable_sockets"])
-
-# Build results summary
-results = {
+summary = {
     "n_rows": int(df.shape[0]),
-    "genus_levels": df["genus"].cat.categories.tolist(),
-    "model_params": model.params.to_dict(),
-    "model_pvalues": model.pvalues.to_dict(),
-    "homo_vs_pan": {
-        "coef": float(homo_vs_pan.effect[0]),
-        "pvalue": float(homo_vs_pan.pvalue),
-    },
-    "homo_vs_papio": None,
-    "homo_vs_pongo": None,
-    "predicted_probabilities": {k: float(v) for k, v in preds.items()},
+    "odds_ratio": odds_ratio,
+    "coef": float(coef),
+    "se": float(se),
+    "pval": float(pval),
+    "nonhuman_rate": nonhuman_rate,
+    "human_rate": human_rate,
+    "rate_diff": rate_diff,
+    "tooth_class_ref": tooth_ref,
 }
 
-if homo_vs_papio is not None:
-    results["homo_vs_papio"] = {
-        "coef": float(homo_vs_papio.effect[0]),
-        "pvalue": float(homo_vs_papio.pvalue),
-    }
+with open("analysis_summary.json", "w") as f:
+    json.dump(summary, f, indent=2)
 
-if homo_vs_pongo is not None:
-    results["homo_vs_pongo"] = {
-        "coef": float(homo_vs_pongo.effect[0]),
-        "pvalue": float(homo_vs_pongo.pvalue),
-    }
-
-# Save results to json for inspection
-with open("analysis_results.json", "w") as f:
-    json.dump(results, f, indent=2)
-
-# Print concise summary
-print("Rows:", results["n_rows"])
-print("Genus levels:", results["genus_levels"])
-print("Predicted probabilities:")
-for k, v in results["predicted_probabilities"].items():
-    print(f"  {k}: {v:.4f}")
-print("Homo vs Pan: coef=%.4f, p=%.4g" % (results["homo_vs_pan"]["coef"], results["homo_vs_pan"]["pvalue"]))
-if results["homo_vs_papio"]:
-    print("Homo vs Papio: coef=%.4f, p=%.4g" % (results["homo_vs_papio"]["coef"], results["homo_vs_papio"]["pvalue"]))
-if results["homo_vs_pongo"]:
-    print("Homo vs Pongo: coef=%.4f, p=%.4g" % (results["homo_vs_pongo"]["coef"], results["homo_vs_pongo"]["pvalue"]))
+print(json.dumps(summary, indent=2))

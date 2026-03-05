@@ -1,118 +1,108 @@
-import pandas as pd
+import json
 import numpy as np
+import pandas as pd
 import statsmodels.api as sm
 import statsmodels.formula.api as smf
 
 # Load data
-path = 'amtl.csv'
-df = pd.read_csv(path)
+_df = pd.read_csv('amtl.csv')
 
-# Rename columns to meaningful names
-rename = {
+# Rename for clarity
+_df = _df.rename(columns={
     'feature1': 'tooth_class',
     'feature2': 'specimen_id',
     'feature3': 'missing_teeth',
     'feature4': 'observable_sockets',
     'feature5': 'age',
     'feature6': 'age_uncertainty',
-    'feature7': 'sex_estimate',
+    'feature7': 'sex_est',
     'feature8': 'genus',
-    'feature9': 'region',
-}
-df = df.rename(columns=rename)
+    'feature9': 'region'
+})
 
 # Basic cleaning
-# Ensure numeric types
-for col in ['missing_teeth', 'observable_sockets', 'age', 'age_uncertainty', 'sex_estimate']:
-    df[col] = pd.to_numeric(df[col], errors='coerce')
+# Keep rows with valid counts and covariates
+_df = _df.dropna(subset=['missing_teeth', 'observable_sockets', 'age', 'sex_est', 'tooth_class', 'genus'])
+_df = _df[_df['observable_sockets'] > 0]
+_df = _df[_df['missing_teeth'] >= 0]
+_df = _df[_df['missing_teeth'] <= _df['observable_sockets']]
 
-# Drop rows with missing key fields or invalid counts
-mask_valid = (
-    df['missing_teeth'].notna()
-    & df['observable_sockets'].notna()
-    & df['age'].notna()
-    & df['sex_estimate'].notna()
-    & df['tooth_class'].notna()
-    & df['genus'].notna()
-)
+# Ensure categorical types
+_df['tooth_class'] = _df['tooth_class'].astype('category')
+_df['genus'] = _df['genus'].astype('category')
 
-df = df.loc[mask_valid].copy()
+# Build response as successes/failures
+_df['present_teeth'] = _df['observable_sockets'] - _df['missing_teeth']
 
-# Remove rows with impossible counts
-# missing_teeth should be between 0 and observable_sockets
-invalid = (df['missing_teeth'] < 0) | (df['observable_sockets'] <= 0) | (df['missing_teeth'] > df['observable_sockets'])
-if invalid.any():
-    df = df.loc[~invalid].copy()
+# GLM binomial with counts
+# Baseline genus: Homo sapiens (if present). Reorder categories if needed.
+if 'Homo sapiens' in list(_df['genus'].cat.categories):
+    cats = list(_df['genus'].cat.categories)
+    if cats[0] != 'Homo sapiens':
+        cats = ['Homo sapiens'] + [c for c in cats if c != 'Homo sapiens']
+        _df['genus'] = _df['genus'].cat.reorder_categories(cats, ordered=False)
 
-# Create human indicator
-# genus values include 'Homo sapiens' for humans
-# Non-human includes Pan, Pongo, Papio
+formula = 'missing_teeth + present_teeth ~ C(genus) + age + sex_est + C(tooth_class)'
+model = smf.glm(
+    formula=formula,
+    data=_df,
+    family=sm.families.Binomial()
+).fit()
 
-df['human'] = (df['genus'] == 'Homo sapiens').astype(int)
+# Extract results for genus comparisons (vs Homo sapiens baseline)
+params = model.params
+conf = model.conf_int()
+conf.columns = ['ci_low', 'ci_high']
 
-# Binomial response: proportion missing with trials = observable_sockets
-# Use GLM with binomial and frequency weights
+results = []
+for genus in ['Pan', 'Pongo', 'Papio']:
+    term = f'C(genus)[T.{genus}]'
+    if term in params.index:
+        coef = params[term]
+        pval = model.pvalues[term]
+        ci_low = conf.loc[term, 'ci_low']
+        ci_high = conf.loc[term, 'ci_high']
+        or_est = float(np.exp(coef))
+        or_low = float(np.exp(ci_low))
+        or_high = float(np.exp(ci_high))
+        results.append({
+            'genus': genus,
+            'coef_log_odds_vs_homo': float(coef),
+            'p_value': float(pval),
+            'odds_ratio_vs_homo': or_est,
+            'or_ci_low': or_low,
+            'or_ci_high': or_high
+        })
 
-df['prop_missing'] = df['missing_teeth'] / df['observable_sockets']
+# Compute predicted probabilities at mean covariates for each genus and tooth class averaged
+# Use overall mean age/sex and most common tooth_class (mode)
+mean_age = float(_df['age'].mean())
+mean_sex = float(_df['sex_est'].mean())
+mode_tooth = _df['tooth_class'].mode().iloc[0]
 
-# Fit model with controls for age, sex, tooth class
-formula = 'prop_missing ~ human + age + sex_estimate + C(tooth_class)'
-model = smf.glm(formula=formula, data=df, family=sm.families.Binomial(), freq_weights=df['observable_sockets'])
-result = model.fit()
+pred_rows = []
+for genus in _df['genus'].cat.categories:
+    pred_rows.append({
+        'genus': genus,
+        'age': mean_age,
+        'sex_est': mean_sex,
+        'tooth_class': mode_tooth,
+        'missing_teeth': 1,  # dummy for formula; will be ignored in prediction
+        'present_teeth': 1
+    })
 
-# Extract human effect
-coef = result.params['human']
-se = result.bse['human']
-p_value = result.pvalues['human']
+pred_df = pd.DataFrame(pred_rows)
+# Use model.predict to get mean probability for missing teeth (per socket)
+# For binomial with counts, predict gives expected mean of missing_teeth / (missing_teeth+present_teeth)
+pred_probs = model.predict(pred_df)
 
-# Odds ratio and 95% CI
-or_human = np.exp(coef)
-ci_low = np.exp(coef - 1.96 * se)
-ci_high = np.exp(coef + 1.96 * se)
+pred_results = {row['genus']: float(prob) for row, prob in zip(pred_rows, pred_probs)}
 
-# Also compute adjusted predicted probabilities for human vs nonhuman at mean covariates
-# Use representative values: mean age, mean sex_estimate, and reference tooth class distribution.
-# We'll compute marginal predicted probability for each row with human=0/1 and average.
-
-df_pred = df.copy()
-
-df_pred['human'] = 0
-pred_nonhuman = result.predict(df_pred)
-
-df_pred['human'] = 1
-pred_human = result.predict(df_pred)
-
-# Weighted average probability by sockets (trials)
-weights = df['observable_sockets']
-mean_nonhuman = np.average(pred_nonhuman, weights=weights)
-mean_human = np.average(pred_human, weights=weights)
-
-print('N rows:', len(df))
-print('Human rows:', df['human'].sum())
-print('Coefficient (human):', coef)
-print('SE:', se)
-print('p-value:', p_value)
-print('Odds ratio:', or_human)
-print('95% CI OR:', (ci_low, ci_high))
-print('Adjusted mean prob nonhuman:', mean_nonhuman)
-print('Adjusted mean prob human:', mean_human)
-print('Difference (human - nonhuman):', mean_human - mean_nonhuman)
-
-# Save summary to file for later use
-summary = {
-    'n_rows': int(len(df)),
-    'human_rows': int(df['human'].sum()),
-    'coef_human': float(coef),
-    'se_human': float(se),
-    'p_value_human': float(p_value),
-    'odds_ratio_human': float(or_human),
-    'or_ci_low': float(ci_low),
-    'or_ci_high': float(ci_high),
-    'adj_prob_nonhuman': float(mean_nonhuman),
-    'adj_prob_human': float(mean_human),
-    'adj_diff': float(mean_human - mean_nonhuman)
+output = {
+    'n_rows_used': int(len(_df)),
+    'model_summary': model.summary().as_text(),
+    'genus_comparisons_vs_homo': results,
+    'predicted_missing_prob_at_mean_covariates': pred_results
 }
 
-import json
-with open('analysis_summary.json', 'w') as f:
-    json.dump(summary, f, indent=2)
+print(json.dumps(output, indent=2))

@@ -11,7 +11,7 @@ approval: never
 sandbox: workspace-write [workdir, /tmp, $TMPDIR]
 reasoning effort: high
 reasoning summaries: auto
-session id: 019cbbd9-8874-71a3-8c66-0b3b7812620f
+session id: 019cbf35-5a4e-7533-a336-f8ca8e071614
 --------
 user
 Follow the instructions given in 'AGENTS.md'
@@ -22,16 +22,13 @@ id: cannot find name for group ID 901
 
 [Errno 13] Permission denied: '/accounts/grad/zachrewolinski/.config/pypoetry/config.toml'
 exec
-/bin/bash -c 'ls -la' in /accounts/grad/zachrewolinski/research/stat-genie/agentic/confidence_experiments/outputs/amtl/null/anonymize/run1 succeeded in 14ms:
-total 63
-drwxr-xr-x 2 3294 901      6 Mar  4 18:35 .
-drwxr-xr-x 3 3294 901      3 Mar  4 18:35 ..
--rw-r--r-- 1 3294 901   2046 Mar  4 18:35 AGENTS.md
--rw-r--r-- 1 3294 901 104776 Mar  4 18:35 amtl.csv
--rw-r--r-- 1 3294 901   6743 Mar  4 18:35 info.json
--rw-r--r-- 1 3294 901   3431 Mar  4 18:35 packages.txt
+/bin/bash -c ls in /accounts/grad/zachrewolinski/research/stat-genie/agentic/confidence_experiments/outputs/amtl/null/anonymize/run1 succeeded in 15ms:
+AGENTS.md
+amtl.csv
+info.json
+packages.txt
 exec
-/bin/bash -c 'cat AGENTS.md' in /accounts/grad/zachrewolinski/research/stat-genie/agentic/confidence_experiments/outputs/amtl/null/anonymize/run1 succeeded in 20ms:
+/bin/bash -c 'cat AGENTS.md' in /accounts/grad/zachrewolinski/research/stat-genie/agentic/confidence_experiments/outputs/amtl/null/anonymize/run1 succeeded in 13ms:
 
     You are an expert data scientist tasked with analyzing a dataset to answer a specific research question.
     The research question is contained in the 'info.json' file along with metadata about the dataset.
@@ -53,7 +50,7 @@ exec
     These outputs must be written to a file called 'conclusion.txt' in JSON format, with the integer scalar stored under the key "response" and the explanation stored under the key "explanation".
     The 'conclusion.txt' file must contain ONLY this JSON object, with no additional text or lines.
 exec
-/bin/bash -c 'cat info.json' in /accounts/grad/zachrewolinski/research/stat-genie/agentic/confidence_experiments/outputs/amtl/null/anonymize/run1 succeeded in 13ms:
+/bin/bash -c 'cat info.json' in /accounts/grad/zachrewolinski/research/stat-genie/agentic/confidence_experiments/outputs/amtl/null/anonymize/run1 succeeded in 16ms:
 {
     "research_questions": [
         "Do modern humans (Homo sapiens) have higher frequencies of antemortem tooth loss (AMTL) compared to non-human primate genera (Pan, Pongo, Papio), after accounting for the effects of age, sex, and tooth class?"
@@ -75,7 +72,7 @@ exec
                     "description": "One of Anterior, Posterior, or Premolar"
                 }
 exec
-/bin/bash -c 'cat packages.txt' in /accounts/grad/zachrewolinski/research/stat-genie/agentic/confidence_experiments/outputs/amtl/null/anonymize/run1 succeeded in 12ms:
+/bin/bash -c 'cat packages.txt' in /accounts/grad/zachrewolinski/research/stat-genie/agentic/confidence_experiments/outputs/amtl/null/anonymize/run1 succeeded in 13ms:
 absl-py==2.3.1
 accelerate==0.31.0
 aiohappyeyeballs==2.6.1
@@ -97,7 +94,7 @@ comm==0.2.3
 contourpy==1.3.2
 cycler==0.12.1
 exec
-/bin/bash -c "cat <<'PY' > /accounts/grad/zachrewolinski/research/stat-genie/agentic/confidence_experiments/outputs/amtl/null/anonymize/run1/analysis.py
+/bin/bash -c "cat <<'PY' > analysis.py
 import json
 import pandas as pd
 import numpy as np
@@ -105,16 +102,16 @@ import statsmodels.api as sm
 import statsmodels.formula.api as smf
 
 # Load data
-path = \"amtl.csv\"
+DF_PATH = \"amtl.csv\"
 
-df = pd.read_csv(path)
+df = pd.read_csv(DF_PATH)
 
 # Rename columns for clarity
-rename_map = {
+colmap = {
     \"feature1\": \"tooth_class\",
     \"feature2\": \"specimen_id\",
-    \"feature3\": \"missing_teeth\",
-    \"feature4\": \"scorable_sockets\",
+    \"feature3\": \"missing\",
+    \"feature4\": \"observed\",
     \"feature5\": \"age\",
     \"feature6\": \"age_uncertainty\",
     \"feature7\": \"sex\",
@@ -122,152 +119,140 @@ rename_map = {
     \"feature9\": \"region\",
 }
 
-df = df.rename(columns=rename_map)
+df = df.rename(columns=colmap)
 
-# Drop rows with missing or zero scorable_sockets (can't compute proportion)
-# Also drop rows with missing key covariates
-needed = [\"missing_teeth\", \"scorable_sockets\", \"age\", \"sex\", \"tooth_class\", \"genus\"]
+# Basic cleaning: drop rows with missing key fields or invalid counts
+# Ensure observed >= missing and observed > 0
+mask_valid = (
+    df[\"missing\"].notna()
+    & df[\"observed\"].notna()
+    & df[\"age\"].notna()
+    & df[\"sex\"].notna()
+    & df[\"tooth_class\"].notna()
+    & df[\"genus\"].notna()
+)
 
-df = df.dropna(subset=needed)
+df = df.loc[mask_valid].copy()
 
-df = df[df[\"scorable_sockets\"] > 0].copy()
+# Ensure numeric
+for c in [\"missing\", \"observed\", \"age\", \"sex\"]:
+    df[c] = pd.to_numeric(df[c], errors=\"coerce\")
 
-# Ensure categories
-# Explicit reference for genus
-if \"Pan\" in df[\"genus\"].unique():
-    genus_order = [\"Pan\", \"Homo sapiens\", \"Papio\", \"Pongo\"]
+df = df.loc[df[\"observed\"] > 0].copy()
+# enforce missing <= observed
+# If any rows violate, drop them
+
+df = df.loc[df[\"missing\"] <= df[\"observed\"]].copy()
+
+# Binary indicator for human
+# In data, genus has \"Homo sapiens\"
+
+df[\"is_human\"] = (df[\"genus\"] == \"Homo sapiens\").astype(int)
+
+# Prepare endog as successes/failures
+# success = missing, failure = observed - missing
+
+df[\"non_missing\"] = df[\"observed\"] - df[\"missing\"]
+
+# Build formula with categorical tooth_class; sex treated as numeric (0-1)
+formula = \"missing + non_missing ~ is_human + age + sex + C(tooth_class)\"
+
+# Fit GLM binomial
+model = smf.glm(
+    formula=formula,
+    data=df,
+    family=sm.families.Binomial(),
+)
+
+result = model.fit()
+
+# Extract human coefficient
+coef = result.params.get(\"is_human\", np.nan)
+se = result.bse.get(\"is_human\", np.nan)
+pval = result.pvalues.get(\"is_human\", np.nan)
+
+# Odds ratio
+odds_ratio = float(np.exp(coef)) if pd.notna(coef) else np.nan
+
+# Compute predicted probabilities for human vs non-human at mean covariates
+# For categorical tooth_class, use most common category
+
+tooth_mode = df[\"tooth_class\"].mode(dropna=True)
+if len(tooth_mode) == 0:
+    tooth_ref = df[\"tooth_class\"].iloc[0]
 else:
-    genus_order = sorted(df[\"genus\"].unique())
+    tooth_ref = tooth_mode.iloc[0]
 
-df[\"genus\"] = pd.Categorical(df[\"genus\"], categories=genus_order)
+mean_age = df[\"age\"].mean()
+mean_sex = df[\"sex\"].mean()
 
-df[\"tooth_class\"] = pd.Categorical(df[\"tooth_class\"], categories=sorted(df[\"tooth_class\"].unique()))
+pred_df = pd.DataFrame(
+    {
+        \"is_human\": [0, 1],
+        \"age\": [mean_age, mean_age],
+        \"sex\": [mean_sex, mean_sex],
+        \"tooth_class\": [tooth_ref, tooth_ref],
+        \"missing\": [0, 0],
+        \"non_missing\": [1, 1],
+    }
+)
 
-# Response as proportion with frequency weights
+pred = result.predict(pred_df)
+nonhuman_rate = float(pred.iloc[0])
+human_rate = float(pred.iloc[1])
+rate_diff = human_rate - nonhuman_rate
 
-df[\"missing_prop\"] = df[\"missing_teeth\"] / df[\"scorable_sockets\"]
+# Also compute model-based marginal effect of human via delta method (approx)
+# We will not overcomplicate; use the sign and significance.
 
-# Fit binomial GLM
-formula = \"missing_prop ~ C(genus, Treatment(reference='Pan')) + age + sex + C(tooth_class)\"
-model = smf.glm(formula=formula, data=df, family=sm.families.Binomial(), freq_weights=df[\"scorable_sockets\"]).fit()
-
-# Wald tests for Homo vs other genera
-# Coef names: C(genus, Treatment(reference='Pan'))[T.Homo sapiens]
-
-coef_names = model.params.index.tolist()
-
-def wald_test_linear_combination(lincomb):
-    # lincomb: dict of param->weight
-    vec = np.zeros(len(coef_names))
-    for k, v in lincomb.items():
-        if k in coef_names:
-            vec[coef_names.index(k)] = v
-        else:
-            raise ValueError(f\"Parameter {k} not found\")
-    return model.t_test(vec)
-
-homo_vs_pan = wald_test_linear_combination({\"C(genus, Treatment(reference='Pan'))[T.Homo sapiens]\": 1.0})
-
-# Homo vs Papio: (Homo - Papio) = beta_homo - beta_papio
-papio_param = \"C(genus, Treatment(reference='Pan'))[T.Papio]\"
-
-if papio_param in coef_names:
-    homo_vs_papio = wald_test_linear_combination({
-        \"C(genus, Treatment(reference='Pan'))[T.Homo sapiens]\": 1.0,
-        papio_param: -1.0,
-    })
-else:
-    homo_vs_papio = None
-
-pongo_param = \"C(genus, Treatment(reference='Pan'))[T.Pongo]\"
-if pongo_param in coef_names:
-    homo_vs_pongo = wald_test_linear_combination({
-        \"C(genus, Treatment(reference='Pan'))[T.Homo sapiens]\": 1.0,
-        pongo_param: -1.0,
-    })
-else:
-    homo_vs_pongo = None
-
-# Marginal standardized predicted probabilities by genus
-# For each genus, set genus for all rows, keep covariates, predict, then average weighted by sockets
-
-preds = {}
-for g in df[\"genus\"].cat.categories:
-    tmp = df.copy()
-    tmp[\"genus\"] = g
-    pred = model.predict(tmp)
-    # weighted average by scorable sockets to reflect tooth counts
-    preds[g] = np.average(pred, weights=tmp[\"scorable_sockets\"])
-
-# Build results summary
-results = {
+summary = {
     \"n_rows\": int(df.shape[0]),
-    \"genus_levels\": df[\"genus\"].cat.categories.tolist(),
-    \"model_params\": model.params.to_dict(),
-    \"model_pvalues\": model.pvalues.to_dict(),
-    \"homo_vs_pan\": {
-        \"coef\": float(homo_vs_pan.effect[0]),
-        \"pvalue\": float(homo_vs_pan.pvalue),
-    },
-    \"homo_vs_papio\": None,
-    \"homo_vs_pongo\": None,
-    \"predicted_probabilities\": {k: float(v) for k, v in preds.items()},
+    \"odds_ratio\": odds_ratio,
+    \"coef\": float(coef),
+    \"se\": float(se),
+    \"pval\": float(pval),
+    \"nonhuman_rate\": nonhuman_rate,
+    \"human_rate\": human_rate,
+    \"rate_diff\": rate_diff,
+    \"tooth_class_ref\": tooth_ref,
 }
 
-if homo_vs_papio is not None:
-    results[\"homo_vs_papio\"] = {
-        \"coef\": float(homo_vs_papio.effect[0]),
-        \"pvalue\": float(homo_vs_papio.pvalue),
-    }
+with open(\"analysis_summary.json\", \"w\") as f:
+    json.dump(summary, f, indent=2)
 
-if homo_vs_pongo is not None:
-    results[\"homo_vs_pongo\"] = {
-        \"coef\": float(homo_vs_pongo.effect[0]),
-        \"pvalue\": float(homo_vs_pongo.pvalue),
-    }
-
-# Save results to json for inspection
-with open(\"analysis_results.json\", \"w\") as f:
-    json.dump(results, f, indent=2)
-
-# Print concise summary
-print(\"Rows:\", results[\"n_rows\"])
-print(\"Genus levels:\", results[\"genus_levels\"])
-print(\"Predicted probabilities:\")
-for k, v in results[\"predicted_probabilities\"].items():
-    print(f\"  {k}: {v:.4f}\")
-print(\"Homo vs Pan: coef=%.4f, p=%.4g\" % (results[\"homo_vs_pan\"][\"coef\"], results[\"homo_vs_pan\"][\"pvalue\"]))
-if results[\"homo_vs_papio\"]:
-    print(\"Homo vs Papio: coef=%.4f, p=%.4g\" % (results[\"homo_vs_papio\"][\"coef\"], results[\"homo_vs_papio\"][\"pvalue\"]))
-if results[\"homo_vs_pongo\"]:
-    print(\"Homo vs Pongo: coef=%.4f, p=%.4g\" % (results[\"homo_vs_pongo\"][\"coef\"], results[\"homo_vs_pongo\"][\"pvalue\"]))
-PY" in /accounts/grad/zachrewolinski/research/stat-genie/agentic/confidence_experiments/outputs/amtl/null/anonymize/run1 succeeded in 11ms:
+print(json.dumps(summary, indent=2))
+PY" in /accounts/grad/zachrewolinski/research/stat-genie/agentic/confidence_experiments/outputs/amtl/null/anonymize/run1 succeeded in 13ms:
 
 exec
-/bin/bash -c 'poetry run python analysis.py' in /accounts/grad/zachrewolinski/research/stat-genie/agentic/confidence_experiments/outputs/amtl/null/anonymize/run1 succeeded in 4.53s:
-Rows: 1450
-Genus levels: ['Pan', 'Homo sapiens', 'Papio', 'Pongo']
-Predicted probabilities:
-  Pan: 0.0696
-  Homo sapiens: 0.0653
-  Papio: 0.0758
-  Pongo: 0.0436
-Homo vs Pan: coef=-0.0683, p=0.5183
-Homo vs Papio: coef=-0.1613, p=0.08411
-Homo vs Pongo: coef=0.4269, p=0.005655
+/bin/bash -c 'poetry run python analysis.py' in /accounts/grad/zachrewolinski/research/stat-genie/agentic/confidence_experiments/outputs/amtl/null/anonymize/run1 succeeded in 5.63s:
+{
+  "n_rows": 1430,
+  "odds_ratio": 0.9918534395458511,
+  "coef": -0.008179925005541905,
+  "se": 0.07954523834519207,
+  "pval": 0.9180950198765984,
+  "nonhuman_rate": 0.05279840371518737,
+  "human_rate": 0.052390812946171976,
+  "rate_diff": -0.0004075907690153924,
+  "tooth_class_ref": "Premolar"
+}
 /accounts/grad/zachrewolinski/research/stat-genie/.venv/lib/python3.10/site-packages/joblib/_multiprocessing_helpers.py:44: UserWarning: [Errno 13] Permission denied.  joblib will operate in serial mode
   warnings.warn("%s.  joblib will operate in serial mode" % (e,))
 exec
-/bin/bash -c "cat <<'JSON' > /accounts/grad/zachrewolinski/research/stat-genie/agentic/confidence_experiments/outputs/amtl/null/anonymize/run1/conclusion.txt
-{\"response\":30,\"explanation\":\"Using a binomial GLM of missing teeth out of scorable sockets with predictors for genus, age, sex, and tooth class (n=1450), Homo sapiens does not show higher AMTL frequencies than the non-human genera overall. The Homo vs Pan contrast is negative and non-significant (coef=-0.068, p=0.52), and Homo vs Papio is also negative and non-significant at 0.05 (coef=-0.161, p=0.084). Homo is significantly higher only relative to Pongo (coef=0.427, p=0.0057). Marginal predicted AMTL rates were ~0.065 for Homo, 0.070 for Pan, 0.076 for Papio, and 0.044 for Pongo, indicating Homo is similar to or lower than Pan/Papio and only higher than Pongo. Therefore, the evidence does not support a general claim that modern humans have higher AMTL than non-human primates after accounting for age, sex, and tooth class.\"}
-JSON" in /accounts/grad/zachrewolinski/research/stat-genie/agentic/confidence_experiments/outputs/amtl/null/anonymize/run1 succeeded in 21ms:
+/bin/bash -c "cat <<'JSON' > conclusion.txt
+{\"response\": 15, \"explanation\": \"Using a binomial GLM (logit) on 1,430 valid observations with missing teeth as successes and observed sockets as trials, I modeled AMTL frequency as a function of human vs. non‑human status, age, sex, and tooth class. The human indicator had an estimated log‑odds coefficient of −0.008 (OR≈0.99) with p=0.918, indicating no statistically significant difference after adjustment. Model‑based predicted AMTL rates at mean covariates were ~5.24% for humans vs ~5.28% for non‑humans (difference −0.0004). This provides no evidence that modern humans have higher AMTL frequencies than Pan/Pongo/Papio once age, sex, and tooth class are accounted for.\"}
+JSON" in /accounts/grad/zachrewolinski/research/stat-genie/agentic/confidence_experiments/outputs/amtl/null/anonymize/run1 succeeded in 20ms:
 
 codex
-Wrote the requested JSON output to `conclusion.txt` based on a binomial GLM that controls for age, sex, and tooth class; the results indicate humans are not higher than all non-human genera overall (only higher vs Pongo, not vs Pan or Papio).
+Wrote the JSON conclusion to `conclusion.txt` using a binomial GLM adjusted for age, sex, and tooth class; the model shows no evidence that humans have higher AMTL rates than non‑human primates.
 
-If you want, I can also share the supporting model outputs from `analysis_results.json` or generate plots.
+If you want, I can:
+1) add robustness checks (e.g., genus-specific comparisons or interaction terms)
+2) run alternative models (e.g., mixed effects by specimen or region)
 tokens used
-13,582
-Wrote the requested JSON output to `conclusion.txt` based on a binomial GLM that controls for age, sex, and tooth class; the results indicate humans are not higher than all non-human genera overall (only higher vs Pongo, not vs Pan or Papio).
+25,297
+Wrote the JSON conclusion to `conclusion.txt` using a binomial GLM adjusted for age, sex, and tooth class; the model shows no evidence that humans have higher AMTL rates than non‑human primates.
 
-If you want, I can also share the supporting model outputs from `analysis_results.json` or generate plots.
+If you want, I can:
+1) add robustness checks (e.g., genus-specific comparisons or interaction terms)
+2) run alternative models (e.g., mixed effects by specimen or region)

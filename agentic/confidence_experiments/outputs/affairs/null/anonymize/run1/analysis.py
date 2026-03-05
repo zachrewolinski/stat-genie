@@ -2,85 +2,106 @@ import json
 import pandas as pd
 import numpy as np
 from scipy import stats
-import statsmodels.api as sm
 
 # Load data
-file_path = 'affairs.csv'
-df = pd.read_csv(file_path)
+_df = pd.read_csv('affairs.csv')
 
-# Variables
-children = df['feature6'].astype(str)
-affairs = pd.to_numeric(df['feature2'], errors='coerce')
+# Map columns based on info.json
+# feature2 = affairs frequency
+# feature6 = children yes/no
 
-# Binary affair indicator
-any_affair = (affairs > 0).astype(int)
+# Clean
+if _df['feature6'].dtype != 'object':
+    _df['feature6'] = _df['feature6'].astype(str)
 
-# Group masks
-mask_yes = children.str.lower() == 'yes'
-mask_no = children.str.lower() == 'no'
+# Normalize children values
+_df['feature6'] = _df['feature6'].str.strip().str.lower()
 
-# Descriptive stats
-summary = {}
-for label, mask in [('yes', mask_yes), ('no', mask_no)]:
-    grp_affairs = affairs[mask].dropna()
-    grp_any = any_affair[mask]
-    summary[label] = {
-        'n': int(mask.sum()),
-        'mean_affairs': float(grp_affairs.mean()),
-        'median_affairs': float(grp_affairs.median()),
-        'prop_any_affair': float(grp_any.mean()),
-        'std_affairs': float(grp_affairs.std(ddof=1))
-    }
+# Binary children indicator
+_df['children_yes'] = (_df['feature6'] == 'yes').astype(int)
 
-# Welch t-test for mean differences
-# (affairs may be skewed but t-test ok with large n; we'll also do Mann-Whitney)
+# Affairs frequency (numeric)
+affairs = pd.to_numeric(_df['feature2'], errors='coerce')
 
-aff_yes = affairs[mask_yes].dropna()
-aff_no = affairs[mask_no].dropna()
+# Any affair
+_df['any_affair'] = (affairs > 0).astype(int)
 
-# Welch t-test
-welch_t = stats.ttest_ind(aff_yes, aff_no, equal_var=False)
+# Drop missing
+_df = _df.dropna(subset=['children_yes', 'feature2'])
 
-# Mann-Whitney U test (two-sided)
-mann_u = stats.mannwhitneyu(aff_yes, aff_no, alternative='two-sided')
+# Group stats
+stats_by_child = _df.groupby('children_yes')['feature2'].agg(['count', 'mean', 'median', 'std'])
 
-# Two-proportion z-test for any affair
-# Use statsmodels
-count_yes = any_affair[mask_yes].sum()
-count_no = any_affair[mask_no].sum()
+# Proportion with any affair
+prop_any = _df.groupby('children_yes')['any_affair'].mean()
 
-n_yes = mask_yes.sum()
-n_no = mask_no.sum()
+# Mann-Whitney U test (non-parametric) for distribution difference
+with_children = _df.loc[_df['children_yes'] == 1, 'feature2']
+without_children = _df.loc[_df['children_yes'] == 0, 'feature2']
 
-stat_prop, p_prop = sm.stats.proportions_ztest([count_yes, count_no], [n_yes, n_no])
+u_stat, u_p = stats.mannwhitneyu(with_children, without_children, alternative='two-sided')
 
-# Effect sizes
-# Cohen's d (using pooled SD)
-mean_yes = aff_yes.mean()
-mean_no = aff_no.mean()
+# Cliff's delta effect size
+# Compute delta: (number of pairs where x>y - x<y) / (n1*n2)
+# Use efficient computation via ranking if sizes large.
 
-sd_yes = aff_yes.std(ddof=1)
-sd_no = aff_no.std(ddof=1)
+# Direct computation for moderate sizes
+x = with_children.to_numpy()
+y = without_children.to_numpy()
 
-pooled_sd = np.sqrt(((len(aff_yes)-1)*sd_yes**2 + (len(aff_no)-1)*sd_no**2) / (len(aff_yes)+len(aff_no)-2))
-cohen_d = (mean_yes - mean_no) / pooled_sd if pooled_sd > 0 else np.nan
+# To reduce memory/time, use broadcasting in chunks
+n1, n2 = len(x), len(y)
 
-# Risk difference and relative risk for any affair
-p_yes = count_yes / n_yes
-p_no = count_no / n_no
-risk_diff = p_yes - p_no
-rel_risk = p_yes / p_no if p_no > 0 else np.nan
+# If very large, chunk; here sizes are small (<=601)
+count_greater = 0
+count_less = 0
+for xi in x:
+    count_greater += np.sum(xi > y)
+    count_less += np.sum(xi < y)
 
-results = {
-    'summary': summary,
-    'welch_t': {'stat': float(welch_t.statistic), 'p': float(welch_t.pvalue)},
-    'mannwhitney': {'stat': float(mann_u.statistic), 'p': float(mann_u.pvalue)},
-    'prop_test': {'stat': float(stat_prop), 'p': float(p_prop)},
-    'effects': {
-        'cohen_d': float(cohen_d),
-        'risk_diff': float(risk_diff),
-        'relative_risk': float(rel_risk)
-    }
+cliffs_delta = (count_greater - count_less) / (n1 * n2)
+
+# Chi-square test for any affair vs children
+contingency = pd.crosstab(_df['children_yes'], _df['any_affair'])
+chi2, chi_p, dof, expected = stats.chi2_contingency(contingency)
+
+# Difference in proportions
+prop_diff = prop_any.loc[1] - prop_any.loc[0]
+
+# Simple logistic regression (unadjusted) using statsmodels if available
+try:
+    import statsmodels.api as sm
+    X = sm.add_constant(_df['children_yes'])
+    y_bin = _df['any_affair']
+    logit_model = sm.Logit(y_bin, X)
+    logit_res = logit_model.fit(disp=False)
+    logit_p = float(logit_res.pvalues['children_yes'])
+    logit_coef = float(logit_res.params['children_yes'])
+except Exception:
+    logit_p = None
+    logit_coef = None
+
+output = {
+    'n_total': int(len(_df)),
+    'n_children_yes': int(( _df['children_yes'] == 1).sum()),
+    'n_children_no': int(( _df['children_yes'] == 0).sum()),
+    'mean_affairs_children_yes': float(stats_by_child.loc[1, 'mean']),
+    'mean_affairs_children_no': float(stats_by_child.loc[0, 'mean']),
+    'median_affairs_children_yes': float(stats_by_child.loc[1, 'median']),
+    'median_affairs_children_no': float(stats_by_child.loc[0, 'median']),
+    'prop_any_affair_children_yes': float(prop_any.loc[1]),
+    'prop_any_affair_children_no': float(prop_any.loc[0]),
+    'prop_any_diff_yes_minus_no': float(prop_diff),
+    'mannwhitney_u_stat': float(u_stat),
+    'mannwhitney_p': float(u_p),
+    'cliffs_delta': float(cliffs_delta),
+    'chi2_stat': float(chi2),
+    'chi2_p': float(chi_p),
+    'logit_coef_children_yes': logit_coef,
+    'logit_p_children_yes': logit_p,
 }
 
-print(json.dumps(results, indent=2))
+with open('analysis_output.json', 'w') as f:
+    json.dump(output, f, indent=2)
+
+print(json.dumps(output, indent=2))
