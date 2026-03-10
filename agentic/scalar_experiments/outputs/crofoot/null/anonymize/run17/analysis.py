@@ -1,67 +1,65 @@
+import json
 import pandas as pd
+import numpy as np
 import statsmodels.api as sm
-from scipy import stats
-from pathlib import Path
 
+DATA_PATH = 'crofoot.csv'
 
-def main() -> None:
-    data_path = Path("crofoot.csv")
-    df = pd.read_csv(data_path)
+df = pd.read_csv(DATA_PATH)
 
-    # Outcome: 1 if focal group wins, 0 otherwise.
-    df["win"] = df["feature4"]
+# Define variables
+# Outcome: focal win (1) vs other win (0)
+# Relative group size: focal size - other size
+# Contest location advantage: other distance - focal distance (positive means closer to focal home range center)
 
-    # Relative group size: focal minus other (positive means focal is larger).
-    df["size_diff"] = df["feature7"] - df["feature8"]
+df['size_diff'] = df['feature7'] - df['feature8']
+df['loc_adv'] = df['feature6'] - df['feature5']
 
-    # Relative location advantage: other group's distance from its home-center
-    # minus focal group's distance from its home-center.
-    # Positive values mean the focal group is closer to its own home range center
-    # than the other group is to its own.
-    df["loc_advantage"] = df["feature6"] - df["feature5"]
+# Standardize predictors for comparability
+for col in ['size_diff', 'loc_adv']:
+    df[col + '_z'] = (df[col] - df[col].mean()) / df[col].std(ddof=0)
 
-    # Drop any missing values just in case.
-    df = df.dropna(subset=["win", "size_diff", "loc_advantage"])
+# Logistic regression
+X = df[['size_diff_z', 'loc_adv_z']]
+X = sm.add_constant(X)
 
-    y = df["win"]
-    X = df[["size_diff", "loc_advantage"]]
-    X = sm.add_constant(X)
+y = df['feature4']
 
-    logit_model = sm.Logit(y, X)
-    result = logit_model.fit(disp=False)
+model = sm.Logit(y, X)
+res = model.fit(disp=False)
 
-    print("Logistic regression results for winning probability")
-    print("==================================================")
-    print(result.summary())
-    print()
-    print("Coefficients:")
-    print(result.params)
-    print()
-    print("P-values:")
-    print(result.pvalues)
+# Odds ratios and CIs
+params = res.params
+conf = res.conf_int()
+conf.columns = ['2.5%', '97.5%']
 
-    # Simple descriptive statistics for binary advantage indicators.
-    df["focal_larger"] = (df["size_diff"] > 0).astype(int)
-    df["focal_closer_home"] = (df["loc_advantage"] > 0).astype(int)
+odds_ratios = np.exp(params)
+conf_or = np.exp(conf)
 
-    print()
-    print("Win rate when focal group is larger vs not:")
-    print(df.groupby("focal_larger")["win"].mean())
+# Compute pseudo R^2 (McFadden)
+ll_null = sm.Logit(y, sm.add_constant(pd.DataFrame({'intercept': np.ones(len(y))}))).fit(disp=False).llf
+ll_model = res.llf
+pseudo_r2 = 1 - (ll_model / ll_null)
 
-    print()
-    print("Win rate when focal group is closer to home center vs not:")
-    print(df.groupby("focal_closer_home")["win"].mean())
+# Simple bivariate checks
+# Point-biserial correlation between outcome and predictors
+corrs = {}
+for col in ['size_diff', 'loc_adv']:
+    corrs[col] = np.corrcoef(df[col], y)[0, 1]
 
-    # Chi-squared tests for association between advantage and winning.
-    ct_size = pd.crosstab(df["focal_larger"], df["win"])
-    chi2_size, p_size, _, _ = stats.chi2_contingency(ct_size)
-    print()
-    print("Chi-squared test for focal_larger vs win: chi2 =", chi2_size, "p =", p_size)
+output = {
+    'n': int(len(df)),
+    'model_summary': {
+        'coef': params.to_dict(),
+        'pvalues': res.pvalues.to_dict(),
+        'odds_ratio': odds_ratios.to_dict(),
+        'odds_ratio_ci95': conf_or.to_dict(),
+        'pseudo_r2_mcfadden': float(pseudo_r2),
+    },
+    'corrs': corrs,
+}
 
-    ct_loc = pd.crosstab(df["focal_closer_home"], df["win"])
-    chi2_loc, p_loc, _, _ = stats.chi2_contingency(ct_loc)
-    print("Chi-squared test for focal_closer_home vs win: chi2 =", chi2_loc, "p =", p_loc)
+with open('analysis_results.json', 'w') as f:
+    json.dump(output, f, indent=2)
 
-
-if __name__ == "__main__":
-    main()
+print(json.dumps(output, indent=2))

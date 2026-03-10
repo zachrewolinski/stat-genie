@@ -1,47 +1,62 @@
 import pandas as pd
+import numpy as np
 import statsmodels.api as sm
-from scipy import stats
 
+# Load data
+_df = pd.read_csv("crofoot.csv")
 
-def main() -> None:
-    # Load data
-    df = pd.read_csv("crofoot.csv")
+# Rename variables for clarity
+win = _df["feature4"].astype(int)
+rel_size = _df["feature7"] - _df["feature8"]  # focal group size minus other group size
+rel_location = _df["feature5"] - _df["feature6"]  # focal distance to its center minus other's distance
 
-    # Construct key predictors:
-    # size_diff > 0  => focal group is larger
-    # distance_diff > 0 => focal group is closer to the center of its own home range
-    df["size_diff"] = df["feature7"] - df["feature8"]
-    df["distance_diff"] = df["feature6"] - df["feature5"]
+# Assemble analysis dataframe
+_df2 = pd.DataFrame({
+    "win": win,
+    "rel_size": rel_size,
+    "rel_location": rel_location,
+})
 
-    # Outcome: 1 if focal group won
-    y = df["feature4"]
+# Standardize predictors for comparable effect sizes
+_df2["rel_size_z"] = (_df2["rel_size"] - _df2["rel_size"].mean()) / _df2["rel_size"].std(ddof=0)
+_df2["rel_location_z"] = (_df2["rel_location"] - _df2["rel_location"].mean()) / _df2["rel_location"].std(ddof=0)
 
-    # Logistic regression with both predictors
-    X = df[["size_diff", "distance_diff"]]
-    X = sm.add_constant(X)
+# Logistic regression: win ~ rel_size + rel_location
+X = sm.add_constant(_df2[["rel_size", "rel_location"]])
+model = sm.GLM(_df2["win"], X, family=sm.families.Binomial())
+result = model.fit()
 
-    logit_model = sm.Logit(y, X)
-    result = logit_model.fit(disp=False)
+# Standardized version
+Xz = sm.add_constant(_df2[["rel_size_z", "rel_location_z"]])
+model_z = sm.GLM(_df2["win"], Xz, family=sm.families.Binomial())
+result_z = model_z.fit()
 
-    print("Logistic regression: win ~ size_diff + distance_diff")
-    print(result.summary())
+# Marginal win rates by advantage categories
+size_adv = pd.cut(_df2["rel_size"], bins=[-np.inf, -0.5, 0.5, np.inf], labels=["smaller", "equal", "larger"])
+loc_adv = pd.cut(_df2["rel_location"], bins=[-np.inf, -1e-9, 1e-9, np.inf], labels=["closer", "tie", "farther"])
 
-    # Group-wise means to provide more intuition
-    print("\nGroup-wise means by outcome (0 = loss, 1 = win):")
-    for var in ["size_diff", "distance_diff"]:
-        means = df.groupby("feature4")[var].mean()
-        print(f"{var} means by outcome:")
-        print(means)
+size_rates = _df2.groupby(size_adv, observed=True)["win"].agg(["mean", "count"]).reset_index()
+loc_rates = _df2.groupby(loc_adv, observed=True)["win"].agg(["mean", "count"]).reset_index()
 
-    # Simple Welch t-tests as a complementary check
-    win = df[df["feature4"] == 1]
-    lose = df[df["feature4"] == 0]
-    print("\nWelch t-tests comparing winners vs losers:")
-    for var in ["size_diff", "distance_diff"]:
-        t_stat, p_val = stats.ttest_ind(win[var], lose[var], equal_var=False)
-        print(f"{var}: t = {t_stat:.3f}, p = {p_val:.4f}")
+# Print results
+print("N:", len(_df2))
+print("Win rate overall:", _df2["win"].mean())
+print("\nLogistic regression (unstandardized):")
+print(result.summary())
+print("\nLogistic regression (standardized):")
+print(result_z.summary())
 
+print("\nWin rates by relative size category:")
+print(size_rates)
 
-if __name__ == "__main__":
-    main()
+print("\nWin rates by relative location category:")
+print(loc_rates)
 
+# Odds ratios with 95% CI for unstandardized predictors
+params = result.params
+conf = result.conf_int()
+OR = np.exp(params)
+OR_ci = np.exp(conf)
+print("\nOdds ratios (unstandardized) and 95% CI:")
+for name in params.index:
+    print(name, OR[name], OR_ci.loc[name, 0], OR_ci.loc[name, 1])

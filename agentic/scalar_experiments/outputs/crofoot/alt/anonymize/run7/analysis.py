@@ -1,107 +1,89 @@
 import pandas as pd
 import numpy as np
-import statsmodels.formula.api as smf
-from scipy import stats
+import statsmodels.api as sm
 
 
-def main() -> None:
-    df = pd.read_csv("crofoot.csv")
+df = pd.read_csv('crofoot.csv')
 
-    # Outcome
-    df["focal_win"] = df["feature4"]
-
-    # Relative group size (focal minus other; positive => focal larger)
-    df["rel_size_diff"] = df["feature7"] - df["feature8"]
-    df["rel_size_ratio"] = df["feature7"] / df["feature8"]
-    df["focal_bigger"] = (df["feature7"] > df["feature8"]).astype(int)
-
-    # Contest location: distance from each group's own home range center.
-    # Smaller distance => more central in own range.
-    # Positive value => focal is more central than other.
-    df["rel_centrality"] = df["feature6"] - df["feature5"]
-    df["focal_closer_center"] = (df["feature5"] < df["feature6"]).astype(int)
-
-    # Dyad ID for potential clustering of standard errors
-    df["dyad"] = df["feature3"].astype(int)
-
-    print("Basic description")
-    print(df[["focal_win", "rel_size_diff", "rel_centrality", "focal_closer_center"]].describe())
-    print()
-
-    # Descriptive win rates by size and location advantage
-    print("=" * 80)
-    print("Win rate by size advantage (row=focal bigger, col=focal win)")
-    ct_size = pd.crosstab(df["focal_bigger"], df["focal_win"], normalize="index")
-    print(ct_size)
-
-    print("=" * 80)
-    print("Win rate by location advantage (row=focal closer to own center, col=focal win)")
-    ct_loc = pd.crosstab(df["focal_closer_center"], df["focal_win"], normalize="index")
-    print(ct_loc)
-
-    # Fisher exact tests for simple 2x2 associations
-    table_size = pd.crosstab(df["focal_bigger"], df["focal_win"])
-    table_loc = pd.crosstab(df["focal_closer_center"], df["focal_win"])
-    if table_size.shape == (2, 2):
-        or_size, p_size = stats.fisher_exact(table_size.values)
-        print("=" * 80)
-        print("Fisher exact test (size advantage vs win)")
-        print("Contingency table:")
-        print(table_size)
-        print(f"Odds ratio={or_size:.3f}, p-value={p_size:.4f}")
-    if table_loc.shape == (2, 2):
-        or_loc, p_loc = stats.fisher_exact(table_loc.values)
-        print("=" * 80)
-        print("Fisher exact test (location advantage vs win)")
-        print("Contingency table:")
-        print(table_loc)
-        print(f"Odds ratio={or_loc:.3f}, p-value={p_loc:.4f}")
-
-    # Logistic regression models
-    models = {
-        "size_only_diff": "focal_win ~ rel_size_diff",
-        "location_only_cont": "focal_win ~ rel_centrality",
-        "size_and_location_cont": "focal_win ~ rel_size_diff + rel_centrality",
-        "location_only_binary": "focal_win ~ focal_closer_center",
-        "size_and_location_binary": "focal_win ~ rel_size_diff + focal_closer_center",
-    }
-
-    results = {}
-    for name, formula in models.items():
-        try:
-            model = smf.logit(formula=formula, data=df)
-            res = model.fit(disp=False)
-            # Cluster-robust SEs at dyad level where possible
-            try:
-                res_robust = res.get_robustcov_results(
-                    cov_type="cluster", cov_kwds={"groups": df["dyad"]}
-                )
-            except Exception:
-                res_robust = res
-            results[name] = res_robust
-        except Exception as exc:
-            print(f"Model {name} failed: {exc}")
-
-    for name, res in results.items():
-        print("=" * 80)
-        print(f"Model: {name}")
-        print(res.summary2())
-
-        # Odds ratios for interpretability
-        params = res.params
-        conf = res.conf_int()
-        or_vals = np.exp(params)
-        or_ci_lower = np.exp(conf[0])
-        or_ci_upper = np.exp(conf[1])
-
-        print("Odds ratios (exp(coef)):")
-        for param_name in params.index:
-            print(
-                f"  {param_name}: OR={or_vals[param_name]:.3f}, "
-                f"95% CI [{or_ci_lower[param_name]:.3f}, {or_ci_upper[param_name]:.3f}]"
-            )
+# Variables
+# outcome: feature4 (1 focal won)
+# relative group size: difference in group size (focal - other)
+# contest location: difference in distance from home range center (focal - other)
+# smaller distance -> closer to home; negative difference means contest closer to focal group center.
 
 
-if __name__ == "__main__":
-    main()
+df['rel_size'] = df['feature7'] - df['feature8']
 
+df['rel_dist'] = df['feature5'] - df['feature6']
+# also indicator if contest closer to focal group (distance smaller)
+
+df['closer_to_focal'] = (df['feature5'] < df['feature6']).astype(int)
+
+# logistic regression with rel_size and rel_dist
+X = df[['rel_size', 'rel_dist']]
+X = sm.add_constant(X)
+model = sm.Logit(df['feature4'], X)
+res = model.fit(disp=False)
+
+# alternative with closer_to_focal instead of rel_dist
+X2 = sm.add_constant(df[['rel_size', 'closer_to_focal']])
+model2 = sm.Logit(df['feature4'], X2)
+res2 = model2.fit(disp=False)
+
+# descriptive statistics
+summary = {
+    'n': len(df),
+    'win_rate': df['feature4'].mean(),
+    'rel_size_mean': df['rel_size'].mean(),
+    'rel_size_std': df['rel_size'].std(ddof=1),
+    'rel_dist_mean': df['rel_dist'].mean(),
+    'rel_dist_std': df['rel_dist'].std(ddof=1),
+    'closer_to_focal_rate': df['closer_to_focal'].mean(),
+}
+
+# correlation for quick check
+corr_rel_size = np.corrcoef(df['rel_size'], df['feature4'])[0, 1]
+
+corr_rel_dist = np.corrcoef(df['rel_dist'], df['feature4'])[0, 1]
+
+# compute odds ratios and p-values
+params = res.params
+pvalues = res.pvalues
+or_vals = np.exp(params)
+
+params2 = res2.params
+pvalues2 = res2.pvalues
+or_vals2 = np.exp(params2)
+
+print('summary', summary)
+print('corr_rel_size', corr_rel_size)
+print('corr_rel_dist', corr_rel_dist)
+print('model1_params', params)
+print('model1_pvalues', pvalues)
+print('model1_or', or_vals)
+print('model1_aic', res.aic)
+print('model2_params', params2)
+print('model2_pvalues', pvalues2)
+print('model2_or', or_vals2)
+print('model2_aic', res2.aic)
+
+# compute predicted probabilities for typical changes
+# e.g., effect of +1 rel_size holding rel_dist at mean
+mean_rel_dist = df['rel_dist'].mean()
+mean_rel_size = df['rel_size'].mean()
+
+def pred_prob(rel_size, rel_dist):
+    lin = params['const'] + params['rel_size']*rel_size + params['rel_dist']*rel_dist
+    return 1/(1+np.exp(-lin))
+
+base = pred_prob(mean_rel_size, mean_rel_dist)
+plus_size = pred_prob(mean_rel_size + 1, mean_rel_dist)
+minus_size = pred_prob(mean_rel_size - 1, mean_rel_dist)
+plus_dist = pred_prob(mean_rel_size, mean_rel_dist + 100)  # 100 m farther from focal
+minus_dist = pred_prob(mean_rel_size, mean_rel_dist - 100)
+
+print('pred_base', base)
+print('pred_plus_size', plus_size)
+print('pred_minus_size', minus_size)
+print('pred_plus_dist', plus_dist)
+print('pred_minus_dist', minus_dist)

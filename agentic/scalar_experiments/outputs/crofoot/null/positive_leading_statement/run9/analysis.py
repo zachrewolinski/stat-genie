@@ -1,49 +1,48 @@
 import pandas as pd
-import statsmodels.formula.api as smf
-from scipy import stats
+import numpy as np
+import statsmodels.api as sm
 
+# Load data
 
-def main() -> None:
-    df = pd.read_csv("crofoot.csv")
+df = pd.read_csv('crofoot.csv')
 
-    # Construct relative group size and contest location metrics
-    df["rel_size"] = (df["n_focal"] - df["n_other"]) / (df["n_focal"] + df["n_other"])
-    # Positive loc_diff => focal group is closer to the center of its home range
-    df["loc_diff"] = df["dist_other"] - df["dist_focal"]
-    df["focal_larger"] = (df["n_focal"] > df["n_other"]).astype(int)
-    df["focal_home"] = (df["dist_focal"] < df["dist_other"]).astype(int)
+# Derived variables
 
-    print("Summary of key predictors:")
-    print(df[["win", "rel_size", "loc_diff"]].describe())
-    print()
+df['rel_size'] = df['n_focal'] - df['n_other']
+# Positive rel_dist means other group is farther from its home-range center than focal
+# (i.e., contest is closer to focal group's center).
+df['rel_dist'] = df['dist_other'] - df['dist_focal']
 
-    # Logistic regression: probability of focal win as a function of relative size and location
-    print("Logistic regression without interaction:")
-    model = smf.logit("win ~ rel_size + loc_diff", data=df).fit(disp=False)
-    print(model.summary())
+# Summary
+print('rows', len(df))
+print(df[['win', 'rel_size', 'rel_dist']].describe())
 
-    # Also check a model with the interaction between relative size and location
-    model_int = smf.logit("win ~ rel_size * loc_diff", data=df).fit(disp=False)
-    print()
-    print("Model with interaction:")
-    print(model_int.summary())
+# Logistic regression: win ~ rel_size + rel_dist
+X = df[['rel_size', 'rel_dist']]
+X = sm.add_constant(X)
+model = sm.GLM(df['win'], X, family=sm.families.Binomial())
+res = model.fit()
+print(res.summary())
 
-    # Simple 2x2 tables and chi-square tests
-    print()
-    print("Contingency: focal larger vs win")
-    table_size = pd.crosstab(df["focal_larger"], df["win"])
-    print(table_size)
-    chi2, p, _, _ = stats.chi2_contingency(table_size)
-    print(f"Chi-square p-value (size): {p:.4f}")
+# Univariate models
+for col in ['rel_size', 'rel_dist']:
+    X1 = sm.add_constant(df[[col]])
+    m1 = sm.GLM(df['win'], X1, family=sm.families.Binomial())
+    r1 = m1.fit()
+    print('\nUnivariate', col)
+    print(r1.summary())
 
-    print()
-    print("Contingency: focal home vs win")
-    table_home = pd.crosstab(df["focal_home"], df["win"])
-    print(table_home)
-    chi2, p, _, _ = stats.chi2_contingency(table_home)
-    print(f"Chi-square p-value (home): {p:.4f}")
-
-
-if __name__ == "__main__":
-    main()
-
+# Odds ratios and CI
+params = res.params
+conf = res.conf_int()
+or_df = pd.DataFrame(
+    {
+        'coef': params,
+        'OR': np.exp(params),
+        'CI_low': np.exp(conf[0]),
+        'CI_high': np.exp(conf[1]),
+        'p': res.pvalues,
+    }
+)
+print('\nOdds ratios')
+print(or_df)

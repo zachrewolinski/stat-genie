@@ -1,82 +1,52 @@
-import json
-
-import numpy as np
 import pandas as pd
+import numpy as np
 import statsmodels.api as sm
 
 
-def main() -> None:
-    # Load data
-    df = pd.read_csv("crofoot.csv")
+df = pd.read_csv('crofoot.csv')
 
-    # Keep rows with all relevant variables present
-    df = df.dropna(
-        subset=["win", "n_focal", "n_other", "dist_focal", "dist_other", "dyad"]
-    )
+# Define relative size and location advantage for the focal group
+# Relative size: focal group size minus other group size
+# Relative location: positive when contest is closer to focal's home range center
+# (i.e., other group is farther from its own center)
+df['rel_size'] = df['n_focal'] - df['n_other']
+df['rel_location'] = df['dist_other'] - df['dist_focal']
 
-    # Construct key predictors:
-    #   - relative group size (focal - other): positive when focal group is larger
-    #   - relative location (other_dist - focal_dist): positive when focal is closer to home
-    df["rel_group_size"] = df["n_focal"] - df["n_other"]
-    df["rel_location"] = df["dist_other"] - df["dist_focal"]
+# Standardize predictors for comparable effect sizes
+for col in ['rel_size', 'rel_location']:
+    df[col + '_z'] = (df[col] - df[col].mean()) / df[col].std(ddof=0)
 
-    # Simple binary indicators for descriptive win rates
-    df["focal_larger"] = (df["n_focal"] > df["n_other"]).astype(int)
-    df["focal_home_adv"] = (df["dist_focal"] < df["dist_other"]).astype(int)
+# Logistic regression: win ~ rel_size + rel_location
+X = df[['rel_size_z', 'rel_location_z']]
+X = sm.add_constant(X)
+y = df['win']
+model = sm.Logit(y, X).fit(disp=False)
 
-    # Standardize predictors for more interpretable coefficients
-    X = df[["rel_group_size", "rel_location"]].astype(float).copy()
-    for col in X.columns:
-        std = X[col].std(ddof=0)
-        if std == 0 or np.isnan(std):
-            # If no variation, center only to avoid division by zero
-            X[col] = X[col] - X[col].mean()
-        else:
-            X[col] = (X[col] - X[col].mean()) / std
+# Odds ratios and 95% CI
+params = model.params
+conf = model.conf_int()
+conf.columns = ['2.5%', '97.5%']
+odds_ratios = np.exp(params)
+conf_odds = np.exp(conf)
 
-    X = sm.add_constant(X)
-    y = df["win"].astype(float)
+print('N:', len(df))
+print('Win rate:', df['win'].mean())
+print('\nLogistic regression (standardized predictors):')
+print(model.summary())
 
-    # Fit logistic regression with cluster-robust SEs by dyad
-    model = sm.GLM(y, X, family=sm.families.Binomial())
-    result = model.fit(cov_type="cluster", cov_kwds={"groups": df["dyad"]})
+print('\nOdds ratios (standardized predictors):')
+for term in ['rel_size_z', 'rel_location_z']:
+    print(f"{term}: OR={odds_ratios[term]:.3f} (95% CI {conf_odds.loc[term, '2.5%']:.3f} to {conf_odds.loc[term, '97.5%']:.3f}), p={model.pvalues[term]:.4f}")
 
-    params = {k: float(v) for k, v in result.params.to_dict().items()}
-    pvalues = {k: float(v) for k, v in result.pvalues.to_dict().items()}
+# Sensitivity: use raw differences (non-standardized)
+X_raw = sm.add_constant(df[['rel_size', 'rel_location']])
+model_raw = sm.Logit(y, X_raw).fit(disp=False)
 
-    # Descriptive win rates by size and location advantages
-    size_stats = (
-        df.groupby("focal_larger")["win"]
-        .agg(["mean", "count"])
-        .reset_index()
-        .to_dict(orient="records")
-    )
-    loc_stats = (
-        df.groupby("focal_home_adv")["win"]
-        .agg(["mean", "count"])
-        .reset_index()
-        .to_dict(orient="records")
-    )
-    joint_stats = (
-        df.groupby(["focal_larger", "focal_home_adv"])["win"]
-        .agg(["mean", "count"])
-        .reset_index()
-        .to_dict(orient="records")
-    )
+print('\nLogistic regression (raw predictors):')
+print(model_raw.summary())
 
-    output = {
-        "n_obs": int(result.nobs),
-        "params": params,
-        "pvalues": pvalues,
-        "cov_type": result.cov_type,
-        "win_rates_by_size": size_stats,
-        "win_rates_by_location": loc_stats,
-        "win_rates_by_size_and_location": joint_stats,
-    }
-
-    with open("analysis_results.json", "w") as f:
-        json.dump(output, f, indent=2)
-
-
-if __name__ == "__main__":
-    main()
+# Simple descriptive check: win rate by sign of rel_size and rel_location
+for col in ['rel_size', 'rel_location']:
+    grp = df.groupby(df[col] > 0)['win'].mean()
+    print(f"\nWin rate when {col} > 0 vs <= 0:")
+    print(grp)

@@ -1,74 +1,60 @@
+import pandas as pd
+import numpy as np
+import statsmodels.api as sm
 import json
 
-import pandas as pd
-import statsmodels.api as sm
+# Load data
+_df = pd.read_csv('crofoot.csv')
 
+# Create relative size and location metrics
+# relative size difference (focal - other)
+_df['rel_size'] = _df['n_focal'] - _df['n_other']
+# location advantage: positive if contest closer to focal home range center
+_df['loc_adv'] = _df['dist_other'] - _df['dist_focal']
 
-def main() -> None:
-    # Load data
-    df = pd.read_csv("crofoot.csv")
+# Basic summaries
+summary = {
+    'n_rows': len(_df),
+    'win_rate': _df['win'].mean(),
+    'rel_size_mean': _df['rel_size'].mean(),
+    'loc_adv_mean': _df['loc_adv'].mean(),
+}
 
-    # Construct key predictors
-    # Relative group size: positive when focal group is larger
-    df["rel_size"] = df["n_focal"] - df["n_other"]
+# Logistic regression with both predictors
+X = _df[['rel_size', 'loc_adv']].copy()
+X = sm.add_constant(X)
+model = sm.Logit(_df['win'], X)
+res = model.fit(disp=False)
 
-    # Contest location advantage: positive when contest is closer to focal group's home-range centre
-    df["loc_adv"] = df["dist_other"] - df["dist_focal"]
+# Also standardized predictors to compare effect sizes
+Xz = _df[['rel_size', 'loc_adv']].copy()
+Xz = (Xz - Xz.mean()) / Xz.std(ddof=0)
+Xz = sm.add_constant(Xz)
+res_z = sm.Logit(_df['win'], Xz).fit(disp=False)
 
-    # Standardise predictors for stability and comparability
-    for col in ["rel_size", "loc_adv"]:
-        df[f"{col}_z"] = (df[col] - df[col].mean()) / df[col].std(ddof=0)
+# Simple binned comparisons for interpretability
+_df['rel_size_cat'] = pd.cut(_df['rel_size'], bins=[-10, -1, 1, 10], labels=['smaller', 'similar', 'larger'])
+_df['loc_adv_cat'] = pd.cut(_df['loc_adv'], bins=[-1000, -1, 1, 1000], labels=['closer_to_other','about_equal','closer_to_focal'])
 
-    y = df["win"]
+win_by_size = _df.groupby('rel_size_cat')['win'].mean().to_dict()
+win_by_loc = _df.groupby('loc_adv_cat')['win'].mean().to_dict()
 
-    # Base model: win ~ rel_size_z + loc_adv_z
-    X_main = sm.add_constant(df[["rel_size_z", "loc_adv_z"]])
-    model_main = sm.Logit(y, X_main)
-    result_main = model_main.fit(disp=False)
+# Output key stats
+out = {
+    'summary': summary,
+    'logit_params': res.params.to_dict(),
+    'logit_pvalues': res.pvalues.to_dict(),
+    'logit_conf_int': {k: [float(v) for v in res.conf_int().loc[k].tolist()] for k in res.params.index},
+    'logit_n': int(res.nobs),
+    'logit_llf': float(res.llf),
+    'logit_prsquared': float(res.prsquared),
+    'logit_z_params': res_z.params.to_dict(),
+    'logit_z_pvalues': res_z.pvalues.to_dict(),
+    'win_by_size': {k: (float(v) if pd.notna(v) else None) for k, v in win_by_size.items()},
+    'win_by_loc': {k: (float(v) if pd.notna(v) else None) for k, v in win_by_loc.items()},
+}
 
-    # Interaction model: win ~ rel_size_z * loc_adv_z
-    df["interaction_z"] = df["rel_size_z"] * df["loc_adv_z"]
-    X_int = sm.add_constant(df[["rel_size_z", "loc_adv_z", "interaction_z"]])
-    model_int = sm.Logit(y, X_int)
-    result_int = model_int.fit(disp=False)
+with open('analysis_output.json', 'w') as f:
+    json.dump(out, f, indent=2)
 
-    # Single-predictor models for robustness checks
-    X_size = sm.add_constant(df[["rel_size_z"]])
-    result_size = sm.Logit(y, X_size).fit(disp=False)
-
-    X_loc = sm.add_constant(df[["loc_adv_z"]])
-    result_loc = sm.Logit(y, X_loc).fit(disp=False)
-
-    # Basic descriptive comparison of predictors between wins and losses
-    # (Optional descriptive summaries omitted from JSON output to keep it simple)
-
-    # Collect key statistics for quick inspection
-    summary = {
-        "n_obs": int(result_main.nobs),
-        "main_model": {
-            "params": result_main.params.to_dict(),
-            "pvalues": result_main.pvalues.to_dict(),
-            "prsquared": float(result_main.prsquared),
-        },
-        "size_only_model": {
-            "params": result_size.params.to_dict(),
-            "pvalues": result_size.pvalues.to_dict(),
-            "prsquared": float(result_size.prsquared),
-        },
-        "location_only_model": {
-            "params": result_loc.params.to_dict(),
-            "pvalues": result_loc.pvalues.to_dict(),
-            "prsquared": float(result_loc.prsquared),
-        },
-        "interaction_model": {
-            "params": result_int.params.to_dict(),
-            "pvalues": result_int.pvalues.to_dict(),
-            "prsquared": float(result_int.prsquared),
-        },
-    }
-
-    print(json.dumps(summary, indent=2))
-
-
-if __name__ == "__main__":
-    main()
+print(json.dumps(out, indent=2))

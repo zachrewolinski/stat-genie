@@ -1,98 +1,53 @@
-import json
-from pathlib import Path
-
-import numpy as np
 import pandas as pd
+import numpy as np
 import statsmodels.api as sm
+import statsmodels.formula.api as smf
 
+# Load data
+_df = pd.read_csv('crofoot.csv')
 
-def main() -> None:
-    data_path = Path("crofoot.csv")
-    df = pd.read_csv(data_path)
+# Derived variables
+_df['rel_size'] = _df['n_focal'] - _df['n_other']
+_df['rel_size_ratio'] = _df['n_focal'] / _df['n_other']
+# Positive when focal is closer to its own home-range center than the other group is to its center
+_df['rel_location'] = _df['dist_other'] - _df['dist_focal']
 
-    # Construct relative predictors
-    df["rel_size"] = df["n_focal"] - df["n_other"]
-    # Positive when focal is closer to its home range center
-    df["home_adv"] = df["dist_other"] - df["dist_focal"]
+# Standardize predictors for comparability
+for col in ['rel_size', 'rel_size_ratio', 'rel_location']:
+    _df[col + '_z'] = (_df[col] - _df[col].mean()) / _df[col].std(ddof=0)
 
-    # Binary advantage indicators
-    df["size_adv_focal"] = (df["rel_size"] > 0).astype(int)
-    df["home_adv_focal"] = (df["home_adv"] > 0).astype(int)
+# Logistic regressions
+# Model with rel_size and rel_location
+model1 = smf.logit('win ~ rel_size_z + rel_location_z', data=_df).fit(disp=False)
 
-    # Basic descriptive summaries
-    n_rows = len(df)
-    win_rate = df["win"].mean()
+# Alternative model with size ratio
+model2 = smf.logit('win ~ rel_size_ratio_z + rel_location_z', data=_df).fit(disp=False)
 
-    # Categorical summaries for readability
-    df["size_cat"] = np.select(
-        [df["rel_size"] > 0, df["rel_size"] < 0],
-        ["focal_larger", "focal_smaller"],
-        default="same_size",
-    )
-    df["home_cat"] = np.select(
-        [df["home_adv"] > 0, df["home_adv"] < 0],
-        ["focal_closer", "focal_farther"],
-        default="same_distance",
-    )
+# Individual predictor models
+model_size = smf.logit('win ~ rel_size_z', data=_df).fit(disp=False)
+model_loc = smf.logit('win ~ rel_location_z', data=_df).fit(disp=False)
 
-    win_by_size = df.groupby("size_cat")["win"].agg(["mean", "count"])
-    win_by_home = df.groupby("home_cat")["win"].agg(["mean", "count"])
+# Extract summaries
+summary = {
+    'n_rows': len(_df),
+    'win_rate': _df['win'].mean(),
+    'rel_size_mean': _df['rel_size'].mean(),
+    'rel_location_mean': _df['rel_location'].mean(),
+    'model1_params': model1.params.to_dict(),
+    'model1_pvalues': model1.pvalues.to_dict(),
+    'model1_conf_int': model1.conf_int().to_dict(),
+    'model2_params': model2.params.to_dict(),
+    'model2_pvalues': model2.pvalues.to_dict(),
+    'model2_conf_int': model2.conf_int().to_dict(),
+    'model_size_params': model_size.params.to_dict(),
+    'model_size_pvalues': model_size.pvalues.to_dict(),
+    'model_loc_params': model_loc.params.to_dict(),
+    'model_loc_pvalues': model_loc.pvalues.to_dict(),
+}
 
-    # Simple contingency tables
-    size_ct = pd.crosstab(df["size_adv_focal"], df["win"])
-    home_ct = pd.crosstab(df["home_adv_focal"], df["win"])
+# Save summary to inspect
+import json
+with open('analysis_summary.json', 'w') as f:
+    json.dump(summary, f, indent=2)
 
-    # Logistic regression: win ~ rel_size + home_adv
-    X = df[["rel_size", "home_adv"]]
-    X = sm.add_constant(X)
-    y = df["win"]
-    logit_model = sm.Logit(y, X).fit(disp=False)
-
-    # Also individual models
-    X_size = sm.add_constant(df[["rel_size"]])
-    model_size = sm.Logit(y, X_size).fit(disp=False)
-
-    X_home = sm.add_constant(df[["home_adv"]])
-    model_home = sm.Logit(y, X_home).fit(disp=False)
-
-    # Binary-predictor models
-    X_size_bin = sm.add_constant(df[["size_adv_focal"]])
-    model_size_bin = sm.Logit(y, X_size_bin).fit(disp=False)
-
-    X_home_bin = sm.add_constant(df[["home_adv_focal"]])
-    model_home_bin = sm.Logit(y, X_home_bin).fit(disp=False)
-
-    results = {
-        "n_rows": int(n_rows),
-        "overall_win_rate": float(win_rate),
-        "win_by_size": win_by_size.reset_index().to_dict(orient="records"),
-        "win_by_home": win_by_home.reset_index().to_dict(orient="records"),
-        "size_adv_crosstab": size_ct.to_dict(),
-        "home_adv_crosstab": home_ct.to_dict(),
-        "logit_full": {
-            "params": {k: float(v) for k, v in logit_model.params.items()},
-            "pvalues": {k: float(v) for k, v in logit_model.pvalues.items()},
-        },
-        "logit_size_only": {
-            "params": {k: float(v) for k, v in model_size.params.items()},
-            "pvalues": {k: float(v) for k, v in model_size.pvalues.items()},
-        },
-        "logit_home_only": {
-            "params": {k: float(v) for k, v in model_home.params.items()},
-            "pvalues": {k: float(v) for k, v in model_home.pvalues.items()},
-        },
-        "logit_size_binary": {
-            "params": {k: float(v) for k, v in model_size_bin.params.items()},
-            "pvalues": {k: float(v) for k, v in model_size_bin.pvalues.items()},
-        },
-        "logit_home_binary": {
-            "params": {k: float(v) for k, v in model_home_bin.params.items()},
-            "pvalues": {k: float(v) for k, v in model_home_bin.pvalues.items()},
-        },
-    }
-
-    print(json.dumps(results, indent=2))
-
-
-if __name__ == "__main__":
-    main()
+print(json.dumps(summary, indent=2))

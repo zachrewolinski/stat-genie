@@ -1,69 +1,99 @@
 import pandas as pd
 import numpy as np
+import statsmodels.api as sm
 import statsmodels.formula.api as smf
 
+# Load data
+csv_path = 'crofoot.csv'
+df = pd.read_csv(csv_path)
 
-def main() -> None:
-    # Load data
-    df = pd.read_csv("crofoot.csv")
+# Basic cleaning: keep relevant columns and drop missing
+cols = ['win', 'n_focal', 'n_other', 'dist_focal', 'dist_other']
+missing_cols = [c for c in cols if c not in df.columns]
+if missing_cols:
+    raise ValueError(f"Missing columns: {missing_cols}")
 
-    # Construct key predictors
-    df["size_diff"] = df["n_focal"] - df["n_other"]
-    df["larger_focal"] = (df["size_diff"] > 0).astype(int)
+df = df[cols].dropna().copy()
 
-    # Positive dist_diff means focal group is closer to its home range center
-    df["dist_diff"] = df["dist_other"] - df["dist_focal"]
-    df["home_adv"] = (df["dist_diff"] > 0).astype(int)
+# Derived variables
+# Relative group size: focal minus other
+# Also consider ratio for robustness
 
-    # Basic descriptive summaries
-    print("Number of contests:", len(df))
-    print()
+df['rel_size'] = df['n_focal'] - df['n_other']
+# Relative location: focal closer to its home range center than other (smaller distance)
+# 1 if focal closer to its center than other group, 0 otherwise
 
-    print("Win rate overall:", df["win"].mean())
-    print()
+df['focal_closer'] = (df['dist_focal'] < df['dist_other']).astype(int)
 
-    print("Win rate by focal larger (larger_focal):")
-    print(df.groupby("larger_focal")["win"].mean())
-    print()
+# Also distance difference (positive = focal farther from its center)
 
-    print("Win rate by home advantage (home_adv):")
-    print(df.groupby("home_adv")["win"].mean())
-    print()
+df['dist_diff'] = df['dist_focal'] - df['dist_other']
 
-    # Logistic regression with binary predictors
-    model_bin = smf.logit("win ~ larger_focal + home_adv", data=df).fit(disp=False)
-    print("Logistic regression with binary predictors (larger_focal, home_adv):")
-    print(model_bin.summary())
-    print()
+# Logistic regression with rel_size and focal_closer
+model1 = smf.logit('win ~ rel_size + focal_closer', data=df).fit(disp=False)
 
-    # Logistic regression with continuous differences
-    model_cont = smf.logit("win ~ size_diff + dist_diff", data=df).fit(disp=False)
-    print("Logistic regression with continuous predictors (size_diff, dist_diff):")
-    print(model_cont.summary())
-    print()
+# Logistic regression with rel_size and distance difference (continuous)
+model2 = smf.logit('win ~ rel_size + dist_diff', data=df).fit(disp=False)
 
-    # Report odds ratios and p-values for easier interpretation
-    def report_effects(model, label: str) -> None:
-        params = model.params
-        conf = model.conf_int()
-        pvalues = model.pvalues
+# For effect size interpretation, compute odds ratios and p-values
 
-        print(f"Effect summary for {label}:")
-        print("term, coef, odds_ratio, ci_low, ci_high, pvalue")
-        for term in params.index:
-            or_val = np.exp(params[term])
-            ci_low = np.exp(conf.loc[term, 0])
-            ci_high = np.exp(conf.loc[term, 1])
-            print(
-                f"{term}, {params[term]:.3f}, {or_val:.3f}, "
-                f"{ci_low:.3f}, {ci_high:.3f}, {pvalues[term]:.3g}"
-            )
-        print()
+def summarize(model):
+    params = model.params
+    conf = model.conf_int()
+    pvals = model.pvalues
+    odds = np.exp(params)
+    conf_odds = np.exp(conf)
+    summary = pd.DataFrame({
+        'coef': params,
+        'odds_ratio': odds,
+        'pvalue': pvals,
+        'conf_low_or': conf_odds[0],
+        'conf_high_or': conf_odds[1],
+    })
+    return summary
 
-    report_effects(model_bin, "binary predictors")
-    report_effects(model_cont, "continuous predictors")
+summary1 = summarize(model1)
+summary2 = summarize(model2)
 
+# basic counts
+n = len(df)
+win_rate = df['win'].mean()
 
-if __name__ == "__main__":
-    main()
+print('N', n)
+print('Win rate', win_rate)
+print('\nModel1: win ~ rel_size + focal_closer')
+print(summary1)
+print('\nModel2: win ~ rel_size + dist_diff')
+print(summary2)
 
+# also check simple bivariate relationships
+# logistic with rel_size only and focal_closer only
+model_rel = smf.logit('win ~ rel_size', data=df).fit(disp=False)
+model_loc = smf.logit('win ~ focal_closer', data=df).fit(disp=False)
+
+print('\nModel rel_size only')
+print(summarize(model_rel))
+print('\nModel focal_closer only')
+print(summarize(model_loc))
+
+# also check with standardized dist_diff
+
+df['dist_diff_z'] = (df['dist_diff'] - df['dist_diff'].mean())/df['dist_diff'].std()
+model2z = smf.logit('win ~ rel_size + dist_diff_z', data=df).fit(disp=False)
+print('\nModel2z: win ~ rel_size + dist_diff_z')
+print(summarize(model2z))
+
+# Save key stats for later use in manual reasoning
+stats = {
+    'n': n,
+    'win_rate': float(win_rate),
+    'model1_params': summary1.to_dict(orient='index'),
+    'model2_params': summary2.to_dict(orient='index'),
+    'model_rel_params': summarize(model_rel).to_dict(orient='index'),
+    'model_loc_params': summarize(model_loc).to_dict(orient='index'),
+    'model2z_params': summarize(model2z).to_dict(orient='index'),
+}
+
+import json
+with open('analysis_summary.json', 'w') as f:
+    json.dump(stats, f, indent=2)

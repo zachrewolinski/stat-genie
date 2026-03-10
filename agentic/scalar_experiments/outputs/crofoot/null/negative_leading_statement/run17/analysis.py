@@ -1,54 +1,72 @@
 import pandas as pd
+import numpy as np
 import statsmodels.api as sm
+from scipy import stats
 
+# Load data
 
-def main() -> None:
-    # Load data
-    df = pd.read_csv("crofoot.csv")
+df = pd.read_csv('crofoot.csv')
 
-    # Construct key predictors
-    # Relative group size: focal group size minus other group size
-    df["rel_size"] = df["n_focal"] - df["n_other"]
+# Create predictors
+# Relative group size (focal - other)
+df['rel_size'] = df['n_focal'] - df['n_other']
+# Location advantage: positive means contest closer to focal home range center
+# because other is farther from its own center
 
-    # Contest location: how much closer the focal group is to the center
-    # of its range relative to the other group (positive favors focal).
-    df["rel_dist"] = df["dist_other"] - df["dist_focal"]
+df['loc_adv'] = df['dist_other'] - df['dist_focal']
 
-    print("Basic description of constructed predictors:")
-    print(df[["rel_size", "rel_dist", "win"]].describe())
-    print()
+# Simple descriptives
+print('N:', len(df))
+print(df[['win','rel_size','loc_adv']].describe())
 
-    y = df["win"]
+# Logistic regression: win ~ rel_size + loc_adv
+X = df[['rel_size','loc_adv']]
+X = sm.add_constant(X)
+model = sm.Logit(df['win'], X)
+try:
+    res = model.fit(disp=False)
+except Exception as e:
+    print('Logit failed:', e)
+    res = model.fit_regularized(disp=False)
 
-    # Multivariable logistic regression: win ~ rel_size + rel_dist
-    X = df[["rel_size", "rel_dist"]]
-    X = sm.add_constant(X, has_constant="add")
+print(res.summary())
 
-    logit_model = sm.Logit(y, X)
-    logit_result = logit_model.fit(disp=False)
+# Compute odds ratios and 95% CI
+params = res.params
+conf = res.conf_int()
+or_vals = np.exp(params)
+or_conf = np.exp(conf)
+print('\nOdds Ratios:')
+print(pd.DataFrame({'OR': or_vals, 'CI_low': or_conf[0], 'CI_high': or_conf[1], 'p': res.pvalues}))
 
-    print("Standard logistic regression (no clustering):")
-    print(logit_result.summary())
-    print()
+# Also test each predictor individually
+for col in ['rel_size','loc_adv']:
+    X1 = sm.add_constant(df[[col]])
+    m1 = sm.Logit(df['win'], X1)
+    try:
+        r1 = m1.fit(disp=False)
+    except Exception as e:
+        r1 = m1.fit_regularized(disp=False)
+    print(f"\nUnivariate logit for {col}")
+    print(r1.summary())
+    or1 = np.exp(r1.params)
+    ci1 = np.exp(r1.conf_int())
+    print(pd.DataFrame({'OR': or1, 'CI_low': ci1[0], 'CI_high': ci1[1], 'p': r1.pvalues}))
 
-    # Cluster-robust standard errors by dyad to account for repeated contests
-    cluster_result = logit_model.fit(
-        disp=False, cov_type="cluster", cov_kwds={"groups": df["dyad"]}
-    )
+# Nonparametric checks: compare rel_size and loc_adv between wins/losses
+wins = df[df['win']==1]
+losses = df[df['win']==0]
 
-    print("Logistic regression with dyad-clustered robust SEs:")
-    print(cluster_result.summary())
-    print()
+for col in ['rel_size','loc_adv']:
+    t_stat, t_p = stats.ttest_ind(wins[col], losses[col], equal_var=False)
+    u_stat, u_p = stats.mannwhitneyu(wins[col], losses[col], alternative='two-sided')
+    print(f"\n{col} mean win={wins[col].mean():.3f} loss={losses[col].mean():.3f}")
+    print(f"t-test p={t_p:.4f}, Mann-Whitney p={u_p:.4f}")
 
-    # Simple univariate models for comparison
-    for var in ["rel_size", "rel_dist"]:
-        print(f"Univariate logistic regression: win ~ {var}")
-        X_uni = sm.add_constant(df[[var]], has_constant="add")
-        model_uni = sm.Logit(y, X_uni)
-        result_uni = model_uni.fit(disp=False)
-        print(result_uni.summary())
-        print()
-
-
-if __name__ == "__main__":
-    main()
+# Effect size (Cohen's d)
+for col in ['rel_size','loc_adv']:
+    mean_diff = wins[col].mean() - losses[col].mean()
+    # pooled SD
+    sd_pooled = np.sqrt(((wins[col].var(ddof=1) + losses[col].var(ddof=1))/2))
+    d = mean_diff / sd_pooled if sd_pooled != 0 else np.nan
+    print(f"Cohen's d for {col}: {d:.3f}")

@@ -1,0 +1,18 @@
+import json
+
+conclusion = {
+    "response": 20,
+    "explanation": (
+        "I computed each player's mean skin-tone rating from the two raters and compared red-card rates per game "
+        "between clearly light (mean <= 0.25) and clearly dark (mean >= 0.75) players, using dyad-level data. "
+        "Light-skin dyads had 1221 red cards over 274,003 games (rate 0.00446 per game), while dark-skin dyads had "
+        "105 red cards over 28,192 games (rate 0.00372 per game). A Poisson regression of red cards with an offset for log(games) "
+        "gave an incidence-rate ratio of 0.84 for dark vs light (95% CI 0.685–1.020, p=0.078), indicating no statistically significant "
+        "increase for darker skin. A continuous-skin-tone model also showed no significant positive association (p=0.153). "
+        "Thus, the data do not provide evidence that darker-skinned players are more likely than lighter-skinned players to receive red cards; "
+        "if anything, the point estimates suggest a slightly lower rate."
+    )
+}
+
+with open("conclusion.txt", "w") as f:
+    json.dump(conclusion, f)

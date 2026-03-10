@@ -1,76 +1,51 @@
 import pandas as pd
 import numpy as np
 import statsmodels.api as sm
+import json
 
+# Load data
+path = "/home/chenwang/stat-genie/agentic/scalar_experiments/outputs/crofoot/null/negative_leading_statement/run20/crofoot.csv"
+df = pd.read_csv(path)
 
-def main() -> None:
-    df = pd.read_csv("crofoot.csv")
+# Derived variables
+# Relative group size: focal minus other
+# Relative location: positive means focal is closer to its home range center than the other group
+# (since smaller distance to center suggests the contest is closer to that group's core area)
+df["rel_size"] = df["n_focal"] - df["n_other"]
+df["rel_loc"] = df["dist_other"] - df["dist_focal"]
 
-    # Construct relative predictors
-    df["size_diff"] = df["n_focal"] - df["n_other"]
-    df["dist_diff"] = df["dist_focal"] - df["dist_other"]
-    df["focal_closer"] = (df["dist_focal"] < df["dist_other"]).astype(int)
+# Basic check
+n = len(df)
 
-    # Full model: probability focal group wins
-    X = df[["size_diff", "dist_diff", "focal_closer"]]
-    X = sm.add_constant(X)
-    y = df["win"]
+# Logistic regression
+X = df[["rel_size", "rel_loc"]].copy()
+X = sm.add_constant(X)
+model = sm.Logit(df["win"], X)
+res = model.fit(disp=False)
 
-    model_full = sm.Logit(y, X).fit(disp=False)
-    print("Full logit model results:")
-    print(model_full.summary())
+# Also compute odds ratios with 95% CI
+params = res.params
+conf = res.conf_int()
+conf.columns = ["2.5%", "97.5%"]
+odds_ratios = np.exp(params)
+conf_or = np.exp(conf)
 
-    # Also report odds ratios and p-values clearly
-    params = model_full.params
-    conf = model_full.conf_int()
-    odds_ratios = params.map(lambda v: float(np.exp(v)))
+# Collect key stats
+summary = {
+    "n": n,
+    "coefficients": params.to_dict(),
+    "pvalues": res.pvalues.to_dict(),
+    "odds_ratios": odds_ratios.to_dict(),
+    "odds_ratio_ci": conf_or.to_dict(),
+    "llf": res.llf,
+    "aic": res.aic,
+}
 
-    print("\nOdds ratios and p-values:")
-    for name in ["size_diff", "dist_diff", "focal_closer"]:
-        print(
-            f"{name}: coef={params[name]:.3f}, "
-            f"OR={odds_ratios[name]:.3f}, "
-            f"p={model_full.pvalues[name]:.3f}, "
-            f"95% CI=({conf.loc[name, 0]:.3f}, {conf.loc[name, 1]:.3f})"
-        )
+# Save summary for later inspection
+with open("/home/chenwang/stat-genie/agentic/scalar_experiments/outputs/crofoot/null/negative_leading_statement/run20/model_summary.json", "w") as f:
+    json.dump(summary, f, indent=2)
 
-    # Size-only model
-    X_size = sm.add_constant(df[["size_diff"]])
-    model_size = sm.Logit(y, X_size).fit(disp=False)
-    print("\nSize-only model:")
-    print(model_size.summary())
-
-    # Location-only model (home-range advantage)
-    X_loc = sm.add_constant(df[["focal_closer"]])
-    model_loc = sm.Logit(y, X_loc).fit(disp=False)
-    print("\nLocation-only model:")
-    print(model_loc.summary())
-
-    # Descriptive summaries
-    print("\nDescriptive summaries:")
-    df["focal_larger"] = (df["size_diff"] > 0).astype(int)
-    df["focal_smaller"] = (df["size_diff"] < 0).astype(int)
-
-    for label, mask in [
-        ("focal larger", df["focal_larger"] == 1),
-        ("focal smaller", df["focal_smaller"] == 1),
-        ("same size", df["size_diff"] == 0),
-    ]:
-        subset = df[mask]
-        if not subset.empty:
-            print(
-                f"{label}: n={len(subset)}, win_rate={subset['win'].mean():.3f}"
-            )
-
-    for label, mask in [
-        ("focal closer to home", df["focal_closer"] == 1),
-        ("other closer to home", df["focal_closer"] == 0),
-    ]:
-        subset = df[mask]
-        print(
-            f"{label}: n={len(subset)}, win_rate={subset['win'].mean():.3f}"
-        )
-
-
-if __name__ == "__main__":
-    main()
+print(res.summary())
+print("\nOdds ratios (with 95% CI):")
+for k in ["const", "rel_size", "rel_loc"]:
+    print(k, odds_ratios[k], conf_or.loc[k, "2.5%"], conf_or.loc[k, "97.5%"], "p=", res.pvalues[k])

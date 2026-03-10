@@ -1,102 +1,72 @@
 import json
-from pathlib import Path
-
-import numpy as np
 import pandas as pd
+import numpy as np
 import statsmodels.api as sm
+from statsmodels.stats.proportion import proportions_ztest
 
+# Load data
 
-def main() -> None:
-    data_path = Path("crofoot.csv")
-    df = pd.read_csv(data_path)
+df = pd.read_csv('crofoot.csv')
 
-    # Define key predictors for the research question.
-    # Relative group size: focal group size minus other group size.
-    df["rel_size"] = df["n_focal"] - df["n_other"]
+# Derived variables
+# Relative group size: focal - other (positive means focal larger)
+# Relative location: dist_focal - dist_other (positive means contest closer to other group's center)
+# Also compute absolute distances maybe.
 
-    # Contest location: indicator for whether the contest is closer to the focal
-    # group's home range center than to the other group's center.
-    df["focal_home_adv"] = (df["dist_focal"] < df["dist_other"]).astype(int)
+df['rel_size'] = df['n_focal'] - df['n_other']
+df['rel_dist'] = df['dist_focal'] - df['dist_other']
 
-    y = df["win"]
-    X = df[["rel_size", "focal_home_adv"]]
-    X = sm.add_constant(X, has_constant="add")
+# Basic summaries
+n = len(df)
+win_rate = df['win'].mean()
 
-    # Fit logistic regression: probability focal group wins as a function of
-    # relative group size and contest location.
-    model = sm.Logit(y, X)
-    result = model.fit(disp=False)
+# Simple contingency: win rates by size advantage sign
+size_adv = pd.cut(df['rel_size'], bins=[-np.inf, -0.5, 0.5, np.inf], labels=['focal_smaller','equal','focal_larger'])
+win_by_size = df.groupby(size_adv)['win'].agg(['mean','count'])
 
-    params = result.params
-    pvalues = result.pvalues
+# Location advantage sign: contest closer to focal if dist_focal < dist_other (rel_dist negative)
+loc_adv = pd.cut(df['rel_dist'], bins=[-np.inf, -1e-9, 1e-9, np.inf], labels=['closer_to_focal','equal','closer_to_other'])
+win_by_loc = df.groupby(loc_adv)['win'].agg(['mean','count'])
 
-    coef_size = float(params["rel_size"])
-    coef_loc = float(params["focal_home_adv"])
-    p_size = float(pvalues["rel_size"])
-    p_loc = float(pvalues["focal_home_adv"])
+# Logistic regression: win ~ rel_size + rel_dist
+X = df[['rel_size','rel_dist']].copy()
+X = sm.add_constant(X)
+model = sm.GLM(df['win'], X, family=sm.families.Binomial())
+res = model.fit()
 
-    # Compute simple descriptive summaries to support the explanation.
-    df["larger_focal"] = (df["rel_size"] > 0).astype(int)
-    win_when_larger = df.loc[df["larger_focal"] == 1, "win"].mean()
-    win_when_smaller = df.loc[df["larger_focal"] == 0, "win"].mean()
+# Also model with standardized predictors to compare effect sizes
+Xz = df[['rel_size','rel_dist']].apply(lambda s: (s - s.mean())/s.std())
+Xz = sm.add_constant(Xz)
+res_z = sm.GLM(df['win'], Xz, family=sm.families.Binomial()).fit()
 
-    win_with_home = df.loc[df["focal_home_adv"] == 1, "win"].mean()
-    win_away = df.loc[df["focal_home_adv"] == 0, "win"].mean()
+# Extract summary stats
+params = res.params
+conf = res.conf_int()
+conf.columns = ['ci_low','ci_high']
+summary = pd.concat([params, res.pvalues, conf], axis=1)
+summary.columns = ['coef','pvalue','ci_low','ci_high']
 
-    # Map statistical evidence to a 0–100 Likert scale, where higher values
-    # correspond to a stronger "Yes, these factors influence win probability".
-    def likert_score(p_a: float, p_b: float) -> int:
-        min_p = min(p_a, p_b)
-        # Strong evidence that at least one factor matters.
-        if min_p < 0.01:
-            return 90
-        if min_p < 0.05:
-            return 75
-        if min_p < 0.1:
-            return 60
-        if min_p < 0.2:
-            return 50
-        if min_p < 0.5:
-            return 30
-        # Very weak or no evidence of an effect.
-        return 10
+summary_z = pd.concat([res_z.params, res_z.pvalues], axis=1)
+summary_z.columns = ['coef_z','pvalue_z']
 
-    response = likert_score(p_size, p_loc)
+# Odds ratios
+odds = np.exp(summary[['coef','ci_low','ci_high']])
+odds.columns = ['odds_ratio','or_ci_low','or_ci_high']
 
-    # Build explanation string summarizing methods and key results.
-    explanation = (
-        "Research question: Do relative group size and contest location influence "
-        "the probability that a capuchin monkey group wins an intergroup contest? "
-        "I modeled the binary outcome of the focal group winning using logistic "
-        "regression with two predictors: relative group size (focal group size minus "
-        "other group size) and a home-range indicator for contest location "
-        "(1 if the contest occurred closer to the focal group's home range center "
-        "than to the other group's center, 0 otherwise). "
-        f"The coefficient for relative group size was {coef_size:.3f} with p-value "
-        f"{p_size:.3f}, and the coefficient for the home-range indicator was "
-        f"{coef_loc:.3f} with p-value {p_loc:.3f}. Both effects are small in magnitude "
-        "and far from conventional thresholds for statistical significance, so the "
-        "logistic model does not provide strong evidence that either relative group "
-        "size or contest location reliably predicts win probability. "
-        f"Descriptively, focal groups won in approximately {win_when_larger:.2f} of "
-        "contests when they were larger than their opponent, compared with "
-        f"{win_when_smaller:.2f} when they were not larger. "
-        f"They also won about {win_with_home:.2f} of contests when the contest "
-        "occurred closer to their own home range center versus "
-        f"{win_away:.2f} when the contest was closer to the other group's center. "
-        "Taken together, these patterns and the logistic regression results provide "
-        "little evidence that relative group size or contest location has a strong, "
-        "consistent effect on winning intergroup contests in this sample. I therefore "
-        "answer 'No' to the research question and set the Likert-scale response to "
-        f"{response} on a 0–100 scale, where 0 represents a strong 'No' and 100 a "
-        "strong 'Yes'."
-    )
+# Save results to json for inspection
+results = {
+    'n': int(n),
+    'win_rate': float(win_rate),
+    'win_by_size': win_by_size.reset_index().to_dict(orient='records'),
+    'win_by_loc': win_by_loc.reset_index().to_dict(orient='records'),
+    'logit_summary': summary.reset_index().rename(columns={'index':'term'}).to_dict(orient='records'),
+    'logit_odds': odds.reset_index().rename(columns={'index':'term'}).to_dict(orient='records'),
+    'logit_z': summary_z.reset_index().rename(columns={'index':'term'}).to_dict(orient='records'),
+    'model_aic': float(res.aic),
+    'model_pseudo_r2': float(1 - res.deviance / res.null_deviance)
+}
 
-    conclusion = {"response": int(response), "explanation": explanation}
+with open('analysis_results.json','w') as f:
+    json.dump(results, f, indent=2)
 
-    with open("conclusion.txt", "w", encoding="utf-8") as f:
-        json.dump(conclusion, f)
-
-
-if __name__ == "__main__":
-    main()
+print('done')

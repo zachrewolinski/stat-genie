@@ -1,58 +1,71 @@
 import json
-from pathlib import Path
-
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
 
+# Load data
+_df = pd.read_csv('crofoot.csv')
 
-def main():
-    # Load data
-    df = pd.read_csv("crofoot.csv")
+# Derive predictors
+_df['rel_size'] = _df['n_focal'] - _df['n_other']
+# Positive rel_loc means focal is closer to its own home-range center than the other group is to its own
+_df['rel_loc'] = _df['dist_other'] - _df['dist_focal']
 
-    # Construct key predictors
-    df["rel_size"] = df["n_focal"] - df["n_other"]  # positive if focal larger
-    df["rel_loc"] = df["dist_other"] - df["dist_focal"]  # positive if focal closer to its center than other is to its
+# Standardize for interpretability
+for col in ['rel_size', 'rel_loc']:
+    _df[f'{col}_z'] = (_df[col] - _df[col].mean()) / _df[col].std(ddof=0)
 
-    # Center predictors to aid interpretation
-    for col in ["rel_size", "rel_loc"]:
-        df[col + "_c"] = df[col] - df[col].mean()
+# Fit logistic regression with cluster-robust SE by dyad (accounts for repeated dyads)
+X = sm.add_constant(_df[['rel_size_z', 'rel_loc_z']])
+robust = sm.Logit(_df['win'], X).fit(
+    disp=0,
+    cov_type='cluster',
+    cov_kwds={'groups': _df['dyad']},
+)
 
-    y = df["win"]
+# Single-predictor models for sensitivity
+X_size = sm.add_constant(_df[['rel_size_z']])
+robust_size = sm.Logit(_df['win'], X_size).fit(
+    disp=0,
+    cov_type='cluster',
+    cov_kwds={'groups': _df['dyad']},
+)
 
-    # Model 1: relative group size only
-    X1 = sm.add_constant(df[["rel_size_c"]])
-    model1 = sm.Logit(y, X1).fit(disp=False)
+X_loc = sm.add_constant(_df[['rel_loc_z']])
+robust_loc = sm.Logit(_df['win'], X_loc).fit(
+    disp=0,
+    cov_type='cluster',
+    cov_kwds={'groups': _df['dyad']},
+)
 
-    # Model 2: relative location only
-    X2 = sm.add_constant(df[["rel_loc_c"]])
-    model2 = sm.Logit(y, X2).fit(disp=False)
+# Compute odds ratios for 1 SD change
+params = robust.params
+ses = robust.bse
+pvals = robust.pvalues
 
-    # Model 3: both predictors
-    X3 = sm.add_constant(df[["rel_size_c", "rel_loc_c"]])
-    model3 = sm.Logit(y, X3).fit(disp=False)
+odds_ratios = np.exp(params)
 
-    summary = {
-        "n_obs": int(len(df)),
-        "model1": {
-            "params": model1.params.to_dict(),
-            "pvalues": model1.pvalues.to_dict(),
-            "llf": float(model1.llf),
-        },
-        "model2": {
-            "params": model2.params.to_dict(),
-            "pvalues": model2.pvalues.to_dict(),
-            "llf": float(model2.llf),
-        },
-        "model3": {
-            "params": model3.params.to_dict(),
-            "pvalues": model3.pvalues.to_dict(),
-            "llf": float(model3.llf),
-        },
-    }
+# Build a small report dict for printing
+report = {
+    'n': int(_df.shape[0]),
+    'rel_size_mean': float(_df['rel_size'].mean()),
+    'rel_loc_mean': float(_df['rel_loc'].mean()),
+    'logit_main': {
+        'coef': params.to_dict(),
+        'se': ses.to_dict(),
+        'pval': pvals.to_dict(),
+        'odds_ratio': odds_ratios.to_dict(),
+    },
+    'logit_size_only': {
+        'coef': robust_size.params.to_dict(),
+        'se': robust_size.bse.to_dict(),
+        'pval': robust_size.pvalues.to_dict(),
+    },
+    'logit_loc_only': {
+        'coef': robust_loc.params.to_dict(),
+        'se': robust_loc.bse.to_dict(),
+        'pval': robust_loc.pvalues.to_dict(),
+    },
+}
 
-    Path("analysis_results.json").write_text(json.dumps(summary, indent=2))
-
-
-if __name__ == "__main__":
-    main()
+print(json.dumps(report, indent=2, sort_keys=True))

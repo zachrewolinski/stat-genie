@@ -1,62 +1,82 @@
-import pandas as pd
+import json
 import numpy as np
+import pandas as pd
 import statsmodels.api as sm
-import statsmodels.formula.api as smf
 
+# Load data
+_df = pd.read_csv('crofoot.csv')
 
-def main() -> None:
-    df = pd.read_csv("crofoot.csv")
+# Map columns based on info.json descriptions
+# Outcome: 1 if focal won contest, 0 if other won
+outcome_col = 'm_focal'
 
-    # Map columns to meaningful names based on info.json
-    df["size_focal"] = df["f_other"]  # number of individuals in focal group
-    df["size_other"] = df["win"]  # number of individuals in other group
-    df["rel_size"] = df["size_focal"] - df["size_other"]
+# Distances from home range centers
+# m_other: distance of focal group from center of its home range
+# n_focal: distance of other group from center of its home range
+focal_dist_col = 'm_other'
+other_dist_col = 'n_focal'
 
-    df["dist_focal_center"] = df["m_other"]  # distance of focal group from its home-range center
-    df["dist_other_center"] = df["n_focal"]  # distance of other group from its home-range center
-    # Positive values => contest is relatively closer to focal group's home-range center
-    df["loc_adv"] = df["dist_other_center"] - df["dist_focal_center"]
+# Group sizes
+# f_other: number of individuals in focal group
+# win: number of individuals in other group
+focal_size_col = 'f_other'
+other_size_col = 'win'
 
-    df["focal_larger"] = (df["rel_size"] > 0).astype(int)
-    df["focal_home_adv"] = (df["loc_adv"] > 0).astype(int)
+# Compute relative predictors
+# Relative size > 0 => focal larger
+_df['rel_size'] = _df[focal_size_col] - _df[other_size_col]
 
-    print("Dataset shape:", df.shape)
-    print("\nProportion of focal wins by relative group size (focal larger vs not):")
-    print(df.groupby("focal_larger")["m_focal"].mean())
+# Relative location > 0 => contest closer to focal center (other distance greater)
+_df['rel_location'] = _df[other_dist_col] - _df[focal_dist_col]
 
-    print("\nProportion of focal wins by location advantage (focal closer to its center vs not):")
-    print(df.groupby("focal_home_adv")["m_focal"].mean())
+# Basic checks
+n = len(_df)
+win_rate = _df[outcome_col].mean()
 
-    print("\nCross-tab of focal wins by size and location advantage:")
-    print(
-        df.groupby(["focal_larger", "focal_home_adv"])["m_focal"].agg(
-            ["mean", "count"]
-        )
-    )
+# Logistic regression with both predictors
+X = _df[['rel_size', 'rel_location']].copy()
+X = sm.add_constant(X)
+model = sm.Logit(_df[outcome_col], X)
+res = model.fit(disp=False)
 
-    # Logistic regression with clustered standard errors by dyad
-    model = smf.glm(
-        formula="m_focal ~ rel_size + loc_adv",
-        data=df,
-        family=sm.families.Binomial(),
-    ).fit(cov_type="cluster", cov_kwds={"groups": df["dyad"]})
+# Also fit single-predictor models for robustness
+X_size = sm.add_constant(_df[['rel_size']])
+res_size = sm.Logit(_df[outcome_col], X_size).fit(disp=False)
 
-    print("\nLogistic regression results (m_focal ~ rel_size + loc_adv):")
-    print(model.summary())
+X_loc = sm.add_constant(_df[['rel_location']])
+res_loc = sm.Logit(_df[outcome_col], X_loc).fit(disp=False)
 
-    # Logistic regression using binary indicators for size and location advantages
-    model_bin = smf.glm(
-        formula="m_focal ~ focal_larger + focal_home_adv",
-        data=df,
-        family=sm.families.Binomial(),
-    ).fit(cov_type="cluster", cov_kwds={"groups": df["dyad"]})
+# Compute odds ratios and CIs
+params = res.params
+conf = res.conf_int()
+conf.columns = ['ci_low', 'ci_high']
 
-    print(
-        "\nLogistic regression results "
-        "(m_focal ~ focal_larger + focal_home_adv):"
-    )
-    print(model_bin.summary())
+odds = np.exp(params)
+conf_odds = np.exp(conf)
 
+# Standardize predictors for comparable effect sizes
+X_std = _df[['rel_size', 'rel_location']].copy()
+X_std = (X_std - X_std.mean()) / X_std.std(ddof=0)
+X_std = sm.add_constant(X_std)
+res_std = sm.Logit(_df[outcome_col], X_std).fit(disp=False)
 
-if __name__ == "__main__":
-    main()
+summary = {
+    'n': int(n),
+    'win_rate': float(win_rate),
+    'coef': res.params.to_dict(),
+    'pvalues': res.pvalues.to_dict(),
+    'odds_ratio': odds.to_dict(),
+    'odds_ci_low': conf_odds['ci_low'].to_dict(),
+    'odds_ci_high': conf_odds['ci_high'].to_dict(),
+    'single_pvalues': {
+        'rel_size': float(res_size.pvalues['rel_size']),
+        'rel_location': float(res_loc.pvalues['rel_location'])
+    },
+    'std_coef': res_std.params.to_dict(),
+    'std_pvalues': res_std.pvalues.to_dict(),
+}
+
+with open('analysis_results.json', 'w') as f:
+    json.dump(summary, f, indent=2)
+
+print(json.dumps(summary, indent=2))

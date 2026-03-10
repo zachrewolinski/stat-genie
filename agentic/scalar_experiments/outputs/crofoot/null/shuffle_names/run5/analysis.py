@@ -1,64 +1,110 @@
 import pandas as pd
 import numpy as np
-import statsmodels.formula.api as smf
+import statsmodels.api as sm
 
+# Load data
+_df = pd.read_csv('crofoot.csv')
 
-def main() -> None:
-    # Load data
-    df = pd.read_csv("crofoot.csv")
+# Identify likely group-size columns by checking constancy within focal/other group IDs
+focal_id = 'n_other'  # per metadata, this appears to be focal group ID (1-6)
+other_id = 'dist_other'  # other group ID (1-6)
 
-    # Outcome: 1 if focal group won, 0 otherwise
-    df["win_focal"] = df["m_focal"]
+# Candidate group size columns: those with small set {5,6,10,13}
+size_candidates = [c for c in _df.columns if set(_df[c].unique()) == {5, 6, 10, 13}]
 
-    # Group sizes (total individuals)
-    df["focal_size"] = df["f_other"]
-    df["other_size"] = df["win"]
+# Check constancy within group IDs
+constancy = {}
+for col in size_candidates:
+    focal_unique = _df.groupby(focal_id)[col].nunique().max()
+    other_unique = _df.groupby(other_id)[col].nunique().max()
+    constancy[col] = {'focal_unique_max': focal_unique, 'other_unique_max': other_unique}
 
-    # Relative group size: positive if focal group is larger
-    df["rel_size_diff"] = df["focal_size"] - df["other_size"]
-    df["rel_size_ratio"] = df["focal_size"] / df["other_size"]
+print('Size candidates:', size_candidates)
+print('Constancy within group IDs:', constancy)
 
-    # Contest location: distance (m) from each group's home-range center
-    # Metadata: m_other = distance of focal group from its home-range center
-    #           n_focal = distance of other group from its home-range center
-    df["dist_focal_center"] = df["m_other"]
-    df["dist_other_center"] = df["n_focal"]
+# Choose mapping based on constancy: focal size should be constant within focal_id; other size within other_id
+# We'll pick the column with focal_unique_max==1 as focal size; other_unique_max==1 as other size
+focal_size_col = None
+other_size_col = None
+for col, stats in constancy.items():
+    if stats['focal_unique_max'] == 1:
+        focal_size_col = col
+    if stats['other_unique_max'] == 1:
+        other_size_col = col
 
-    # Home-advantage measure: positive when focal group is closer to its center
-    df["home_advantage"] = df["dist_other_center"] - df["dist_focal_center"]
+print('Selected focal_size_col:', focal_size_col)
+print('Selected other_size_col:', other_size_col)
 
-    # Standardize predictors for comparability
-    for col in ["rel_size_diff", "home_advantage"]:
-        df[f"{col}_z"] = (df[col] - df[col].mean()) / df[col].std(ddof=0)
+# Distance columns (contest location) are those with large numeric ranges (>50)
+dist_cols = [c for c in _df.columns if _df[c].max() > 50]
+print('Distance columns:', dist_cols)
 
-    print("Summary of key derived variables:\n")
-    print(df[["win_focal", "rel_size_diff", "home_advantage"]].describe())
-    print("\nCorrelation between predictors:\n")
-    print(df[["rel_size_diff_z", "home_advantage_z"]].corr())
+# By metadata, m_other is distance of focal group from center; n_focal is distance of other group from center
+# Use those column names (since values match range) for location
+# Determine which dist col corresponds to focal/other by constancy with IDs: distance from focal should vary, not constant, but may correlate? We'll follow metadata mapping
+if set(dist_cols) == {'m_other', 'n_focal'}:
+    dist_focal_col = 'm_other'
+    dist_other_col = 'n_focal'
+else:
+    # fallback: choose two largest-range columns, order arbitrary
+    dist_focal_col, dist_other_col = dist_cols[:2]
 
-    # Logistic regression: probability focal group wins
-    formula = "win_focal ~ rel_size_diff_z + home_advantage_z"
-    model = smf.logit(formula=formula, data=df)
-    result = model.fit(disp=False)
+print('Selected dist_focal_col:', dist_focal_col)
+print('Selected dist_other_col:', dist_other_col)
 
-    print("\nLogistic regression results:")
-    print(result.summary())
+# Outcome
+outcome_col = 'm_focal'  # binary
 
-    # Odds ratios and 95% CIs
-    params = result.params
-    conf = result.conf_int()
-    odds_ratios = np.exp(params)
-    conf_odds = np.exp(conf)
+# Build analysis dataframe
+_df = _df.copy()
+_df['relative_size'] = _df[focal_size_col] - _df[other_size_col]
+_df['relative_size_log'] = np.log(_df[focal_size_col] / _df[other_size_col])
+_df['relative_location'] = _df[dist_focal_col] - _df[dist_other_col]
 
-    print("\nOdds ratios with 95% confidence intervals:")
-    for name in params.index:
-        print(
-            f"{name:20s} OR={odds_ratios[name]:6.3f} "
-            f"95% CI=({conf_odds.loc[name, 0]:6.3f}, {conf_odds.loc[name, 1]:6.3f}) "
-            f"p={result.pvalues[name]:.4f}"
-        )
+# Logistic regression: win ~ relative_size + relative_location
+X = _df[['relative_size', 'relative_location']]
+X = sm.add_constant(X)
+model = sm.Logit(_df[outcome_col], X)
+result = model.fit(disp=False)
+print('\nLogit (relative_size, relative_location):')
+print(result.summary())
 
+# Alternative using log ratio
+X2 = _df[['relative_size_log', 'relative_location']]
+X2 = sm.add_constant(X2)
+model2 = sm.Logit(_df[outcome_col], X2)
+result2 = model2.fit(disp=False)
+print('\nLogit (relative_size_log, relative_location):')
+print(result2.summary())
 
-if __name__ == "__main__":
-    main()
+# For effect sizes, compute predicted probability at +/-1 SD for each variable holding other at mean
+for name, res, cols in [
+    ('diff', result, ['relative_size', 'relative_location']),
+    ('log', result2, ['relative_size_log', 'relative_location'])
+]:
+    means = _df[cols].mean()
+    sds = _df[cols].std()
+    base = means.copy()
+    def pred(v):
+        x = {'const':1.0}
+        x.update(v)
+        return res.predict(pd.DataFrame([x]))[0]
+    for col in cols:
+        v_low = base.copy(); v_low[col] = base[col] - sds[col]
+        v_high = base.copy(); v_high[col] = base[col] + sds[col]
+        p_low = pred(v_low)
+        p_high = pred(v_high)
+        print(f"Model {name}: {col} +/-1SD: {p_low:.3f} -> {p_high:.3f}")
 
+# Simple comparisons: win rates by relative_size sign and relative_location sign
+_df['rel_size_sign'] = np.sign(_df['relative_size'])
+_df['rel_loc_sign'] = np.sign(_df['relative_location'])
+
+print('\nWin rates by relative_size sign:')
+print(_df.groupby('rel_size_sign')[outcome_col].mean())
+print('\nWin rates by relative_location sign:')
+print(_df.groupby('rel_loc_sign')[outcome_col].mean())
+
+# Cross-tab
+print('\nWin rates by size sign and location sign:')
+print(_df.pivot_table(values=outcome_col, index='rel_size_sign', columns='rel_loc_sign', aggfunc='mean'))

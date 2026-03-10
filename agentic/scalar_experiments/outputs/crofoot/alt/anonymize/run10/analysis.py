@@ -1,75 +1,58 @@
+import json
 import pandas as pd
 import numpy as np
 import statsmodels.api as sm
 
+# Load data
+_df = pd.read_csv('crofoot.csv')
 
-def main() -> None:
-    df = pd.read_csv("crofoot.csv")
+# Define variables
+outcome = _df['feature4']  # 1 if focal won
+size_diff = _df['feature7'] - _df['feature8']  # focal size - other size
+loc_adv = _df['feature6'] - _df['feature5']    # other distance - focal distance (positive => focal closer to its home center)
 
-    # Outcome: 1 if focal group won, 0 otherwise
-    df["focal_won"] = df["feature4"].astype(int)
+# Standardize predictors for comparability
+X = pd.DataFrame({
+    'size_diff': size_diff,
+    'loc_adv': loc_adv,
+})
+X_std = (X - X.mean()) / X.std(ddof=0)
+X_std = sm.add_constant(X_std)
 
-    # Relative group size: focal minus other, and size ratio
-    df["size_diff"] = df["feature7"] - df["feature8"]
-    df["size_ratio"] = df["feature7"] / df["feature8"]
+# Logistic regression
+model = sm.Logit(outcome, X_std).fit(disp=False)
 
-    # Contest location advantage: how much closer the focal group is
-    # to the center of its home range relative to the other group.
-    # Positive values mean the focal group is closer to its own center.
-    df["loc_advantage"] = df["feature6"] - df["feature5"]
+# Also fit univariate models to check each predictor alone
+X_size = sm.add_constant(((size_diff - size_diff.mean()) / size_diff.std(ddof=0)))
+model_size = sm.Logit(outcome, X_size).fit(disp=False)
 
-    y = df["focal_won"]
+X_loc = sm.add_constant(((loc_adv - loc_adv.mean()) / loc_adv.std(ddof=0)))
+model_loc = sm.Logit(outcome, X_loc).fit(disp=False)
 
-    # Model 1: relative group size only (continuous difference)
-    X_size = sm.add_constant(df[["size_diff"]])
-    model_size = sm.GLM(y, X_size, family=sm.families.Binomial())
-    res_size = model_size.fit()
+# Extract results
+res = {
+    'n': int(len(_df)),
+    'win_rate': float(outcome.mean()),
+    'coef': model.params.to_dict(),
+    'pvalues': model.pvalues.to_dict(),
+    'odds_ratio': np.exp(model.params).to_dict(),
+    'pseudo_r2': float(model.prsquared),
+    'size_only': {
+        'coef': model_size.params.to_dict(),
+        'pvalues': model_size.pvalues.to_dict(),
+        'odds_ratio': np.exp(model_size.params).to_dict(),
+        'pseudo_r2': float(model_size.prsquared),
+    },
+    'loc_only': {
+        'coef': model_loc.params.to_dict(),
+        'pvalues': model_loc.pvalues.to_dict(),
+        'odds_ratio': np.exp(model_loc.params).to_dict(),
+        'pseudo_r2': float(model_loc.prsquared),
+    },
+}
 
-    # Model 2: location advantage only (continuous)
-    X_loc = sm.add_constant(df[["loc_advantage"]])
-    model_loc = sm.GLM(y, X_loc, family=sm.families.Binomial())
-    res_loc = model_loc.fit()
+# Save intermediate results for inspection
+with open('analysis_results.json', 'w') as f:
+    json.dump(res, f, indent=2)
 
-    # Model 3: both predictors together (continuous)
-    X_both = sm.add_constant(df[["size_diff", "loc_advantage"]])
-    model_both = sm.GLM(y, X_both, family=sm.families.Binomial())
-    res_both = model_both.fit()
-
-    print("=== Model with size_diff only ===")
-    print(res_size.summary())
-    print("\nOdds ratios:", np.exp(res_size.params))
-
-    print("\n=== Model with loc_advantage only ===")
-    print(res_loc.summary())
-    print("\nOdds ratios:", np.exp(res_loc.params))
-
-    print("\n=== Model with size_diff and loc_advantage ===")
-    print(res_both.summary())
-    print("\nOdds ratios:", np.exp(res_both.params))
-
-    # Categorical versions for robustness checks
-    df["focal_larger"] = np.where(df["size_diff"] > 0, 1, 0)
-    df["focal_closer"] = np.where(df["loc_advantage"] > 0, 1, 0)
-
-    print("\n=== Proportions: focal wins by focal_larger ===")
-    print(df.groupby("focal_larger")["focal_won"].mean())
-
-    print("\n=== Proportions: focal wins by focal_closer ===")
-    print(df.groupby("focal_closer")["focal_won"].mean())
-
-    # Logistic models with binary predictors
-    X_bin_size = sm.add_constant(df[["focal_larger"]])
-    res_bin_size = sm.GLM(y, X_bin_size, family=sm.families.Binomial()).fit()
-    print("\n=== Logistic model with focal_larger (binary) ===")
-    print(res_bin_size.summary())
-    print("\nOdds ratios:", np.exp(res_bin_size.params))
-
-    X_bin_loc = sm.add_constant(df[["focal_closer"]])
-    res_bin_loc = sm.GLM(y, X_bin_loc, family=sm.families.Binomial()).fit()
-    print("\n=== Logistic model with focal_closer (binary) ===")
-    print(res_bin_loc.summary())
-    print("\nOdds ratios:", np.exp(res_bin_loc.params))
-
-
-if __name__ == "__main__":
-    main()
+print(json.dumps(res, indent=2))

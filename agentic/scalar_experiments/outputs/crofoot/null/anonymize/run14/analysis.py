@@ -1,82 +1,71 @@
+import json
 import pandas as pd
+import numpy as np
 import statsmodels.api as sm
 
+# Load data
+path = "crofoot.csv"
+df = pd.read_csv(path)
 
-def main() -> None:
-    df = pd.read_csv("crofoot.csv")
+# Core variables
+win = df["feature4"].astype(int)
+size_focal = df["feature7"].astype(float)
+size_other = df["feature8"].astype(float)
 
-    # Outcome: 1 if focal group won, 0 otherwise.
-    df["win"] = df["feature4"]
+# Relative group size metrics
+size_diff = size_focal - size_other
+size_ratio = size_focal / size_other
+log_size_ratio = np.log(size_ratio)
 
-    # Relative group size: focal size minus other size.
-    df["rel_group_size"] = df["feature7"] - df["feature8"]
+# Contest location (relative distance to home range centers)
+# Positive values mean the other group is farther from its center than the focal group.
+loc_diff = df["feature6"].astype(float) - df["feature5"].astype(float)
 
-    # Contest location (home-field advantage):
-    # Positive when the contest is closer to the focal group's home range center
-    # than to the other group's center, measured in 100 m units.
-    df["home_adv_100"] = (df["feature6"] - df["feature5"]) / 100.0
+# Standardize predictors for effect size interpretation
+X = pd.DataFrame({
+    "size_diff": size_diff,
+    "loc_diff": loc_diff,
+})
+X_std = (X - X.mean()) / X.std(ddof=0)
+X_std = sm.add_constant(X_std)
 
-    # Basic summaries of the constructed predictors.
-    print("N observations:", len(df))
-    print("Relative group size (focal - other) summary:")
-    print(df["rel_group_size"].describe())
-    print("\nHome advantage (other_dist - focal_dist, in 100 m) summary:")
-    print(df["home_adv_100"].describe())
+# Fit logistic regression (standardized predictors)
+model = sm.Logit(win, X_std)
+res = model.fit(disp=False)
 
-    # Logistic regression: probability the focal group wins with both predictors.
-    X = df[["rel_group_size", "home_adv_100"]]
-    X = sm.add_constant(X)
-    y = df["win"]
+# Odds ratios per 1 SD increase
+params = res.params
+conf = res.conf_int()
 
-    logit_model = sm.Logit(y, X)
-    result = logit_model.fit(disp=False)
+def odds_ratio_and_ci(param_name):
+    beta = params[param_name]
+    lo, hi = conf.loc[param_name]
+    return float(np.exp(beta)), float(np.exp(lo)), float(np.exp(hi))
 
-    print("\nLogistic regression results (win ~ rel_group_size + home_adv_100):")
-    print(result.summary())
-    print("\nParameters:")
-    print(result.params)
-    print("\nP-values:")
-    print(result.pvalues)
+or_size = odds_ratio_and_ci("size_diff")
+or_loc = odds_ratio_and_ci("loc_diff")
 
-    # Simple win-rate comparisons for interpretability.
-    df["focal_larger"] = (df["rel_group_size"] > 0).astype(int)
-    df["focal_home_adv"] = (df["home_adv_100"] > 0).astype(int)
+# P-values
+pvals = res.pvalues
 
-    print("\nWin rate by focal_larger (1=focal larger group):")
-    print(df.groupby("focal_larger")["win"].mean())
+# Also fit alternative with log size ratio to ensure robustness
+X_alt = pd.DataFrame({
+    "log_size_ratio": log_size_ratio,
+    "loc_diff": loc_diff,
+})
+X_alt_std = (X_alt - X_alt.mean()) / X_alt.std(ddof=0)
+X_alt_std = sm.add_constant(X_alt_std)
+res_alt = sm.Logit(win, X_alt_std).fit(disp=False)
 
-    print("\nWin rate by focal_home_adv (1=focal closer to home center):")
-    print(df.groupby("focal_home_adv")["win"].mean())
+summary = {
+    "n": int(len(df)),
+    "pvalues_std": {k: float(v) for k, v in pvals.items()},
+    "odds_ratio_std": {
+        "size_diff": {"or": or_size[0], "ci_low": or_size[1], "ci_high": or_size[2]},
+        "loc_diff": {"or": or_loc[0], "ci_low": or_loc[1], "ci_high": or_loc[2]},
+    },
+    "alt_pvalues_std": {k: float(v) for k, v in res_alt.pvalues.items()},
+}
 
-    # Univariate logistic regressions for robustness checks.
-    print("\nUnivariate logit: win ~ rel_group_size")
-    X_rel = sm.add_constant(df[["rel_group_size"]])
-    res_rel = sm.Logit(y, X_rel).fit(disp=False)
-    print(res_rel.summary())
-    print("Params:", res_rel.params.to_dict())
-    print("P-values:", res_rel.pvalues.to_dict())
-
-    print("\nUnivariate logit: win ~ home_adv_100")
-    X_home = sm.add_constant(df[["home_adv_100"]])
-    res_home = sm.Logit(y, X_home).fit(disp=False)
-    print(res_home.summary())
-    print("Params:", res_home.params.to_dict())
-    print("P-values:", res_home.pvalues.to_dict())
-
-    print("\nUnivariate logit: win ~ focal_larger (binary)")
-    X_fl = sm.add_constant(df[["focal_larger"]])
-    res_fl = sm.Logit(y, X_fl).fit(disp=False)
-    print(res_fl.summary())
-    print("Params:", res_fl.params.to_dict())
-    print("P-values:", res_fl.pvalues.to_dict())
-
-    print("\nUnivariate logit: win ~ focal_home_adv (binary)")
-    X_fh = sm.add_constant(df[["focal_home_adv"]])
-    res_fh = sm.Logit(y, X_fh).fit(disp=False)
-    print(res_fh.summary())
-    print("Params:", res_fh.params.to_dict())
-    print("P-values:", res_fh.pvalues.to_dict())
-
-
-if __name__ == "__main__":
-    main()
+with open("analysis_results.json", "w") as f:
+    json.dump(summary, f, indent=2)

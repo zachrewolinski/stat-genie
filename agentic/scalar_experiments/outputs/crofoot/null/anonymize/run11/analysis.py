@@ -1,73 +1,95 @@
+import json
 import pandas as pd
 import numpy as np
 import statsmodels.api as sm
 
+# Load data
+df = pd.read_csv("crofoot.csv")
 
-def main() -> None:
-    df = pd.read_csv("crofoot.csv")
+# Outcome: focal win (1) vs other win (0)
+y = df["feature4"].astype(int)
 
-    # Rename for clarity
-    df = df.rename(
-        columns={
-            "feature4": "win",  # 1 if focal won
-            "feature5": "focal_dist",
-            "feature6": "other_dist",
-            "feature7": "focal_size",
-            "feature8": "other_size",
-        }
-    )
+# Predictors
+rel_group_size = df["feature7"] - df["feature8"]
+location_index = df["feature6"] - df["feature5"]  # positive => contest closer to focal center
 
-    # Relative group size: focal minus other (positive = focal larger)
-    df["size_diff"] = df["focal_size"] - df["other_size"]
-    df["size_advantage"] = (df["size_diff"] > 0).astype(int)
+# Standardize predictors for comparable effect sizes
+X = pd.DataFrame({
+    "rel_group_size": rel_group_size,
+    "location_index": location_index,
+})
 
-    # Contest location advantage: other_dist - focal_dist
-    # Positive values mean focal group is closer to its home-range center
-    df["loc_adv"] = df["other_dist"] - df["focal_dist"]
-    df["home_advantage"] = (df["loc_adv"] > 0).astype(int)
+X_std = (X - X.mean()) / X.std(ddof=0)
+X_std = sm.add_constant(X_std, has_constant="add")
 
-    print("Number of contests:", len(df))
-    print()
+# Logistic regression
+model = sm.Logit(y, X_std)
+result = model.fit(disp=False)
 
-    # Descriptive win rates by size advantage
-    print("Win rate by size advantage (focal larger vs not):")
-    size_win_table = pd.crosstab(df["size_advantage"], df["win"], normalize="index")
-    print(size_win_table)
-    print()
+# Also compute unstandardized model for interpretability
+X_raw = sm.add_constant(X, has_constant="add")
+model_raw = sm.Logit(y, X_raw)
+result_raw = model_raw.fit(disp=False)
 
-    # Descriptive win rates by home-range advantage
-    print("Win rate by home-range advantage (focal closer to its center vs not):")
-    home_win_table = pd.crosstab(df["home_advantage"], df["win"], normalize="index")
-    print(home_win_table)
-    print()
+# Predicted probability difference across +/-1 SD of each predictor
+# Use standardized model: coefficient corresponds to log-odds change per 1 SD.
 
-    # Logistic regression: outcome on relative group size and location advantage
-    y = df["win"]
-    X = df[["size_diff", "loc_adv"]]
-    X = sm.add_constant(X)
-    model = sm.Logit(y, X).fit(disp=False)
-    print("Logistic regression: win ~ size_diff + loc_adv")
-    print(model.summary())
-    print()
-    print("Odds ratios:")
-    print(np.exp(model.params))
-    print()
+# Helper to compute odds ratio and CI for standardized coefficients
+params = result.params
+conf = result.conf_int()
 
-    # Univariate models for robustness
-    X_size = sm.add_constant(df[["size_diff"]])
-    model_size = sm.Logit(y, X_size).fit(disp=False)
-    print("Univariate logistic regression: win ~ size_diff")
-    print(model_size.summary())
-    print("Odds ratio (size_diff):", np.exp(model_size.params["size_diff"]))
-    print()
+summary = {
+    "n": int(len(df)),
+    "rel_group_size_coef_std": float(params["rel_group_size"]),
+    "rel_group_size_p": float(result.pvalues["rel_group_size"]),
+    "rel_group_size_or_std": float(np.exp(params["rel_group_size"])),
+    "rel_group_size_or_ci_std": [float(np.exp(conf.loc["rel_group_size", 0])), float(np.exp(conf.loc["rel_group_size", 1]))],
+    "location_index_coef_std": float(params["location_index"]),
+    "location_index_p": float(result.pvalues["location_index"]),
+    "location_index_or_std": float(np.exp(params["location_index"])),
+    "location_index_or_ci_std": [float(np.exp(conf.loc["location_index", 0])), float(np.exp(conf.loc["location_index", 1]))],
+    "model_pseudo_r2": float(result.prsquared),
+}
 
-    X_loc = sm.add_constant(df[["loc_adv"]])
-    model_loc = sm.Logit(y, X_loc).fit(disp=False)
-    print("Univariate logistic regression: win ~ loc_adv")
-    print(model_loc.summary())
-    print("Odds ratio (loc_adv):", np.exp(model_loc.params["loc_adv"]))
+# Compute predicted probabilities for illustrative contrasts (raw model)
+# baseline at mean predictors
+mean_pred = X.mean()
 
+# For relative group size: compare -1 SD vs +1 SD while holding location at mean
+rel_sd = X["rel_group_size"].std(ddof=0)
+loc_mean = mean_pred["location_index"]
 
-if __name__ == "__main__":
-    main()
+X_low = sm.add_constant(
+    pd.DataFrame({"rel_group_size": [mean_pred["rel_group_size"] - rel_sd], "location_index": [loc_mean]}),
+    has_constant="add",
+)
+X_high = sm.add_constant(
+    pd.DataFrame({"rel_group_size": [mean_pred["rel_group_size"] + rel_sd], "location_index": [loc_mean]}),
+    has_constant="add",
+)
 
+p_low = float(result_raw.predict(X_low)[0])
+p_high = float(result_raw.predict(X_high)[0])
+
+# For location index: compare -1 SD vs +1 SD while holding rel size at mean
+loc_sd = X["location_index"].std(ddof=0)
+rel_mean = mean_pred["rel_group_size"]
+
+X_loc_low = sm.add_constant(
+    pd.DataFrame({"rel_group_size": [rel_mean], "location_index": [mean_pred["location_index"] - loc_sd]}),
+    has_constant="add",
+)
+X_loc_high = sm.add_constant(
+    pd.DataFrame({"rel_group_size": [rel_mean], "location_index": [mean_pred["location_index"] + loc_sd]}),
+    has_constant="add",
+)
+
+p_loc_low = float(result_raw.predict(X_loc_low)[0])
+p_loc_high = float(result_raw.predict(X_loc_high)[0])
+
+summary["prob_rel_group_size_minus1sd"] = p_low
+summary["prob_rel_group_size_plus1sd"] = p_high
+summary["prob_location_minus1sd"] = p_loc_low
+summary["prob_location_plus1sd"] = p_loc_high
+
+print(json.dumps(summary, indent=2))

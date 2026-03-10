@@ -1,0 +1,14 @@
+import json
+
+response = 60
+explanation = (
+    "I defined efficiency as nuts_opened per second and modeled nut-cracking rate using a GLM with a log(seconds) offset. "
+    "A Poisson model showed heavy overdispersion (Pearson chi2/df ~32), so a negative binomial rate model is more appropriate. "
+    "In the negative binomial model (n=84), sex shows evidence of an effect: males have about half the nut-cracking rate of females "
+    "(rate ratio ~0.50, p=0.012). Age is not significant (p=0.308) and receiving help is not significant (p=0.144), and the "
+    "OLS model on rate also shows no significant effects. The help group is small (7 sessions), limiting power. "
+    "Overall, there is modest evidence that sex influences efficiency, but little evidence that age or help do, so the answer is a weak yes."
+)
+
+with open('conclusion.txt', 'w') as f:
+    json.dump({"response": response, "explanation": explanation}, f)

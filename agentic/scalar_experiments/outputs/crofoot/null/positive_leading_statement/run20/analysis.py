@@ -1,172 +1,65 @@
-import json
-from pathlib import Path
-
-import numpy as np
 import pandas as pd
-import statsmodels.api as sm
+import numpy as np
+import statsmodels.formula.api as smf
 
+# Load data
+df = pd.read_csv('crofoot.csv')
 
-def main() -> None:
-    # Load metadata and data
-    info = json.loads(Path("info.json").read_text())
-    df = pd.read_csv("crofoot.csv")
+# Create predictors
+# Relative group size: difference and ratio
 
-    # Construct key predictors according to research question
-    # Relative group size: focal minus other (positive if focal larger)
-    df["rel_n"] = df["n_focal"] - df["n_other"]
+df['size_diff'] = df['n_focal'] - df['n_other']
+df['size_ratio'] = df['n_focal'] / df['n_other']
 
-    # Contest location: relative centrality (other distance minus focal distance)
-    # Positive values: contest closer to focal home-range center
-    df["rel_dist"] = df["dist_other"] - df["dist_focal"]
+# Location advantage: positive if contest closer to focal center than other center
 
-    # Standardise predictors for interpretability
-    for col in ["rel_n", "rel_dist"]:
-        mean = df[col].mean()
-        std = df[col].std(ddof=0)
-        if std == 0:
-            df[f"z_{col}"] = 0.0
-        else:
-            df[f"z_{col}"] = (df[col] - mean) / std
+df['loc_adv'] = df['dist_other'] - df['dist_focal']
 
-    y = df["win"]
-    X = df[["z_rel_n", "z_rel_dist"]]
-    X = sm.add_constant(X)
+# Standardize continuous predictors for comparability
+for col in ['size_diff', 'loc_adv']:
+    df[f'z_{col}'] = (df[col] - df[col].mean()) / df[col].std(ddof=0)
 
-    logit_model = sm.Logit(y, X)
-    try:
-        result = logit_model.fit(disp=0)
-    except Exception as exc:  # pragma: no cover - defensive
-        explanation = (
-            "Failed to fit logistic regression model due to: "
-            f"{exc}. Cannot robustly assess effects of relative "
-            "group size and contest location on win probability."
-        )
-        output = {"response": 50, "explanation": explanation}
-        Path("conclusion.txt").write_text(json.dumps(output))
-        return
+# Logistic regression with size_diff and loc_adv
+model = smf.logit('win ~ z_size_diff + z_loc_adv', data=df).fit(disp=False)
 
-    # Collect coefficient estimates and p-values
-    params = result.params
-    pvalues = result.pvalues
+# Also test size_ratio and loc_adv
 
-    coef_rel_n = float(params.get("z_rel_n", np.nan))
-    p_rel_n = float(pvalues.get("z_rel_n", np.nan))
-    coef_rel_dist = float(params.get("z_rel_dist", np.nan))
-    p_rel_dist = float(pvalues.get("z_rel_dist", np.nan))
+df['z_size_ratio'] = (df['size_ratio'] - df['size_ratio'].mean()) / df['size_ratio'].std(ddof=0)
+model_ratio = smf.logit('win ~ z_size_ratio + z_loc_adv', data=df).fit(disp=False)
 
-    # Determine strength of evidence
-    sig_rel_n = p_rel_n < 0.05
-    sig_rel_dist = p_rel_dist < 0.05
+# Simple models for each predictor
+model_size_only = smf.logit('win ~ z_size_diff', data=df).fit(disp=False)
+model_loc_only = smf.logit('win ~ z_loc_adv', data=df).fit(disp=False)
 
-    # Map statistical evidence to Likert-style 0-100 response
-    # Start from neutral 50 and adjust
-    score = 50
+# Pseudo R2 (McFadden)
 
-    # Effect of relative group size
-    if sig_rel_n and coef_rel_n > 0:
-        score += 20
-    elif sig_rel_n and coef_rel_n < 0:
-        score -= 10
+def mcfadden(m):
+    return 1 - m.llf / m.llnull
 
-    # Effect of contest location (closer to focal center)
-    if sig_rel_dist and coef_rel_dist > 0:
-        score += 20
-    elif sig_rel_dist and coef_rel_dist < 0:
-        score -= 10
+results = {
+    'n': len(df),
+    'model': model.params.to_dict(),
+    'model_pvalues': model.pvalues.to_dict(),
+    'model_or': np.exp(model.params).to_dict(),
+    'model_conf': model.conf_int().rename(columns={0: 'low', 1: 'high'}).to_dict(),
+    'model_mcfadden': mcfadden(model),
+    'model_ratio': model_ratio.params.to_dict(),
+    'model_ratio_pvalues': model_ratio.pvalues.to_dict(),
+    'model_ratio_or': np.exp(model_ratio.params).to_dict(),
+    'model_ratio_mcfadden': mcfadden(model_ratio),
+    'model_size_only_pvalues': model_size_only.pvalues.to_dict(),
+    'model_loc_only_pvalues': model_loc_only.pvalues.to_dict(),
+}
 
-    # Cap within [0, 100] and convert to int
-    score = int(min(max(score, 0), 100))
+# Predictive effect: marginal effect for 1 SD change
+me = model.get_margeff(at='mean').summary_frame()
+results['marginal_effects'] = me.to_dict()
 
-    # Compose explanation
-    lines = []
-    rq = info.get("research_questions", [""])[0]
-    lines.append(
-        "Research question: "
-        "Do relative group size and contest location influence the probability "
-        "of a capuchin group winning an intergroup contest?"
-    )
-    lines.append(
-        "I addressed this using a logistic regression with win (1 = focal group "
-        "won, 0 = other group won) as the outcome and two predictors: (i) "
-        "relative group size (focal minus other group size) and (ii) relative "
-        "contest location (other group distance from its home-range centre minus "
-        "focal group distance)."
-    )
+# Crosstab for intuitive check: win rate by size_diff sign and loc_adv sign
+df['size_diff_sign'] = np.where(df['size_diff'] >= 0, 'focal>=other', 'focal<other')
+df['loc_adv_sign'] = np.where(df['loc_adv'] >= 0, 'closer_to_focal', 'closer_to_other')
 
-    lines.append(
-        "Both predictors were standardised, and I estimated a logistic regression "
-        f"on {len(df)} contests. The coefficient for relative group size was "
-        f"{coef_rel_n:.3f} with p-value {p_rel_n:.3f}, and the coefficient for "
-        f"relative contest location was {coef_rel_dist:.3f} with p-value "
-        f"{p_rel_dist:.3f}."
-    )
+ctab = df.groupby(['size_diff_sign', 'loc_adv_sign'])['win'].agg(['mean', 'count'])
+results['ctab'] = ctab.reset_index().to_dict(orient='records')
 
-    if sig_rel_n or sig_rel_dist:
-        direction_parts = []
-        if sig_rel_n:
-            if coef_rel_n > 0:
-                direction_parts.append(
-                    "larger focal groups had a significantly higher probability "
-                    "of winning than smaller focal groups"
-                )
-            else:
-                direction_parts.append(
-                    "larger focal groups had a significantly lower probability "
-                    "of winning than smaller focal groups"
-                )
-        if sig_rel_dist:
-            if coef_rel_dist > 0:
-                direction_parts.append(
-                    "contests occurring closer to the focal group's home-range "
-                    "centre were significantly more likely to be won by the focal group"
-                )
-            else:
-                direction_parts.append(
-                    "contests occurring closer to the other group's home-range "
-                    "centre were significantly more likely to be won by the other group"
-                )
-
-        lines.append(
-            "Taken together, these results provide statistically significant "
-            "evidence that " + " and ".join(direction_parts) + ", indicating that "
-            "both relative group size and contest location influence contest "
-            "outcomes in this dataset."
-        )
-    else:
-        lines.append(
-            "Neither relative group size nor contest location achieved "
-            "conventional statistical significance (p < 0.05), so there is "
-            "insufficient evidence in this dataset to claim that they affect "
-            "the probability of winning."
-        )
-
-    if score >= 60:
-        lines.append(
-            f"Based on these analyses, I answer the research question as a "
-            f"'Yes' with confidence corresponding to {score} on a 0–100 scale, "
-            "where higher values indicate stronger evidence that relative group "
-            "size and contest location influence win probability."
-        )
-    elif score <= 40:
-        lines.append(
-            f"Based on these analyses, I answer the research question as a "
-            f"'No' with confidence corresponding to {score} on a 0–100 scale, "
-            "reflecting limited evidence that these variables influence win "
-            "probability in this sample."
-        )
-    else:
-        lines.append(
-            f"Based on these analyses, the evidence is equivocal; I give an "
-            f"intermediate score of {score} on a 0–100 scale, reflecting "
-            "uncertain but suggestive effects of relative group size and contest "
-            "location on win probability."
-        )
-
-    explanation = " ".join(lines)
-
-    output = {"response": score, "explanation": explanation}
-    Path("conclusion.txt").write_text(json.dumps(output))
-
-
-if __name__ == "__main__":
-    main()
+print(results)

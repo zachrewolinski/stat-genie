@@ -1,56 +1,70 @@
+import json
 import pandas as pd
 import numpy as np
 import statsmodels.api as sm
 
+# Load data
+path = "crofoot.csv"
+df = pd.read_csv(path)
 
-def main() -> None:
-    df = pd.read_csv("crofoot.csv")
+# Focus on relevant columns
+needed = ["win", "n_focal", "n_other", "dist_focal", "dist_other"]
+missing = [c for c in needed if c not in df.columns]
+if missing:
+    raise ValueError(f"Missing columns: {missing}")
 
-    # Relative group size: positive values mean the focal group is larger.
-    df["rel_group_size"] = df["n_focal"] - df["n_other"]
+# Construct predictors
+# Relative group size: difference in group size (focal - other)
+df["rel_size"] = df["n_focal"] - df["n_other"]
+# Relative location: positive means contest is closer to focal home range center
+# (other is farther from its center than focal is from its center)
+df["rel_location"] = df["dist_other"] - df["dist_focal"]
 
-    # Relative location: positive values mean the focal group is farther
-    # from its home range center than the other group (disadvantage).
-    df["rel_dist"] = df["dist_focal"] - df["dist_other"]
+# Drop rows with missing values
+model_df = df[["win", "rel_size", "rel_location"]].dropna()
 
-    # Simple categorical indicators for descriptive summaries.
-    df["focal_larger"] = (df["rel_group_size"] > 0).astype(int)
-    df["focal_closer_home"] = (df["rel_dist"] < 0).astype(int)
+# Standardize predictors for interpretability
+model_df["rel_size_z"] = (model_df["rel_size"] - model_df["rel_size"].mean()) / model_df["rel_size"].std(ddof=0)
+model_df["rel_location_z"] = (model_df["rel_location"] - model_df["rel_location"].mean()) / model_df["rel_location"].std(ddof=0)
 
-    y = df["win"]
-    X = df[["rel_group_size", "rel_dist"]]
-    X = sm.add_constant(X, has_constant="add")
+X = model_df[["rel_size_z", "rel_location_z"]]
+X = sm.add_constant(X)
+y = model_df["win"]
 
-    model = sm.Logit(y, X).fit(disp=False)
+# Fit logistic regression
+logit = sm.Logit(y, X)
+res = logit.fit(disp=False)
 
-    params = model.params
-    pvalues = model.pvalues
-    odds_ratios = np.exp(params)
+# Extract key stats
+params = res.params.to_dict()
+conf_int = res.conf_int().rename(columns={0: "ci_low", 1: "ci_high"}).to_dict(orient="index")
+pvalues = res.pvalues.to_dict()
 
-    print("Logistic regression: win ~ rel_group_size + rel_dist")
-    print(model.summary2())
-    print("\nOdds ratios:")
-    for name, value in odds_ratios.items():
-        print(f"  {name}: {value:.3f}")
+# Compute odds ratios for one SD increase
+odds_ratios = {k: float(np.exp(v)) for k, v in params.items() if k != "const"}
 
-    print("\nP-values:")
-    for name, value in pvalues.items():
-        print(f"  {name}: {value:.4f}")
+# Simple effect size: change in predicted probability from -1 SD to +1 SD for each predictor
+base = X.copy()
 
-    # Descriptive win rates by relative group size and location.
-    win_rate_larger = df.loc[df["focal_larger"] == 1, "win"].mean()
-    win_rate_smaller_or_equal = df.loc[df["focal_larger"] == 0, "win"].mean()
+# Function to compute predicted prob for given z values
 
-    win_rate_home = df.loc[df["focal_closer_home"] == 1, "win"].mean()
-    win_rate_away_or_neutral = df.loc[df["focal_closer_home"] == 0, "win"].mean()
+def pred_prob(size_z, loc_z):
+    return float(res.predict([1.0, size_z, loc_z])[0])
 
-    print("\nDescriptive win rates:")
-    print(f"  Focal larger group win rate: {win_rate_larger:.3f}")
-    print(f"  Focal smaller/equal group win rate: {win_rate_smaller_or_equal:.3f}")
-    print(f"  Focal closer to home win rate: {win_rate_home:.3f}")
-    print(f"  Focal farther/equal distance win rate: {win_rate_away_or_neutral:.3f}")
+prob_size_minus = pred_prob(-1.0, 0.0)
+prob_size_plus = pred_prob(1.0, 0.0)
+prob_loc_minus = pred_prob(0.0, -1.0)
+prob_loc_plus = pred_prob(0.0, 1.0)
 
+results = {
+    "n": int(len(model_df)),
+    "params": params,
+    "pvalues": pvalues,
+    "conf_int": conf_int,
+    "odds_ratios": odds_ratios,
+    "prob_change_rel_size": float(prob_size_plus - prob_size_minus),
+    "prob_change_rel_location": float(prob_loc_plus - prob_loc_minus),
+}
 
-if __name__ == "__main__":
-    main()
-
+with open("analysis_results.json", "w") as f:
+    json.dump(results, f, indent=2)

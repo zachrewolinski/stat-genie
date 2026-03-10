@@ -1,38 +1,59 @@
 import pandas as pd
 import statsmodels.api as sm
+import numpy as np
 
+# Load data
 
-def main() -> None:
-    df = pd.read_csv("crofoot.csv")
+df = pd.read_csv('crofoot.csv')
 
-    # Outcome: 1 if focal group won, 0 otherwise
-    y = df["feature4"]
+# Rename for clarity
 
-    # Relative group size: focal group size minus other group size
-    df["rel_group_size"] = df["feature7"] - df["feature8"]
+df = df.rename(columns={
+    'feature4': 'focal_win',
+    'feature5': 'focal_dist',
+    'feature6': 'other_dist',
+    'feature7': 'focal_size',
+    'feature8': 'other_size'
+})
 
-    # Location advantage: how much closer the focal group is to the center of
-    # its own home range compared with the other group.
-    # Positive values mean the focal group is more "at home".
-    df["loc_advantage"] = df["feature6"] - df["feature5"]
+# Relative group size and relative location
 
-    X = df[["rel_group_size", "loc_advantage"]]
-    X = sm.add_constant(X)
+df['size_diff'] = df['focal_size'] - df['other_size']
+df['size_ratio'] = df['focal_size'] / df['other_size']
+df['dist_diff'] = df['focal_dist'] - df['other_dist']
 
-    logit_model = sm.Logit(y, X)
-    result = logit_model.fit(disp=False)
+# Logistic regression with size_diff and dist_diff
 
-    print("Logistic regression: focal win ~ rel_group_size + loc_advantage")
-    print(result.summary())
+X = df[['size_diff', 'dist_diff']]
+X = sm.add_constant(X)
+y = df['focal_win']
 
-    # Also fit single-predictor models for robustness
-    for col in ["rel_group_size", "loc_advantage"]:
-        Xi = sm.add_constant(df[[col]])
-        model_i = sm.Logit(y, Xi).fit(disp=False)
-        print(f"\nLogistic regression with single predictor: {col}")
-        print(model_i.summary())
+model = sm.Logit(y, X)
+result = model.fit(disp=False)
 
+# Also test size_ratio with dist_diff to check robustness
 
-if __name__ == "__main__":
-    main()
+X2 = df[['size_ratio', 'dist_diff']]
+X2 = sm.add_constant(X2)
+model2 = sm.Logit(y, X2)
+result2 = model2.fit(disp=False)
 
+# Output summary metrics
+
+print('Model 1 (size_diff, dist_diff)')
+print(result.summary2().tables[1])
+print('\nModel 2 (size_ratio, dist_diff)')
+print(result2.summary2().tables[1])
+
+# Simple descriptive: win rate by size_diff sign and dist_diff sign
+
+df['size_adv'] = np.where(df['size_diff'] > 0, 'larger', np.where(df['size_diff'] < 0, 'smaller', 'equal'))
+df['location_adv'] = np.where(df['dist_diff'] < 0, 'focal_closer', np.where(df['dist_diff'] > 0, 'other_closer', 'equal'))
+
+print('\nWin rate by size_adv')
+print(df.groupby('size_adv')['focal_win'].mean())
+print('\nWin rate by location_adv')
+print(df.groupby('location_adv')['focal_win'].mean())
+
+print('\nCounts')
+print(df[['size_adv', 'location_adv']].value_counts())

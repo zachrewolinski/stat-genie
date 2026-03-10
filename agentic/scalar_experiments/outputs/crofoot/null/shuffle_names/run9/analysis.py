@@ -1,67 +1,54 @@
-import json
-
-import numpy as np
 import pandas as pd
+import numpy as np
 import statsmodels.api as sm
 
 
-def main() -> None:
-    df = pd.read_csv("crofoot.csv")
+def main():
+    df = pd.read_csv('crofoot.csv')
 
-    # Outcome: 1 if focal group won, 0 otherwise
-    y = df["m_focal"]
+    # Map variables based on metadata descriptions (names were shuffled)
+    y = df['m_focal']  # 1 if focal won contest
 
-    # Group sizes
-    focal_size = df["f_other"]
-    other_size = df["win"]
-    df["rel_size"] = focal_size - other_size  # positive when focal group is larger
+    focal_size = df['f_other']  # number of individuals in focal group
+    other_size = df['win']      # number of individuals in other group
+    rel_size = focal_size - other_size
 
-    # Contest location: distance of each group from the center of its own home range
-    df["focal_distance"] = df["m_other"]
-    df["other_distance"] = df["n_focal"]
-    df["distance_diff"] = df["other_distance"] - df["focal_distance"]
-    df["focal_closer"] = (df["focal_distance"] < df["other_distance"]).astype(int)
+    dist_focal = df['m_other']  # distance of focal group from center of its home range
+    dist_other = df['n_focal']  # distance of other group from center of its home range
+    rel_location = dist_focal - dist_other
 
-    # Model 1: effect of relative group size
-    X_size = sm.add_constant(df[["rel_size"]])
-    model_size = sm.Logit(y, X_size).fit(disp=False)
+    # Prepare design matrix
+    X = pd.DataFrame({
+        'rel_size': rel_size,
+        'rel_location': rel_location,
+    })
+    X = sm.add_constant(X)
 
-    # Model 2: effect of contest location (continuous difference and indicator)
-    X_loc = sm.add_constant(df[["distance_diff", "focal_closer"]])
-    model_loc = sm.Logit(y, X_loc).fit(disp=False)
+    model = sm.Logit(y, X)
+    result = model.fit(disp=False)
 
-    # Model 3: combined model
-    X_both = sm.add_constant(df[["rel_size", "distance_diff", "focal_closer"]])
-    model_both = sm.Logit(y, X_both).fit(disp=False)
+    # Also fit model with standardized predictors for effect size interpretation
+    Xz = (X[['rel_size', 'rel_location']] - X[['rel_size', 'rel_location']].mean()) / X[['rel_size', 'rel_location']].std(ddof=0)
+    Xz = sm.add_constant(Xz)
+    model_z = sm.Logit(y, Xz)
+    result_z = model_z.fit(disp=False)
 
-    def summarize_model(name: str, model) -> dict:
-        params = model.params
-        pvalues = model.pvalues
-        conf_int = model.conf_int()
+    # Compute marginal effect at mean for standardized predictors
+    try:
+        margeff = result_z.get_margeff(at='mean')
+        me_table = margeff.summary_frame()
+    except Exception:
+        me_table = None
 
-        summary = {
-            "llf": float(model.llf),
-            "aic": float(model.aic),
-            "bic": float(model.bic),
-            "nobs": int(model.nobs),
-            "params": {},
-        }
-        for term in params.index:
-            summary["params"][term] = {
-                "coef": float(params[term]),
-                "pvalue": float(pvalues[term]),
-                "conf_int_95": [float(conf_int.loc[term, 0]), float(conf_int.loc[term, 1])],
-                "odds_ratio": float(np.exp(params[term])),
-            }
-        return {name: summary}
-
-    results = {}
-    results.update(summarize_model("size_only", model_size))
-    results.update(summarize_model("location_only", model_loc))
-    results.update(summarize_model("combined", model_both))
-
-    print(json.dumps(results, indent=2))
+    print('N', len(df))
+    print('\nLogit (raw predictors)')
+    print(result.summary())
+    print('\nLogit (standardized predictors)')
+    print(result_z.summary())
+    if me_table is not None:
+        print('\nMarginal effects at mean (standardized predictors)')
+        print(me_table)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

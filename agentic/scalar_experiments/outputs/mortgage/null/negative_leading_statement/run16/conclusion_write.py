@@ -1,0 +1,19 @@
+import json
+
+output = {
+    "response": 35,
+    "explanation": (
+        "Using mortgage.csv (n=2355 with complete covariates), the unadjusted denial rate is "
+        "11.4% for male applicants (212/1867) vs 13.9% for female applicants (69/495). "
+        "A chi-square test of the 2x2 table is not significant (p=0.114), so the bivariate "
+        "difference is not statistically supported. In a multivariable logistic regression "
+        "controlling for race, housing expense ratio, self-employment, marital status, credit scores, "
+        "bad credit history, debt-to-income ratio, loan-to-value ratio, and PMI denial, the female "
+        "coefficient is 0.248 (odds ratio 1.28, 95% CI 0.96–1.72; p=0.097) with a marginal effect of "
+        "+2.6 percentage points (p=0.096). Because the effect is small and not statistically "
+        "significant at the 0.05 level, the evidence does not support a gender effect on approval."
+    ),
+}
+
+with open("conclusion.txt", "w", encoding="utf-8") as f:
+    json.dump(output, f)

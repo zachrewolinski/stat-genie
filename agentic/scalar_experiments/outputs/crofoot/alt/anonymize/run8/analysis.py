@@ -1,61 +1,99 @@
 import pandas as pd
 import numpy as np
 import statsmodels.api as sm
+from pathlib import Path
 
+# Load data
+csv_path = Path('crofoot.csv')
 
-def main() -> None:
-    df = pd.read_csv("crofoot.csv")
+df = pd.read_csv(csv_path)
 
-    # Outcome: 1 if focal group wins, 0 otherwise
-    df["outcome"] = df["feature4"]
+# Map columns based on info.json descriptions
+# feature4: 1 if focal won contest, 0 if other won
+# feature5: distance of focal from center of its home range
+# feature6: distance of other from center of its home range
+# feature7: number of individuals in focal group
+# feature8: number of individuals in other group
 
-    # Relative group size: focal minus other
-    df["size_diff"] = df["feature7"] - df["feature8"]
-    df["focal_larger"] = (df["size_diff"] > 0).astype(int)
-    df["focal_smaller"] = (df["size_diff"] < 0).astype(int)
+# Derived predictors
+# Relative group size (difference and ratio)
+df['size_diff'] = df['feature7'] - df['feature8']
+df['size_ratio'] = df['feature7'] / df['feature8']
 
-    # Contest location advantage: 1 if focal group is closer to its home-range center
-    df["focal_closer"] = (df["feature5"] < df["feature6"]).astype(int)
+# Relative contest location: positive means contest closer to focal (other is farther)
+# If focal distance < other distance, then contest is closer to focal
+# We use other_distance - focal_distance so positive favors focal
 
-    print("Basic description of key variables:")
-    print(df[["outcome", "size_diff", "focal_closer"]].describe(), end="\n\n")
+df['loc_diff'] = df['feature6'] - df['feature5']
+# Also compute proportion closer to focal (0 to 1). lower means closer to focal
+# Using focal distance / (focal + other)
+df['loc_prop_focal'] = df['feature5'] / (df['feature5'] + df['feature6'])
 
-    # Win rates by relative group size category
-    size_cat = np.select(
-        [
-            df["size_diff"] > 0,
-            df["size_diff"] < 0,
-        ],
-        ["focal_larger", "focal_smaller"],
-        default="equal_size",
-    )
-    df["size_category"] = size_cat
+# Response
+y = df['feature4']
 
-    print("Win rate by relative group size category (focal vs other):")
-    print(df.groupby("size_category")["outcome"].mean(), end="\n\n")
+# Helper to fit logistic regression and output summary metrics
 
-    # Win rates by contest location advantage
-    print("Win rate by contest location (focal closer vs not):")
-    print(df.groupby("focal_closer")["outcome"].mean(), end="\n\n")
+def fit_logit(X, name):
+    X = sm.add_constant(X, has_constant='add')
+    model = sm.Logit(y, X)
+    res = model.fit(disp=False)
+    params = res.params
+    conf = res.conf_int()
+    pvals = res.pvalues
+    odds = np.exp(params)
+    conf_odds = np.exp(conf)
+    out = {
+        'name': name,
+        'n': int(res.nobs),
+        'params': params.to_dict(),
+        'pvalues': pvals.to_dict(),
+        'odds_ratio': odds.to_dict(),
+        'odds_ci': {k: [float(conf_odds.loc[k, 0]), float(conf_odds.loc[k, 1])] for k in conf_odds.index},
+        'llf': float(res.llf),
+        'aic': float(res.aic),
+    }
+    return out
 
-    # Logistic regression: outcome ~ size_diff + focal_closer
-    X = df[["size_diff", "focal_closer"]]
-    X = sm.add_constant(X)
-    y = df["outcome"]
+# Models
+models = []
 
-    logit_model = sm.Logit(y, X).fit(disp=False)
+# Model with size_diff and loc_diff
+models.append(fit_logit(df[['size_diff', 'loc_diff']], 'size_diff + loc_diff'))
 
-    print("Logistic regression: outcome ~ size_diff + focal_closer")
-    print(logit_model.summary(), end="\n\n")
+# Model with size_ratio and loc_diff
+models.append(fit_logit(df[['size_ratio', 'loc_diff']], 'size_ratio + loc_diff'))
 
-    odds_ratios = np.exp(logit_model.params)
-    print("Odds ratios:")
-    print(odds_ratios, end="\n\n")
+# Model with size_diff and loc_prop_focal (lower = closer to focal)
+models.append(fit_logit(df[['size_diff', 'loc_prop_focal']], 'size_diff + loc_prop_focal'))
 
-    print("p-values:")
-    print(logit_model.pvalues, end="\n\n")
+# Model with size_ratio and loc_prop_focal
+models.append(fit_logit(df[['size_ratio', 'loc_prop_focal']], 'size_ratio + loc_prop_focal'))
 
+# Single predictor models
+models.append(fit_logit(df[['size_diff']], 'size_diff only'))
+models.append(fit_logit(df[['loc_diff']], 'loc_diff only'))
 
-if __name__ == "__main__":
-    main()
+# Save results
+results = {
+    'descriptives': {
+        'n': int(df.shape[0]),
+        'win_rate': float(df['feature4'].mean()),
+        'size_diff_mean': float(df['size_diff'].mean()),
+        'size_diff_std': float(df['size_diff'].std()),
+        'loc_diff_mean': float(df['loc_diff'].mean()),
+        'loc_diff_std': float(df['loc_diff'].std()),
+    },
+    'models': models,
+}
 
+import json
+Path('analysis_results.json').write_text(json.dumps(results, indent=2))
+
+# Print concise summary for quick inspection
+print('N:', results['descriptives']['n'])
+print('Win rate:', results['descriptives']['win_rate'])
+for m in models:
+    print('\nModel:', m['name'])
+    for k, v in m['params'].items():
+        print(f"  {k}: coef={v:.4f}, p={m['pvalues'][k]:.4g}, OR={m['odds_ratio'][k]:.3f}")

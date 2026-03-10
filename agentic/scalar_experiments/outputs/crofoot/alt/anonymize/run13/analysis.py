@@ -1,71 +1,64 @@
 import pandas as pd
 import numpy as np
-import statsmodels.formula.api as smf
+import statsmodels.api as sm
 
+# Load data
+path = "/home/chenwang/stat-genie/agentic/scalar_experiments/outputs/crofoot/alt/anonymize/run13/crofoot.csv"
+df = pd.read_csv(path)
 
-def main() -> None:
-    df = pd.read_csv("crofoot.csv")
+# Define variables
+# Relative group size: log ratio to make symmetric
+# Add small epsilon just in case
+rel_size = np.log(df["feature7"] / df["feature8"])
 
-    # Outcome: 1 if focal group won, 0 otherwise
-    df["win"] = df["feature4"].astype(int)
+# Contest location advantage: positive when contest is closer to focal group center
+loc_adv = df["feature6"] - df["feature5"]
 
-    # Relative group size: difference and ratio of group sizes (focal - other)
-    df["size_diff"] = df["feature7"] - df["feature8"]
-    df["size_ratio"] = df["feature7"] / df["feature8"]
+# Outcome
+y = df["feature4"]
 
-    # Contest location: distance of each group from the center of its home range
-    # Binary "home advantage" indicator: 1 if focal group is closer to its home-range center
-    df["focal_home_adv"] = (df["feature5"] < df["feature6"]).astype(int)
-    df["dist_diff"] = df["feature5"] - df["feature6"]
+# Prepare design matrix with intercept
+X = pd.DataFrame({
+    "rel_size": rel_size,
+    "loc_adv": loc_adv,
+})
+X = sm.add_constant(X)
 
-    print("Basic counts")
-    print(df[["win", "size_diff", "size_ratio", "focal_home_adv", "dist_diff"]].describe())
-    print()
+# Fit logistic regression
+model = sm.GLM(y, X, family=sm.families.Binomial())
+result = model.fit()
 
-    print("Win rate by relative group size (size_diff sign)")
-    df["size_cat"] = np.select(
-        [df["size_diff"] < 0, df["size_diff"] == 0, df["size_diff"] > 0],
-        ["focal_smaller", "same_size", "focal_larger"],
-    )
-    print(df.groupby("size_cat")["win"].mean())
-    print(df["size_cat"].value_counts())
-    print()
+# Also fit reduced models for comparison
+model_size = sm.GLM(y, sm.add_constant(X[["rel_size"]]), family=sm.families.Binomial()).fit()
+model_loc = sm.GLM(y, sm.add_constant(X[["loc_adv"]]), family=sm.families.Binomial()).fit()
 
-    print("Win rate by home-range advantage")
-    print(df.groupby("focal_home_adv")["win"].mean())
-    print(df["focal_home_adv"].value_counts())
-    print()
+# Likelihood ratio tests
+# Comparing full vs intercept-only
+model_null = sm.GLM(y, sm.add_constant(pd.DataFrame({"intercept": np.ones(len(y))})), family=sm.families.Binomial()).fit()
 
-    # Bivariate logistic regressions
-    print("Logit: win ~ size_diff")
-    m_size = smf.logit("win ~ size_diff", data=df).fit(disp=False)
-    print(m_size.summary())
-    print()
+from scipy import stats
 
-    print("Logit: win ~ focal_home_adv")
-    m_loc = smf.logit("win ~ focal_home_adv", data=df).fit(disp=False)
-    print(m_loc.summary())
-    print()
+def lr_test(full, reduced):
+    lr = 2 * (full.llf - reduced.llf)
+    df_diff = full.df_model - reduced.df_model
+    p = stats.chi2.sf(lr, df_diff)
+    return lr, df_diff, p
 
-    print("Logit: win ~ size_diff + focal_home_adv")
-    m_both = smf.logit("win ~ size_diff + focal_home_adv", data=df).fit(disp=False)
-    print(m_both.summary())
-    print()
+lr_full_vs_null = lr_test(result, model_null)
+lr_size_vs_null = lr_test(model_size, model_null)
+lr_loc_vs_null = lr_test(model_loc, model_null)
 
-    # Some simple effect summaries
-    def prob_from_model(model, **kwargs) -> float:
-        params = model.params
-        xbeta = params["Intercept"]
-        for name, value in kwargs.items():
-            xbeta += params.get(name, 0.0) * value
-        return float(1.0 / (1.0 + np.exp(-xbeta)))
+# Collect summary stats
+summary = {
+    "n": int(len(df)),
+    "coef": result.params.to_dict(),
+    "se": result.bse.to_dict(),
+    "pvalues": result.pvalues.to_dict(),
+    "llf": result.llf,
+    "aic": result.aic,
+    "lr_full_vs_null": lr_full_vs_null,
+    "lr_size_vs_null": lr_size_vs_null,
+    "lr_loc_vs_null": lr_loc_vs_null,
+}
 
-    print("Estimated win probabilities from joint model:")
-    for size_d in (-3, 0, 3):
-        for adv in (0, 1):
-            p = prob_from_model(m_both, size_diff=size_d, focal_home_adv=adv)
-            print(f" size_diff={size_d:+d}, focal_home_adv={adv} -> P(win)={p:.3f}")
-
-
-if __name__ == "__main__":
-    main()
+print(summary)

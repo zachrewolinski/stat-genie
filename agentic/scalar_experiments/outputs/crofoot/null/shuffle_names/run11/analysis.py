@@ -1,77 +1,81 @@
-import pandas as pd
+import json
 import numpy as np
-import statsmodels.formula.api as smf
+import pandas as pd
+import statsmodels.api as sm
 
+# Load data
+csv_path = 'crofoot.csv'
+df = pd.read_csv(csv_path)
 
-def main() -> None:
-    df = pd.read_csv("crofoot.csv")
+# Map variables based on info.json descriptions (names appear shuffled)
+# Outcome: m_focal (binary 0/1)
+# Relative group size: f_other (focal group size) vs win (other group size)
+# Contest location: m_other (distance of focal from its home range center) vs n_focal (distance of other from its center)
 
-    # Rename outcome for clarity
-    df["focal_win"] = df["m_focal"]
+outcome = df['m_focal']
 
-    # Relative group size: focal minus other
-    df["rel_group_size"] = df["f_other"] - df["win"]
-    df["rel_group_ratio"] = df["f_other"] / df["win"]
+focal_size = df['f_other']
+other_size = df['win']
+relative_size = focal_size - other_size
 
-    # Contest location: distance from each group's home-range center
-    df["rel_home_distance"] = df["m_other"] - df["n_focal"]
-    df["focal_closer_home"] = (df["m_other"] <= df["n_focal"]).astype(int)
+focal_dist = df['m_other']
+other_dist = df['n_focal']
+relative_location = other_dist - focal_dist  # positive means contest is closer to focal group's center
 
-    print("Shape:", df.shape)
-    print("\nWin counts (focal_win):")
-    print(df["focal_win"].value_counts())
+# Standardize predictors for comparability
+X = pd.DataFrame({
+    'rel_size': (relative_size - relative_size.mean()) / relative_size.std(ddof=0),
+    'rel_location': (relative_location - relative_location.mean()) / relative_location.std(ddof=0),
+})
+X = sm.add_constant(X)
 
-    print("\nRelative group size summary:")
-    print(df["rel_group_size"].describe())
+model = sm.Logit(outcome, X)
+result = model.fit(disp=False)
 
-    print("\nRelative home distance summary (m_other - n_focal):")
-    print(df["rel_home_distance"].describe())
+# Also check single-predictor models for robustness
+X_size = sm.add_constant(pd.DataFrame({
+    'rel_size': (relative_size - relative_size.mean()) / relative_size.std(ddof=0)
+}))
+res_size = sm.Logit(outcome, X_size).fit(disp=False)
 
-    # Empirical win rates by relative group size category
-    def size_category(x: int) -> str:
-        if x <= -2:
-            return "focal much smaller (<= -2)"
-        if x == -1:
-            return "focal slightly smaller (-1)"
-        if x == 0:
-            return "same size (0)"
-        if x == 1:
-            return "focal slightly larger (1)"
-        return "focal much larger (>= 2)"
+X_loc = sm.add_constant(pd.DataFrame({
+    'rel_location': (relative_location - relative_location.mean()) / relative_location.std(ddof=0)
+}))
+res_loc = sm.Logit(outcome, X_loc).fit(disp=False)
 
-    df["size_cat"] = df["rel_group_size"].apply(size_category)
-    print("\nWin rate by relative group size category:")
-    print(
-        df.groupby("size_cat")["focal_win"]
-        .agg(["mean", "count"])
-        .sort_index()
-    )
+# Basic descriptive stats
+summary = {
+    'n': int(df.shape[0]),
+    'outcome_mean': float(outcome.mean()),
+    'relative_size_mean': float(relative_size.mean()),
+    'relative_size_std': float(relative_size.std(ddof=0)),
+    'relative_location_mean': float(relative_location.mean()),
+    'relative_location_std': float(relative_location.std(ddof=0)),
+}
 
-    # Empirical win rates by home-advantage indicator
-    print("\nWin rate by focal_closer_home (1=focal closer to home center):")
-    print(df.groupby("focal_closer_home")["focal_win"].agg(["mean", "count"]))
+output = {
+    'multivariable': {
+        'coef': result.params.to_dict(),
+        'pvalues': result.pvalues.to_dict(),
+        'odds_ratio': np.exp(result.params).to_dict(),
+        'conf_int': result.conf_int().rename(columns={0:'low',1:'high'}).to_dict('index'),
+    },
+    'size_only': {
+        'coef': res_size.params.to_dict(),
+        'pvalues': res_size.pvalues.to_dict(),
+        'odds_ratio': np.exp(res_size.params).to_dict(),
+        'conf_int': res_size.conf_int().rename(columns={0:'low',1:'high'}).to_dict('index'),
+    },
+    'location_only': {
+        'coef': res_loc.params.to_dict(),
+        'pvalues': res_loc.pvalues.to_dict(),
+        'odds_ratio': np.exp(res_loc.params).to_dict(),
+        'conf_int': res_loc.conf_int().rename(columns={0:'low',1:'high'}).to_dict('index'),
+    },
+    'summary': summary,
+}
 
-    # Logistic regression models
-    def fit_and_print(formula: str, name: str) -> None:
-        print(f"\n=== {name} ===")
-        try:
-            model = smf.logit(formula, data=df).fit(disp=False)
-            print(model.summary())
-        except Exception as exc:  # pragma: no cover - diagnostic
-            print(f"Failed to fit {name}: {exc}")
+with open('analysis_results.json', 'w') as f:
+    json.dump(output, f, indent=2)
 
-    fit_and_print("focal_win ~ rel_group_size", "Model 1: size only")
-    fit_and_print("focal_win ~ rel_home_distance", "Model 2: location only")
-    fit_and_print(
-        "focal_win ~ rel_group_size + rel_home_distance",
-        "Model 3: size + location",
-    )
-    fit_and_print(
-        "focal_win ~ rel_group_size + focal_closer_home",
-        "Model 4: size + home-advantage indicator",
-    )
-
-
-if __name__ == "__main__":
-    main()
-
+print(json.dumps(output, indent=2))

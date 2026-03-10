@@ -1,65 +1,50 @@
 import pandas as pd
+import numpy as np
 import statsmodels.api as sm
 
+# Load data
+path = "crofoot.csv"
+df = pd.read_csv(path)
 
-def main() -> None:
-    df = pd.read_csv("crofoot.csv")
+# Derived predictors
+# Relative group size (focal - other)
+df["size_diff"] = df["n_focal"] - df["n_other"]
 
-    # Relative group size: positive when focal group is larger.
-    df["rel_size"] = df["n_focal"] - df["n_other"]
-    df["focal_larger"] = (df["rel_size"] > 0).astype(int)
+# Location advantage: positive means focal is closer to its center than other is to its center
+# (other distance - focal distance)
+df["loc_adv"] = df["dist_other"] - df["dist_focal"]
 
-    # Contest location: positive when focal group is closer to its home range center.
-    df["rel_dist"] = df["dist_other"] - df["dist_focal"]
-    df["focal_closer"] = (df["rel_dist"] > 0).astype(int)
+# Logistic regression
+X = df[["size_diff", "loc_adv"]].copy()
+X = sm.add_constant(X)
+y = df["win"]
 
-    print("Number of contests:", len(df))
-    print("Overall focal win rate:", df["win"].mean())
-    print()
+model = sm.Logit(y, X).fit(disp=False)
 
-    # Simple win rates by relative group size.
-    print("Win rate by whether focal group is larger:")
-    print(
-        df.groupby("focal_larger")["win"]
-        .agg(["mean", "count"])
-        .rename(index={0: "focal_not_larger", 1: "focal_larger"})
-    )
-    print()
+# Standardized predictors for effect size comparability
+X_std = df[["size_diff", "loc_adv"]].apply(lambda s: (s - s.mean())/s.std(ddof=0))
+X_std = sm.add_constant(X_std)
+model_std = sm.Logit(y, X_std).fit(disp=False)
 
-    # Simple win rates by contest location advantage.
-    print("Win rate by whether focal group is closer to home range center:")
-    print(
-        df.groupby("focal_closer")["win"]
-        .agg(["mean", "count"])
-        .rename(index={0: "focal_not_closer", 1: "focal_closer"})
-    )
-    print()
+# Simple descriptive stats
+win_rate = df["win"].mean()
 
-    # Logistic regression: win ~ relative group size + relative distance.
-    def fit_logit(y, X, label: str) -> None:
-        print(f"Logistic regression: {label}")
-        Xc = sm.add_constant(X, has_constant="add")
-        try:
-            model = sm.Logit(y, Xc).fit(disp=False)
-            print(model.summary())
-        except Exception as exc:  # noqa: BLE001
-            print("Logistic regression failed:", repr(exc))
-        print()
+# Grouped win rates by size advantage and location advantage
+size_adv_win = df[df["size_diff"] > 0]["win"].mean()
+size_disadv_win = df[df["size_diff"] < 0]["win"].mean()
+size_tie_win = df[df["size_diff"] == 0]["win"].mean()
 
-    y = df["win"]
-    fit_logit(y, df[["rel_size"]], "win ~ rel_size")
-    fit_logit(y, df[["rel_dist"]], "win ~ rel_dist")
-    fit_logit(y, df[["rel_size", "rel_dist"]], "win ~ rel_size + rel_dist")
+loc_adv_win = df[df["loc_adv"] > 0]["win"].mean()
+loc_disadv_win = df[df["loc_adv"] < 0]["win"].mean()
+loc_tie_win = df[df["loc_adv"] == 0]["win"].mean()
 
-    # Logistic regression using binary indicators for robustness.
-    fit_logit(y, df[["focal_larger"]], "win ~ focal_larger")
-    fit_logit(y, df[["focal_closer"]], "win ~ focal_closer")
-    fit_logit(
-        y,
-        df[["focal_larger", "focal_closer"]],
-        "win ~ focal_larger + focal_closer",
-    )
+print("n_rows", len(df))
+print("win_rate", win_rate)
+print("size_adv_win", size_adv_win, "size_disadv_win", size_disadv_win, "size_tie_win", size_tie_win)
+print("loc_adv_win", loc_adv_win, "loc_disadv_win", loc_disadv_win, "loc_tie_win", loc_tie_win)
 
+print("\nLogit coefficients (raw):")
+print(model.summary2().tables[1])
 
-if __name__ == "__main__":
-    main()
+print("\nLogit coefficients (standardized):")
+print(model_std.summary2().tables[1])

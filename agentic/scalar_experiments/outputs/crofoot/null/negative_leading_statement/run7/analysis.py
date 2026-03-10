@@ -1,82 +1,82 @@
-from pathlib import Path
-
-import numpy as np
 import pandas as pd
+import numpy as np
 import statsmodels.api as sm
+from statsmodels.stats.proportion import proportion_confint
 
+# Load data
+path = 'crofoot.csv'
+df = pd.read_csv(path)
 
-def main() -> None:
-    data_path = Path("crofoot.csv")
-    df = pd.read_csv(data_path)
+# Define predictors
+# Relative group size (focal - other)
+df['rel_size'] = df['n_focal'] - df['n_other']
+# Relative location: positive means contest closer to focal home range center
+# (other distance minus focal distance)
+df['rel_location'] = df['dist_other'] - df['dist_focal']
 
-    # Construct key predictors
-    df["size_diff"] = df["n_focal"] - df["n_other"]
-    # Ratio-based measure of relative size; add a small epsilon to avoid
-    # division by zero (not expected here, but kept for robustness).
-    df["size_ratio"] = df["n_focal"] / df["n_other"]
-    df["log_size_ratio"] = (df["size_ratio"]).map(float).pipe(np.log)
-    # Positive values mean the focal group is relatively closer to the center
-    # of its home range than the opposing group is to its own center.
-    df["loc_diff"] = df["dist_other"] - df["dist_focal"]
+# Basic summaries
+summary = {
+    'n': len(df),
+    'win_rate': df['win'].mean(),
+    'rel_size_mean': df['rel_size'].mean(),
+    'rel_size_sd': df['rel_size'].std(ddof=1),
+    'rel_location_mean': df['rel_location'].mean(),
+    'rel_location_sd': df['rel_location'].std(ddof=1),
+}
 
-    # Standardize predictors for easier interpretation of coefficients
-    for col in ["size_diff", "loc_diff", "log_size_ratio"]:
-        mean = df[col].mean()
-        std = df[col].std(ddof=0)
-        df[col + "_z"] = (df[col] - mean) / std
+# Correlations (point-biserial is Pearson with binary outcome)
+corr_rel_size = df['win'].corr(df['rel_size'])
+corr_rel_location = df['win'].corr(df['rel_location'])
 
-    y = df["win"]
+# Logistic regression: win ~ rel_size + rel_location
+X = df[['rel_size', 'rel_location']]
+X = sm.add_constant(X)
+model = sm.Logit(df['win'], X)
+result = model.fit(disp=False)
 
-    def run_logit(predictor_cols, label):
-        X = df[list(predictor_cols)]
-        X = sm.add_constant(X)
-        model = sm.Logit(y, X)
-        res = model.fit(disp=False)
-        print(f"\n=== Model: {label} ===")
-        print(res.summary())
-        print("\nCoefficients:")
-        for name in res.params.index:
-            print(f"  {name}: coef={res.params[name]:.3f}, p={res.pvalues[name]:.4f}")
-        return res
+# Logistic regression: win ~ rel_size (alone)
+X1 = sm.add_constant(df[['rel_size']])
+res1 = sm.Logit(df['win'], X1).fit(disp=False)
 
-    # Model 1: size difference + location difference
-    res_diff = run_logit(["size_diff_z", "loc_diff_z"], "win ~ size_diff_z + loc_diff_z")
+# Logistic regression: win ~ rel_location (alone)
+X2 = sm.add_constant(df[['rel_location']])
+res2 = sm.Logit(df['win'], X2).fit(disp=False)
 
-    # Model 2: log size ratio + location difference
-    res_ratio = run_logit(
-        ["log_size_ratio_z", "loc_diff_z"],
-        "win ~ log_size_ratio_z + loc_diff_z",
-    )
+# Odds ratios with 95% CI
+params = result.params
+conf = result.conf_int()
+odds = np.exp(params)
+odds_ci = np.exp(conf)
 
-    # Model 3: main effects + interaction
-    df["interaction_z"] = df["size_diff_z"] * df["loc_diff_z"]
-    res_interaction = run_logit(
-        ["size_diff_z", "loc_diff_z", "interaction_z"],
-        "win ~ size_diff_z * loc_diff_z",
-    )
+# Save key results
+out = {
+    'summary': summary,
+    'corr_rel_size': corr_rel_size,
+    'corr_rel_location': corr_rel_location,
+    'logit_both': {
+        'params': params.to_dict(),
+        'pvalues': result.pvalues.to_dict(),
+        'odds_ratios': odds.to_dict(),
+        'odds_ci_low': odds_ci[0].to_dict(),
+        'odds_ci_high': odds_ci[1].to_dict(),
+        'pseudo_r2': result.prsquared,
+    },
+    'logit_rel_size': {
+        'params': res1.params.to_dict(),
+        'pvalues': res1.pvalues.to_dict(),
+        'pseudo_r2': res1.prsquared,
+    },
+    'logit_rel_location': {
+        'params': res2.params.to_dict(),
+        'pvalues': res2.pvalues.to_dict(),
+        'pseudo_r2': res2.prsquared,
+    },
+}
 
-    print("\nEffect direction summary (Model 1):")
-    size_sign = "positive" if res_diff.params["size_diff_z"] > 0 else "negative"
-    loc_sign = "positive" if res_diff.params["loc_diff_z"] > 0 else "negative"
-    print(f"  size_diff_z: {size_sign}")
-    print(f"  loc_diff_z: {loc_sign}")
+# Write results for inspection
+pd.DataFrame({'metric': list(summary.keys()), 'value': list(summary.values())}).to_csv('analysis_summary.csv', index=False)
+import json
+with open('analysis_results.json', 'w') as f:
+    json.dump(out, f, indent=2)
 
-    # Descriptive summaries
-    print("\n=== Descriptive summaries ===")
-    print("Mean predictors by outcome (win):")
-    print(
-        df.groupby("win")[["size_diff", "size_ratio", "loc_diff"]].mean().rename(
-            columns={
-                "size_diff": "mean_size_diff",
-                "size_ratio": "mean_size_ratio",
-                "loc_diff": "mean_loc_diff",
-            }
-        )
-    )
-    print("\nCorrelations with winning:")
-    corr = df[["win", "size_diff", "size_ratio", "loc_diff"]].corr()
-    print(corr["win"])
-
-
-if __name__ == "__main__":
-    main()
+print('Done')

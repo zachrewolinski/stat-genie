@@ -1,153 +1,94 @@
 import json
-from pathlib import Path
-
-import numpy as np
 import pandas as pd
+import numpy as np
 import statsmodels.api as sm
 
+# Load data
+df = pd.read_csv('crofoot.csv')
 
-def main() -> None:
-    # Load data
-    data_path = Path("crofoot.csv")
-    df = pd.read_csv(data_path)
+# Define variables
+# Outcome: focal group win (1) vs loss (0)
+df['win'] = df['feature4']
 
-    # Outcome: 1 if focal group won, 0 otherwise
-    win = df["feature4"].astype(int)
+# Relative group size: focal size - other size
+df['rel_size'] = df['feature7'] - df['feature8']
 
-    # Relative group size: difference in number of individuals (focal - other)
-    size_focal = df["feature7"]
-    size_other = df["feature8"]
-    size_diff = size_focal - size_other
+# Contest location: relative distance to home-range centers
+# Negative values mean contest is closer to focal group's center (focal distance smaller)
+df['rel_location'] = df['feature5'] - df['feature6']
 
-    # Contest location: relative distance to home range centers.
-    # feature5: distance of focal group from its home range center
-    # feature6: distance of other group from its home range center
-    # Define "home advantage" as how much closer the focal group is than the other group.
-    # Positive values mean the focal group is closer to its home range center than the other group is to theirs.
-    dist_focal = df["feature5"]
-    dist_other = df["feature6"]
-    home_adv = dist_other - dist_focal
+# Prepare design matrix
+X = df[['rel_size', 'rel_location']]
+X = sm.add_constant(X)
+y = df['win']
 
-    analysis_df = pd.DataFrame(
-        {
-            "win": win,
-            "size_diff": size_diff,
-            "home_adv": home_adv,
-        }
-    ).dropna()
+# Fit logistic regression (GLM binomial for stability)
+model = sm.GLM(y, X, family=sm.families.Binomial())
+result = model.fit()
 
-    # Fit logistic regression: probability focal group wins ~ relative group size + home advantage
-    X = analysis_df[["size_diff", "home_adv"]]
-    X = sm.add_constant(X)
-    y = analysis_df["win"]
+# Extract key stats
+params = result.params
+pvalues = result.pvalues
 
-    try:
-        logit_model = sm.Logit(y, X)
-        result = logit_model.fit(disp=False)
-    except Exception:
-        # Fallback to GLM with binomial family if Logit fails to converge
-        glm_model = sm.GLM(y, X, family=sm.families.Binomial())
-        result = glm_model.fit()
+# Odds ratios for interpretability
+odds_ratios = np.exp(params)
 
-    params = result.params
-    pvalues = result.pvalues
+# Summaries for reasoning
+n = len(df)
 
-    coef_size = float(params.get("size_diff", np.nan))
-    p_size = float(pvalues.get("size_diff", np.nan))
+summary = {
+    'n': n,
+    'params': params.to_dict(),
+    'pvalues': pvalues.to_dict(),
+    'odds_ratios': odds_ratios.to_dict()
+}
 
-    coef_home = float(params.get("home_adv", np.nan))
-    p_home = float(pvalues.get("home_adv", np.nan))
+# Determine evidence strength for each predictor
+size_p = pvalues['rel_size']
+loc_p = pvalues['rel_location']
 
-    # Determine strength of evidence that relative group size and contest location influence win probability.
-    # We summarize across both predictors using their significance and effect directions.
-    def evidence_score(p: float, coef: float) -> float:
-        if np.isnan(p) or np.isnan(coef):
-            return 0.0
-        # Base on significance
-        if p < 0.001:
-            base = 1.0
-        elif p < 0.01:
-            base = 0.85
-        elif p < 0.05:
-            base = 0.7
-        elif p < 0.1:
-            base = 0.5
-        else:
-            base = 0.3
-        # Modulate by standardized effect magnitude
-        mag = min(abs(coef), 2.0) / 2.0  # cap at |coef|=2
-        return base * (0.6 + 0.4 * mag)
+# Simple heuristic for Likert response
+# Start from neutral (50) and adjust based on significance and effect direction
+response = 50
 
-    score_size = evidence_score(p_size, coef_size)
-    score_home = evidence_score(p_home, coef_home)
+# Location effect
+if loc_p < 0.001:
+    response += 30
+elif loc_p < 0.01:
+    response += 20
+elif loc_p < 0.05:
+    response += 10
 
-    # Combine evidence from both predictors
-    combined = (score_size + score_home) / 2.0
+# Size effect
+if size_p < 0.001:
+    response += 25
+elif size_p < 0.01:
+    response += 15
+elif size_p < 0.05:
+    response += 8
 
-    # Map combined evidence to Likert scale [0, 100], interpreted as "Yes" strength.
-    # Very weak or non-significant effects (combined <= 0.35) should correspond to a weak "Yes" or even "No".
-    if combined <= 0.2:
-        response_value = 20
-    elif combined <= 0.35:
-        response_value = 40
-    elif combined <= 0.5:
-        response_value = 60
-    elif combined <= 0.7:
-        response_value = 75
-    else:
-        response_value = 90
+# If both non-significant, reduce
+if loc_p >= 0.05 and size_p >= 0.05:
+    response -= 20
 
-    # Ensure integer as required
-    response_int = int(response_value)
+# Cap between 0 and 100
+response = int(max(0, min(100, round(response))))
 
-    # Build explanation string with key statistics
-    explanation_parts = []
-    explanation_parts.append(
-        "I modeled the probability that the focal capuchin group wins an intergroup contest "
-        "using logistic regression with two predictors: relative group size (difference in number of individuals, "
-        "focal minus other group) and contest location (a 'home advantage' variable defined as the other group's "
-        "distance from its home range center minus the focal group's distance; positive values mean the contest is "
-        "closer to the focal group's home range center)."
-    )
-    explanation_parts.append(
-        f"In this model (N = {len(analysis_df)} contests), the estimated coefficient for relative group size "
-        f"was {coef_size:.3f} with p-value {p_size:.3f}, and the coefficient for home advantage was "
-        f"{coef_home:.3f} with p-value {p_home:.3f}."
-    )
+# Build explanation
+explanation = (
+    f"Analyzed {n} contests with a logistic regression predicting focal win (feature4) "
+    f"from relative group size (feature7 - feature8) and relative contest location "
+    f"(feature5 - feature6). The model estimates for rel_size: coef={params['rel_size']:.3f}, "
+    f"OR={odds_ratios['rel_size']:.3f}, p={size_p:.4f}; "
+    f"for rel_location: coef={params['rel_location']:.4f}, OR={odds_ratios['rel_location']:.4f}, "
+    f"p={loc_p:.4f}. A negative rel_location coefficient means contests closer to the focal group's "
+    f"home-range center (smaller focal distance) increase win probability. "
+    f"The Likert response reflects statistical significance and effect sizes of both predictors."
+)
 
-    if response_int >= 70:
-        interpretation = (
-            "These estimates provide statistically meaningful evidence that both relative group size and contest "
-            "location influence the focal group's chance of winning: larger focal groups and contests occurring closer "
-            "to the focal group's home range center are associated with a higher probability of victory."
-        )
-    elif response_int >= 50:
-        interpretation = (
-            "These estimates provide moderate but not overwhelming evidence that relative group size and/or contest "
-            "location influence the focal group's chance of winning; the directions of the effects are consistent with "
-            "larger focal groups and greater home advantage increasing the probability of a win, but some uncertainty remains."
-        )
-    else:
-        interpretation = (
-            "Overall, the statistical evidence that relative group size and contest location influence the focal group's "
-            "chance of winning is weak; effect estimates are small or imprecise, and the data do not strongly rule out "
-            "the possibility of little or no influence for one or both predictors."
-        )
+# Write conclusion
+with open('conclusion.txt', 'w') as f:
+    json.dump({'response': response, 'explanation': explanation}, f)
 
-    explanation_parts.append(interpretation)
-
-    explanation = " ".join(explanation_parts)
-
-    conclusion = {
-        "response": response_int,
-        "explanation": explanation,
-    }
-
-    # Write the required JSON object to conclusion.txt with no extra text.
-    out_path = Path("conclusion.txt")
-    out_path.write_text(json.dumps(conclusion), encoding="utf-8")
-
-
-if __name__ == "__main__":
-    main()
-
+# Also print summary for debugging
+print(json.dumps(summary, indent=2))

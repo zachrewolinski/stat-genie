@@ -1,49 +1,49 @@
-import json
-from pathlib import Path
-
-import numpy as np
 import pandas as pd
+import numpy as np
 import statsmodels.api as sm
 
+# Load data
+_df = pd.read_csv('crofoot.csv')
 
-def main() -> None:
-    data_path = Path("crofoot.csv")
-    df = pd.read_csv(data_path)
+# Create relative predictors
+_df['size_diff'] = _df['n_focal'] - _df['n_other']
+# Positive dist_diff means the contest is closer to the focal group's home-range center
+_df['dist_diff'] = _df['dist_other'] - _df['dist_focal']
 
-    # Construct predictors: relative group size and relative location advantage.
-    # Relative group size: focal size minus other size.
-    df["rel_size"] = df["n_focal"] - df["n_other"]
+# Standardize predictors for numerical stability / effect comparability
+for col in ['size_diff', 'dist_diff']:
+    _df[col + '_z'] = (_df[col] - _df[col].mean()) / _df[col].std(ddof=0)
 
-    # Location advantage: focal closer to its range center than other is to its own.
-    df["loc_adv"] = df["dist_focal"] - df["dist_other"]
+# Model 1: win ~ size_diff + dist_diff (standardized)
+X1 = sm.add_constant(_df[['size_diff_z', 'dist_diff_z']])
+model1 = sm.GLM(_df['win'], X1, family=sm.families.Binomial())
+res1 = model1.fit()
 
-    # Standardize predictors for interpretability in the regression.
-    for col in ["rel_size", "loc_adv"]:
-        mean = df[col].mean()
-        std = df[col].std(ddof=0)
-        if std == 0 or np.isnan(std):
-            df[f"z_{col}"] = df[col] - mean
-        else:
-            df[f"z_{col}"] = (df[col] - mean) / std
+# Model 2: win ~ size_diff + dist_diff (raw)
+X2 = sm.add_constant(_df[['size_diff', 'dist_diff']])
+model2 = sm.GLM(_df['win'], X2, family=sm.families.Binomial())
+res2 = model2.fit()
 
-    # Logistic regression: probability focal group wins.
-    y = df["win"]
-    X = df[["z_rel_size", "z_loc_adv"]]
-    X = sm.add_constant(X)
-    logit_model = sm.Logit(y, X)
-    result = logit_model.fit(disp=False)
+# Model 3: alternative parameterization with size ratio
+_df['size_ratio'] = _df['n_focal'] / _df['n_other']
+_df['size_ratio_z'] = (_df['size_ratio'] - _df['size_ratio'].mean()) / _df['size_ratio'].std(ddof=0)
+X3 = sm.add_constant(_df[['size_ratio_z', 'dist_diff_z']])
+model3 = sm.GLM(_df['win'], X3, family=sm.families.Binomial())
+res3 = model3.fit()
 
-    summary = {
-        "params": result.params.to_dict(),
-        "pvalues": result.pvalues.to_dict(),
-        "llf": float(result.llf),
-        "nobs": int(result.nobs),
-    }
+# Summaries
+summary = {
+    'n_rows': int(_df.shape[0]),
+    'win_rate': float(_df['win'].mean()),
+    'model1_params': res1.params.to_dict(),
+    'model1_pvalues': res1.pvalues.to_dict(),
+    'model1_or': np.exp(res1.params).to_dict(),
+    'model2_params': res2.params.to_dict(),
+    'model2_pvalues': res2.pvalues.to_dict(),
+    'model2_or': np.exp(res2.params).to_dict(),
+    'model3_params': res3.params.to_dict(),
+    'model3_pvalues': res3.pvalues.to_dict(),
+    'model3_or': np.exp(res3.params).to_dict(),
+}
 
-    # Save a lightweight JSON summary for inspection if needed.
-    Path("model_summary.json").write_text(json.dumps(summary, indent=2))
-
-
-if __name__ == "__main__":
-    main()
-
+print(summary)

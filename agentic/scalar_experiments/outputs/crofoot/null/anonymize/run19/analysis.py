@@ -1,63 +1,91 @@
 import json
-from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import statsmodels.api as sm
-import statsmodels.formula.api as smf
+from scipy import stats
 
+# Load data
+path = "crofoot.csv"
+df = pd.read_csv(path)
 
-def main() -> None:
-    data_path = Path("crofoot.csv")
-    df = pd.read_csv(data_path)
+# Rename columns for clarity
+cols = {
+    "feature4": "focal_win",
+    "feature5": "focal_dist",
+    "feature6": "other_dist",
+    "feature7": "focal_size",
+    "feature8": "other_size",
+}
 
-    # Derived predictors
-    df["rel_group_size"] = df["feature7"] - df["feature8"]
-    df["focal_closer"] = (df["feature5"] < df["feature6"]).astype(int)
-    df["rel_distance"] = df["feature5"] - df["feature6"]
+df = df.rename(columns=cols)
 
-    results = {}
+# Construct predictors
+# Relative group size: focal size minus other size (positive means focal larger)
+df["rel_size_diff"] = df["focal_size"] - df["other_size"]
+# Relative group size ratio
+df["rel_size_ratio"] = df["focal_size"] / df["other_size"]
+# Contest location advantage: other distance minus focal distance (positive means focal closer to its home range)
+df["loc_adv"] = df["other_dist"] - df["focal_dist"]
 
-    # Model 1: contest location as a binary "home advantage" indicator
-    formula1 = "feature4 ~ rel_group_size + focal_closer"
-    model1 = smf.glm(formula=formula1, data=df, family=sm.families.Binomial())
-    res1 = model1.fit()
+y = df["focal_win"].astype(int)
 
-    results["model_home_indicator"] = {
-        "n_obs": int(res1.nobs),
-        "params": res1.params.to_dict(),
-        "pvalues": res1.pvalues.to_dict(),
-        "conf_int": {
-            name: {"lower": float(ci[0]), "upper": float(ci[1])}
-            for name, ci in zip(res1.params.index, res1.conf_int().values)
-        },
-        "aic": float(res1.aic),
-        "bic": float(res1.bic),
-        "deviance": float(res1.deviance),
-        "null_deviance": float(res1.null_deviance),
-    }
+def fit_logit(predictors):
+    X = df[predictors].astype(float)
+    X = sm.add_constant(X)
+    model = sm.Logit(y, X)
+    result = model.fit(disp=False)
+    return result
 
-    # Model 2: contest location as continuous distance difference
-    formula2 = "feature4 ~ rel_group_size + rel_distance"
-    model2 = smf.glm(formula=formula2, data=df, family=sm.families.Binomial())
-    res2 = model2.fit()
+# Main model: relative size (difference) + location advantage
+result_diff = fit_logit(["rel_size_diff", "loc_adv"])
 
-    results["model_distance_difference"] = {
-        "n_obs": int(res2.nobs),
-        "params": res2.params.to_dict(),
-        "pvalues": res2.pvalues.to_dict(),
-        "conf_int": {
-            name: {"lower": float(ci[0]), "upper": float(ci[1])}
-            for name, ci in zip(res2.params.index, res2.conf_int().values)
-        },
-        "aic": float(res2.aic),
-        "bic": float(res2.bic),
-        "deviance": float(res2.deviance),
-        "null_deviance": float(res2.null_deviance),
-    }
+# Alternative model: relative size (ratio) + location advantage
+result_ratio = fit_logit(["rel_size_ratio", "loc_adv"])
 
-    with Path("analysis_results.json").open("w") as f:
-        json.dump(results, f, indent=2)
+# Bivariate correlations (point-biserial)
+corr_rel_diff = np.corrcoef(df["rel_size_diff"], y)[0, 1]
+corr_rel_ratio = np.corrcoef(df["rel_size_ratio"], y)[0, 1]
+corr_loc = np.corrcoef(df["loc_adv"], y)[0, 1]
 
+# Simple group comparisons
+win = df[df["focal_win"] == 1]
+lose = df[df["focal_win"] == 0]
 
-if __name__ == "__main__":
-    main()
+tt_rel_diff = stats.ttest_ind(win["rel_size_diff"], lose["rel_size_diff"], equal_var=False)
+tt_loc = stats.ttest_ind(win["loc_adv"], lose["loc_adv"], equal_var=False)
+
+summary = {
+    "n": int(len(df)),
+    "logit_diff": {
+        "rel_size_coef": float(result_diff.params["rel_size_diff"]),
+        "rel_size_p": float(result_diff.pvalues["rel_size_diff"]),
+        "loc_adv_coef": float(result_diff.params["loc_adv"]),
+        "loc_adv_p": float(result_diff.pvalues["loc_adv"]),
+        "rel_size_or": float(np.exp(result_diff.params["rel_size_diff"])),
+        "loc_adv_or": float(np.exp(result_diff.params["loc_adv"])),
+        "pseudo_r2": float(result_diff.prsquared),
+    },
+    "logit_ratio": {
+        "rel_size_coef": float(result_ratio.params["rel_size_ratio"]),
+        "rel_size_p": float(result_ratio.pvalues["rel_size_ratio"]),
+        "loc_adv_coef": float(result_ratio.params["loc_adv"]),
+        "loc_adv_p": float(result_ratio.pvalues["loc_adv"]),
+        "rel_size_or": float(np.exp(result_ratio.params["rel_size_ratio"])),
+        "loc_adv_or": float(np.exp(result_ratio.params["loc_adv"])),
+        "pseudo_r2": float(result_ratio.prsquared),
+    },
+    "corr_rel_diff": float(corr_rel_diff),
+    "corr_rel_ratio": float(corr_rel_ratio),
+    "corr_loc": float(corr_loc),
+    "tt_rel_diff_p": float(tt_rel_diff.pvalue),
+    "tt_loc_p": float(tt_loc.pvalue),
+    "means": {
+        "rel_size_diff_win": float(win["rel_size_diff"].mean()),
+        "rel_size_diff_lose": float(lose["rel_size_diff"].mean()),
+        "loc_adv_win": float(win["loc_adv"].mean()),
+        "loc_adv_lose": float(lose["loc_adv"].mean()),
+    },
+}
+
+print(json.dumps(summary, indent=2))
