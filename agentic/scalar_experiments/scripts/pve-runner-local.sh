@@ -23,6 +23,9 @@ datasets=("affairs" "amtl" "boxes" "caschools" "crofoot" "hurricane" "mortgage" 
 # only interested in varying pve
 distributions=("pve")
 
+# get pve values
+pves=(0.0 0.001 0.005 0.01 0.05 0.2)
+
 # list all perturbation types
 perturbations=("anonymize" "shuffle_names" "add_features" "positive_leading_statement" "negative_leading_statement")
 
