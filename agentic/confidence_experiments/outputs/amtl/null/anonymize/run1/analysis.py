@@ -1,126 +1,217 @@
 import json
+from pathlib import Path
+
 import pandas as pd
-import numpy as np
 import statsmodels.api as sm
 import statsmodels.formula.api as smf
 
-# Load data
-DF_PATH = "amtl.csv"
 
-df = pd.read_csv(DF_PATH)
+def main() -> None:
+    data_path = Path("amtl.csv")
+    if not data_path.exists():
+        raise FileNotFoundError("amtl.csv not found in current directory")
 
-# Rename columns for clarity
-colmap = {
-    "feature1": "tooth_class",
-    "feature2": "specimen_id",
-    "feature3": "missing",
-    "feature4": "observed",
-    "feature5": "age",
-    "feature6": "age_uncertainty",
-    "feature7": "sex",
-    "feature8": "genus",
-    "feature9": "region",
-}
+    df = pd.read_csv(data_path)
 
-df = df.rename(columns=colmap)
+    # Rename columns for clarity
+    df = df.rename(
+        columns={
+            "feature1": "tooth_class",
+            "feature2": "specimen_id",
+            "feature3": "n_missing",
+            "feature4": "n_sockets",
+            "feature5": "age_at_death",
+            "feature6": "age_uncertainty",
+            "feature7": "sex_estimate",
+            "feature8": "genus",
+            "feature9": "region",
+        }
+    )
 
-# Basic cleaning: drop rows with missing key fields or invalid counts
-# Ensure observed >= missing and observed > 0
-mask_valid = (
-    df["missing"].notna()
-    & df["observed"].notna()
-    & df["age"].notna()
-    & df["sex"].notna()
-    & df["tooth_class"].notna()
-    & df["genus"].notna()
-)
+    # Basic cleaning: keep only valid rows
+    df = df[(df["n_sockets"] > 0) & (df["n_missing"] >= 0) & (df["n_missing"] <= df["n_sockets"])]
+    if df.empty:
+        raise ValueError("No valid rows remaining after filtering.")
 
-df = df.loc[mask_valid].copy()
+    # Outcome as proportion with binomial variance weights
+    df["missing_prop"] = df["n_missing"] / df["n_sockets"]
 
-# Ensure numeric
-for c in ["missing", "observed", "age", "sex"]:
-    df[c] = pd.to_numeric(df[c], errors="coerce")
+    # Ensure Homo sapiens is present and set as reference
+    if "Homo sapiens" not in df["genus"].unique():
+        raise ValueError("Expected genus 'Homo sapiens' not found in data.")
 
-df = df.loc[df["observed"] > 0].copy()
-# enforce missing <= observed
-# If any rows violate, drop them
+    # Choose a common tooth class for marginal predictions
+    if not df["tooth_class"].empty:
+        common_tooth_class = df["tooth_class"].mode(dropna=True).iat[0]
+    else:
+        common_tooth_class = "Posterior"
 
-df = df.loc[df["missing"] <= df["observed"]].copy()
+    # Binomial GLM with Homo sapiens as reference genus,
+    # controlling for age, sex, and tooth class.
+    formula = (
+        "missing_prop ~ C(genus, Treatment(reference='Homo sapiens'))"
+        " + C(tooth_class)"
+        " + age_at_death"
+        " + sex_estimate"
+    )
 
-# Binary indicator for human
-# In data, genus has "Homo sapiens"
+    model = smf.glm(
+        formula=formula,
+        data=df,
+        family=sm.families.Binomial(),
+        var_weights=df["n_sockets"],
+    ).fit()
 
-df["is_human"] = (df["genus"] == "Homo sapiens").astype(int)
+    # Extract genus effects (log-odds differences vs Homo sapiens)
+    genus_effects = {}
+    for name, coef, pval in zip(model.params.index, model.params.values, model.pvalues.values):
+        if name.startswith("C(genus"):
+            # name format: C(genus, Treatment(reference='Homo sapiens'))[T.Pan]
+            genus_name = name.split("]")[0].split("[T.")[-1]
+            genus_effects[genus_name] = {"coef": float(coef), "pval": float(pval)}
 
-# Prepare endog as successes/failures
-# success = missing, failure = observed - missing
+    non_human_genera = [g for g in df["genus"].unique() if g != "Homo sapiens"]
 
-df["non_missing"] = df["observed"] - df["missing"]
+    # Determine whether humans have higher AMTL than each non-human genus
+    # In this coding, a negative coefficient for genus G means logit(p_G) < logit(p_Homo),
+    # i.e., Homo sapiens has higher AMTL than genus G.
+    evidence_counts = {"significant_higher": 0, "n_nonhuman": len(non_human_genera)}
 
-# Build formula with categorical tooth_class; sex treated as numeric (0-1)
-formula = "missing + non_missing ~ is_human + age + sex + C(tooth_class)"
+    per_genus_conclusions = []
+    for g in sorted(non_human_genera):
+        effect = genus_effects.get(g)
+        if effect is None:
+            # If the genus was used as reference for some reason, fall back to predictions.
+            conclusion = {
+                "genus": g,
+                "interpretation": "effect not directly estimated; using predicted probabilities only",
+            }
+        else:
+            coef = effect["coef"]
+            pval = effect["pval"]
+            if coef < 0 and pval < 0.05:
+                evidence_counts["significant_higher"] += 1
+                interp = "Humans have significantly higher AMTL than this genus (p < 0.05)."
+            elif coef < 0 and pval < 0.10:
+                interp = "Humans tend to have higher AMTL than this genus (0.05 <= p < 0.10)."
+            else:
+                interp = "No statistically clear evidence that humans have higher AMTL than this genus."
 
-# Fit GLM binomial
-model = smf.glm(
-    formula=formula,
-    data=df,
-    family=sm.families.Binomial(),
-)
+            conclusion = {
+                "genus": g,
+                "coef_vs_humans": coef,
+                "p_value": pval,
+                "interpretation": interp,
+            }
 
-result = model.fit()
+        per_genus_conclusions.append(conclusion)
 
-# Extract human coefficient
-coef = result.params.get("is_human", np.nan)
-se = result.bse.get("is_human", np.nan)
-pval = result.pvalues.get("is_human", np.nan)
+    # Compute adjusted predicted AMTL probabilities for each genus at typical covariate values
+    typical_age = float(df["age_at_death"].median())
+    typical_sex = float(df["sex_estimate"].mean())
 
-# Odds ratio
-odds_ratio = float(np.exp(coef)) if pd.notna(coef) else np.nan
+    pred_rows = []
+    for g in sorted(df["genus"].unique()):
+        pred_rows.append(
+            {
+                "genus": g,
+                "tooth_class": common_tooth_class,
+                "age_at_death": typical_age,
+                "sex_estimate": typical_sex,
+            }
+        )
 
-# Compute predicted probabilities for human vs non-human at mean covariates
-# For categorical tooth_class, use most common category
+    pred_df = pd.DataFrame(pred_rows)
+    pred_df["pred_missing_prop"] = model.predict(pred_df)
 
-tooth_mode = df["tooth_class"].mode(dropna=True)
-if len(tooth_mode) == 0:
-    tooth_ref = df["tooth_class"].iloc[0]
-else:
-    tooth_ref = tooth_mode.iloc[0]
-
-mean_age = df["age"].mean()
-mean_sex = df["sex"].mean()
-
-pred_df = pd.DataFrame(
-    {
-        "is_human": [0, 1],
-        "age": [mean_age, mean_age],
-        "sex": [mean_sex, mean_sex],
-        "tooth_class": [tooth_ref, tooth_ref],
-        "missing": [0, 0],
-        "non_missing": [1, 1],
+    genus_predictions = {
+        row["genus"]: float(row["pred_missing_prop"]) for _, row in pred_df.iterrows()
     }
-)
 
-pred = result.predict(pred_df)
-nonhuman_rate = float(pred.iloc[0])
-human_rate = float(pred.iloc[1])
-rate_diff = human_rate - nonhuman_rate
+    # Determine overall answer and Likert-scale response
+    n_sig = evidence_counts["significant_higher"]
+    n_total = evidence_counts["n_nonhuman"]
 
-# Also compute model-based marginal effect of human via delta method (approx)
-# We will not overcomplicate; use the sign and significance.
+    if n_total == 0:
+        response_score = 50
+        overall_conclusion = (
+            "The dataset contains only modern humans, so a comparison to non-human primates "
+            "is not possible. The answer is therefore uncertain."
+        )
+    else:
+        # Map strength of evidence to a 0–100 scale.
+        if n_sig == n_total:
+            response_score = 90
+            overall_conclusion = (
+                "Yes. Binomial regression controlling for age, sex, and tooth class "
+                "indicates that modern humans have significantly higher frequencies of "
+                "antemortem tooth loss than all sampled non-human primate genera."
+            )
+        elif n_sig >= 1:
+            response_score = 70
+            overall_conclusion = (
+                "Mostly yes. Humans show significantly higher AMTL than some non-human genera "
+                "after adjustment, but the evidence is weaker or non-significant for at least "
+                "one genus."
+            )
+        else:
+            response_score = 30
+            overall_conclusion = (
+                "No clear evidence. After accounting for age, sex, and tooth class, the model "
+                "does not show consistent statistically significant differences indicating that "
+                "humans have higher AMTL than non-human primates."
+            )
 
-summary = {
-    "n_rows": int(df.shape[0]),
-    "odds_ratio": odds_ratio,
-    "coef": float(coef),
-    "se": float(se),
-    "pval": float(pval),
-    "nonhuman_rate": nonhuman_rate,
-    "human_rate": human_rate,
-    "rate_diff": rate_diff,
-    "tooth_class_ref": tooth_ref,
-}
+    # Build detailed explanation string for the conclusion file
+    explanation_parts = []
+    explanation_parts.append(
+        "I fit a binomial generalized linear model (logistic regression) to the AMTL dataset, "
+        "using the number of missing teeth out of the number of observable sockets as the "
+        "outcome. The model included genus (with Homo sapiens as the reference category), "
+        "tooth class (anterior, premolar, posterior), estimated age at death, and a "
+        "continuous sex estimate as predictors, with the number of sockets used as "
+        "binomial variance weights."
+    )
 
-with open("analysis_summary.json", "w") as f:
-    json.dump(summary, f, indent=2)
+    # Add per-genus statistical summary
+    genus_summaries = []
+    for item in per_genus_conclusions:
+        g = item["genus"]
+        pred = genus_predictions.get(g)
+        if "coef_vs_humans" in item:
+            coef = item["coef_vs_humans"]
+            pval = item["p_value"]
+            genus_summaries.append(
+                f"For genus {g}, the log-odds difference relative to humans is {coef:.3f} "
+                f"(p = {pval:.3f}); the model-predicted proportion of teeth missing under "
+                f"typical conditions is approximately {pred:.3f}."
+            )
+        else:
+            genus_summaries.append(
+                f"For genus {g}, the effect relative to humans could not be directly read "
+                f"from the model coefficients; the model-predicted proportion of teeth "
+                f"missing under typical conditions is approximately {pred:.3f}."
+            )
 
-print(json.dumps(summary, indent=2))
+    # Add human reference prediction
+    human_pred = genus_predictions.get("Homo sapiens")
+    if human_pred is not None:
+        genus_summaries.append(
+            f"For Homo sapiens, the model-predicted proportion of teeth missing under "
+            f"typical conditions is approximately {human_pred:.3f}."
+        )
+
+    explanation_parts.append(" ".join(genus_summaries))
+    explanation_parts.append(overall_conclusion)
+
+    explanation = " ".join(explanation_parts)
+
+    conclusion = {"response": int(response_score), "explanation": explanation}
+
+    conclusion_path = Path("conclusion.txt")
+    conclusion_path.write_text(json.dumps(conclusion, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    main()
+
