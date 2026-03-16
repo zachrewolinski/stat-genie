@@ -36,23 +36,23 @@ def update_subdir(dataset_name: str, distribution: str, perturbation_type: str, 
     # called conclusion.txt
     if distribution == "pve":
         analysis_output_path = outputs_dir / dataset_name / distribution / f"pve_{pve}" / perturbation_type / f"run{run_number}"
-        codex_log_path = logs_dir / dataset_name / distribution / f"pve_{pve}" / perturbation_type / f"run{run_number}" / "data-analysis.out"
+        # codex_log_path = logs_dir / dataset_name / distribution / f"pve_{pve}" / perturbation_type / f"run{run_number}" / "data-analysis.out"
     else:
         analysis_output_path = outputs_dir / dataset_name / distribution / perturbation_type / f"run{run_number}"
-        codex_log_path = logs_dir / dataset_name / distribution / perturbation_type / f"run{run_number}" / "data-analysis.out"
+        # codex_log_path = logs_dir / dataset_name / distribution / perturbation_type / f"run{run_number}" / "data-analysis.out"
     if not analysis_output_path.exists():
         raise FileNotFoundError(f"The subdirectory path {analysis_output_path} does not exist. Please create it using 'make-subdir.py' before running this script.")
     conclusion_path = analysis_output_path / "conclusion.txt"
     if not conclusion_path.exists():
         raise FileNotFoundError(f"The conclusion.txt file does not exist in the subdirectory path {analysis_output_path}. Please ensure that the analysis has been run and a conclusion has been generated before running this script.")
     # confirm that a data-analysis.out file exists in the corresponding codex logs directory
-    if not codex_log_path.exists():
-        raise FileNotFoundError(f"The codex log file {codex_log_path} does not exist. Please ensure that the analysis has been run and the codex log file has been generated before running this script.")
+    # if not codex_log_path.exists():
+    #     raise FileNotFoundError(f"The codex log file {codex_log_path} does not exist. Please ensure that the analysis has been run and the codex log file has been generated before running this script.")
     
     # move the codex log file into the analysis output subdirectory
-    new_codex_log_path = analysis_output_path / "data-analysis.out"
-    codex_log_path.rename(new_codex_log_path)
-    print(f"[update-subdir] moved codex log file from {codex_log_path} to {new_codex_log_path}")
+    # new_codex_log_path = analysis_output_path / "data-analysis.out"
+    # codex_log_path.rename(new_codex_log_path)
+    # print(f"[update-subdir] moved codex log file from {codex_log_path} to {new_codex_log_path}")
     
     return
 
@@ -88,6 +88,8 @@ def rewrite_agent_instructions(dataset_name: str, distribution: str, perturbatio
     else:
         subdir_path = f"{dataset_name}/{distribution}/{perturbation_type}/run{run_number}"
 
+    # edited out after (1) and (2):
+    # Also of use is the 'data-analysis.out' file, which contains the log of the analyst's reasoning process and code that was run as they conducted their analysis.
     instructions = f"""
     You are an expert data scientist tasked with reviewing an analysis of a dataset to answer a specific research question.
     The research question is contained in the 'info.json' file along with metadata about the dataset, which is itself provided in the '{dataset_name}.csv' file.
@@ -95,9 +97,8 @@ def rewrite_agent_instructions(dataset_name: str, distribution: str, perturbatio
     Your task is to evaluate your confidence in the conclusion of the analysis, which is contained in the 'conclusion.txt' file in the subdirectory.
     The 'conclusion.txt' file contains two pieces of information: (1) the "response", an integer scalar that represents the analyst's answer on a Likert scale from 0 to 100, where 0 represents a strong "No" answer and 100 represents a strong "Yes" answer,
     and (2) the "explanation", a text string that provides the analyst's reasoning and evidence that led them to their conclusion.
-    Also of use is the 'data-analysis.out' file, which contains the log of the analyst's reasoning process and code that was run as they conducted their analysis.
     You are NOT to run any analyses of your own to evaluate the confidence of the conclusion.
-    Your task is only to evaluate the confidence of the conclusion based on your knowledge of data science, the information provided in the subdirectory, including the conclusion itself and the analyst's reasoning process as documented in the data-analysis.out file.
+    Your task is only to evaluate the confidence of the conclusion based on your knowledge of data science and the information provided in the subdirectory, including the conclusion itself.
     This confidence must be an integer from 0 to 100, where the number represents:
     - If you were to reconduct this analysis 100 times with slightly different reasonable decisions in the data science pipeline, how many times would you expect to get an answer more positive (larger on the Likert scale) than the seen in the conclusion?
     Your confidence must be written to a file called 'confidence.txt' in JSON format, with the integer scalar stored under the key "confidence" and your explanation stored under the key "explanation".

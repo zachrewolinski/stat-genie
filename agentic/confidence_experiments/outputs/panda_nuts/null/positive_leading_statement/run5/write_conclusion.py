@@ -1,0 +1,18 @@
+import json
+
+explanation = (
+    "I defined nut-cracking efficiency as nuts opened per second (nuts_opened/seconds). "
+    "Because nuts_opened is a count and session durations vary, I modeled the rate using a GEE negative binomial "
+    "with a log(seconds) offset and clustering by chimpanzee (22 individuals, 84 sessions) to account for repeated measures "
+    "and overdispersion. In this rate model, sex showed a statistically significant effect: males had lower efficiency "
+    "(coef = -0.70, p = 0.033; rate ratio ~ 0.50, 95% CI 0.26-0.94). Age was not significant (p = 0.496; RR per year ~ 1.03, 95% CI 0.94-1.14), "
+    "and receiving help was not significant (p = 0.248; RR ~ 0.54, 95% CI 0.19-1.54). "
+    "An OLS model on the efficiency ratio also found no significant effects for age, sex, or help, and a mixed-effects model did not converge. "
+    "Overall, the evidence does not support a consistent influence of age and help on efficiency, with only modest evidence for a sex difference."
+)
+
+out = {"response": 35, "explanation": explanation}
+
+with open('conclusion.txt', 'w') as f:
+    json.dump(out, f, ensure_ascii=True)
+

@@ -1,107 +1,172 @@
 import json
-import pandas as pd
+from pathlib import Path
+
 import numpy as np
+import pandas as pd
 from scipy import stats
+import statsmodels.formula.api as smf
 
-# Load data
-_df = pd.read_csv('affairs.csv')
 
-# Map columns based on info.json
-# feature2 = affairs frequency
-# feature6 = children yes/no
+def main() -> None:
+    data_path = Path("affairs.csv")
+    df = pd.read_csv(data_path)
 
-# Clean
-if _df['feature6'].dtype != 'object':
-    _df['feature6'] = _df['feature6'].astype(str)
+    # Outcome: any extramarital affair in the past year
+    df["has_affair"] = (df["feature2"] > 0).astype(int)
 
-# Normalize children values
-_df['feature6'] = _df['feature6'].str.strip().str.lower()
+    # Key predictor: children in the marriage (1 = yes, 0 = no)
+    df["children_yes"] = (df["feature6"] == "yes").astype(int)
 
-# Binary children indicator
-_df['children_yes'] = (_df['feature6'] == 'yes').astype(int)
+    # Basic descriptive comparison
+    prop_affair_children = (
+        df.loc[df["children_yes"] == 1, "has_affair"].mean()
+    )
+    prop_affair_no_children = (
+        df.loc[df["children_yes"] == 0, "has_affair"].mean()
+    )
 
-# Affairs frequency (numeric)
-affairs = pd.to_numeric(_df['feature2'], errors='coerce')
+    # 2x2 chi-square test of independence
+    contingency = pd.crosstab(df["children_yes"], df["has_affair"])
+    chi2, p_chi2, _, _ = stats.chi2_contingency(contingency)
 
-# Any affair
-_df['any_affair'] = (affairs > 0).astype(int)
+    # Unadjusted logistic regression: has_affair ~ children_yes
+    model_unadj = smf.logit("has_affair ~ children_yes", data=df).fit(disp=False)
+    coef_unadj = model_unadj.params["children_yes"]
+    p_unadj = model_unadj.pvalues["children_yes"]
+    or_unadj = float(np.exp(coef_unadj))
 
-# Drop missing
-_df = _df.dropna(subset=['children_yes', 'feature2'])
+    # Adjusted logistic regression controlling for key covariates
+    # Gender (categorical), age, years married, religiosity, education,
+    # occupation, and self-rated marriage quality.
+    model_adj = smf.logit(
+        "has_affair ~ children_yes + C(feature3) + feature4 + feature5 + "
+        "feature7 + feature8 + feature9 + feature10",
+        data=df,
+    ).fit(disp=False)
+    coef_adj = model_adj.params["children_yes"]
+    p_adj = model_adj.pvalues["children_yes"]
+    or_adj = float(np.exp(coef_adj))
 
-# Group stats
-stats_by_child = _df.groupby('children_yes')['feature2'].agg(['count', 'mean', 'median', 'std'])
+    # Determine Likert-scale response (0–100, 0 = strong No, 100 = strong Yes)
+    response = score_evidence(coef_adj, p_adj, or_adj)
 
-# Proportion with any affair
-prop_any = _df.groupby('children_yes')['any_affair'].mean()
+    explanation = build_explanation(
+        prop_affair_children=prop_affair_children,
+        prop_affair_no_children=prop_affair_no_children,
+        chi2=chi2,
+        p_chi2=p_chi2,
+        coef_unadj=coef_unadj,
+        p_unadj=p_unadj,
+        or_unadj=or_unadj,
+        coef_adj=coef_adj,
+        p_adj=p_adj,
+        or_adj=or_adj,
+        response=response,
+    )
 
-# Mann-Whitney U test (non-parametric) for distribution difference
-with_children = _df.loc[_df['children_yes'] == 1, 'feature2']
-without_children = _df.loc[_df['children_yes'] == 0, 'feature2']
+    conclusion_path = Path("conclusion.txt")
+    with conclusion_path.open("w", encoding="utf-8") as f:
+        json.dump({"response": int(response), "explanation": explanation}, f)
 
-u_stat, u_p = stats.mannwhitneyu(with_children, without_children, alternative='two-sided')
 
-# Cliff's delta effect size
-# Compute delta: (number of pairs where x>y - x<y) / (n1*n2)
-# Use efficient computation via ranking if sizes large.
+def score_evidence(coef_adj: float, p_adj: float, or_adj: float) -> int:
+    """
+    Map statistical evidence to a 0–100 Likert scale.
 
-# Direct computation for moderate sizes
-x = with_children.to_numpy()
-y = without_children.to_numpy()
+    Positive answer = children decrease engagement in extramarital affairs,
+    i.e., odds ratio < 1 (negative coefficient for children_yes).
+    """
+    direction_negative = coef_adj < 0
 
-# To reduce memory/time, use broadcasting in chunks
-n1, n2 = len(x), len(y)
+    # Default: uncertain / no clear evidence
+    score = 50
 
-# If very large, chunk; here sizes are small (<=601)
-count_greater = 0
-count_less = 0
-for xi in x:
-    count_greater += np.sum(xi > y)
-    count_less += np.sum(xi < y)
+    if direction_negative:
+        # Evidence that children are associated with *fewer* affairs.
+        if p_adj < 0.001:
+            if or_adj < 0.6:
+                score = 95
+            elif or_adj < 0.8:
+                score = 88
+            else:
+                score = 80
+        elif p_adj < 0.05:
+            if or_adj < 0.6:
+                score = 88
+            elif or_adj < 0.8:
+                score = 80
+            else:
+                score = 70
+        else:
+            # Directionally consistent but not statistically significant
+            if or_adj < 1.0:
+                score = 60
+            else:
+                score = 50
+    else:
+        # Evidence that children are associated with *more* affairs
+        # (opposite of the hypothesized decrease).
+        if p_adj < 0.001:
+            if or_adj > 1.6:
+                score = 5
+            elif or_adj > 1.2:
+                score = 12
+            else:
+                score = 20
+        elif p_adj < 0.05:
+            if or_adj > 1.6:
+                score = 12
+            elif or_adj > 1.2:
+                score = 20
+            else:
+                score = 30
+        else:
+            score = 50
 
-cliffs_delta = (count_greater - count_less) / (n1 * n2)
+    # Ensure integer within [0, 100]
+    score = max(0, min(100, int(round(score))))
+    return score
 
-# Chi-square test for any affair vs children
-contingency = pd.crosstab(_df['children_yes'], _df['any_affair'])
-chi2, chi_p, dof, expected = stats.chi2_contingency(contingency)
 
-# Difference in proportions
-prop_diff = prop_any.loc[1] - prop_any.loc[0]
+def build_explanation(
+    *,
+    prop_affair_children: float,
+    prop_affair_no_children: float,
+    chi2: float,
+    p_chi2: float,
+    coef_unadj: float,
+    p_unadj: float,
+    or_unadj: float,
+    coef_adj: float,
+    p_adj: float,
+    or_adj: float,
+    response: int,
+) -> str:
+    direction_adj = "decrease" if coef_adj < 0 else "increase"
 
-# Simple logistic regression (unadjusted) using statsmodels if available
-try:
-    import statsmodels.api as sm
-    X = sm.add_constant(_df['children_yes'])
-    y_bin = _df['any_affair']
-    logit_model = sm.Logit(y_bin, X)
-    logit_res = logit_model.fit(disp=False)
-    logit_p = float(logit_res.pvalues['children_yes'])
-    logit_coef = float(logit_res.params['children_yes'])
-except Exception:
-    logit_p = None
-    logit_coef = None
+    explanation = (
+        "Research question: Does having children decrease engagement in extramarital affairs?\n"
+        f"In this sample of 601 first-marriage individuals, the proportion reporting any "
+        f"extramarital intercourse in the past year was "
+        f"{prop_affair_no_children:.3f} among those without children and "
+        f"{prop_affair_children:.3f} among those with children.\n"
+        f"A chi-square test of independence between children-in-marriage and any affair "
+        f"yielded χ² = {chi2:.2f} (p = {p_chi2:.4f}).\n"
+        f"Unadjusted logistic regression (any affair ~ children) gave a coefficient for having "
+        f"children of {coef_unadj:.3f} (odds ratio = {or_unadj:.3f}, p = {p_unadj:.4f}).\n"
+        f"Adjusting for gender, age, years married, religiosity, education, occupation, and "
+        f"self-rated marital happiness, the coefficient for having children was {coef_adj:.3f} "
+        f"(odds ratio = {or_adj:.3f}, p = {p_adj:.4f}), implying that children are associated "
+        f"with a relative {direction_adj} in the odds of having an affair.\n"
+        f"Combining the direction and statistical significance of the adjusted effect, the "
+        f"evidence corresponds to a Likert-scale response of {response} on a 0–100 scale "
+        f"(0 = strong 'No', 100 = strong 'Yes') to the question of whether having children "
+        f"reduces engagement in extramarital affairs."
+    )
 
-output = {
-    'n_total': int(len(_df)),
-    'n_children_yes': int(( _df['children_yes'] == 1).sum()),
-    'n_children_no': int(( _df['children_yes'] == 0).sum()),
-    'mean_affairs_children_yes': float(stats_by_child.loc[1, 'mean']),
-    'mean_affairs_children_no': float(stats_by_child.loc[0, 'mean']),
-    'median_affairs_children_yes': float(stats_by_child.loc[1, 'median']),
-    'median_affairs_children_no': float(stats_by_child.loc[0, 'median']),
-    'prop_any_affair_children_yes': float(prop_any.loc[1]),
-    'prop_any_affair_children_no': float(prop_any.loc[0]),
-    'prop_any_diff_yes_minus_no': float(prop_diff),
-    'mannwhitney_u_stat': float(u_stat),
-    'mannwhitney_p': float(u_p),
-    'cliffs_delta': float(cliffs_delta),
-    'chi2_stat': float(chi2),
-    'chi2_p': float(chi_p),
-    'logit_coef_children_yes': logit_coef,
-    'logit_p_children_yes': logit_p,
-}
+    return explanation
 
-with open('analysis_output.json', 'w') as f:
-    json.dump(output, f, indent=2)
 
-print(json.dumps(output, indent=2))
+if __name__ == "__main__":
+    main()
+

@@ -1,0 +1,15 @@
+import json
+
+response = 20
+explanation = (
+    "Using the shuffled columns, dyslexia severity is the 0/1/2 field (column 'device'; >0 = dyslexic), "
+    "reader view is the balanced 0/1 field (column 'language'), and reading speed is the 'running_time' field "
+    "(wpm, computed from word count and reading time). Among dyslexic participants, mean speed with reader view "
+    "was 323.3 wpm (n=219) vs 342.3 wpm without (n=219). The difference is small and not significant "
+    "(Welch t-test p=0.70, Cohen’s d≈-0.04; Mann–Whitney p=0.73). A within‑participant paired test for those with "
+    "both conditions (n=73) also shows no improvement (p=0.63, d≈-0.06). Therefore, there is no evidence that "
+    "Reader View improves reading speed for individuals with dyslexia in this dataset."
+)
+
+with open('conclusion.txt', 'w') as f:
+    json.dump({'response': response, 'explanation': explanation}, f)
