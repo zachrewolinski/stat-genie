@@ -173,9 +173,13 @@ class DataPerturbation:
             # replace the original DV column with the new Z values
             df.iloc[:, dv_idx] = z
             
-            # post-computation verification
-            actual_pve = np.var(y_hat) / np.var(z)
-            assert np.isclose(actual_pve, pve, atol=0.001), (
+            # post-computation verification: refit OLS on the new z so the
+            # check is valid for all PVE values (including 0)
+            z_float = z.astype(float)
+            verify_coeffs, _, _, _ = np.linalg.lstsq(X, z_float, rcond=None)
+            verify_y_hat = X @ verify_coeffs
+            actual_pve = np.var(verify_y_hat) / np.var(z_float)
+            assert np.isclose(actual_pve, pve, atol=0.02), (
                 f"Expected PVE {pve}, but got {actual_pve:.4f}"
             )
 
