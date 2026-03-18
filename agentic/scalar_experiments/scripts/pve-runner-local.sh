@@ -24,13 +24,13 @@ datasets=("affairs" "amtl" "boxes" "caschools" "crofoot" "hurricane" "mortgage" 
 distributions=("pve")
 
 # get pve values
-pves=(0.0 0.001 0.005 0.01 0.05 0.2)
+pves=(0.0 0.01 0.1)
 
 # list all perturbation types
 perturbations=("anonymize" "shuffle_names" "add_features" "positive_leading_statement" "negative_leading_statement")
 
-# 20 runs each for the full distributions
-num_runs=20
+# for efficiency, do five runs each for the full distributions
+num_runs=5
 
 # analysis script name
 analysis_script="scripts/analysis.sh"
