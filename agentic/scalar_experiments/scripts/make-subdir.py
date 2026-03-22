@@ -18,11 +18,9 @@ script_dir = Path(__file__).resolve().parent.parent
 # append the outputs to script_dir to get where we should create subdirs
 outputs_dir = script_dir / "outputs"
 
-# def make_subdir(prompt_version: int, dataset_name: str, perturbation_type: str, run_number: int):
 def make_subdir(dataset_name: str, distribution: str, perturbation_type: str, run_number: int, pve: float = None):
 	
     # create the subdirectory path
-    # subdir_path = outputs_dir / f"prompt{prompt_version}" / dataset_name / perturbation_type / f"run{run_number}"
     if distribution == "pve":
         subdir_path = outputs_dir / dataset_name / distribution / f"pve_{pve}" / perturbation_type / f"run{run_number}"
     else:
@@ -32,7 +30,6 @@ def make_subdir(dataset_name: str, distribution: str, perturbation_type: str, ru
     
     return
     
-# def add_files(prompt_version: int,dataset_name: str, perturbation_type: str, run_number: int):
 def add_files(dataset_name: str, distribution: str, perturbation_type: str, run_number: int, pve: float = None):
     
     # if we are calculating the null dist, break the relationships
@@ -55,7 +52,10 @@ def add_files(dataset_name: str, distribution: str, perturbation_type: str, run_
                 in 'make-subdir.py' when adding files.")
     
     # now we can define the other perturbations
-    if perturbation_type == "anonymize":
+    if perturbation_type == "none":
+        feature_perturbation = FeaturePerturbation()
+        task_perturbation = TaskPerturbation()
+    elif perturbation_type == "anonymize":
         feature_perturbation = FeaturePerturbation(anonymize=True)
         task_perturbation = TaskPerturbation()
     elif perturbation_type == "shuffle_names":
@@ -82,7 +82,6 @@ def add_files(dataset_name: str, distribution: str, perturbation_type: str, run_
     dataset_info, df = data_perturbation.perturb(dataset_info, df)
     
     # write perturbed files to the subdirectory
-    # subdir_path = outputs_dir / f"prompt{prompt_version}" / dataset_name / perturbation_type / f"run{run_number}"
     if distribution == "pve":
         subdir_path = outputs_dir / dataset_name / distribution / f"pve_{pve}" / perturbation_type / f"run{run_number}"
     else:
@@ -99,7 +98,6 @@ def add_files(dataset_name: str, distribution: str, perturbation_type: str, run_
     print(f"[add-files] added package list to: {subdir_path}")
     
     # write instructions to the subdirectory
-    # instructions = write_agent_instructions(prompt_version, dataset_name, perturbation_type, run_number)
     instructions = write_agent_instructions(dataset_name, distribution, perturbation_type, run_number, pve=pve)
     with open(subdir_path / "AGENTS.md", "w") as f:
         f.write(instructions)
@@ -139,86 +137,6 @@ def write_agent_instructions(dataset_name: str, distribution: str, perturbation_
     
     return instructions
 
-# def write_agent_instructions(prompt_version: int, dataset_name: str, perturbation_type: str, run_number: int):
-    
-#     if prompt_version == 1:
-#         # get only yes/no and explanation
-#         instructions = f"""
-#         You are an expert data scientist tasked with analyzing a dataset to answer a specific research question.
-#         The research question is contained in the 'info.json' file along with metadata about the dataset.
-#         Use the metadata from 'info.json' to understand the dataset structure and context.
-#         The dataset itself is provided in the '{dataset_name}.csv' file.
-#         You only have access to the '{dataset_name}/{perturbation_type}/run{run_number}' subdirectory and its contents - no other files or directories.
-#         Create a data analysis that answers the research question.
-#         You are allowed to import packages that are listed in the provided 'packages.txt' file (along with their installed versions) to help with your analysis.
-#         When executing Python scripts, ALWAYS use the command `poetry run python <filename.py>`. Never use `python` or `python3` directly.
-#         Your data analysis should result in two outputs: (1) a binary "Yes" or "No" answer to the research question
-#         and (2) an explanation of the reasoning and evidence that led you to your conclusion.
-#         These outputs must be written to a file called 'conclusion.txt' in JSON format, with the value of "Yes" or "No"
-#         stored under the key "response" and the explanation stored under the key "explanation".
-#         The 'conclusion.txt' file must contain ONLY this JSON object, with no additional text or lines.
-#         """
-#     elif prompt_version == 2:
-#         # get yes/no, confidence score, and explanation
-#         instructions = f"""
-#         You are an expert data scientist tasked with analyzing a dataset to answer a specific research question.
-#         The research question is contained in the 'info.json' file along with metadata about the dataset.
-#         Use the metadata from 'info.json' to understand the dataset structure and context.
-#         The dataset itself is provided in the '{dataset_name}.csv' file.
-#         You only have access to the '{dataset_name}/{perturbation_type}/run{run_number}' subdirectory and its contents - no other files or directories.
-#         Create a data analysis that answers the research question.
-#         You are allowed to import packages that are listed in the provided 'packages.txt' file (along with their installed versions) to help with your analysis.
-#         When executing Python scripts, ALWAYS use the command `poetry run python <filename.py>`. Never use `python` or `python3` directly.
-#         Your data analysis should result in three outputs: (1) a binary "Yes" or "No" answer to the research question,
-#         (2) a confidence score between 0 and 100 that represents how confident you are in your answer,
-#         and (3) an explanation of the reasoning and evidence that led you to your conclusion.
-#         These outputs must be written to a file called 'conclusion.txt' in JSON format, with the value of "Yes" or "No"
-#         stored under the key "response", the confidence score stored under the key "confidence", and the explanation stored under the key "explanation".
-#         The 'conclusion.txt' file must contain ONLY this JSON object, with no additional text or lines.
-#         """
-#         pass
-#     elif prompt_version == 3:
-#         # get yes/no, strength of yes/no, confidence score, and explanation
-#         instructions = f"""
-#         You are an expert data scientist tasked with analyzing a dataset to answer a specific research question.
-#         The research question is contained in the 'info.json' file along with metadata about the dataset.
-#         Use the metadata from 'info.json' to understand the dataset structure and context.
-#         The dataset itself is provided in the '{dataset_name}.csv' file.
-#         You only have access to the '{dataset_name}/{perturbation_type}/run{run_number}' subdirectory and its contents - no other files or directories.
-#         Create a data analysis that answers the research question.
-#         You are allowed to import packages that are listed in the provided 'packages.txt' file (along with their installed versions) to help with your analysis.
-#         When executing Python scripts, ALWAYS use the command `poetry run python <filename.py>`. Never use `python` or `python3` directly.
-#         Your data analysis should result in four outputs: (1) a binary "Yes" or "No" answer to the research question,
-#         (2) the strength of your "Yes" or "No" on a scale from 0 to 100, with 0 representing a weak Yes/No and 100 representing a strong Yes/No,
-#         (3) a confidence score between 0 and 100 that represents how confident you are in your answer,
-#         and (4) an explanation of the reasoning and evidence that led you to your conclusion.
-#         These outputs must be written to a file called 'conclusion.txt' in JSON format, with the value of "Yes" or "No"
-#         stored under the key "response", the strength stored under the key "strength", the confidence score stored under the key "confidence", and the explanation stored under the key "explanation".
-#         The 'conclusion.txt' file must contain ONLY this JSON object, with no additional text or lines.
-#         """
-#     elif prompt_version == 4:
-#         # get scalar answer from 0 to 100 and explanation
-#         instructions = f"""
-#         You are an expert data scientist tasked with analyzing a dataset to answer a specific research question.
-#         The research question is contained in the 'info.json' file along with metadata about the dataset.
-#         Use the metadata from 'info.json' to understand the dataset structure and context.
-#         The dataset itself is provided in the '{dataset_name}.csv' file.
-#         You only have access to the '{dataset_name}/{perturbation_type}/run{run_number}' subdirectory and its contents - no other files or directories.
-#         Create a data analysis that answers the research question.
-#         You are allowed to import packages that are listed in the provided 'packages.txt' file (along with their installed versions) to help with your analysis.
-#         When executing Python scripts, ALWAYS use the command `poetry run python <filename.py>`. Never use `python` or `python3` directly.
-#         Your data analysis should result in two outputs: (1) an integer scalar that places your "Yes" or "No" response on a Likert scale from 0 to 100,
-#         where 0 represents a strong "No" answer and 100 represents a strong "Yes" answer,
-#         and (2) an explanation of the reasoning and evidence that led you to your conclusion.
-#         These outputs must be written to a file called 'conclusion.txt' in JSON format, with the integer scalar stored under the key "response" and the explanation stored under the key "explanation".
-#         The 'conclusion.txt' file must contain ONLY this JSON object, with no additional text or lines.
-#         """
-#         pass
-#     else:
-#         raise ValueError(f"Prompt version '{prompt_version}' is not defined. Please specify a valid prompt version in 'make-subdir.py' when writing agent instructions.")
-    
-#     return instructions
-
 def get_package_list():
     """
     Gets the list of packages available in the poetry environment.
@@ -248,9 +166,6 @@ if __name__ == "__main__":
     try:
         # create argument parser
         parser = argparse.ArgumentParser()
-        # parser.add_argument("--prompt-version", type=int, required=True,
-        #                     choices=[1, 2, 3, 4],
-        #                     help="Version of the prompt to write in the AGENTS.md file.")
         parser.add_argument("--dataset", required=True,
                             choices=["affairs",
                                     "amtl",
@@ -273,7 +188,8 @@ if __name__ == "__main__":
                                  "shuffle_names",
                                  "add_features",
                                  "positive_leading_statement",
-                                 "negative_leading_statement"],
+                                 "negative_leading_statement",
+                                 "none"],
                         help="Choice of perturbation applied to dataset.")
         parser.add_argument("--run_number", type=int, default=1,
                             help="Run number for stability purposes.")
@@ -282,7 +198,6 @@ if __name__ == "__main__":
         args = parser.parse_args()
         
         # get necessary info
-        # prompt_version = args.prompt_version
         dataset_name = args.dataset
         perturbation_type = args.perturbation_type
         run_number = args.run_number
@@ -290,11 +205,9 @@ if __name__ == "__main__":
         pve = args.pve
         
         # make the subdirectory
-        # make_subdir(prompt_version, dataset_name, perturbation_type, run_number)
         make_subdir(dataset_name, distribution, perturbation_type, run_number, pve=pve)
         
         # add the perturbed data files
-        # add_files(prompt_version, dataset_name, perturbation_type, run_number)
         add_files(dataset_name, distribution, perturbation_type, run_number, pve=pve)
         
         # exit successfully

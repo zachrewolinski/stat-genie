@@ -30,7 +30,6 @@ else
 fi
 
 # change directory to the newly created subdirectory
-# cd "outputs/prompt$prompt_version/$dataset_name/$perturbation_type/run$run_number" || exit 1
 if [[ "$distribution" == "pve" ]]; then
     cd "outputs/$dataset_name/$distribution/pve_$pve/$perturbation_type/run$run_number" || exit 1
 else

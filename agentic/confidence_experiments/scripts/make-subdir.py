@@ -59,7 +59,10 @@ def add_files(dataset_name: str, distribution: str, perturbation_type: str, run_
                 in 'make-subdir.py' when adding files.")
     
     # now we can define the other perturbations
-    if perturbation_type == "anonymize":
+    if perturbation_type == "none":
+        feature_perturbation = FeaturePerturbation()
+        task_perturbation = TaskPerturbation()
+    elif perturbation_type == "anonymize":
         feature_perturbation = FeaturePerturbation(anonymize=True)
         task_perturbation = TaskPerturbation()
     elif perturbation_type == "shuffle_names":
@@ -192,7 +195,8 @@ if __name__ == "__main__":
                                  "shuffle_names",
                                  "add_features",
                                  "positive_leading_statement",
-                                 "negative_leading_statement"],
+                                 "negative_leading_statement",
+                                 "none"],
                         help="Choice of perturbation applied to dataset.")
         parser.add_argument("--run_number", type=int, default=1,
                             help="Run number for stability purposes.")

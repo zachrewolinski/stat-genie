@@ -11,20 +11,16 @@
 datasets=("amtl")
 
 # list the distribution types
-distributions=("pve") # ("alt") # ("null")
+distributions=("null") # ("null" "alt" "pve")
 
 # get pve values
 pves=(0.0 0.5 1.0) # only used if distribution is "pve"
 
 # list all perturbation types
-perturbations=("anonymize") # "shuffle_names" "add_features" "positive_leading_statement" "negative_leading_statement")
+perturbations=("none") # ("anonymize" "shuffle_names" "add_features" "positive_leading_statement" "negative_leading_statement")
 
 # number of runs per dataset-perturbation pair
-# num_runs=20
-num_runs=1
-
-# prompt version (1-4)
-# prompt_versions=(1 2 3 4)
+num_runs=20
 
 # analysis script name
 analysis_script="scripts/analysis.sh"
