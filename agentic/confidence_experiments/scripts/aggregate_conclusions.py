@@ -104,22 +104,20 @@ def _parse_and_merge_run(
 
     if not conclusion_path.exists():
         return None, "conclusion.txt missing"
-    if not confidence_path.exists():
-        return None, "confidence.txt missing"
 
     conclusion = _read_and_parse(conclusion_path, CONCLUSION_SCHEMA)
     if conclusion is None:
         return None, "conclusion.txt invalid"
 
-    confidence = _read_and_parse(confidence_path, CONFIDENCE_SCHEMA)
-    if confidence is None:
-        return None, "confidence.txt invalid"
+    confidence = None
+    if confidence_path.exists():
+        confidence = _read_and_parse(confidence_path, CONFIDENCE_SCHEMA)
 
     merged: dict[str, Any] = {
         "response": conclusion["response"],
         "response_explanation": conclusion["explanation"],
-        "confidence": confidence["confidence"],
-        "confidence_explanation": confidence["explanation"],
+        "confidence": confidence["confidence"] if confidence else "",
+        "confidence_explanation": confidence["explanation"] if confidence else "",
     }
     return merged, None
 

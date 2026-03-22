@@ -45,6 +45,43 @@ _discover_runs = _local_agg._discover_runs
 EXPERIMENT_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_OUTPUTS_DIR = EXPERIMENT_DIR / "outputs"
 
+PVE_LEVEL_PATTERN = re.compile(r"^pve_([\d.]+)$")
+RUN_DIR_PATTERN = re.compile(r"^run(\d+)$", re.IGNORECASE)
+
+
+def _discover_pve_runs(
+    outputs_dir: Path,
+) -> list[tuple[str, str, str, int, Path]]:
+    """Walk outputs/{dataset}/pve/pve_{X}/{perturbation}/run{N}/."""
+    runs: list[tuple[str, str, str, int, Path]] = []
+    if not outputs_dir.exists():
+        return runs
+
+    for dataset_dir in sorted(p for p in outputs_dir.iterdir() if p.is_dir()):
+        pve_dir = dataset_dir / "pve"
+        if not pve_dir.is_dir():
+            continue
+        for level_dir in sorted(p for p in pve_dir.iterdir() if p.is_dir()):
+            level_match = PVE_LEVEL_PATTERN.match(level_dir.name)
+            if not level_match:
+                continue
+            pve_level = level_match.group(1)
+            for pert_dir in sorted(p for p in level_dir.iterdir() if p.is_dir()):
+                for run_dir in sorted(p for p in pert_dir.iterdir() if p.is_dir()):
+                    run_match = RUN_DIR_PATTERN.match(run_dir.name)
+                    if not run_match:
+                        continue
+                    conclusion_path = run_dir / "conclusion.txt"
+                    if conclusion_path.exists():
+                        runs.append((
+                            dataset_dir.name,
+                            pve_level,
+                            pert_dir.name,
+                            int(run_match.group(1)),
+                            run_dir,
+                        ))
+    return runs
+
 AZURE_ENDPOINT = "https://fxdata-eastus2.openai.azure.com/openai"
 AZURE_API_VERSION = "2025-04-01-preview"
 
@@ -351,6 +388,7 @@ def _print_stats(label: str, stats: dict[str, int], dry_run: bool) -> None:
 def fix_conclusions(
     outputs_dir: Path,
     *,
+    pve: bool = False,
     dry_run: bool = False,
     verbose: bool = False,
     llm_deployment: str | None = None,
@@ -387,7 +425,27 @@ def fix_conclusions(
     _print_stats("conclusion.txt", conclusion_stats, dry_run)
     _print_stats("confidence.txt", confidence_stats, dry_run)
 
-    return _merge_stats(conclusion_stats, confidence_stats)
+    combined = _merge_stats(conclusion_stats, confidence_stats)
+
+    if pve:
+        pve_paths: list[tuple[str, Path]] = []
+        for ds, lvl, pert, rid, run_dir in _discover_pve_runs(outputs_dir):
+            label = f"{ds}/pve/pve_{lvl}/{pert}/run{rid}"
+            conclusion_file = run_dir / "conclusion.txt"
+            if conclusion_file.exists():
+                pve_paths.append((label, conclusion_file))
+
+        pve_stats = _fix_files(
+            pve_paths,
+            CONCLUSION_SCHEMA,
+            dry_run=dry_run,
+            verbose=verbose,
+            llm_deployment=llm_deployment,
+        )
+        _print_stats("PVE conclusion.txt", pve_stats, dry_run)
+        combined = _merge_stats(combined, pve_stats)
+
+    return combined
 
 
 def parse_args() -> argparse.Namespace:
@@ -409,6 +467,11 @@ def parse_args() -> argparse.Namespace:
         "--verbose",
         action="store_true",
         help="Print details of each fix.",
+    )
+    parser.add_argument(
+        "--pve",
+        action="store_true",
+        help="Also scan PVE output directories.",
     )
     parser.add_argument(
         "--llm-deployment",
@@ -442,6 +505,7 @@ def main() -> int:
 
     stats = fix_conclusions(
         args.outputs_dir,
+        pve=args.pve,
         dry_run=args.dry_run,
         verbose=args.verbose,
         llm_deployment=args.llm_deployment,
