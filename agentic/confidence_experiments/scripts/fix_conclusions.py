@@ -10,6 +10,7 @@ import re
 import sys
 from pathlib import Path
 from typing import Any
+from dotenv import load_dotenv
 
 import importlib.util
 
@@ -224,6 +225,9 @@ def _llm_fix(raw: str, schema: list[tuple[str, str]], deployment: str | None) ->
     Provider selection uses env vars: OPENAI_API_KEY takes priority over
     AZURE_OPENAI_API_KEY. Returns None when no key is available.
     """
+    # load the dotenv file if it exists, to pick up API keys
+    load_dotenv()
+    
     openai_key = os.environ.get("OPENAI_API_KEY")
     azure_key = os.environ.get("AZURE_OPENAI_API_KEY")
 
