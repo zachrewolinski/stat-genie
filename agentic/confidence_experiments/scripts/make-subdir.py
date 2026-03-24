@@ -60,7 +60,7 @@ def add_files(dataset_name: str, distribution: str, perturbation_type: str, run_
         data_perturbation = DataPerturbation(set_pve=True, pve=pve, iv_idxs=iv_dv_info["iv_idxs"], dv_idxs=iv_dv_info["dv_idxs"])
     else:
         raise ValueError(f"Distribution type '{distribution}' is not defined. \
-            Please specify 'null', 'alt', or 'pve' for the distribution type \
+            Please specify 'null', 'diff-null', 'alt', or 'pve' for the distribution type \
                 in 'make-subdir.py' when adding files.")
     
     # now we can define the other perturbations
