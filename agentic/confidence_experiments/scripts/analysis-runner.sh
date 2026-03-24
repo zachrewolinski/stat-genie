@@ -5,16 +5,18 @@
 # run from agentic/scalar_experiments/ (or sbatch from there so job cwd is scalar_experiments/).
 
 # list all blade datasets
-datasets=("affairs" "amtl" "boxes" "caschools" "crofoot" "hurricane" "mortgage" "panda_nuts" "reading" "soccer" "teachingratings")
+# datasets=("affairs" "amtl" "boxes" "caschools" "crofoot" "hurricane" "mortgage" "panda_nuts" "reading" "soccer" "teachingratings")
+# list one dataset for each quadrant
+datasets=("crofoot" "teachingratings" "boxes" "caschools")
 
 # list the distribution types
-distributions=("alt" "null")
+distributions=("diff-null") # ("alt" "null")
 
 # get pve values
 # pves=(0.0 0.5 1.0) # only used if distribution is "pve"
 
 # list all perturbation types
-perturbations=("none") # ("anonymize" "shuffle_names" "add_features" "positive_leading_statement" "negative_leading_statement")
+perturbations=("none" "anonymize" "shuffle_names" "add_features" "positive_leading_statement" "negative_leading_statement")
 
 # number of runs per dataset-perturbation pair
 num_runs=20

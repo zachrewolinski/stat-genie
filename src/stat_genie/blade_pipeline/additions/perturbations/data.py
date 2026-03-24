@@ -18,17 +18,20 @@ class DataPerturbation:
         self,
         shuffle_values: bool = False,
         shuffle_values_seed: int = 42,
+        shuffle_dvs: bool = False,
+        shuffle_dvs_seed: int = 42,
         set_pve: bool = False,
         pve: float = None,
         iv_idxs: list[int] = None,
         dv_idxs: list[int] = None,
         set_pve_seed: int = 42,
     ):
-        # ensure that both shuffle and pve perturbations are not selected at
-        # the same time, since they will conflict with each other
-        if shuffle_values and set_pve:
+        # ensure that only one of the shuffle_values, shuffle_dvs, and pve
+        # perturbations are not selected at the same time, since they will
+        # conflict with each other
+        if sum([shuffle_values, shuffle_dvs, set_pve]) > 1:
             raise ValueError(
-                "Cannot apply both shuffle and PVE perturbations simultaneously."
+                "Cannot apply multiple null-defining perturbations simultaneously."
             )
         # check that necessary parameters are provided if set_pve is True
         if set_pve:
@@ -36,14 +39,52 @@ class DataPerturbation:
                 raise ValueError(
                     "If set_pve is True, pve, iv_idxs, & dv_idxs are required."
                 )
+        # check that necessary parameters are provided if shuffle_dvs is True
+        if shuffle_dvs and dv_idxs is None:
+            raise ValueError(
+                "If shuffle_dvs is True, dv_idxs is required to specify which columns are DVs to shuffle."
+            )
 
         self.shuffle_values = shuffle_values
         self.shuffle_values_seed = shuffle_values_seed
+        self.shuffle_dvs = shuffle_dvs
+        self.shuffle_dvs_seed = shuffle_dvs_seed
         self.control_pve = set_pve
         self.pve = pve
         self.iv_idxs = iv_idxs
         self.dv_idxs = dv_idxs
         self.set_pve_seed = set_pve_seed
+        
+    def shuffle_dv_values(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Shuffles the values in each dependent variable column of the dataframe independently.
+        This should flip downstream model predictions to make the answer "No",
+        if it is not already, while preserving the distribution of each DV.
+
+        Args:
+            df: The dataframe whose DV values are to be shuffled.
+
+        Returns:
+        - The perturbed dataframe
+        """
+
+        # set random seed for reproducibility
+        seed = self.shuffle_dvs_seed
+
+        # copy the dataframe to avoid modifying the original one
+        df = deepcopy(df)
+
+        # go through each DV column and randomly shuffle its values,
+        # independently of how the other columns were shuffled.
+        for dv_idx in self.dv_idxs:
+            df.iloc[:, dv_idx] = (
+                df.iloc[:, dv_idx]
+                .sample(n=df.shape[0], random_state=seed)
+                .reset_index(drop=True)
+            )
+            seed += 1  # change seed for the next column for different shuffling
+
+        return df
 
     def shuffle_values_in_cols(self, df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -218,6 +259,9 @@ class DataPerturbation:
         # in case no perturbations are selected
         perturbed_df = deepcopy(df)
         updated_metadata = deepcopy(json_metadata)
+        
+        if self.shuffle_dvs:
+            perturbed_df = self.shuffle_dv_values(perturbed_df)
 
         if self.shuffle_values:
             perturbed_df = self.shuffle_values_in_cols(perturbed_df)

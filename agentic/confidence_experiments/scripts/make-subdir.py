@@ -42,6 +42,11 @@ def add_files(dataset_name: str, distribution: str, perturbation_type: str, run_
     # if we are calculating the null dist, break the relationships
     if distribution == "null":
         data_perturbation = DataPerturbation(shuffle_values=True)
+    elif distribution == "diff-null":
+        iv_dv_info = get_dataset_iv_dv_path(dataset_name)
+        with open(iv_dv_info, "r") as f:
+            iv_dv_info = json.load(f)
+        data_perturbation = DataPerturbation(shuffle_dvs=True, dv_idxs=iv_dv_info["dv_idxs"])
     elif distribution == "alt":
         data_perturbation = DataPerturbation()
     elif distribution == "pve":
@@ -188,7 +193,7 @@ if __name__ == "__main__":
                                     "teachingratings"],
                             help="Dataset name. Must be one of the BLADE datasets.")
         parser.add_argument("--distribution", required=True,
-                            choices=["null", "alt", "pve"],
+                            choices=["null", "alt", "pve", "diff-null"],
                             help="Are we calculating the null distribution (i.e. perturbations that should destroy relationships in the data) or the alternative distribution (i.e. perturbations that should preserve relationships in the data)?")
         parser.add_argument("--perturbation-type", required=True, 
                         choices=["anonymize",
