@@ -189,10 +189,15 @@ class DataPerturbation:
             y = df.iloc[:, dv_idx].values
             y_numeric = y.astype(float)
 
+            # exclude rows with NaN in the DV or any IV to avoid SVD failures
+            valid_mask = ~np.isnan(y_numeric) & ~np.any(np.isnan(X), axis=1)
+            X_fit = X[valid_mask]
+            y_fit = y_numeric[valid_mask]
+
             # OLS fitted values are the "signal" component from the IVs
-            coeffs, _, _, _ = np.linalg.lstsq(X, y_numeric, rcond=None)
-            y_hat = X @ coeffs
-            var_signal = np.var(y_hat)
+            coeffs, _, _, _ = np.linalg.lstsq(X_fit, y_fit, rcond=None)
+            y_hat_fit = X_fit @ coeffs
+            var_signal = np.var(y_hat_fit)
 
             if pve > 0 and np.isclose(var_signal, 0, atol=1e-10):
                 raise ValueError(
@@ -200,40 +205,45 @@ class DataPerturbation:
                     "have no linear variation and cannot achieve PVE > 0."
                 )
 
-            # construct latent variable Z = signal + noise
+            # construct latent variable Z = signal + noise; NaN rows stay NaN
             # derivation: $Var(\hat{Y}) / (Var(\hat{Y}) + \sigma_\epsilon^2)$ = pve
             #             => $\sigma_\epsilon^2 = sqrt(Var(\hat{Y})$ * (1 - pve) / pve)
+            z = np.full(len(y), np.nan)
+            n_fit = valid_mask.sum()
             if pve == 0:
-                z = rng.normal(np.mean(y_numeric), np.std(y_numeric), size=len(y))
+                z[valid_mask] = rng.normal(np.mean(y_fit), np.std(y_fit), size=n_fit)
             elif pve == 1:
-                z = y_hat
+                z[valid_mask] = y_hat_fit
             else:
                 sigma_noise = np.sqrt(var_signal * (1 - pve) / pve)
-                z = y_hat + rng.normal(0, sigma_noise, size=len(y))
+                z[valid_mask] = y_hat_fit + rng.normal(0, sigma_noise, size=n_fit)
 
             # replace the original DV column with the new Z values
             df.iloc[:, dv_idx] = z
-            
+
             # post-computation verification: refit OLS on the new z so the
             # check is valid for all PVE values (including 0)
-            z_float = z.astype(float)
-            verify_coeffs, _, _, _ = np.linalg.lstsq(X, z_float, rcond=None)
-            verify_y_hat = X @ verify_coeffs
-            actual_pve = np.var(verify_y_hat) / np.var(z_float)
-            assert np.isclose(actual_pve, pve, atol=0.02), (
-                f"Expected PVE {pve}, but got {actual_pve:.4f}"
+            z_fit = z[valid_mask]
+            verify_coeffs, _, _, _ = np.linalg.lstsq(X_fit, z_fit, rcond=None)
+            verify_y_hat = X_fit @ verify_coeffs
+            actual_pve = np.var(verify_y_hat) / np.var(z_fit)
+            # tolerance scales with sample size: larger for small datasets
+            atol = max(0.05, 3.0 / np.sqrt(n_fit))
+            assert np.isclose(actual_pve, pve, atol=atol), (
+                f"Expected PVE {pve}, but got {actual_pve:.4f} (n={n_fit}, atol={atol:.3f})"
             )
 
             # update field metadata to reflect the perturbed DV's distribution
             field_props = json_metadata["data_desc"]["fields"][dv_idx][
                 "properties"
             ]
-            sample_idxs = rng.choice(len(z), size=3, replace=False)
-            field_props["std"] = float(np.std(z))
-            field_props["min"] = float(np.min(z))
-            field_props["max"] = float(np.max(z))
-            field_props["samples"] = [float(z[i]) for i in sample_idxs]
-            field_props["num_unique_values"] = int(len(np.unique(z)))
+            z_valid = z_fit  # reuse already-sliced array
+            sample_idxs = rng.choice(n_fit, size=3, replace=False)
+            field_props["std"] = float(np.std(z_valid))
+            field_props["min"] = float(np.min(z_valid))
+            field_props["max"] = float(np.max(z_valid))
+            field_props["samples"] = [float(z_valid[i]) for i in sample_idxs]
+            field_props["num_unique_values"] = int(len(np.unique(z_valid)))
 
         return json_metadata, df
 

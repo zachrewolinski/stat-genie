@@ -41,12 +41,12 @@ def add_files(dataset_name: str, distribution: str, perturbation_type: str, run_
     
     # if we are calculating the null dist, break the relationships
     if distribution == "null":
-        data_perturbation = DataPerturbation(shuffle_values=True)
+        data_perturbation = DataPerturbation(shuffle_values=True, shuffle_values_seed=run_number)
     elif distribution == "diff-null":
         iv_dv_info = get_dataset_iv_dv_path(dataset_name)
         with open(iv_dv_info, "r") as f:
             iv_dv_info = json.load(f)
-        data_perturbation = DataPerturbation(shuffle_dvs=True, dv_idxs=iv_dv_info["dv_idxs"])
+        data_perturbation = DataPerturbation(shuffle_dvs=True, dv_idxs=iv_dv_info["dv_idxs"], shuffle_dvs_seed=run_number)
     elif distribution == "alt":
         data_perturbation = DataPerturbation()
     elif distribution == "pve":
@@ -57,7 +57,7 @@ def add_files(dataset_name: str, distribution: str, perturbation_type: str, run_
         iv_dv_info = get_dataset_iv_dv_path(dataset_name)
         with open(iv_dv_info, "r") as f:
             iv_dv_info = json.load(f)
-        data_perturbation = DataPerturbation(set_pve=True, pve=pve, iv_idxs=iv_dv_info["iv_idxs"], dv_idxs=iv_dv_info["dv_idxs"])
+        data_perturbation = DataPerturbation(set_pve=True, pve=pve, iv_idxs=iv_dv_info["iv_idxs"], dv_idxs=iv_dv_info["dv_idxs"], set_pve_seed=run_number)
     else:
         raise ValueError(f"Distribution type '{distribution}' is not defined. \
             Please specify 'null', 'diff-null', 'alt', or 'pve' for the distribution type \
