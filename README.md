@@ -1,10 +1,10 @@
-# stat-genie
+# Sanity Checks for Agentic Data Science
 
 Evaluating and supplementing the stability of AI-performed data science.
 
 ## Overview
 
-stat-genie is a framework for evaluating the stability and reliability of LLM-generated statistical analyses. It uses the [blade-bench](https://github.com/behavioral-data/blade) benchmark and extends it with perturbation experiments to test how consistent AI models are when analyzing datasets.
+We introduce a framework for evaluating the stability and reliability of LLM-generated statistical analyses. It uses the [blade-bench](https://github.com/behavioral-data/blade) benchmark and extends it with perturbation experiments to test how consistent AI models are when analyzing datasets.
 
 ---
 
@@ -190,14 +190,25 @@ stat-genie/
 │   │   ├── run_pairwise_eval.py      # Pairwise evaluation
 │   │   └── run_pairwise_eval.sh      # Shell wrapper
 │   └── outputs/              # Experiment outputs
-├── agentic/experiments/      # Agentic (Codex) experiments
-│   ├── scripts/              # Agentic experiment scripts
-│   └── toy/                  # Toy example
+├── agentic/                  # Agentic (Codex) experiments
+│   ├── confidence_experiments/  # Experiments eliciting confidence scores from Codex
+│   │   ├── scripts/          # Runner and aggregation scripts
+│   │   ├── outputs/          # Per-run Codex outputs
+│   │   ├── aggregated_results/ # Aggregated CSVs
+│   │   └── insights/         # Analysis notebooks and figures
+│   ├── scalar_experiments/   # Experiments eliciting scalar yes/no conclusions
+│   │   ├── scripts/          # Runner and aggregation scripts
+│   │   ├── outputs/          # Per-run Codex outputs
+│   │   ├── aggregated_results/ # Aggregated CSVs
+│   │   └── insights/         # Analysis notebooks and figures
+│   └── human_experiments/    # Human baseline experiment results
 ├── src/stat_genie/           # Source code
 │   └── blade_pipeline/
-│       ├── additions/        # Custom additions
+│       ├── additions/        # Custom additions to the blade pipeline
+│       │   ├── analysis/     # Conclusion writing and model output extraction
 │       │   ├── perturbations/  # Perturbation implementations
-│       │   └── eval/         # Evaluation utilities
+│       │   ├── eval/         # Evaluation utilities (extraction, judging)
+│       │   └── prompt/       # Prompt construction utilities
 │       ├── baselines/        # Baseline implementations
 │       ├── datasets/         # Dataset files
 │       └── llms/             # LLM utilities
@@ -247,64 +258,115 @@ Output files are saved to `blade-demos/analysis_output/` and `blade-demos/eval_o
 
 ## Core Workflows
 
-### 1. Generate LLM Analyses
+Both experiment types (scalar and confidence) follow the same three-phase pattern: **run → fix → aggregate**. All commands should be run from the respective experiment directory.
 
-Use `blade/run_gen_analyses.py` to generate statistical analyses using an LLM:
+### Scalar Experiments (`agentic/scalar_experiments/`)
 
-```bash
-poetry run python blade/run_gen_analyses.py \
-    --run_dataset hurricane \
-    --llm_config_path config/llm_config.yml \
-    --llm_eval_config_path config/llm_eval_config.yml \
-    --llm_provider openai \
-    --llm_model gpt-5-mini \
-    -n 10 \
-    --output_dir outputs/my_analysis
-```
+Codex performs a full statistical analysis and writes a scalar yes/no conclusion to `conclusion.txt` in each run's output subdirectory.
 
-**Options:**
-
-| Flag | Description | Default |
-|------|-------------|---------|
-| `--run_dataset` | Dataset to analyze | Required |
-| `-n, --num_runs` | Number of analysis runs | 10 |
-| `--use_agent` | Use ReAct agent (vs base LM) | False |
-| `--no_use_data_desc` | Disable data description in prompts | False |
-| `--llm_provider` | LLM provider (openai, anthropic, etc.) | From config |
-| `--llm_model` | Model name | From config |
-| `--output_dir` | Output directory | Auto-generated |
-
-**Output files:**
-- `multirun_analyses.json` - Generated analyses (used for evaluation)
-- `llm_analysis_*.py` - Generated Python code for each run
-- `llm.log` - LLM prompt/response logs
-- `run.log` - Execution logs
-- `config.json` - Run configuration
-
-### 2. Evaluate Generated Analyses
-
-Use `blade/run_get_eval.py` to evaluate the generated analyses:
+**Phase 1 — Run analyses:**
 
 ```bash
-poetry run python blade/run_get_eval.py \
-    --multirun_load_path outputs/my_analysis/multirun_analyses.json \
-    --llm_eval_config_path config/llm_eval_config.yml \
-    --output_dir outputs/my_eval
+cd agentic/scalar_experiments
+
+# SLURM (recommended for full experiment):
+sbatch scripts/analysis-runner.sh
+
+# Local:
+bash scripts/analysis-runner-local.sh
+
+# Single run:
+bash scripts/analysis.sh <dataset> <distribution> <perturbation> <run_number>
+# e.g.:
+bash scripts/analysis.sh caschools null none 1
+bash scripts/analysis.sh caschools alt anonymize 3
 ```
 
-**Options:**
+For PVE (proportion of variance explained) experiments across a range of signal strengths:
 
-| Flag | Description |
-|------|-------------|
-| `--multirun_load_path` | Path to `multirun_analyses.json` |
-| `--submission_load_path` | Alternative: path to submission file |
-| `--output_dir` | Output directory |
-| `--ks` | K values for diversity metrics (e.g., `'[3,5,10]'`) |
+```bash
+sbatch scripts/pve-analysis-runner.sh   # SLURM
+bash scripts/pve-runner-local.sh        # local
+```
 
-**Output files:**
-- `eval_results.json` - Detailed evaluation results
-- `eval_metrics.json` - Aggregated metrics
-- `llm_history.json` - LLM evaluation logs
+**Phase 2 — Fix broken conclusions:**
+
+Some runs produce malformed `conclusion.txt` files. Fix them before aggregating:
+
+```bash
+bash scripts/fix-conclusions.sh          # null/alt distributions
+bash scripts/fix-conclusions.sh --pve    # pve distribution
+```
+
+**Phase 3 — Aggregate:**
+
+```bash
+bash scripts/aggregate_conclusions.sh       # null/alt → aggregated_results/aggregated_results.csv
+bash scripts/aggregate_pve_conclusions.sh   # pve → aggregated_results/aggregated_pve_results.csv
+```
+
+**Optional — Calibration simulation:**
+
+```bash
+sbatch scripts/run_calibration.sh   # SLURM (32 CPUs, 64G RAM)
+# Results saved to insights/calibration_results_*.npz
+```
+
+---
+
+### Confidence Experiments (`agentic/confidence_experiments/`)
+
+Codex is shown the output of a prior scalar analysis and asked to produce a calibrated confidence score.
+
+**Phase 1 — Run confidence elicitations:**
+
+```bash
+cd agentic/confidence_experiments
+
+# SLURM:
+sbatch scripts/confidence-runner.sh
+
+# Local:
+bash scripts/analysis-runner-local.sh
+
+# Single run:
+bash scripts/confidence.sh <dataset> <distribution> <perturbation> <run_number>
+# e.g.:
+bash scripts/confidence.sh caschools null anonymize 1
+```
+
+**Phase 2 — Fix broken conclusions:**
+
+```bash
+bash scripts/fix-conclusions.sh --pve
+```
+
+**Phase 3 — Aggregate:**
+
+```bash
+bash scripts/aggregate_pve_conclusions.sh   # → aggregated_results/aggregated_pve_results.csv
+```
+
+**Optional — Calibration simulation:**
+
+```bash
+sbatch scripts/run_calibration.sh
+# Results saved to insights/calibration_results_*.npz
+```
+
+---
+
+### Output structure
+
+Each run produces a subdirectory under `outputs/`:
+
+```
+outputs/<dataset>/<distribution>/<perturbation>/run<N>/
+    AGENTS.md        # Codex prompt
+    conclusion.txt   # Model's yes/no answer (scalar) or confidence score
+    *.py             # Generated analysis code
+    agent-analysis.out  # Raw Codex session log
+```
 
 ---
 
@@ -386,58 +448,87 @@ bash experiments/scripts/run_pairwise_eval.sh caschools
 
 ## Agentic Experiments
 
-The `agentic/experiments/` directory contains scripts for running agentic (Codex) experiments.
+The `agentic/` directory contains three experiment types, each in its own subdirectory. All experiments use Codex (via `npx codex exec`) and follow a similar structure: a runner script dispatches per-run jobs, each job sets up a subdirectory under `outputs/` and runs Codex against an `AGENTS.md` prompt, and aggregation scripts collect results into CSVs under `aggregated_results/`.
 
-### Run Codex Analysis Pipeline
+### Scalar Experiments (`agentic/scalar_experiments/`)
 
-**Local execution (no SLURM):**
+Codex performs a full statistical analysis and produces a scalar yes/no conclusion for each research question.
 
-```bash
-cd agentic/experiments
-
-# For Azure OpenAI: login first (tokens auto-refresh during long runs)
-az login
-
-bash scripts/run_codex_experiments_local.sh
-```
-
-**SLURM cluster submission:**
+**Run a single analysis:**
 
 ```bash
-cd agentic/experiments
-bash scripts/run_codex_experiments.sh
-```
+cd agentic/scalar_experiments
 
-This runs:
-1. Analysis generation with Codex agent
-2. Extraction and aggregation
-3. Pairwise evaluation
+# For Azure: refresh token first
+source scripts/token-refresh-helper.sh
 
-The local scripts automatically refresh Azure tokens every 30 minutes to prevent expiration during long runs.
-
-### Run Single Agentic Analysis
-
-```bash
-# From agentic/experiments/
-bash scripts/analysis.sh <dataset> <perturbation> <run_number> <agent_name>
+bash scripts/analysis.sh <dataset> <distribution> <perturbation> <run_number>
 
 # Example:
-bash scripts/analysis.sh caschools noperturb 1 codex
+bash scripts/analysis.sh caschools null none 1
 ```
 
-### Extract and Aggregate Results
+`<distribution>` is `null`, `alt`, or `pve`. `<perturbation>` is `none` or one of the perturbation types (e.g. `anonymize`, `shuffle_names`, `add_features`, `positive_leading_statement`, `negative_leading_statement`).
+
+**Run all analyses (SLURM):**
 
 ```bash
-# From agentic/experiments/
-bash scripts/run_extract_and_aggregate_all.sh
+cd agentic/scalar_experiments
+sbatch scripts/analysis-runner.sh
+
+# Or locally:
+bash scripts/analysis-runner-local.sh
 ```
+
+**Aggregate results:**
+
+```bash
+cd agentic/scalar_experiments
+bash scripts/aggregate_conclusions.sh
+```
+
+### Confidence Experiments (`agentic/confidence_experiments/`)
+
+Codex is given the output of a prior scalar analysis and asked to produce a calibrated confidence score for its conclusion.
+
+**Run a single confidence elicitation:**
+
+```bash
+cd agentic/confidence_experiments
+bash scripts/confidence.sh <dataset> <distribution> <perturbation> <run_number>
+
+# Example:
+bash scripts/confidence.sh caschools null anonymize 1
+```
+
+**Run all (SLURM):**
+
+```bash
+cd agentic/confidence_experiments
+sbatch scripts/confidence-runner.sh
+```
+
+**Aggregate results:**
+
+```bash
+cd agentic/confidence_experiments
+bash scripts/aggregate_pve_conclusions.sh
+```
+
+### Human Experiments (`agentic/human_experiments/`)
+
+Contains human baseline results (CSV) and analysis notebook (`insights.ipynb`) for comparison against the agentic experiments.
 
 ### Running Codex with Azure
 
+For all experiment types, authenticate before running:
+
 ```bash
-cd agentic/experiments
-source scripts/refresh-azure-token.sh
-bash scripts/analysis.sh caschools noperturb 1 codex
+# Login (once per session)
+az login
+
+# Refresh token (tokens expire after ~1 hour)
+source scripts/token-refresh-helper.sh
 ```
 
 ---
