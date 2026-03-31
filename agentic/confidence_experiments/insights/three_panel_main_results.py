@@ -248,6 +248,11 @@ ax_agree.set_xlabel("Runs per Dataset (Log)", fontsize=LABEL_FS)
 ax_agree.set_ylabel("Agreement w/ full-sample class.", fontsize=LABEL_FS)
 ax_agree.set_ylim(-0.02, 1.05)
 
+# --- Panel labels ----------------------------------------------------------
+for ax, label in [(ax_ridge, "(a)"), (ax_scatter, "(b)"), (ax_agree, "(c)")]:
+    ax.text(0.5, -0.135, label, transform=ax.transAxes,
+            ha="center", va="top", fontsize=LABEL_FS, fontweight="bold")
+
 # --- Finalize --------------------------------------------------------------
 sns.despine(ax=ax_ridge, left=True)
 sns.despine(ax=ax_scatter)
