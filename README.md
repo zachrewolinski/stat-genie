@@ -175,14 +175,13 @@ Supported providers: `openai`, `azureopenai`, `anthropic`, `groq`, `mistral`, `t
 
 ```
 stat-genie/
-├── blade/                    # Core blade-bench scripts
+├── blade/                    # Copy of the BLADE repo
 │   ├── run_gen_analyses.py   # Generate LLM analyses
 │   └── run_get_eval.py       # Evaluate analyses
-├── blade-demos/              # Demo scripts and outputs
 ├── config/                   # Configuration files
-│   ├── llm_config.yml        # LLM provider config
-│   └── llm_eval_config.yml   # Evaluation LLM config
-├── experiments/
+│   ├── llm_config.yml        # LLM provider config (legacy)
+│   └── llm_eval_config.yml   # Evaluation LLM config (legacy)
+├── experiments/              # Repository of non-agentic experiments using the BLADE harness
 │   ├── scripts/              # Perturbation experiment scripts
 │   │   ├── run_analysis.py   # Single analysis runner
 │   │   ├── run_analysis.sh   # Shell wrapper
@@ -203,7 +202,7 @@ stat-genie/
 │   │   └── insights/         # Analysis notebooks and figures
 │   └── human_experiments/    # Human baseline experiment results
 ├── src/stat_genie/           # Source code
-│   └── blade_pipeline/
+│   └── blade_pipeline/       # Our additions/modifications to BLADE code
 │       ├── additions/        # Custom additions to the blade pipeline
 │       │   ├── analysis/     # Conclusion writing and model output extraction
 │       │   ├── perturbations/  # Perturbation implementations
@@ -236,23 +235,6 @@ stat-genie/
 | `soccer` | Soccer data |
 | `teachingratings` | Teaching ratings data |
 | `toy` | Toy dataset for testing |
-
----
-
-## Quick Start
-
-Run a quick demo that generates analyses and evaluates them:
-
-```bash
-# From the project root
-bash blade-demos/run_and_eval_agent.sh
-```
-
-This will:
-1. Generate LLM analyses for the `hurricane` dataset
-2. Evaluate the generated analyses
-
-Output files are saved to `blade-demos/analysis_output/` and `blade-demos/eval_output/`.
 
 ---
 
@@ -291,7 +273,7 @@ bash scripts/pve-runner-local.sh        # local
 
 **Phase 2 — Fix broken conclusions:**
 
-Some runs produce malformed `conclusion.txt` files. Fix them before aggregating:
+Some runs produce malformed `conclusion.txt` files, even though the agent is instructed to produce valid JSON output. Fix them before aggregating:
 
 ```bash
 bash scripts/fix-conclusions.sh          # null/alt distributions
